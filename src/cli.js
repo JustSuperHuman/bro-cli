@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { loadConfig, ensureDefaultConfig, setKey, CONFIG_PATH } from './config.js';
-import { loadModels, mergeProviders } from './models.js';
+import { loadModels, mergeProviders, updateModels, REMOTE_URL } from './models.js';
 import { select, promptHidden } from './ui.js';
 import { launch } from './launch.js';
 import { rememberSelection, lastProvider, lastModelFor } from './state.js';
@@ -14,6 +14,7 @@ Usage:
   bro -p <provider>      Skip the provider menu (id or name)
   bro -m <model>         Skip the model menu (use with -p)
   bro -l, --list         List every provider and model
+  bro update             Refresh the model list from GitHub and cache it
   bro --dry-run          Show what would run; launch nothing
   bro --safe             Don't pass --dangerously-skip-permissions
   bro -h, --help         Show this help
@@ -21,7 +22,7 @@ Usage:
   bro -- <args...>       Pass everything after -- straight to claude
 
 Config:  ${CONFIG_PATH}
-Models:  ${process.env.BRO_MODELS_URL || 'https://m.justgains.com/models.json'}
+Models:  ${REMOTE_URL}
 Docs:    https://justgains.com`;
 
 function parseArgs(argv) {
@@ -31,6 +32,7 @@ function parseArgs(argv) {
     if (t === '--provider' || t === '-p') a.provider = argv[++i];
     else if (t === '--model' || t === '-m') a.model = argv[++i];
     else if (t === '--list' || t === '-l') a.list = true;
+    else if (t === 'update' || t === '--update') a.update = true;
     else if (t === '--dry-run') a.dryRun = true;
     else if (t === '--safe') a.safe = true;
     else if (t === '--help' || t === '-h') a.help = true;
@@ -48,6 +50,20 @@ export async function main(argv) {
   const args = parseArgs(argv);
   if (args.help) { console.log(HELP); return 0; }
   if (args.version) { console.log(pkg.version); return 0; }
+
+  if (args.update) {
+    try {
+      const r = await updateModels();
+      console.log(`Updated models from ${r.source}`);
+      console.log(`  ${r.providers} providers · ${r.models} models`);
+      console.log(`  stored at ${r.cache}`);
+      return 0;
+    } catch (e) {
+      console.error(`Update failed: ${e.message}`);
+      console.error('Kept the existing local copy.');
+      return 1;
+    }
+  }
 
   ensureDefaultConfig();
   const config = loadConfig();

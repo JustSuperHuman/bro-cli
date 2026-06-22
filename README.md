@@ -7,8 +7,8 @@ Pick a provider, pick a model, go.
 ## Install
 
 ```sh
-npm install -g bro-cli
-# or: bun install -g bro-cli
+npm install -g bro-claude
+# or: bun install -g bro-claude
 ```
 
 You also need the `claude` CLI installed (that's the thing `bro` launches).
@@ -32,6 +32,7 @@ Claude is first in the list and runs **natively** (your normal Claude login — 
 ```sh
 bro -p sakana -m fugu     # skip the menus
 bro --list                # list every provider + model
+bro update                # refresh the model list from GitHub, cache it locally
 bro --dry-run             # show what would run, launch nothing
 bro --safe                # don't pass --dangerously-skip-permissions
 bro -- --resume           # everything after -- is passed to claude
@@ -60,7 +61,7 @@ Keys and your own providers/models live in `~/.bro/config.json`:
 }
 ```
 
-Custom providers merge with the built-in list (same `id` adds models; new `id` adds a provider). The model list itself is served from `https://m.justgains.com/models.json` (override with `BRO_MODELS_URL`).
+Custom providers merge with the built-in list (same `id` adds models; new `id` adds a provider). The built-in model list is pulled from [`models.json`](https://github.com/JustSuperHuman/bro-cli/blob/main/models.json) on GitHub and cached at `~/.bro/models.cache.json` — run `bro update` to refresh it (override the source with `BRO_MODELS_URL`).
 
 ---
 

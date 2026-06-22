@@ -1,5 +1,5 @@
 {
-  "name": "bro-cli",
+  "name": "bro-claude",
   "version": "0.1.0",
   "description": "Run Claude Code against any model provider — Claude native, or any OpenAI/Anthropic-compatible API via an auto-installed proxy. Pick a provider, pick a model, go.",
   "type": "module",
@@ -39,10 +39,10 @@
   "homepage": "https://justgains.com",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/justgains/bro-cli.git"
+    "url": "git+https://github.com/JustSuperHuman/bro-cli.git"
   },
   "bugs": {
-    "url": "https://github.com/justgains/bro-cli/issues"
+    "url": "https://github.com/JustSuperHuman/bro-cli/issues"
   },
   "dependencies": {}
 }
