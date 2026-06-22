@@ -1,0 +1,168 @@
+{
+  "#note": "Hosted at https://m.justgains.com/models.json and bundled as a fallback. Any field whose key starts with '#' is ignored (handy for notes + test data). 'mode' is one of: native (run Claude with your own login), anthropic (Anthropic-compatible base URL), openai (OpenAI-compatible — routed through the auto-installed proxy).",
+  "version": 1,
+  "docs": "https://justgains.com",
+  "providers": [
+    {
+      "id": "anthropic",
+      "name": "Claude (Anthropic)",
+      "mode": "native",
+      "keyUrl": "https://claude.com/claude-code",
+      "models": [
+        { "name": "Default (your Claude login)" },
+        { "id": "claude-opus-4-8", "name": "Claude Opus 4.8" },
+        { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6" },
+        { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5" },
+        { "id": "claude-fable-5", "name": "Claude Fable 5" }
+      ]
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "mode": "anthropic",
+      "baseUrl": "https://openrouter.ai/api",
+      "keyEnv": "OPENROUTER_API_KEY",
+      "keyUrl": "https://openrouter.ai/keys",
+      "models": [
+        { "id": "openrouter/fusion", "name": "Fusion" },
+        { "id": "moonshotai/kimi-k2.7-code", "name": "Kimi K2.7 Code" },
+        { "id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet" },
+        { "id": "deepseek/deepseek-chat", "name": "DeepSeek Chat" },
+        { "id": "meta-llama/llama-3.3-70b-instruct", "name": "Llama 3.3 70B" },
+        { "id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash" }
+      ]
+    },
+    {
+      "id": "zai",
+      "name": "Z.ai (GLM)",
+      "mode": "anthropic",
+      "baseUrl": "https://api.z.ai/api/anthropic",
+      "keyEnv": "ZAI_API_KEY",
+      "keyUrl": "https://z.ai",
+      "disable1mContext": true,
+      "models": [
+        { "id": "glm-5.2", "name": "GLM 5.2" },
+        { "id": "glm-4.6", "name": "GLM 4.6" }
+      ]
+    },
+    {
+      "id": "sakana",
+      "name": "Sakana (Fugu)",
+      "mode": "openai",
+      "baseUrl": "https://api.sakana.ai/v1/chat/completions",
+      "keyEnv": "SAKANA_API_KEY",
+      "keyUrl": "https://console.sakana.ai/get-started",
+      "models": [
+        { "id": "fugu", "name": "Fugu" },
+        { "id": "fugu-ultra", "name": "Fugu Ultra" }
+      ]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "mode": "openai",
+      "baseUrl": "https://api.openai.com/v1/chat/completions",
+      "keyEnv": "OPENAI_API_KEY",
+      "keyUrl": "https://platform.openai.com/api-keys",
+      "models": [
+        { "id": "gpt-4o", "name": "GPT-4o" },
+        { "id": "gpt-4o-mini", "name": "GPT-4o mini" },
+        { "id": "o4-mini", "name": "o4-mini" }
+      ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "mode": "openai",
+      "baseUrl": "https://api.deepseek.com/chat/completions",
+      "keyEnv": "DEEPSEEK_API_KEY",
+      "keyUrl": "https://platform.deepseek.com/api_keys",
+      "models": [
+        { "id": "deepseek-chat", "name": "DeepSeek Chat" },
+        { "id": "deepseek-reasoner", "name": "DeepSeek Reasoner" }
+      ]
+    },
+    {
+      "id": "groq",
+      "name": "Groq",
+      "mode": "openai",
+      "baseUrl": "https://api.groq.com/openai/v1/chat/completions",
+      "keyEnv": "GROQ_API_KEY",
+      "keyUrl": "https://console.groq.com/keys",
+      "models": [
+        { "id": "llama-3.3-70b-versatile", "name": "Llama 3.3 70B" },
+        { "id": "llama-3.1-8b-instant", "name": "Llama 3.1 8B" }
+      ]
+    },
+    {
+      "id": "xai",
+      "name": "xAI (Grok)",
+      "mode": "openai",
+      "baseUrl": "https://api.x.ai/v1/chat/completions",
+      "keyEnv": "XAI_API_KEY",
+      "keyUrl": "https://console.x.ai",
+      "models": [
+        { "id": "grok-4", "name": "Grok 4" },
+        { "id": "grok-3-mini", "name": "Grok 3 mini" }
+      ]
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral",
+      "mode": "openai",
+      "baseUrl": "https://api.mistral.ai/v1/chat/completions",
+      "keyEnv": "MISTRAL_API_KEY",
+      "keyUrl": "https://console.mistral.ai/api-keys",
+      "models": [
+        { "id": "mistral-large-latest", "name": "Mistral Large" },
+        { "id": "codestral-latest", "name": "Codestral" }
+      ]
+    },
+    {
+      "id": "moonshot",
+      "name": "Moonshot (Kimi)",
+      "mode": "openai",
+      "baseUrl": "https://api.moonshot.ai/v1/chat/completions",
+      "keyEnv": "MOONSHOT_API_KEY",
+      "keyUrl": "https://platform.moonshot.ai/console/api-keys",
+      "models": [
+        { "id": "kimi-k2-0711-preview", "name": "Kimi K2" },
+        { "id": "moonshot-v1-128k", "name": "Moonshot v1 128k" }
+      ]
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama (local)",
+      "mode": "openai",
+      "baseUrl": "http://localhost:11434/v1/chat/completions",
+      "noKey": true,
+      "keyUrl": "https://ollama.com",
+      "models": [
+        { "id": "llama3.2", "name": "Llama 3.2" },
+        { "id": "qwen2.5-coder:7b", "name": "Qwen2.5 Coder 7B" }
+      ]
+    },
+    {
+      "id": "lmstudio",
+      "name": "LM Studio (local)",
+      "mode": "openai",
+      "baseUrl": "http://localhost:1234/v1/chat/completions",
+      "noKey": true,
+      "keyUrl": "https://lmstudio.ai",
+      "models": [
+        { "id": "local-model", "name": "Loaded model" }
+      ]
+    },
+    {
+      "#": "Test data — this whole provider is ignored because its id starts with '#'.",
+      "id": "#example",
+      "name": "#Example provider (ignored)",
+      "mode": "openai",
+      "baseUrl": "https://example.com/v1/chat/completions",
+      "models": [
+        { "id": "real-model", "name": "Kept" },
+        { "#id": "commented-out-model", "name": "#ignored" }
+      ]
+    }
+  ]
+}

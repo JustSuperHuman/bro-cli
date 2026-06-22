@@ -1,0 +1,48 @@
+{
+  "name": "bro-cli",
+  "version": "0.1.0",
+  "description": "Run Claude Code against any model provider — Claude native, or any OpenAI/Anthropic-compatible API via an auto-installed proxy. Pick a provider, pick a model, go.",
+  "type": "module",
+  "bin": {
+    "bro": "bin/bro.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "models.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node bin/bro.js",
+    "bro": "node bin/bro.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "cli",
+    "llm",
+    "ai",
+    "anthropic",
+    "openai",
+    "openrouter",
+    "sakana",
+    "fugu",
+    "proxy",
+    "justgains"
+  ],
+  "author": "JustGains (https://justgains.com)",
+  "license": "MIT",
+  "homepage": "https://justgains.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/justgains/bro-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/justgains/bro-cli/issues"
+  },
+  "dependencies": {}
+}
