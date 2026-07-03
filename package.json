@@ -9,6 +9,7 @@
   "files": [
     "bin",
     "src",
+    "pool",
     "models.json",
     "README.md",
     "LICENSE"

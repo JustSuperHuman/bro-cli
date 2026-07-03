@@ -3,6 +3,7 @@ import { loadConfig, ensureDefaultConfig, setKey, CONFIG_PATH } from './config.j
 import { loadModels, mergeProviders, updateModels, REMOTE_URL } from './models.js';
 import { select, promptHidden } from './ui.js';
 import { launch } from './launch.js';
+import { runPool, runPoolAccounts, POOL_PROVIDER } from './pool.js';
 import { rememberSelection, lastProvider, lastModelFor } from './state.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -11,6 +12,13 @@ const HELP = `bro — run Claude Code against any provider/model.
 
 Usage:
   bro                    Pick a provider, then a model (interactive)
+  bro -p pool            Multiple Claude Account Proxy — pool many Claude
+                         plans, then launch Claude Code across them
+  bro accounts list      List pool accounts
+  bro accounts login <name>
+                         Add/log in a Claude account for the pool
+  bro accounts import <name>
+                         Copy this machine's current Claude login into the pool
   bro -p <provider>      Skip the provider menu (id or name)
   bro -m <model>         Skip the model menu (use with -p)
   bro -l, --list         List every provider and model
@@ -19,7 +27,11 @@ Usage:
   bro --safe             Don't pass --dangerously-skip-permissions
   bro -h, --help         Show this help
   bro -v, --version      Show version
-  bro -- <args...>       Pass everything after -- straight to claude
+  bro --resume <id>      Pick provider/model, then pass args to claude
+  bro -- <args...>       Force everything after -- straight to claude
+
+Put bro flags first. The first unrecognized arg, and everything after it,
+is passed verbatim to claude after provider/model selection.
 
 Config:  ${CONFIG_PATH}
 Models:  ${REMOTE_URL}
@@ -29,6 +41,7 @@ function parseArgs(argv) {
   const a = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
+    if (t === '--') { a._.push(...argv.slice(i + 1)); break; }
     if (t === '--provider' || t === '-p') a.provider = argv[++i];
     else if (t === '--model' || t === '-m') a.model = argv[++i];
     else if (t === '--list' || t === '-l') a.list = true;
@@ -37,16 +50,31 @@ function parseArgs(argv) {
     else if (t === '--safe') a.safe = true;
     else if (t === '--help' || t === '-h') a.help = true;
     else if (t === '--version' || t === '-v') a.version = true;
-    else if (t === '--') { a._.push(...argv.slice(i + 1)); break; }
-    else a._.push(t);
+    else {
+      // Unknown args belong to Claude. Once Claude args begin, preserve the
+      // rest verbatim so values like `bro --resume update` are not re-parsed.
+      a._.push(...argv.slice(i));
+      break;
+    }
   }
   return a;
 }
 
-const tagOf = (p) => (p.mode === 'native' ? 'native' : p.mode === 'anthropic' ? 'anthropic-api' : 'via proxy');
+const tagOf = (p) =>
+  p.mode === 'pool'
+    ? 'rotate accounts'
+    : p.mode === 'native'
+      ? 'native'
+      : p.mode === 'anthropic'
+        ? 'anthropic-api'
+        : 'via proxy';
 const modelLabel = (m) => (m.name ? `${m.name}  ${m.id ? `\x1b[2m(${m.id})\x1b[0m` : ''}` : m.id || '(default)');
 
 export async function main(argv) {
+  if (argv[0] === 'accounts') {
+    return runPoolAccounts(argv.slice(1));
+  }
+
   const args = parseArgs(argv);
   if (args.help) { console.log(HELP); return 0; }
   if (args.version) { console.log(pkg.version); return 0; }
@@ -68,7 +96,8 @@ export async function main(argv) {
   ensureDefaultConfig();
   const config = loadConfig();
   const data = await loadModels();
-  const providers = mergeProviders(data, config.providers);
+  // The account pool is always the top option — no models.json entry needed.
+  const providers = [POOL_PROVIDER, ...mergeProviders(data, config.providers)];
 
   if (!providers.length) {
     console.error('No providers available. Check your network or ~/.bro/config.json.');
@@ -103,6 +132,19 @@ export async function main(argv) {
     }).catch(() => null);
     if (!choice) { console.log('Cancelled.'); return 0; }
     provider = choice.value;
+  }
+
+  // Account pool: its own setup → start proxy → launch claude flow.
+  if (provider.mode === 'pool') {
+    const skipPool = !args.safe && config.dangerouslySkipPermissions !== false;
+    if (!args.dryRun) rememberSelection(provider.id, '');
+    const result = await runPool({
+      extraArgs: args._,
+      skipPermissions: skipPool,
+      dryRun: args.dryRun
+    });
+    if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
+    return typeof result === 'number' ? result : 0;
   }
 
   // 2) model (+ an easy skip-permissions toggle — Tab to flip)

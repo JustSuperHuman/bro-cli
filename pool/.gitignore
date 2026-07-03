@@ -1,0 +1,8 @@
+node_modules/
+bun.lockb
+*.log
+.DS_Store
+# Local pool state, if a user points the pool dir into the repo
+.pool/
+pool/
+dist/

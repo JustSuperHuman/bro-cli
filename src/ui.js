@@ -77,6 +77,65 @@ export function select({ message, choices, startIndex = 0, toggle = null }) {
   });
 }
 
+// Show something for `ms`, then continue — but let the user steer:
+//   enter            -> continue immediately (skip the remaining wait)
+//   any other key    -> pause: stop the timer and wait for enter
+//   ctrl-c / esc     -> cancel (resolves false)
+// Resolves true to continue, false to cancel. On a non-TTY it just continues.
+export function holdOrContinue({ ms = 1500, pausedMessage = 'Paused — press enter to launch, esc to cancel.' } = {}) {
+  if (!isInteractive) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    let paused = false;
+    readline.emitKeypressEvents(stdin);
+    stdin.setRawMode(true);
+    stdin.resume();
+
+    const finish = (val) => {
+      if (timer) clearTimeout(timer);
+      stdin.removeListener('keypress', onKey);
+      stdin.setRawMode(false);
+      stdin.pause();
+      resolve(val);
+    };
+
+    const onKey = (_str, key) => {
+      if (!key) return;
+      if (key.name === 'return' || key.name === 'enter') return finish(true);
+      if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+        stdout.write('\n');
+        return finish(false);
+      }
+      if (!paused) {
+        paused = true;
+        if (timer) { clearTimeout(timer); timer = null; }
+        stdout.write(`\n\x1b[2m${pausedMessage}\x1b[0m`);
+      }
+    };
+
+    stdin.on('keypress', onKey);
+    timer = setTimeout(() => finish(true), ms);
+  });
+}
+
+// Prompt for a visible line of input. Resolves with the trimmed string (may be
+// empty if the user just hits enter). Rejects on Ctrl-C.
+export function prompt(message) {
+  if (!isInteractive) return Promise.reject(new Error('A terminal (TTY) is required for input.'));
+  return new Promise((resolve, reject) => {
+    const rl = readline.createInterface({ input: stdin, output: stdout });
+    rl.question(message, (answer) => {
+      rl.close();
+      resolve((answer || '').trim());
+    });
+    rl.on('SIGINT', () => {
+      rl.close();
+      stdout.write('\n');
+      reject(new Error('cancelled'));
+    });
+  });
+}
+
 // Prompt for a secret, echoing nothing.
 export function promptHidden(message) {
   if (!isInteractive) return Promise.reject(new Error('A terminal (TTY) is required to enter a key.'));
