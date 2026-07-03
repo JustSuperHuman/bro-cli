@@ -1,6 +1,6 @@
 {
   "name": "bro-claude",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Run Claude Code against any model provider — Claude native, or any OpenAI/Anthropic-compatible API via an auto-installed proxy. Pick a provider, pick a model, go.",
   "type": "module",
   "bin": {
