@@ -110,7 +110,15 @@ test("forwards Anthropic messages verbatim with the selected account OAuth token
 
     const response = await proxyAnthropicMessages(
       body,
-      new Headers({ "anthropic-version": "2023-06-01", "anthropic-beta": "fine-grained-tool-streaming-2025-05-14" }),
+      new Headers({
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
+        "content-type": "application/json",
+        "user-agent": "claude-code-test-harness",
+        "x-app": "cli",
+        "x-api-key": "local-proxy-key",
+        host: "127.0.0.1:3456",
+      }),
       mgr,
       config,
       new AbortController().signal,
@@ -128,6 +136,11 @@ test("forwards Anthropic messages verbatim with the selected account OAuth token
     expect(calls[0]!.headers.get("anthropic-beta")).toBe(
       "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
     );
+    expect(calls[0]!.headers.get("content-type")).toBe("application/json");
+    expect(calls[0]!.headers.get("user-agent")).toBe("claude-code-test-harness");
+    expect(calls[0]!.headers.get("x-app")).toBe("cli");
+    expect(calls[0]!.headers.has("x-api-key")).toBe(false);
+    expect(calls[0]!.headers.has("host")).toBe(false);
     expect(mgr.getAccount("a").usage.totalRequests).toBe(1);
     expect(mgr.getAccount("a").usage.totalInputTokens).toBe(11);
     expect(mgr.getAccount("a").usage.totalOutputTokens).toBe(3);

@@ -38,10 +38,9 @@ Direct upstream (upstream/anthropic.ts)
    │      grant_type=refresh_token
    │ 5. POST the original JSON body to:
    │      https://api.anthropic.com/v1/messages
-   │    with:
-   │      Authorization: Bearer <account accessToken>
-   │      anthropic-beta: caller betas...,oauth-2025-04-20
-   │      anthropic-version: caller value or 2023-06-01
+   │    with the caller/harness request headers preserved. The only changes:
+   │      Authorization is replaced with Bearer <account accessToken>
+   │      hop-by-hop headers and local x-api-key proxy auth are stripped
    ▼
 Instrument response
    │ 6. Non-stream: parse upstream JSON usage, then return the upstream body.
@@ -53,6 +52,10 @@ Response
    ▼
 HTTP response  (X-Pool-Account header names the chosen account)
 ```
+
+The direct backend intentionally does not synthesize Anthropic protocol headers
+such as `anthropic-version` or `anthropic-beta`. Those come from the harness
+request. Claude Code already sends the OAuth beta header it needs.
 
 ## Legacy CLI backend
 

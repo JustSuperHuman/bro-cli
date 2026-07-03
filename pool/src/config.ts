@@ -23,10 +23,6 @@ export interface Config {
   backend: "oauth" | "cli";
   /** Base URL for the real Anthropic API when using the direct OAuth backend. */
   anthropicApiBaseUrl: string;
-  /** API version sent upstream when the client did not provide one. */
-  anthropicVersion: string;
-  /** Beta header value that enables Claude Code OAuth bearer tokens upstream. */
-  oauthBetaHeader: string;
   /** OAuth token endpoint used to refresh Claude Code account credentials. */
   oauthTokenUrl: string;
   /** Public Claude Code OAuth client id. Override if Anthropic changes it. */
@@ -76,8 +72,6 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     claudeBin: process.env.CLAUDE_BIN || "claude",
     backend: backendEnv(),
     anthropicApiBaseUrl: process.env.ANTHROPIC_API_BASE_URL || "https://api.anthropic.com",
-    anthropicVersion: process.env.ANTHROPIC_VERSION || "2023-06-01",
-    oauthBetaHeader: process.env.ANTHROPIC_OAUTH_BETA || "oauth-2025-04-20",
     oauthTokenUrl: process.env.CLAUDE_OAUTH_TOKEN_URL || "https://platform.claude.com/v1/oauth/token",
     oauthClientId: process.env.CLAUDE_OAUTH_CLIENT_ID || "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
     tokenRefreshSkewMs: intEnv("TOKEN_REFRESH_SKEW_MS", 5 * 60 * 1000),

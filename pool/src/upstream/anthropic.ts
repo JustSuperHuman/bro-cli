@@ -159,7 +159,7 @@ async function fetchWithAccount(
   try {
     const response = await fetch(messagesUrl(config.anthropicApiBaseUrl), {
       method: "POST",
-      headers: upstreamHeaders(incomingHeaders, token, config),
+      headers: upstreamHeaders(incomingHeaders, token),
       body: bodyText,
       signal: abort.signal,
     });
@@ -566,32 +566,32 @@ function authOrNetworkReason(message: string): RetryReason {
   return { status: 401, type: "authentication_error", message, rateLimited: false };
 }
 
-function upstreamHeaders(incoming: Headers, token: string, config: Config): Headers {
-  const headers = new Headers();
-  headers.set("authorization", `Bearer ${token}`);
-  headers.set("content-type", "application/json");
-  headers.set("anthropic-version", incoming.get("anthropic-version") || config.anthropicVersion);
+function upstreamHeaders(incoming: Headers, token: string): Headers {
+  const headers = new Headers(incoming);
 
-  const beta = mergeBeta(incoming.get("anthropic-beta"), config.oauthBetaHeader);
-  if (beta) headers.set("anthropic-beta", beta);
-
-  for (const [key, value] of incoming) {
-    const lower = key.toLowerCase();
-    if (!lower.startsWith("anthropic-")) continue;
-    if (lower === "anthropic-version" || lower === "anthropic-beta") continue;
-    headers.set(key, value);
+  for (const name of HOP_BY_HOP_REQUEST_HEADERS) {
+    headers.delete(name);
   }
+
+  // The caller's proxy credential is local to this pool. Upstream auth must be
+  // the selected Claude account's OAuth bearer token.
+  headers.set("authorization", `Bearer ${token}`);
+  headers.delete("x-api-key");
   return headers;
 }
 
-function mergeBeta(existing: string | null, required: string): string {
-  const values = (existing ?? "")
-    .split(",")
-    .map((v) => v.trim())
-    .filter(Boolean);
-  if (!values.includes(required)) values.push(required);
-  return values.join(",");
-}
+const HOP_BY_HOP_REQUEST_HEADERS = [
+  "connection",
+  "content-length",
+  "host",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+];
 
 function responseFromUpstreamText(text: string, upstream: Response, accountName: string): Response {
   return new Response(text, {

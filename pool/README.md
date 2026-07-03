@@ -104,7 +104,7 @@ curl http://127.0.0.1:3456/v1/messages \
   -d '{"model":"claude-sonnet-5","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Both endpoints support streaming (`"stream": true`). The default `/v1/messages` backend forwards the Anthropic request body verbatim, including `system`, `tools`, `thinking`, beta features, and `stream`. Use `CLAUDE_POOL_BACKEND=cli` if you need the old CLI alias-mapping behavior.
+Both endpoints support streaming (`"stream": true`). The default `/v1/messages` backend forwards the Anthropic request body verbatim, including `system`, `tools`, `thinking`, beta features, and `stream`. It also preserves the caller/harness Anthropic headers instead of inventing defaults; the only upstream header substitution is `Authorization: Bearer <selected account token>`, with hop-by-hop headers and local `x-api-key` proxy auth stripped. Use `CLAUDE_POOL_BACKEND=cli` if you need the old CLI alias-mapping behavior.
 
 ### Endpoints
 
@@ -131,7 +131,7 @@ All optional — see [`.env.example`](./.env.example). Key vars: `CLAUDE_POOL_DI
 
 ## Notes & limitations
 
-- The default `/v1/messages` backend is a direct reverse proxy. It preserves Anthropic request fields and streams upstream SSE bytes back unchanged after the initial failover check.
+- The default `/v1/messages` backend is a direct reverse proxy. It preserves Anthropic request fields and harness headers, swaps only upstream authorization to the selected account token, and streams upstream SSE bytes back unchanged after the initial failover check.
 - The OpenAI compatibility endpoint and `CLAUDE_POOL_BACKEND=cli` fallback use the older adapter path, which flattens chat history into one CLI prompt and supports text responses only.
 - This uses Claude Code OAuth credentials from your subscription login. Review Anthropic's terms for your plan before pooling multiple accounts for shared/automated use.
 
