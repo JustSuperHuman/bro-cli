@@ -77,6 +77,49 @@
     transition: box-shadow .2s, border-color .2s;
   }
   .composer:focus-within { border-color: var(--border-strong); box-shadow: var(--shadow-lg); }
+  .composer.dragover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  #attachRow { display: none; flex-wrap: wrap; gap: 8px; padding: 2px 4px 10px; }
+  #attachRow.has { display: flex; }
+  .chip {
+    position: relative; width: 54px; height: 54px;
+    border-radius: 10px; overflow: hidden;
+    border: 1px solid var(--border-strong); box-shadow: var(--shadow);
+  }
+  .chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .chip .rm {
+    all: unset; cursor: pointer; position: absolute; top: 2px; right: 2px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: rgba(31, 30, 29, .65); color: #fff;
+    font-size: 10px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .chip .rm:hover { background: var(--danger); }
+  #ctxBar {
+    display: none; align-items: center; gap: 10px;
+    margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid var(--surface-2);
+  }
+  #ctxBar.has { display: flex; }
+  .ctx-label { font-size: 11px; color: var(--text-3); flex: none; text-transform: uppercase; letter-spacing: .06em; }
+  #ctxRow { display: flex; gap: 6px; overflow-x: auto; padding: 2px; min-width: 0; }
+  .ctx-item {
+    position: relative; flex: none; width: 42px; height: 42px;
+    border-radius: 9px; overflow: hidden; cursor: pointer;
+    border: 1.5px solid var(--border); opacity: .8;
+    transition: opacity .15s, border-color .15s;
+  }
+  .ctx-item:hover { opacity: 1; border-color: var(--border-strong); }
+  .ctx-item.sel { opacity: 1; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .ctx-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ctx-item .rm {
+    all: unset; cursor: pointer; position: absolute; top: 1px; right: 1px;
+    width: 15px; height: 15px; border-radius: 50%;
+    background: rgba(31, 30, 29, .65); color: #fff;
+    font-size: 9px; line-height: 1;
+    display: none; align-items: center; justify-content: center;
+  }
+  .ctx-item:hover .rm { display: flex; }
+  .ctx-item .rm:hover { background: var(--danger); }
   #prompt {
     width: 100%; border: 0; outline: 0; resize: none;
     background: transparent; color: var(--text);
@@ -92,14 +135,15 @@
   }
   .ctl { display: inline-flex; align-items: center; gap: 6px; }
   .ctl label { font-size: 12px; color: var(--text-3); }
-  select, .stepper {
+  select, .stepper, #attachBtn {
     appearance: none; -webkit-appearance: none;
     background: var(--surface-2); color: var(--text);
     border: 1px solid var(--border); border-radius: 9px;
     font: 13px var(--sans); padding: 6px 10px;
     cursor: pointer; outline: none;
   }
-  select:hover { border-color: var(--border-strong); }
+  select:hover, #attachBtn:hover { border-color: var(--border-strong); }
+  #attachBtn { color: var(--text-2); }
   select:focus { border-color: var(--accent); }
   select:disabled { opacity: .45; cursor: not-allowed; }
   #modelCustom {
@@ -132,8 +176,16 @@
   }
 
   /* ---------- gallery ---------- */
+  #galleryBar { display: none; justify-content: flex-end; margin-top: 20px; }
+  #galleryBar.has { display: flex; }
+  #deleteAll {
+    all: unset; cursor: pointer;
+    font-size: 12.5px; color: var(--text-3);
+    padding: 4px 10px; border-radius: 8px;
+  }
+  #deleteAll:hover { color: var(--danger); background: #faf1ee; }
   #gallery {
-    margin-top: 26px;
+    margin-top: 12px;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
     gap: 16px;
@@ -284,8 +336,13 @@
   </header>
 
   <div class="composer">
-    <textarea id="prompt" rows="1" placeholder="Describe an image… (Enter to generate, Shift+Enter for a new line)" autofocus></textarea>
+    <div id="attachRow"></div>
+    <textarea id="prompt" rows="1" placeholder="Describe an image… (Enter to generate · paste or drop images to use as reference)" autofocus></textarea>
     <div class="composer-row">
+      <div class="ctl">
+        <button id="attachBtn" title="Add reference images — or paste / drag &amp; drop anywhere">＋ img</button>
+        <input id="fileInput" type="file" accept="image/*" multiple hidden>
+      </div>
       <div class="ctl">
         <select id="model" title="Model"></select>
         <input id="modelCustom" placeholder="model id…" spellcheck="false">
@@ -319,6 +376,14 @@
       <div class="spacer"></div>
       <button id="go">Generate <kbd>⏎</kbd></button>
     </div>
+    <div id="ctxBar">
+      <span class="ctx-label">context</span>
+      <div id="ctxRow"></div>
+    </div>
+  </div>
+
+  <div id="galleryBar">
+    <button id="deleteAll" title="Delete every generated image in the gallery">Delete all</button>
   </div>
 
   <div id="gallery">
@@ -417,6 +482,137 @@
     try { await navigator.clipboard.writeText(state.outDir); toast('Output folder copied'); } catch {}
   };
 
+  // ---- reference images ----
+  // Uploads land in .bro/context named by content hash (server dedupes), and the
+  // library strip lets you re-attach any of them with a click.
+  let ctxItems = state.context || []; // [{ file, ts }]
+  const attachments = []; // context file names attached to the next generation
+  const attachRow = $('attachRow'), ctxBar = $('ctxBar'), ctxRow = $('ctxRow'), fileInput = $('fileInput');
+  const MAX_ATTACH = 8, MAX_DIM = 2048;
+  const ctxUrl = (f) => '/context/' + encodeURIComponent(f);
+
+  function renderRefs() {
+    attachRow.innerHTML = '';
+    attachRow.classList.toggle('has', attachments.length > 0);
+    for (const f of attachments) {
+      const chip = document.createElement('div');
+      chip.className = 'chip';
+      const img = document.createElement('img');
+      img.src = ctxUrl(f);
+      img.alt = f;
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.textContent = '✕';
+      rm.title = 'Detach';
+      rm.onclick = () => detach(f);
+      chip.append(img, rm);
+      attachRow.appendChild(chip);
+    }
+
+    ctxRow.innerHTML = '';
+    ctxBar.classList.toggle('has', ctxItems.length > 0);
+    for (const it of ctxItems) {
+      const sel = attachments.includes(it.file);
+      const d = document.createElement('div');
+      d.className = 'ctx-item' + (sel ? ' sel' : '');
+      d.title = sel ? 'Click to detach' : 'Click to attach';
+      const img = document.createElement('img');
+      img.src = ctxUrl(it.file);
+      img.alt = it.file;
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.textContent = '✕';
+      rm.title = 'Delete from library';
+      rm.onclick = async (e) => {
+        e.stopPropagation();
+        await fetch('/api/context/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file: it.file }) });
+        ctxItems = ctxItems.filter((c) => c.file !== it.file);
+        const i = attachments.indexOf(it.file);
+        if (i >= 0) attachments.splice(i, 1);
+        renderRefs();
+      };
+      d.onclick = () => (attachments.includes(it.file) ? detach(it.file) : attach(it.file));
+      d.append(img, rm);
+      ctxRow.appendChild(d);
+    }
+  }
+
+  function attach(f) {
+    if (attachments.includes(f)) return;
+    if (attachments.length >= MAX_ATTACH) { toast('Max ' + MAX_ATTACH + ' reference images'); return; }
+    attachments.push(f);
+    renderRefs();
+  }
+  function detach(f) {
+    const i = attachments.indexOf(f);
+    if (i >= 0) attachments.splice(i, 1);
+    renderRefs();
+  }
+
+  // Read a file as a data URL, downscaling anything over MAX_DIM so the
+  // request body (and the upstream API) doesn't choke on 40MP screenshots.
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onerror = reject;
+      fr.onload = () => {
+        const img = new Image();
+        img.onerror = () => resolve(fr.result); // undecodable here — send as-is
+        img.onload = () => {
+          if (img.width <= MAX_DIM && img.height <= MAX_DIM) return resolve(fr.result);
+          const s = MAX_DIM / Math.max(img.width, img.height);
+          const c = document.createElement('canvas');
+          c.width = Math.round(img.width * s);
+          c.height = Math.round(img.height * s);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          resolve(c.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.92));
+        };
+        img.src = fr.result;
+      };
+      fr.readAsDataURL(file);
+    });
+  }
+
+  async function addImageFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      const r = await fetch('/api/context', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dataUrl }) });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+      if (!ctxItems.some((c) => c.file === body.file)) ctxItems.unshift({ file: body.file, ts: Date.now() });
+      else if (body.existed && attachments.includes(body.file)) toast('Already attached');
+      attach(body.file);
+    } catch (e) { toast('Upload failed: ' + (e.message || e)); }
+  }
+
+  $('attachBtn').onclick = () => fileInput.click();
+  fileInput.onchange = () => { [...fileInput.files].forEach(addImageFile); fileInput.value = ''; };
+
+  document.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.items || [])]
+      .filter((i) => i.kind === 'file' && i.type.startsWith('image/'))
+      .map((i) => i.getAsFile());
+    if (!files.length) return;
+    e.preventDefault();
+    files.forEach(addImageFile);
+    promptEl.focus();
+  });
+
+  const composerEl = document.querySelector('.composer');
+  document.addEventListener('dragover', (e) => {
+    if ([...(e.dataTransfer?.types || [])].includes('Files')) {
+      e.preventDefault();
+      composerEl.classList.add('dragover');
+    }
+  });
+  document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) composerEl.classList.remove('dragover'); });
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    composerEl.classList.remove('dragover');
+    [...(e.dataTransfer?.files || [])].forEach(addImageFile);
+  });
+
   // ---- toasts ----
   function toast(msg) {
     const t = document.createElement('div');
@@ -436,6 +632,22 @@
   // ---- cards ----
   const fmtSec = (ms) => (ms / 1000).toFixed(1) + 's';
 
+  const galleryBar = $('galleryBar');
+  const syncGalleryBar = () => galleryBar.classList.toggle('has', !!gallery.querySelector('.card'));
+
+  $('deleteAll').onclick = async () => {
+    const cards = [...gallery.querySelectorAll('.card')].filter((c) => !c.classList.contains('generating'));
+    if (!cards.length) return;
+    const n = cards.length;
+    if (!confirm('Delete all ' + n + ' generated image' + (n === 1 ? '' : 's') + '? This can’t be undone. (Context images are kept.)')) return;
+    const r = await fetch('/api/delete-all', { method: 'POST' });
+    if (!r.ok) { toast('Delete failed'); return; }
+    cards.forEach((c) => c.remove());
+    if (!gallery.querySelector('.card')) empty.style.display = '';
+    syncGalleryBar();
+    toast('Deleted ' + (await r.json()).deleted + ' images');
+  };
+
   function baseCard() {
     empty.style.display = 'none';
     const card = document.createElement('div');
@@ -444,8 +656,10 @@
       '<div class="frame"></div>' +
       '<div class="meta"><div class="prompt-line"></div>' +
       '<div class="sub"><span class="model"></span><span class="time"></span>' +
+      '<span class="refs" title="Reference images"></span>' +
       '<span class="actions"></span></div></div>';
     gallery.prepend(card);
+    syncGalleryBar();
     return card;
   }
 
@@ -465,6 +679,7 @@
     card.querySelector('.prompt-line').title = item.prompt;
     card.querySelector('.model').textContent = item.model;
     card.querySelector('.time').textContent = item.ms ? fmtSec(item.ms) : '';
+    card.querySelector('.refs').textContent = item.refs ? '⧉ ' + item.refs : '';
 
     const actions = card.querySelector('.actions');
     actions.innerHTML = '';
@@ -482,16 +697,18 @@
       await fetch('/api/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file: item.file }) });
       card.remove();
       if (!gallery.querySelector('.card')) empty.style.display = '';
+      syncGalleryBar();
     }, 'del');
   }
 
-  function fireGeneration(prompt, model, size, quality) {
+  function fireGeneration(prompt, model, size, quality, images) {
     const card = baseCard();
     card.classList.add('generating');
     const frame = card.querySelector('.frame');
     frame.innerHTML = '<div class="gen-center"><div class="ring"></div><div class="elapsed">0.0s</div></div>';
     card.querySelector('.prompt-line').textContent = prompt;
     card.querySelector('.model').textContent = model;
+    card.querySelector('.refs').textContent = images.length ? '⧉ ' + images.length : '';
 
     const started = Date.now();
     const elapsedEl = frame.querySelector('.elapsed');
@@ -501,7 +718,7 @@
     fetch('/api/generate', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt, model, size, quality })
+      body: JSON.stringify({ prompt, model, size, quality, images })
     })
       .then(async (r) => {
         const body = await r.json();
@@ -520,7 +737,7 @@
         msg.textContent = e.message || 'Generation failed';
         const retry = document.createElement('button');
         retry.textContent = 'Retry';
-        retry.onclick = () => { card.remove(); fireGeneration(prompt, model, size, quality); if (!gallery.querySelector('.card')) empty.style.display = ''; };
+        retry.onclick = () => { card.remove(); fireGeneration(prompt, model, size, quality, images); if (!gallery.querySelector('.card')) empty.style.display = ''; };
         div.append(msg, retry);
         frame.appendChild(div);
         card.querySelector('.time').textContent = fmtSec(Date.now() - started);
@@ -534,7 +751,8 @@
     const model = currentModel();
     if (!model) { toast('Pick or type a model first'); modelCustom.focus(); return; }
     persist();
-    for (let i = 0; i < count; i++) fireGeneration(prompt, model, sizeSel.value, qualitySel.value);
+    const images = [...attachments]; // snapshot — detaching later must not affect in-flight retries
+    for (let i = 0; i < count; i++) fireGeneration(prompt, model, sizeSel.value, qualitySel.value, images);
   }
 
   $('go').onclick = generate;
@@ -595,6 +813,7 @@
 
   // ---- history ----
   for (const item of state.history || []) fillDone(baseCard(), item);
+  renderRefs();
 })();
 </script>
 </body>

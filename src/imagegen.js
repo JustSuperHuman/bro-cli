@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -92,19 +93,18 @@ function chatUrlOf(api) {
   return api.chatUrl || api.imagesUrl.replace(/\/images\/generations\/?$/, '/chat/completions');
 }
 
+// Reference images go to the edits endpoint (multipart) instead of generations.
+function editsUrlOf(api) {
+  return api.editsUrl || api.imagesUrl.replace(/\/generations\/?$/, '/edits');
+}
+
 function usesChatApi(api, model) {
   const known = (api.models || []).find((m) => m.id === model);
   if (known) return known.via === 'chat';
   return /gemini|flash-image|banana/i.test(model);
 }
 
-async function postJson(url, apiKey, body, signal) {
-  const res = await fetch(url, {
-    method: 'POST',
-    signal,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify(body)
-  });
+async function readApiResponse(res) {
   const text = await res.text();
   if (!res.ok) {
     let msg = text.slice(0, 500);
@@ -116,6 +116,27 @@ async function postJson(url, apiKey, body, signal) {
     throw new Error(`${res.status} ${msg}`);
   }
   return JSON.parse(text);
+}
+
+async function postJson(url, apiKey, body, signal) {
+  const res = await fetch(url, {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(body)
+  });
+  return readApiResponse(res);
+}
+
+// multipart POST — fetch sets the boundary header from the FormData itself.
+async function postForm(url, apiKey, form, signal) {
+  const res = await fetch(url, {
+    method: 'POST',
+    signal,
+    headers: { authorization: `Bearer ${apiKey}` },
+    body: form
+  });
+  return readApiResponse(res);
 }
 
 async function download(url, signal) {
@@ -131,18 +152,35 @@ function decodeDataUrl(url) {
   return { buf: Buffer.from(m[2], 'base64'), ext: EXT_BY_TYPE[m[1].toLowerCase()] || 'png' };
 }
 
+async function imageFromData(data, signal) {
+  if (!data) throw new Error('Empty response (no data[0])');
+  if (data.b64_json) {
+    return { buf: Buffer.from(data.b64_json, 'base64'), ext: 'png', revisedPrompt: data.revised_prompt };
+  }
+  if (data.url) {
+    return { ...(await download(data.url, signal)), revisedPrompt: data.revised_prompt };
+  }
+  throw new Error('Response had neither b64_json nor url');
+}
+
 // Call the upstream images API for a single image. Concurrency comes from the
 // browser firing many of these requests at once, so n is always 1 here.
-async function generateOne({ api, apiKey, prompt, model, size, quality }) {
+// `images` are decoded reference images ({ buf, ext, type, dataUrl }) — with any
+// present, images-API models go through /images/edits and chat models get the
+// references embedded as image_url content parts.
+async function generateOne({ api, apiKey, prompt, model, size, quality, images = [] }) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 300000);
   try {
     if (usesChatApi(api, model)) {
       // size/quality knobs don't exist on the chat path — steer with the prompt instead.
+      const userContent = images.length
+        ? [{ type: 'text', text: prompt }, ...images.map((im) => ({ type: 'image_url', image_url: { url: im.dataUrl } }))]
+        : prompt;
       const json = await postJson(
         chatUrlOf(api),
         apiKey,
-        { model, messages: [{ role: 'user', content: prompt }] },
+        { model, messages: [{ role: 'user', content: userContent }] },
         ctrl.signal
       );
       const msg = json.choices?.[0]?.message || {};
@@ -159,19 +197,25 @@ async function generateOne({ api, apiKey, prompt, model, size, quality }) {
       throw new Error('Model replied without an image: ' + (content.slice(0, 200) || JSON.stringify(json).slice(0, 200)));
     }
 
+    if (images.length) {
+      const form = new FormData();
+      form.append('model', model);
+      form.append('prompt', prompt);
+      if (size && size !== 'auto') form.append('size', size);
+      if (quality && quality !== 'auto') form.append('quality', quality);
+      // gpt-image models take multiple references via image[]; single stays `image`
+      // for compatibility with stricter backends.
+      const field = images.length > 1 ? 'image[]' : 'image';
+      images.forEach((im, i) => form.append(field, new Blob([im.buf], { type: im.type }), `ref-${i}.${im.ext}`));
+      const json = await postForm(editsUrlOf(api), apiKey, form, ctrl.signal);
+      return await imageFromData(json.data?.[0], ctrl.signal);
+    }
+
     const body = { model, prompt, n: 1 };
     if (size && size !== 'auto') body.size = size;
     if (quality && quality !== 'auto') body.quality = quality;
-    const data = (await postJson(api.imagesUrl, apiKey, body, ctrl.signal)).data?.[0];
-    if (!data) throw new Error('Empty response (no data[0])');
-
-    if (data.b64_json) {
-      return { buf: Buffer.from(data.b64_json, 'base64'), ext: 'png', revisedPrompt: data.revised_prompt };
-    }
-    if (data.url) {
-      return { ...(await download(data.url, ctrl.signal)), revisedPrompt: data.revised_prompt };
-    }
-    throw new Error('Response had neither b64_json nor url');
+    const json = await postJson(api.imagesUrl, apiKey, body, ctrl.signal);
+    return await imageFromData(json.data?.[0], ctrl.signal);
   } finally {
     clearTimeout(timer);
   }
@@ -209,6 +253,34 @@ function readHistory(outDir, limit = 300) {
   }
 }
 
+// ---------- context library (.bro/context — reference images, deduped by hash) ----------
+
+function readContext(ctxDir) {
+  try {
+    return fs
+      .readdirSync(ctxDir)
+      .filter((f) => TYPE_BY_EXT[path.extname(f).slice(1).toLowerCase()])
+      .map((f) => ({ file: f, ts: fs.statSync(path.join(ctxDir, f)).mtimeMs }))
+      .sort((a, b) => b.ts - a.ts);
+  } catch {
+    return [];
+  }
+}
+
+// Resolve context file names into buffers + data URLs for the upstream call.
+function resolveRefs(ctxDir, images) {
+  const refs = [];
+  for (const f of (Array.isArray(images) ? images : []).slice(0, 8)) {
+    const name = path.basename(String(f || ''));
+    const full = path.join(ctxDir, name);
+    if (!name || !fs.existsSync(full)) continue;
+    const buf = fs.readFileSync(full);
+    const type = TYPE_BY_EXT[path.extname(name).slice(1).toLowerCase()] || 'image/png';
+    refs.push({ buf, type, ext: EXT_BY_TYPE[type] || 'png', dataUrl: `data:${type};base64,${buf.toString('base64')}` });
+  }
+  return refs;
+}
+
 // ---------- server ----------
 
 function readBody(req, max = 1024 * 1024) {
@@ -235,7 +307,7 @@ function sendJson(res, code, obj) {
   res.end(body);
 }
 
-function createServer({ api, apiKey, outDir }) {
+function createServer({ api, apiKey, outDir, ctxDir }) {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     try {
@@ -251,19 +323,51 @@ function createServer({ api, apiKey, outDir }) {
           models: api.models,
           defaultModel: api.models[0]?.id || '',
           outDir,
-          history: readHistory(outDir)
+          history: readHistory(outDir),
+          context: readContext(ctxDir)
         });
         return;
       }
 
+      // Save a reference image into the context library. The file name is the
+      // sha256 of the bytes, so re-uploading the same image is a no-op.
+      if (req.method === 'POST' && url.pathname === '/api/context') {
+        const { dataUrl } = JSON.parse(await readBody(req, 64 * 1024 * 1024));
+        const m = String(dataUrl || '').match(/^data:(image\/[a-z0-9+.-]+);base64,(.+)$/is);
+        if (!m) return sendJson(res, 400, { error: 'Expected a base64 image data URL.' });
+        const type = m[1].toLowerCase();
+        const buf = Buffer.from(m[2], 'base64');
+        const hash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16);
+        const file = `${hash}.${EXT_BY_TYPE[type] || 'png'}`;
+        const full = path.join(ctxDir, file);
+        const existed = fs.existsSync(full);
+        if (!existed) {
+          fs.mkdirSync(ctxDir, { recursive: true });
+          fs.writeFileSync(full, buf);
+        }
+        sendJson(res, 200, { file, existed });
+        return;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/context/delete') {
+        const { file } = JSON.parse(await readBody(req));
+        const name = path.basename(String(file || ''));
+        const full = path.join(ctxDir, name);
+        if (name && fs.existsSync(full)) fs.unlinkSync(full);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
       if (req.method === 'POST' && url.pathname === '/api/generate') {
-        const { prompt, model, size, quality } = JSON.parse(await readBody(req));
+        // `images` is a list of context-library file names (uploaded via /api/context).
+        const { prompt, model, size, quality, images } = JSON.parse(await readBody(req));
         if (!prompt || !String(prompt).trim()) return sendJson(res, 400, { error: 'Prompt is required.' });
         const useModel = (model || api.models[0]?.id || '').trim();
         if (!useModel) return sendJson(res, 400, { error: 'Model is required.' });
 
+        const refs = resolveRefs(ctxDir, images);
         const started = Date.now();
-        const { buf, ext, revisedPrompt } = await generateOne({ api, apiKey, prompt, model: useModel, size, quality });
+        const { buf, ext, revisedPrompt } = await generateOne({ api, apiKey, prompt, model: useModel, size, quality, images: refs });
         const file = `${stamp()}-${slug(prompt)}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
         fs.mkdirSync(outDir, { recursive: true });
         fs.writeFileSync(path.join(outDir, file), buf);
@@ -275,11 +379,33 @@ function createServer({ api, apiKey, outDir }) {
           model: useModel,
           size: size || 'auto',
           quality: quality || 'auto',
+          refs: refs.length || undefined,
           ms: Date.now() - started,
           ts: Date.now()
         };
         appendHistory(outDir, entry);
         sendJson(res, 200, entry);
+        return;
+      }
+
+      // Wipe every generated image + the history file. Context refs are untouched.
+      if (req.method === 'POST' && url.pathname === '/api/delete-all') {
+        let deleted = 0;
+        for (const f of fs.readdirSync(outDir)) {
+          if (!TYPE_BY_EXT[path.extname(f).slice(1).toLowerCase()]) continue;
+          try {
+            fs.unlinkSync(path.join(outDir, f));
+            deleted++;
+          } catch {
+            /* keep going */
+          }
+        }
+        try {
+          fs.unlinkSync(historyPath(outDir));
+        } catch {
+          /* may not exist */
+        }
+        sendJson(res, 200, { ok: true, deleted });
         return;
       }
 
@@ -292,9 +418,10 @@ function createServer({ api, apiKey, outDir }) {
         return;
       }
 
-      if (req.method === 'GET' && url.pathname.startsWith('/images/')) {
-        const name = path.basename(decodeURIComponent(url.pathname.slice('/images/'.length)));
-        const full = path.join(outDir, name);
+      if (req.method === 'GET' && (url.pathname.startsWith('/images/') || url.pathname.startsWith('/context/'))) {
+        const dir = url.pathname.startsWith('/context/') ? ctxDir : outDir;
+        const name = path.basename(decodeURIComponent(url.pathname.split('/').slice(2).join('/')));
+        const full = path.join(dir, name);
         if (!fs.existsSync(full)) {
           res.writeHead(404);
           res.end('Not found');
@@ -387,9 +514,10 @@ export async function runImageGen({ config, apiId, dryRun = false }) {
   }
 
   const outDir = path.join(process.cwd(), '.bro', 'image-gen');
+  const ctxDir = path.join(process.cwd(), '.bro', 'context');
 
   if (dryRun) {
-    console.log(JSON.stringify({ via: 'image-gen web ui', api: api.id, imagesUrl: api.imagesUrl, outDir }, null, 2));
+    console.log(JSON.stringify({ via: 'image-gen web ui', api: api.id, imagesUrl: api.imagesUrl, outDir, ctxDir }, null, 2));
     return 0;
   }
 
@@ -408,14 +536,16 @@ export async function runImageGen({ config, apiId, dryRun = false }) {
 
   rememberSelection(IMAGE_PROVIDER.id, api.id);
   fs.mkdirSync(outDir, { recursive: true });
+  fs.mkdirSync(ctxDir, { recursive: true });
 
-  const server = createServer({ api, apiKey, outDir });
+  const server = createServer({ api, apiKey, outDir, ctxDir });
   const port = await listenOnFreePort(server);
   const url = `http://127.0.0.1:${port}`;
 
   console.log(`\n\x1b[1m🎨 bro image gen\x1b[0m — ${api.name || api.id}`);
   console.log(`   UI:      \x1b[36m${url}\x1b[0m`);
   console.log(`   Output:  ${outDir}`);
+  console.log(`   Context: ${ctxDir}`);
   console.log(`   \x1b[2mCtrl-C to stop\x1b[0m\n`);
   openBrowser(url);
 

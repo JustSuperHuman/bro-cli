@@ -53,6 +53,7 @@ bro accounts remove work      # delete a pooled account
 - **Prompt fast** — type, press Enter, keep typing. Every generation is a card that shimmers while it works and fades the image in when it lands.
 - **Concurrent by design** — the batch stepper fires N generations at once, and you can keep firing more while others are still running.
 - **Switch models in the UI** — pick from the API's list (including chat-routed models like `gemini-3.1-flash-image`) or type any custom model id. Size and quality knobs included where the API supports them.
+- **Reference images** — paste, drag-drop, or attach images to the prompt as context. They're saved to `./.bro/context/` named by content hash (the same image is never stored twice) and appear in a library strip for one-click reuse. Image-API models route through `/images/edits`; chat-routed models get them as vision input.
 - **Files land in `./.bro/image-gen/`** of the directory you launched from, with a `history.jsonl` so the gallery survives reloads.
 
 ```sh
