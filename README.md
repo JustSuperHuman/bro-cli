@@ -63,6 +63,18 @@ bro image -p yunwu    # skip the API menu
 
 Keys are shared with the chat provider of the same id, so a saved Yunwu key just works. Add your own APIs via `imageApis` in `~/.bro/config.json` (merged by `id`, same as providers).
 
+### Image Gen HTTP API
+
+The image-gen web UI is backed by local JSON routes, and scripts can call the same routes directly while `bro image` is running. Start the server, copy the printed `http://127.0.0.1:<port>` URL, then call `/api/generate`:
+
+```sh
+curl -s http://127.0.0.1:8790/api/generate \
+  -H "content-type: application/json" \
+  -d '{"prompt":"a clean product photo of a steel water bottle","model":"gpt-image-2","size":"1024x1024","quality":"high"}'
+```
+
+The response includes the saved file name and metadata; download the image from `/images/<file>`. Reference images use the same flow as the UI: upload a base64 data URL to `/api/context`, then pass the returned context file names as `images` in `/api/generate`. See [docs/image-api.md](./docs/image-api.md) for the complete route list and examples.
+
 ## Providers
 
 Claude is next in the list and runs **natively** (your normal Claude login — no proxy). Other Anthropic-compatible providers (OpenRouter, Z.ai) just point Claude at their endpoint. OpenAI-format providers (Sakana, OpenAI, DeepSeek, Groq, …) are routed through [`claude-code-router`](https://github.com/musistudio/claude-code-router), which `bro` installs for you the first time you need it.

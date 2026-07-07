@@ -37,6 +37,49 @@
 
   .wrap { max-width: 1280px; margin: 0 auto; padding: 0 24px 96px; }
 
+  /* ---------- layout: batch tabs on the left, composer + gallery right ---------- */
+  .main { display: flex; align-items: flex-start; gap: 22px; margin-top: 14px; }
+  .content { flex: 1; min-width: 0; }
+  #sidebar {
+    flex: none; width: 208px;
+    position: sticky; top: 14px;
+    max-height: calc(100vh - 28px); overflow-y: auto;
+    display: flex; flex-direction: column; gap: 5px;
+    padding: 2px;
+  }
+  .tab {
+    position: relative;
+    cursor: pointer; padding: 8px 11px;
+    border-radius: 11px; border: 1px solid transparent;
+    transition: background .15s, border-color .15s;
+  }
+  .tab:hover { background: var(--surface); border-color: var(--border); }
+  .tab.active { background: var(--surface); border-color: var(--border-strong); box-shadow: var(--shadow); }
+  .tab .rm {
+    all: unset; cursor: pointer; position: absolute; top: 6px; right: 6px;
+    width: 17px; height: 17px; border-radius: 50%;
+    background: var(--surface-2); color: var(--text-2);
+    font-size: 10px; line-height: 1;
+    display: none; align-items: center; justify-content: center;
+  }
+  .tab:hover .rm { display: flex; }
+  .tab .rm:hover { background: #faf1ee; color: var(--danger); }
+  .tab .t-prompt {
+    font-size: 12.5px; color: var(--text); padding-right: 16px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .tab .t-sub {
+    font-size: 11px; color: var(--text-3); margin-top: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tab .t-sub .t-model { color: var(--accent-hover); }
+  .tab.all .t-prompt { font-weight: 500; }
+  @media (max-width: 900px) {
+    .main { display: block; }
+    #sidebar { position: static; width: auto; max-height: none; flex-direction: row; overflow-x: auto; margin-bottom: 4px; }
+    .tab { flex: none; max-width: 220px; }
+  }
+
   /* ---------- header ---------- */
   header {
     display: flex; align-items: baseline; gap: 14px;
@@ -73,7 +116,6 @@
     border-radius: 18px;
     box-shadow: var(--shadow);
     padding: 14px 14px 10px;
-    margin-top: 14px;
     transition: box-shadow .2s, border-color .2s;
   }
   .composer:focus-within { border-color: var(--border-strong); box-shadow: var(--shadow-lg); }
@@ -211,6 +253,7 @@
     opacity: 0; transition: opacity .5s ease;
   }
   .card img.ready { opacity: 1; }
+  .card.hidden { display: none; }
 
   /* generating state */
   .card.generating .frame::before {
@@ -335,6 +378,16 @@
     <span id="activeBadge"><span class="pip"></span><span id="activeText"></span></span>
   </header>
 
+  <div class="main">
+  <aside id="sidebar">
+    <div class="tab all active" id="tabAll" title="Show every generation">
+      <div class="t-prompt">All generations</div>
+      <div class="t-sub" id="tabAllSub"></div>
+    </div>
+    <div id="tabList" style="display: contents;"></div>
+  </aside>
+  <div class="content">
+
   <div class="composer">
     <div id="attachRow"></div>
     <textarea id="prompt" rows="1" placeholder="Describe an image… (Enter to generate · paste or drop images to use as reference)" autofocus></textarea>
@@ -392,6 +445,9 @@
       <div>Type a prompt above and press Enter — run as many at once as you like.</div>
     </div>
   </div>
+
+  </div><!-- /.content -->
+  </div><!-- /.main -->
 </div>
 
 <div id="lightbox">
@@ -650,6 +706,133 @@
     activeText.textContent = active === 1 ? '1 generating' : active + ' generating';
   }
 
+  // ---- batch tabs ----
+  // Every Generate click is a batch: its cards share a batch id (persisted in
+  // history) and get a tab in the left sidebar. Clicking a tab filters the
+  // gallery to that batch and restores the config that produced it.
+  const tabList = $('tabList'), tabAll = $('tabAll'), tabAllSub = $('tabAllSub');
+  const batches = new Map(); // id -> { id, prompt, model, size, quality, images, ts }
+  let activeBatch = ''; // '' = all generations
+
+  function registerBatch(id, cfg) {
+    const b = batches.get(id);
+    if (b) {
+      b.ts = Math.max(b.ts, cfg.ts || 0);
+      if (cfg.images && cfg.images.length) b.images = cfg.images;
+      return b;
+    }
+    const nb = { images: [], ...cfg, id };
+    batches.set(id, nb);
+    return nb;
+  }
+
+  function renderTabs() {
+    const counts = new Map();
+    for (const c of gallery.querySelectorAll('.card')) {
+      const id = c.dataset.batch;
+      if (id) counts.set(id, (counts.get(id) || 0) + 1);
+    }
+    for (const id of [...batches.keys()]) if (!counts.get(id)) batches.delete(id);
+    if (activeBatch && !batches.has(activeBatch)) { activeBatch = ''; applyFilter(); }
+    const total = gallery.querySelectorAll('.card').length;
+    tabAll.classList.toggle('active', !activeBatch);
+    tabAllSub.textContent = total ? total + ' image' + (total === 1 ? '' : 's') : '';
+    tabList.innerHTML = '';
+    for (const b of [...batches.values()].sort((x, y) => y.ts - x.ts)) {
+      const d = document.createElement('div');
+      d.className = 'tab' + (activeBatch === b.id ? ' active' : '');
+      d.title = b.prompt;
+      const p = document.createElement('div');
+      p.className = 't-prompt';
+      p.textContent = b.prompt || '(no prompt)';
+      const s = document.createElement('div');
+      s.className = 't-sub';
+      const m = document.createElement('span');
+      m.className = 't-model';
+      m.textContent = b.model;
+      s.append(m, ' · ' + counts.get(b.id) + (b.images.length ? ' · ⧉' + b.images.length : ''));
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.textContent = '✕';
+      rm.title = 'Delete this batch and its images';
+      rm.onclick = (e) => { e.stopPropagation(); deleteBatch(b.id); };
+      d.append(p, s, rm);
+      d.onclick = () => selectBatch(b.id);
+      tabList.appendChild(d);
+    }
+  }
+
+  function applyFilter() {
+    let any = false;
+    for (const c of gallery.querySelectorAll('.card')) {
+      const show = !activeBatch || c.dataset.batch === activeBatch;
+      c.classList.toggle('hidden', !show);
+      if (show) any = true;
+    }
+    empty.style.display = any ? 'none' : '';
+  }
+
+  // Select a tab; for a real batch, restore the config that produced it as best
+  // we can (prompt, model, size/quality, and whichever refs still exist).
+  function selectBatch(id, loadConfig = true) {
+    activeBatch = id || '';
+    applyFilter();
+    renderTabs();
+    const b = batches.get(activeBatch);
+    if (!b || !loadConfig) return;
+    promptEl.value = b.prompt || '';
+    autosize();
+    if (b.model && [...modelSel.options].some((o) => o.value === b.model && o.value !== '__custom__')) {
+      modelSel.value = b.model;
+      modelCustom.style.display = 'none';
+    } else if (b.model) {
+      modelSel.value = '__custom__';
+      modelCustom.style.display = 'inline-block';
+      modelCustom.value = b.model;
+    }
+    if (b.size) sizeSel.value = b.size;
+    if (b.quality) qualitySel.value = b.quality;
+    syncKnobs();
+    attachments.length = 0;
+    let missing = 0;
+    for (const f of b.images) {
+      if (ctxItems.some((c) => c.file === f)) attachments.push(f);
+      else missing++;
+    }
+    renderRefs();
+    if (missing) toast(missing + ' reference image' + (missing === 1 ? '' : 's') + ' no longer in the library');
+    promptEl.focus();
+  }
+  tabAll.onclick = () => selectBatch('');
+
+  // Delete a whole batch: its images on disk and its cards. The tab then prunes
+  // itself via renderTabs. Refuses while the batch still has in-flight requests.
+  async function deleteBatch(id) {
+    const cards = [...gallery.querySelectorAll('.card')].filter((c) => c.dataset.batch === id);
+    if (cards.some((c) => c.classList.contains('generating'))) {
+      toast('This batch is still generating — wait for it to finish');
+      return;
+    }
+    const b = batches.get(id);
+    const n = cards.filter((c) => c._item).length;
+    const label = (b?.prompt || '').slice(0, 60) || 'this batch';
+    if (!confirm('Delete “' + label + '” — ' + n + ' image' + (n === 1 ? '' : 's') + '? This can’t be undone.')) return;
+    let deleted = 0;
+    for (const c of cards) {
+      const file = c._item?.file;
+      if (file) {
+        const r = await fetch('/api/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file }) });
+        if (!r.ok) { toast('Delete failed — stopping'); break; }
+        deleted++;
+      }
+      removeCard(c); // error cards have no file; just drop them
+    }
+    renderTabs();
+    applyFilter();
+    syncGalleryBar();
+    toast('Deleted ' + deleted + ' image' + (deleted === 1 ? '' : 's'));
+  }
+
   // ---- cards ----
   const fmtSec = (ms) => (ms / 1000).toFixed(1) + 's';
 
@@ -671,7 +854,8 @@
     const r = await fetch('/api/delete-all', { method: 'POST' });
     if (!r.ok) { toast('Delete failed'); return; }
     cards.forEach(removeCard);
-    if (!gallery.querySelector('.card')) empty.style.display = '';
+    renderTabs();
+    applyFilter();
     syncGalleryBar();
     toast('Deleted ' + (await r.json()).deleted + ' images');
   };
@@ -736,13 +920,15 @@
     mk('✕', 'Delete', async () => {
       await fetch('/api/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file: item.file }) });
       removeCard(card);
-      if (!gallery.querySelector('.card')) empty.style.display = '';
+      renderTabs();
+      applyFilter();
       syncGalleryBar();
     }, 'del');
   }
 
-  function fireGeneration(prompt, model, size, quality, images) {
+  function fireGeneration(prompt, model, size, quality, images, batchId) {
     const card = baseCard();
+    card.dataset.batch = batchId;
     card.classList.add('generating');
     const frame = card.querySelector('.frame');
     frame.innerHTML = '<div class="gen-center"><div class="ring"></div><div class="elapsed">0.0s</div></div>';
@@ -758,7 +944,7 @@
     fetch('/api/generate', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt, model, size, quality, images })
+      body: JSON.stringify({ prompt, model, size, quality, images, batch: batchId })
     })
       .then(async (r) => {
         const body = await r.json();
@@ -777,7 +963,7 @@
         msg.textContent = e.message || 'Generation failed';
         const retry = document.createElement('button');
         retry.textContent = 'Retry';
-        retry.onclick = () => { removeCard(card); fireGeneration(prompt, model, size, quality, images); if (!gallery.querySelector('.card')) empty.style.display = ''; };
+        retry.onclick = () => { removeCard(card); fireGeneration(prompt, model, size, quality, images, batchId); applyFilter(); renderTabs(); };
         div.append(msg, retry);
         frame.appendChild(div);
         card.querySelector('.time').textContent = fmtSec(Date.now() - started);
@@ -792,7 +978,11 @@
     if (!model) { toast('Pick or type a model first'); modelCustom.focus(); return; }
     persist();
     const images = [...attachments]; // snapshot — detaching later must not affect in-flight retries
-    for (let i = 0; i < count; i++) fireGeneration(prompt, model, sizeSel.value, qualitySel.value, images);
+    const batchId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+    registerBatch(batchId, { prompt, model, size: sizeSel.value, quality: qualitySel.value, images: [...images], ts: Date.now() });
+    for (let i = 0; i < count; i++) fireGeneration(prompt, model, sizeSel.value, qualitySel.value, images, batchId);
+    // focus the new batch's tab; keep the composer exactly as the user set it
+    selectBatch(batchId, false);
   }
 
   $('go').onclick = generate;
@@ -814,7 +1004,7 @@
 
   // Finished images in gallery order (newest first) — recomputed each time so
   // generations that complete while the lightbox is open become navigable.
-  const doneItems = () => [...gallery.querySelectorAll('.card')].map((c) => c._item).filter(Boolean);
+  const doneItems = () => [...gallery.querySelectorAll('.card:not(.hidden)')].map((c) => c._item).filter(Boolean);
 
   function syncLbNav() {
     const items = doneItems();
@@ -852,7 +1042,23 @@
   });
 
   // ---- history ----
-  for (const item of state.history || []) fillDone(baseCard(), item);
+  // Entries written before batches existed have no batch id — group those by
+  // prompt+model so old sessions still land in sensible tabs.
+  for (const item of state.history || []) {
+    const id = item.batch || 'auto:' + (item.model || '') + '|' + (item.prompt || '');
+    registerBatch(id, {
+      prompt: item.prompt,
+      model: item.model,
+      size: item.size,
+      quality: item.quality,
+      images: item.images || [],
+      ts: item.ts || 0
+    });
+    const card = baseCard();
+    card.dataset.batch = id;
+    fillDone(card, item);
+  }
+  renderTabs();
   renderRefs();
 })();
 </script>

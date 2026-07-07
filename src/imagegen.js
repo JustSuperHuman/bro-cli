@@ -277,7 +277,7 @@ function resolveRefs(ctxDir, images) {
     if (!name || !fs.existsSync(full)) continue;
     const buf = fs.readFileSync(full);
     const type = TYPE_BY_EXT[path.extname(name).slice(1).toLowerCase()] || 'image/png';
-    refs.push({ buf, type, ext: EXT_BY_TYPE[type] || 'png', dataUrl: `data:${type};base64,${buf.toString('base64')}` });
+    refs.push({ file: name, buf, type, ext: EXT_BY_TYPE[type] || 'png', dataUrl: `data:${type};base64,${buf.toString('base64')}` });
   }
   return refs;
 }
@@ -361,7 +361,8 @@ function createServer({ api, apiKey, outDir, ctxDir }) {
 
       if (req.method === 'POST' && url.pathname === '/api/generate') {
         // `images` is a list of context-library file names (uploaded via /api/context).
-        const { prompt, model, size, quality, images } = JSON.parse(await readBody(req));
+        // `batch` groups the entries of one Generate click so the UI can tab them.
+        const { prompt, model, size, quality, images, batch } = JSON.parse(await readBody(req));
         if (!prompt || !String(prompt).trim()) return sendJson(res, 400, { error: 'Prompt is required.' });
         const useModel = (model || api.models[0]?.id || '').trim();
         if (!useModel) return sendJson(res, 400, { error: 'Model is required.' });
@@ -375,11 +376,13 @@ function createServer({ api, apiKey, outDir, ctxDir }) {
 
         const entry = {
           file,
+          batch: batch ? String(batch).slice(0, 64) : undefined,
           prompt: String(prompt),
           revisedPrompt: revisedPrompt || undefined,
           model: useModel,
           size: size || 'auto',
           quality: quality || 'auto',
+          images: refs.length ? refs.map((r) => r.file) : undefined,
           refs: refs.length || undefined,
           ms: Date.now() - started,
           ts: Date.now()
