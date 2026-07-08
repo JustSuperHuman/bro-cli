@@ -6,9 +6,10 @@
 //
 // The pool server itself lives in ../pool (a Bun/TypeScript app). This module is
 // the Node-side orchestrator: it ensures at least one account is authenticated,
-// starts the pool server in the background, waits for it to become healthy, then
-// runs `claude` in the foreground pointed at it — tearing the server down when
-// Claude exits.
+// starts the pool server (detached, so it outlives a single session), and points
+// Claude Code's settings.json at it so *every* session — foreground and the
+// background agents started from the agents view — routes through the pool. The
+// server stays up until `bro pool down`.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -18,6 +19,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { which, globalBinDirs, runInherit } from './proc.js';
 import { permissionArgs } from './launch.js';
+import { applyPoolEnv, clearPoolEnv, isPoolEnvActive } from './settings.js';
 import { select, prompt, holdOrContinue } from './ui.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -28,6 +30,7 @@ const DEFAULT_PORT = 3456;
 const POOL_DIR = process.env.CLAUDE_POOL_DIR || path.join(os.homedir(), '.claude-max-pool');
 const ACCOUNTS_DIR = path.join(POOL_DIR, 'accounts');
 const PROXY_LOG = path.join(os.homedir(), '.bro', 'pool-proxy.log');
+const PROXY_PID = path.join(os.homedir(), '.bro', 'pool-proxy.pid');
 
 export const POOL_PROVIDER = {
   id: 'pool',
@@ -173,10 +176,60 @@ function startProxy(bun, port) {
   const child = spawn(bun, ['run', POOL_ENTRY, 'serve'], {
     env: { ...process.env, CLAUDE_POOL_DIR: POOL_DIR, PORT: String(port), HOST: '127.0.0.1' },
     stdio: ['ignore', out, out],
+    detached: true, // survive the launching terminal so agents can keep using it
     windowsHide: true
   });
+  try {
+    fs.writeFileSync(PROXY_PID, String(child.pid));
+  } catch {}
   child.unref?.();
   return child;
+}
+
+// Start the server if it isn't already healthy on this port.
+async function ensureServer(bun, port, baseUrl) {
+  if (await healthy(port)) return;
+  console.log(`\nStarting the pool server on ${baseUrl} …`);
+  const child = startProxy(bun, port);
+  child.on('error', (e) => console.error(`Pool server error: ${e.message}`));
+  const ok = await waitHealthy(port);
+  if (!ok) {
+    await killProxy(port);
+    throw new Error(`The pool server did not become healthy on ${baseUrl}.\n` + `  Check the log: ${PROXY_LOG}`);
+  }
+}
+
+// Stop the (detached) server: by recorded pid, else by whatever holds the port.
+async function killProxy(port) {
+  let killed = false;
+  let pid = 0;
+  try {
+    pid = Number.parseInt(fs.readFileSync(PROXY_PID, 'utf8'), 10);
+  } catch {}
+  if (pid) {
+    try {
+      process.kill(pid);
+      killed = true;
+    } catch {}
+  }
+  if (!killed) {
+    // Fallback: whatever is bound to the port (macOS/Linux).
+    try {
+      const out = execFileSync('lsof', ['-ti', `tcp:${port}`], { stdio: ['ignore', 'pipe', 'ignore'] })
+        .toString()
+        .trim();
+      for (const p of out.split(/\s+/).filter(Boolean)) {
+        try {
+          process.kill(Number.parseInt(p, 10));
+          killed = true;
+        } catch {}
+      }
+    } catch {}
+  }
+  try {
+    fs.rmSync(PROXY_PID);
+  } catch {}
+  return killed;
 }
 
 // --- status panel ----------------------------------------------------------
@@ -239,9 +292,100 @@ function printStatus(status, baseUrl) {
 
 // --- entry point -----------------------------------------------------------
 
-export async function runPool({ extraArgs = [], permissionMode = 'auto', dryRun = false } = {}) {
-  const port = Number.parseInt(process.env.PORT || '', 10) || DEFAULT_PORT;
+function poolPort() {
+  return Number.parseInt(process.env.PORT || '', 10) || DEFAULT_PORT;
+}
+
+// The values written both to settings.json (for every session, agents included)
+// and to the foreground claude process env.
+function poolEnvValues(port) {
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    token: process.env.PROXY_API_KEY || 'claude-max-pool'
+  };
+}
+
+// `bro pool up` — start the pool as the backend for ALL Claude Code sessions.
+export async function poolUp() {
+  const port = poolPort();
   const baseUrl = `http://127.0.0.1:${port}`;
+  const bun = findBun();
+  const authed = await ensureAccount(bun);
+  if (authed.length === 0) {
+    console.log('No accounts configured — nothing to start.');
+    return 0;
+  }
+  await ensureServer(bun, port, baseUrl);
+  const { baseUrl: b, token } = poolEnvValues(port);
+  applyPoolEnv({ baseUrl: b, token });
+  printStatus(await fetchStatus(port), baseUrl);
+  console.log('  ' + C.green('Pool is now the backend for all Claude Code sessions') + C.dim(' (agents included).'));
+  console.log('  ' + C.dim('Stop it with ') + 'bro pool down');
+  console.log('');
+  return 0;
+}
+
+// `bro pool down` — stop the server and restore the normal Claude login.
+export async function poolDown() {
+  const port = poolPort();
+  const restored = clearPoolEnv();
+  const killed = await killProxy(port);
+  if (killed || restored) {
+    console.log('Pool backend stopped. Claude Code sessions use your normal login again.');
+  } else {
+    console.log('Pool was not running.');
+  }
+  return 0;
+}
+
+// `bro pool status` — server health + whether the global override is active.
+export async function poolStatus() {
+  const port = poolPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const up = await healthy(port);
+  const active = isPoolEnvActive();
+  if (up) {
+    printStatus(await fetchStatus(port), baseUrl);
+  } else {
+    console.log('\n  ' + C.red('●') + ' Pool server not running on ' + baseUrl + '\n');
+  }
+  console.log(
+    '  ' + C.dim('Claude backend override: ') + (active ? C.green('active (all sessions → pool)') : C.dim('off'))
+  );
+  console.log('');
+  if (active && !up) {
+    console.log(
+      '  ' + C.amber('settings.json points at the pool but the server is down — run `bro pool up` or `bro pool down`.') + '\n'
+    );
+  }
+  return 0;
+}
+
+export async function runPoolCommand(args = []) {
+  const sub = args[0];
+  if (sub === 'up') return poolUp();
+  if (sub === 'down') return poolDown();
+  if (sub === 'status') return poolStatus();
+  console.log('Usage: bro pool <up|down|status>');
+  return sub ? 1 : 0;
+}
+
+// If the pool is set as the backend but its server is gone, strip the override so
+// Claude Code isn't bricked (there is no automatic fallback to Anthropic).
+export async function selfHealPoolEnv() {
+  if (!isPoolEnvActive()) return;
+  if (await healthy(poolPort())) return;
+  clearPoolEnv();
+  console.error(
+    'bro: the account pool was set as your Claude backend but its server isn’t running —\n' +
+      '     removed the override from settings.json so Claude works normally. (`bro pool up` to restart.)'
+  );
+}
+
+export async function runPool({ extraArgs = [], permissionMode = 'auto', dryRun = false } = {}) {
+  const port = poolPort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const { baseUrl: b, token } = poolEnvValues(port);
 
   if (dryRun) {
     return {
@@ -251,6 +395,7 @@ export async function runPool({ extraArgs = [], permissionMode = 'auto', dryRun 
       backend: process.env.CLAUDE_POOL_BACKEND || 'oauth',
       baseUrl,
       accounts: listAccounts(),
+      settingsEnv: { ANTHROPIC_BASE_URL: b, ANTHROPIC_AUTH_TOKEN: token },
       claude: {
         cmd: which('claude') || 'claude',
         args: [...permissionArgs(permissionMode), ...extraArgs],
@@ -261,56 +406,33 @@ export async function runPool({ extraArgs = [], permissionMode = 'auto', dryRun 
 
   const bun = findBun();
 
-  // 1) Make sure we have at least one authenticated account.
+  // 1) At least one authenticated account.
   const authed = await ensureAccount(bun);
   if (authed.length === 0) {
     console.log('No accounts configured — nothing to launch.');
     return 0;
   }
-  // 2) Start the proxy (reuse an already-running one on this port).
-  let proxyChild = null;
-  const already = await healthy(port);
-  if (!already) {
-    console.log(`\nStarting the pool server on ${baseUrl} …`);
-    proxyChild = startProxy(bun, port);
-    proxyChild.on('error', (e) => console.error(`Pool server error: ${e.message}`));
-    const ok = await waitHealthy(port);
-    if (!ok) {
-      try {
-        proxyChild.kill();
-      } catch {}
-      throw new Error(
-        `The pool server did not become healthy on ${baseUrl}.\n` + `  Check the log: ${PROXY_LOG}`
-      );
-    }
-  }
 
-  const stopProxy = () => {
-    if (proxyChild) {
-      try {
-        proxyChild.kill();
-      } catch {}
-    }
-  };
+  // 2) Bring the (persistent) server up and make the pool the backend for every
+  //    Claude Code session, including agents started from the agents view.
+  await ensureServer(bun, port, baseUrl);
+  applyPoolEnv({ baseUrl: b, token });
 
   // 3) Flash the live status, then launch. Hold ~1.5s; enter launches now,
   //    any other key pauses so you can read it, esc cancels.
-  const status = await fetchStatus(port);
-  printStatus(status, baseUrl);
+  printStatus(await fetchStatus(port), baseUrl);
   process.stdout.write('  ' + C.dim('Launching Claude…  ') + C.dim('enter = now · any key = pause · esc = cancel'));
   const go = await holdOrContinue({ ms: 1500 });
   process.stdout.write('\n');
   if (!go) {
-    stopProxy();
-    console.log('Cancelled.');
+    console.log('Cancelled. ' + C.dim('(Pool is still running — `bro pool down` to stop it.)'));
     return 0;
   }
 
-  // 4) Launch Claude Code pointed at the pool. Claude speaks the Anthropic API;
-  //    the pool serves /v1/messages and routes across account OAuth tokens.
+  // 4) Launch Claude Code pointed at the pool. The env is also set on this process
+  //    (highest precedence) as belt-and-suspenders on top of the settings.json env.
   const claude = which('claude');
   if (!claude) {
-    stopProxy();
     throw new Error('The `claude` CLI was not found. Install Claude Code: https://claude.com/claude-code');
   }
 
@@ -318,8 +440,8 @@ export async function runPool({ extraArgs = [], permissionMode = 'auto', dryRun 
   delete env.CLAUDE_CONFIG_DIR; // use the user's normal Claude Code workspace/config
   delete env.ANTHROPIC_API_KEY;
   delete env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
-  env.ANTHROPIC_BASE_URL = baseUrl;
-  env.ANTHROPIC_AUTH_TOKEN = process.env.PROXY_API_KEY || 'claude-max-pool';
+  env.ANTHROPIC_BASE_URL = b;
+  env.ANTHROPIC_AUTH_TOKEN = token;
   env.NODE_NO_WARNINGS = '1';
 
   const claudeArgs = [...permissionArgs(permissionMode), ...extraArgs];
@@ -328,6 +450,6 @@ export async function runPool({ extraArgs = [], permissionMode = 'auto', dryRun 
   try {
     return await runInherit(claude, claudeArgs, env);
   } finally {
-    stopProxy();
+    console.log('\n' + C.dim('Pool is still your Claude backend (agents included). Stop it with `bro pool down`.'));
   }
 }
