@@ -3,7 +3,7 @@ import { loadConfig, ensureDefaultConfig, setKey, configPermissionMode, CONFIG_P
 import { loadModels, mergeProviders, updateModels, REMOTE_URL } from './models.js';
 import { select, promptHidden } from './ui.js';
 import { launch } from './launch.js';
-import { runPool, runPoolAccounts, POOL_PROVIDER } from './pool.js';
+import { runPool, runPoolAccounts, runPoolCommand, selfHealPoolEnv, POOL_PROVIDER } from './pool.js';
 import { runImageGen, IMAGE_PROVIDER } from './imagegen.js';
 import { rememberSelection, lastProvider, lastModelFor } from './state.js';
 
@@ -23,6 +23,10 @@ Usage:
   bro image              Image generation — pick an API, then a self-hosted
                          web UI opens (images save to ./.bro/image-gen)
   bro image -p <api>     Skip the image API menu (e.g. bro image -p yunwu)
+  bro pool up            Make the account pool the backend for ALL Claude
+                         Code sessions (agents included)
+  bro pool down          Stop the pool and restore your normal Claude login
+  bro pool status        Show pool server + backend-override status
   bro -p <provider>      Skip the provider menu (id or name)
   bro -m <model>         Skip the model menu (use with -p)
   bro -l, --list         List every provider and model
@@ -83,6 +87,10 @@ export async function main(argv) {
     return runPoolAccounts(argv.slice(1));
   }
 
+  if (argv[0] === 'pool') {
+    return runPoolCommand(argv.slice(1));
+  }
+
   const args = parseArgs(argv);
   if (args.help) { console.log(HELP); return 0; }
   if (args.version) { console.log(pkg.version); return 0; }
@@ -103,6 +111,13 @@ export async function main(argv) {
 
   ensureDefaultConfig();
   const config = loadConfig();
+
+  // Safety net: if a previous pool session left the global override in place but
+  // the server is gone, strip it so Claude Code still works. Skip when we're about
+  // to intentionally bring the pool up via `-p pool`.
+  if (!(args.provider && args.provider.toLowerCase() === 'pool')) {
+    await selfHealPoolEnv();
+  }
 
   // `bro image` goes straight to the image-gen web UI (no claude involved).
   if (args.image) {
