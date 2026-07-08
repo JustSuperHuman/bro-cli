@@ -47,7 +47,26 @@ Pick it and `bro` handles everything:
 
 1. **Setup** — if you have no pooled accounts yet, it offers to log in a new one (opens Claude to sign in) or import the login already on this machine. Add as many as you like; each is stored in its own isolated config dir under `~/.claude-max-pool/`.
 2. **Start the proxy** — launches the pool server (in `pool/`, runs on [Bun](https://bun.sh)) in the background and waits for it to go healthy. A live dashboard shows each account's auth state, plan, rate tier, and rolling usage at `http://127.0.0.1:3456/`.
-3. **Launch Claude** — starts Claude Code pointed at the pool (`ANTHROPIC_BASE_URL`). The pool forwards Claude's Anthropic `/v1/messages` calls directly to Anthropic with the least-loaded account's OAuth token by default, without nesting another `claude --print` subprocess. When Claude exits, the proxy is stopped.
+3. **Launch Claude** — starts Claude Code pointed at the pool (`ANTHROPIC_BASE_URL`). The pool forwards Claude's Anthropic `/v1/messages` calls directly to Anthropic with the least-loaded account's OAuth token by default, without nesting another `claude --print` subprocess. The pool server keeps running after Claude exits (see below).
+
+### Pool as your Claude backend (agents included)
+
+Launching the pool (`bro -p pool`) makes it the backend for **every** Claude Code
+session on the machine — foreground windows *and* background agents started from
+the agents view — by writing `ANTHROPIC_BASE_URL` into your `~/.claude/settings.json`
+and leaving the pool server running (detached) after Claude exits.
+
+```sh
+bro pool up       # start the pool as the global Claude backend
+bro pool status   # show server health + whether the override is active
+bro pool down     # stop the pool and restore your normal Claude login
+```
+
+The override stays active until you run `bro pool down`. If the pool server ever
+stops while the override is still set, the next `bro` command strips it
+automatically — Claude Code has no fallback for an unreachable base URL, so this
+keeps `claude` working. Note: pointing Claude at a local proxy disables MCP tool
+search and Remote Control for those sessions.
 
 Manage pool accounts directly through `bro`:
 
@@ -85,6 +104,9 @@ Claude is next in the list and runs **natively** (your normal Claude login — n
 
 ```sh
 bro -p pool               # Multiple Claude Account Proxy (pool many plans)
+bro pool up               # make the pool the backend for all Claude sessions
+bro pool down             # stop the pool, restore your normal Claude login
+bro pool status           # pool server + backend-override status
 bro -p sakana -m fugu     # skip the menus
 bro --list                # list every provider + model
 bro update                # refresh the model list from GitHub, cache it locally
