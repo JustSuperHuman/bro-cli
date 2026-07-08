@@ -11,7 +11,10 @@ export const CONFIG_PATH = path.join(BRO_DIR, 'config.json');
 const DEFAULT_CONFIG = {
   '#': 'bro config. Anything whose key/id/name starts with # is ignored.',
   '#docs': 'https://justgains.com',
-  dangerouslySkipPermissions: true,
+  // How Claude Code starts: 'auto' (intelligent auto-mode, the default),
+  // 'manual' (prompt for everything), or 'bypass' (--dangerously-skip-permissions).
+  permissionMode: 'auto',
+  '#dangerouslySkipPermissions': 'deprecated — use permissionMode instead (true → bypass, false → manual)',
   keys: {
     '#sakana': 'fish_xxx   (remove the # and rename the key to "sakana" to use it)',
     '#openrouter': 'sk-or-xxx',
@@ -51,6 +54,21 @@ export function ensureDefaultConfig() {
   fs.mkdirSync(BRO_DIR, { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
   return true;
+}
+
+// Resolve the Claude Code permission posture from config:
+//   'auto'   — Claude's intelligent auto-mode (--permission-mode auto)  [default]
+//   'manual' — prompt for everything (Claude's normal mode)
+//   'bypass' — skip every permission check (--dangerously-skip-permissions)
+// `permissionMode` is the source of truth; the legacy `dangerouslySkipPermissions`
+// boolean is honored only when `permissionMode` is unset, so existing configs keep
+// working after upgrading.
+export function configPermissionMode(config = {}) {
+  const m = config.permissionMode;
+  if (m === 'auto' || m === 'manual' || m === 'bypass') return m;
+  if (config.dangerouslySkipPermissions === true) return 'bypass';
+  if (config.dangerouslySkipPermissions === false) return 'manual';
+  return 'auto';
 }
 
 // Persist a key without disturbing the user's '#' notes/examples.

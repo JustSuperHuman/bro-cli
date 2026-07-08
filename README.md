@@ -20,10 +20,24 @@ bro
 ```
 
 1. Scroll to a **provider** and press enter.
-2. Scroll to a **model** and press enter. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there.
+2. Scroll to a **model** and press enter. Press **Tab** to flip the **Skip permissions** toggle right there — it opts this launch into the dangerous `--dangerously-skip-permissions` bypass.
 3. First time on a paid provider it asks for an API key and saves it.
 
 Your last provider + model are remembered and pre-selected next time (per provider).
+
+### Permission mode
+
+By default `bro` starts Claude Code in **auto mode** (`--permission-mode auto`) —
+Claude's intelligent auto-mode approves safe actions and only prompts when it
+needs to. Set `permissionMode` in `~/.bro/config.json` to change the default:
+
+- `"auto"` — auto-mode (the default)
+- `"manual"` — prompt for everything (same as `bro --safe`)
+- `"bypass"` — skip every permission check (`--dangerously-skip-permissions`)
+
+The **Skip permissions** toggle in the menu opts a single launch into `bypass`.
+(The older `dangerouslySkipPermissions: true/false` config key still works when
+`permissionMode` is unset.)
 
 ## Multiple Claude Account Proxy
 
@@ -75,7 +89,7 @@ bro -p sakana -m fugu     # skip the menus
 bro --list                # list every provider + model
 bro update                # refresh the model list from GitHub, cache it locally
 bro --dry-run             # show what would run, launch nothing
-bro --safe                # don't pass --dangerously-skip-permissions
+bro --safe                # start in manual mode (prompt for everything)
 bro --resume <session-id> # pick provider/model, then resume Claude there
 bro -p pool --resume <id> # resume through the Multiple Claude Account Proxy
 bro -- --help             # force a bro flag name through to claude

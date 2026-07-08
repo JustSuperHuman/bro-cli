@@ -16,6 +16,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { which, globalBinDirs, runInherit } from './proc.js';
+import { permissionArgs } from './launch.js';
 import { select, prompt, holdOrContinue } from './ui.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -215,7 +216,7 @@ function printStatus(status, baseUrl) {
 
 // --- entry point -----------------------------------------------------------
 
-export async function runPool({ extraArgs = [], skipPermissions = true, dryRun = false } = {}) {
+export async function runPool({ extraArgs = [], permissionMode = 'auto', dryRun = false } = {}) {
   const port = Number.parseInt(process.env.PORT || '', 10) || DEFAULT_PORT;
   const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -229,7 +230,7 @@ export async function runPool({ extraArgs = [], skipPermissions = true, dryRun =
       accounts: listAccounts(),
       claude: {
         cmd: which('claude') || 'claude',
-        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...extraArgs],
+        args: [...permissionArgs(permissionMode), ...extraArgs],
         env: { ANTHROPIC_BASE_URL: baseUrl }
       }
     };
@@ -298,9 +299,7 @@ export async function runPool({ extraArgs = [], skipPermissions = true, dryRun =
   env.ANTHROPIC_AUTH_TOKEN = process.env.PROXY_API_KEY || 'claude-max-pool';
   env.NODE_NO_WARNINGS = '1';
 
-  const claudeArgs = [];
-  if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
-  claudeArgs.push(...extraArgs);
+  const claudeArgs = [...permissionArgs(permissionMode), ...extraArgs];
 
   console.log('Launching Claude Code through the account pool…\n');
   try {

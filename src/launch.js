@@ -5,6 +5,14 @@ import { which, globalBinDirs, runInherit, ensureProxy } from './proc.js';
 
 const CCR_CONFIG = path.join(os.homedir(), '.claude-code-router', 'config.json');
 
+// Map a permission posture ('auto' | 'manual' | 'bypass') to the claude CLI flags
+// that put it in that mode at startup. Shared by the direct and pool launchers.
+export function permissionArgs(mode) {
+  if (mode === 'bypass') return ['--dangerously-skip-permissions'];
+  if (mode === 'manual') return [];
+  return ['--permission-mode', 'auto'];
+}
+
 // Upsert this provider into the proxy's config and point its default route at the
 // chosen model. Existing (hand-edited) providers in the file are preserved.
 function writeCcrConfig(provider, model, apiKey) {
@@ -42,9 +50,8 @@ function writeCcrConfig(provider, model, apiKey) {
 //   anthropic -> point claude at an Anthropic-compatible base URL
 //   openai    -> route claude through the proxy (ccr)
 // With { dryRun: true } nothing is spawned or written; returns a description.
-export async function launch({ provider, model, apiKey, extraArgs = [], skipPermissions = true, dryRun = false }) {
-  const claudeArgs = [];
-  if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
+export async function launch({ provider, model, apiKey, extraArgs = [], permissionMode = 'auto', dryRun = false }) {
+  const claudeArgs = [...permissionArgs(permissionMode)];
   if (model) claudeArgs.push('--model', provider.mode === 'openai' ? `${provider.id},${model}` : model);
   claudeArgs.push(...extraArgs);
 
