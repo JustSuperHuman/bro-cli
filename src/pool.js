@@ -13,7 +13,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { which, globalBinDirs, runInherit } from './proc.js';
 import { select, prompt, holdOrContinue } from './ui.js';
@@ -35,6 +36,26 @@ export const POOL_PROVIDER = {
 
 // --- account inspection (read the pool's on-disk state directly) -----------
 
+// macOS keeps Claude Code credentials in the login Keychain rather than a
+// `.credentials.json` file, so there is nothing on disk to read after a login.
+// Mirror the pool server's fallback (pool/src/accounts/keychain.ts): the
+// Keychain item is namespaced per config dir as
+// `Claude Code-credentials-<sha256(configDir)[:8]>`.
+function readMacKeychainCreds(configDir) {
+  if (process.platform !== 'darwin') return null;
+  const suffix = createHash('sha256').update(configDir).digest('hex').slice(0, 8);
+  const service = `Claude Code-credentials-${suffix}`;
+  try {
+    const raw = execFileSync('security', ['find-generic-password', '-s', service, '-w'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    return JSON.parse(raw.trim());
+  } catch {
+    return null;
+  }
+}
+
 function listAccounts() {
   let names = [];
   try {
@@ -49,14 +70,16 @@ function listAccounts() {
   return names.map((name) => {
     let authenticated = false;
     let subscriptionType = null;
+    let creds = null;
     try {
-      const creds = JSON.parse(fs.readFileSync(path.join(ACCOUNTS_DIR, name, '.credentials.json'), 'utf8'));
-      const oauth = creds && creds.claudeAiOauth;
-      authenticated = Boolean(oauth && oauth.accessToken);
-      subscriptionType = (oauth && oauth.subscriptionType) || null;
+      creds = JSON.parse(fs.readFileSync(path.join(ACCOUNTS_DIR, name, '.credentials.json'), 'utf8'));
     } catch {
-      /* no creds yet */
+      // No file on disk — on macOS the login lives in the Keychain.
+      creds = readMacKeychainCreds(path.join(ACCOUNTS_DIR, name));
     }
+    const oauth = creds && creds.claudeAiOauth;
+    authenticated = Boolean(oauth && oauth.accessToken);
+    subscriptionType = (oauth && oauth.subscriptionType) || null;
     return { name, authenticated, subscriptionType };
   });
 }

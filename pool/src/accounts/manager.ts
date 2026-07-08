@@ -14,6 +14,11 @@ import type { Config } from "../config.ts";
 import { defaultClaudeConfigDir } from "../config.ts";
 import type { Account, AccountUsage, CredentialsFile } from "./types.ts";
 import { emptyUsage } from "./types.ts";
+import {
+  keychainServiceForConfigDir,
+  readKeychainCreds,
+  readKeychainCredsForConfigDir,
+} from "./keychain.ts";
 import type { CliUsage } from "../subprocess/types.ts";
 
 interface PersistedState {
@@ -114,12 +119,26 @@ export class AccountManager {
   importCurrent(name: string): void {
     this.create(name);
     const src = join(defaultClaudeConfigDir(), ".credentials.json");
-    if (!existsSync(src)) {
+    if (existsSync(src)) {
+      copyFileSync(src, this.credsPath(name));
+      return;
+    }
+    // macOS has no plaintext credentials file — read the current login from the
+    // Keychain and materialize it into this account's `.credentials.json`.
+    if (process.platform === "darwin") {
+      const creds = readKeychainCredsForConfigDir(defaultClaudeConfigDir());
+      if (creds?.claudeAiOauth?.accessToken) {
+        writeFileSync(this.credsPath(name), JSON.stringify(creds, null, 2));
+        return;
+      }
       throw new Error(
-        `No credentials found at ${src}. Log in with the base 'claude' CLI first, or use 'accounts login ${name}'.`,
+        `No Claude Code login found in the macOS Keychain for ${defaultClaudeConfigDir()}. ` +
+          `Log in with the base 'claude' CLI first, or use 'accounts login ${name}'.`,
       );
     }
-    copyFileSync(src, this.credsPath(name));
+    throw new Error(
+      `No credentials found at ${src}. Log in with the base 'claude' CLI first, or use 'accounts login ${name}'.`,
+    );
   }
 
   private assertValidName(name: string): void {
@@ -134,12 +153,22 @@ export class AccountManager {
 
   private readCreds(name: string): CredentialsFile | null {
     const p = this.credsPath(name);
-    if (!existsSync(p)) return null;
-    try {
-      return JSON.parse(readFileSync(p, "utf8")) as CredentialsFile;
-    } catch {
-      return null;
+    if (existsSync(p)) {
+      try {
+        return JSON.parse(readFileSync(p, "utf8")) as CredentialsFile;
+      } catch {
+        return null;
+      }
     }
+    // macOS keeps Claude Code credentials in the login Keychain, not in a
+    // `.credentials.json` file, so there is nothing on disk to read after an
+    // `accounts login`. Fall back to the Keychain item for this account's
+    // config dir. Rotated tokens are still cached to the file by
+    // updateOAuthCreds(), which then takes precedence on the next read.
+    if (process.platform === "darwin") {
+      return readKeychainCreds(keychainServiceForConfigDir(this.configDirFor(name)));
+    }
+    return null;
   }
 
   getOAuthCreds(name: string): CredentialsFile["claudeAiOauth"] | null {
