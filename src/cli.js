@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { loadConfig, ensureDefaultConfig, setKey, CONFIG_PATH } from './config.js';
+import { loadConfig, ensureDefaultConfig, setKey, configPermissionMode, CONFIG_PATH } from './config.js';
 import { loadModels, mergeProviders, updateModels, REMOTE_URL } from './models.js';
 import { select, promptHidden } from './ui.js';
 import { launch } from './launch.js';
@@ -28,7 +28,8 @@ Usage:
   bro -l, --list         List every provider and model
   bro update             Refresh the model list from GitHub and cache it
   bro --dry-run          Show what would run; launch nothing
-  bro --safe             Don't pass --dangerously-skip-permissions
+  bro --safe             Start Claude in manual mode (prompt for everything)
+                         instead of the default auto mode
   bro -h, --help         Show this help
   bro -v, --version      Show version
   bro --resume <id>      Pick provider/model, then pass args to claude
@@ -155,20 +156,23 @@ export async function main(argv) {
 
   // Account pool: its own setup → start proxy → launch claude flow.
   if (provider.mode === 'pool') {
-    const skipPool = !args.safe && config.dangerouslySkipPermissions !== false;
+    const poolMode = args.safe ? 'manual' : configPermissionMode(config);
     if (!args.dryRun) rememberSelection(provider.id, '');
     const result = await runPool({
       extraArgs: args._,
-      skipPermissions: skipPool,
+      permissionMode: poolMode,
       dryRun: args.dryRun
     });
     if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
     return typeof result === 'number' ? result : 0;
   }
 
-  // 2) model (+ an easy skip-permissions toggle — Tab to flip)
+  // 2) model. Claude starts in auto mode by default; --safe forces manual.
+  //    The "Skip permissions" toggle (Tab to flip) opts into the dangerous
+  //    --dangerously-skip-permissions bypass for this launch.
   let model = args.model;
-  let skip = !args.safe && config.dangerouslySkipPermissions !== false;
+  //    'auto' | 'manual' | 'bypass'
+  let mode = args.safe ? 'manual' : configPermissionMode(config);
   const models = provider.models || [];
   if (model == null) {
     if (!models.length) {
@@ -179,11 +183,15 @@ export async function main(argv) {
         message: `Choose a model for ${provider.name || provider.id}:`,
         startIndex: lastM != null ? Math.max(0, models.findIndex((m) => (m.id ?? '') === lastM)) : 0,
         choices: models.map((m) => ({ label: modelLabel(m), value: m.id ?? '' })),
-        toggle: { label: 'Skip permissions', value: skip }
+        toggle: { label: 'Skip permissions', value: mode === 'bypass' }
       }).catch(() => null);
       if (choice == null) { console.log('Cancelled.'); return 0; }
       model = choice.value;
-      if (choice.toggleOn !== undefined) skip = choice.toggleOn;
+      // Turning the toggle on means bypass; turning it off drops back to the
+      // non-bypass posture (manual under --safe, otherwise auto).
+      if (choice.toggleOn !== undefined) {
+        mode = choice.toggleOn ? 'bypass' : args.safe ? 'manual' : 'auto';
+      }
     }
   }
 
@@ -210,7 +218,7 @@ export async function main(argv) {
     model,
     apiKey,
     extraArgs: args._,
-    skipPermissions: skip,
+    permissionMode: mode,
     dryRun: args.dryRun
   });
 
