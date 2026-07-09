@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { which, globalBinDirs, runInherit } from './proc.js';
 import { select, prompt, holdOrContinue } from './ui.js';
+import { launchOmp } from './launch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const POOL_ROOT = path.join(__dirname, '..', 'pool');
@@ -27,11 +28,30 @@ const POOL_DIR = process.env.CLAUDE_POOL_DIR || path.join(os.homedir(), '.claude
 const ACCOUNTS_DIR = path.join(POOL_DIR, 'accounts');
 const PROXY_LOG = path.join(os.homedir(), '.bro', 'pool-proxy.log');
 
+// No model list here: bro never picks a model for the pool. Claude Code and
+// omp both have their own model pickers (which know about every model the
+// accounts can use, unlike a hardcoded list). -m still forces one.
 export const POOL_PROVIDER = {
   id: 'pool',
   name: 'Multiple Claude Account Proxy',
-  mode: 'pool'
+  mode: 'pool',
+  models: []
 };
+
+export const ACCOUNT_PROVIDER = {
+  id: 'account',
+  name: 'Claude Account Profile',
+  mode: 'account',
+  models: []
+};
+
+// Written to omp's models.yml only when the live /v1/models fetch fails.
+const FALLBACK_MODELS = [
+  { id: 'claude-fable-5', name: 'Claude Fable 5' },
+  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5' },
+  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8' },
+  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5' }
+];
 
 // --- account inspection (read the pool's on-disk state directly) -----------
 
@@ -59,6 +79,64 @@ function listAccounts() {
     }
     return { name, authenticated, subscriptionType };
   });
+}
+
+function accountDirFor(name) {
+  return path.join(ACCOUNTS_DIR, name);
+}
+
+function accountLabel(a) {
+  const state = a.authenticated ? 'ready' : 'logged out';
+  const plan = a.subscriptionType ? ` · ${a.subscriptionType}` : '';
+  return `${a.name}  \x1b[2m${state}${plan}\x1b[0m`;
+}
+
+async function chooseAccountProfile(preferredName) {
+  let bun = null;
+  const needBun = () => {
+    bun ||= findBun();
+    return bun;
+  };
+
+  while (true) {
+    const accounts = listAccounts();
+    if (preferredName) {
+      const found = accounts.find((a) => a.name === preferredName);
+      if (!found) throw new Error(`Unknown account profile: ${preferredName}. Run "bro accounts list" to see profiles.`);
+      if (found.authenticated) return found;
+      console.log(`Account "${preferredName}" exists but is not logged in yet.`);
+      await runPoolCli(needBun(), ['accounts', 'login', preferredName]);
+      preferredName = null;
+      continue;
+    }
+
+    const choices = [
+      ...accounts.map((a) => ({
+        label: accountLabel(a),
+        value: a.authenticated ? { action: 'use', account: a } : { action: 'login', name: a.name }
+      })),
+      { label: 'Log in / add another Claude account', value: { action: 'login' } },
+      { label: "Import this machine's current Claude login", value: { action: 'import' } },
+      { label: 'Cancel', value: { action: 'cancel' } }
+    ];
+
+    const choice = await select({
+      message: 'Choose a Claude account profile:',
+      choices
+    }).catch(() => ({ value: { action: 'cancel' } }));
+
+    const picked = choice.value;
+    if (picked.action === 'cancel') return null;
+    if (picked.action === 'use') return picked.account;
+    if (picked.action === 'login') {
+      const fallback = picked.name || 'work';
+      const name = picked.name || (await prompt(`Account name [${fallback}]: `).catch(() => '')) || fallback;
+      await runPoolCli(needBun(), ['accounts', 'login', name]);
+    } else if (picked.action === 'import') {
+      const name = (await prompt('Name for the imported account [primary]: ').catch(() => '')) || 'primary';
+      await runPoolCli(needBun(), ['accounts', 'import', name]);
+    }
+  }
 }
 
 // --- bun discovery ---------------------------------------------------------
@@ -215,24 +293,114 @@ function printStatus(status, baseUrl) {
 
 // --- entry point -----------------------------------------------------------
 
-export async function runPool({ extraArgs = [], skipPermissions = true, dryRun = false } = {}) {
-  const port = Number.parseInt(process.env.PORT || '', 10) || DEFAULT_PORT;
-  const baseUrl = `http://127.0.0.1:${port}`;
+// Ask the running pool server for the live Anthropic model list (it proxies
+// /v1/models upstream with a pooled OAuth token). Null on any failure.
+async function fetchPoolModels(port) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10000);
+    const res = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      signal: ctrl.signal,
+      headers: { connection: 'close' }
+    });
+    clearTimeout(t);
+    if (!res.ok) return null;
+    const json = await res.json();
+    const models = (json.data || [])
+      .filter((m) => m && m.id)
+      .map((m) => ({ id: m.id, name: m.display_name || m.id }));
+    return models.length ? models : null;
+  } catch {
+    return null;
+  }
+}
+
+function poolOmpProvider(baseUrl, models) {
+  return {
+    ...POOL_PROVIDER,
+    mode: 'anthropic',
+    baseUrl,
+    disable1mContext: true,
+    // omp requests go straight through to the Anthropic API, which 404s on
+    // aliases like "opus" — only real model ids may reach models.yml.
+    models: models && models.length ? models : FALLBACK_MODELS
+  };
+}
+
+export async function runAccountProfile({ accountName = '', model = '', extraArgs = [], skipPermissions = true, dryRun = false } = {}) {
+  const accounts = listAccounts();
 
   if (dryRun) {
+    const account = accountName ? accounts.find((a) => a.name === accountName) : null;
     return {
+      via: 'claude account profile',
+      poolDir: POOL_DIR,
+      account: accountName || '(menu)',
+      accounts,
+      claude: {
+        cmd: which('claude') || 'claude',
+        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(model ? ['--model', model] : []), ...extraArgs],
+        env: account ? { CLAUDE_CONFIG_DIR: accountDirFor(account.name) } : { CLAUDE_CONFIG_DIR: '(selected account profile)' }
+      }
+    };
+  }
+
+  const account = await chooseAccountProfile(accountName);
+  if (!account) {
+    console.log('Cancelled.');
+    return 0;
+  }
+
+  const claude = which('claude');
+  if (!claude) throw new Error('The `claude` CLI was not found. Install Claude Code: https://claude.com/claude-code');
+
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: accountDirFor(account.name) };
+  for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_DISABLE_1M_CONTEXT']) {
+    delete env[k];
+  }
+  env.NODE_NO_WARNINGS = '1';
+
+  const claudeArgs = [];
+  if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
+  if (model) claudeArgs.push('--model', model);
+  claudeArgs.push(...extraArgs);
+
+  console.log(`\nLaunching Claude Code as ${account.name}${model ? ' / ' + model : ''}...\n`);
+  return runInherit(claude, claudeArgs, env);
+}
+
+export async function runPool({ model = '', extraArgs = [], skipPermissions = true, harness = 'claude', dryRun = false } = {}) {
+  const port = Number.parseInt(process.env.PORT || '', 10) || DEFAULT_PORT;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const apiKey = process.env.PROXY_API_KEY || 'claude-max-pool';
+
+  if (dryRun) {
+    const out = {
       via: 'multiple-account pool',
       poolServer: `bun run ${POOL_ENTRY} serve`,
       poolDir: POOL_DIR,
       backend: process.env.CLAUDE_POOL_BACKEND || 'oauth',
       baseUrl,
       accounts: listAccounts(),
-      claude: {
-        cmd: which('claude') || 'claude',
-        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...extraArgs],
-        env: { ANTHROPIC_BASE_URL: baseUrl }
-      }
+      harness
     };
+    if (harness === 'omp') {
+      out.omp = await launchOmp({
+        provider: poolOmpProvider(baseUrl),
+        model,
+        apiKey,
+        extraArgs,
+        skipPermissions,
+        dryRun: true
+      });
+    } else {
+      out.claude = {
+        cmd: which('claude') || 'claude',
+        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(model ? ['--model', model] : []), ...extraArgs],
+        env: { ANTHROPIC_BASE_URL: baseUrl }
+      };
+    }
+    return out;
   }
 
   const bun = findBun();
@@ -244,16 +412,42 @@ export async function runPool({ extraArgs = [], skipPermissions = true, dryRun =
     return 0;
   }
   // 2) Start the proxy (reuse an already-running one on this port).
+  // The server is a Bun process, and Bun has been seen to segfault mid-session
+  // on Windows — the harness then reports "The socket connection was closed
+  // unexpectedly". Supervise the child and restart it so a crash costs one
+  // failed request instead of the rest of the session.
   let proxyChild = null;
+  let stopping = false;
+  let fastExits = 0;
+  const spawnSupervised = () => {
+    const startedAt = Date.now();
+    proxyChild = startProxy(bun, port);
+    proxyChild.on('error', (e) => console.error(`Pool server error: ${e.message}`));
+    proxyChild.on('exit', (code, signal) => {
+      if (stopping) return;
+      fastExits = Date.now() - startedAt < 5000 ? fastExits + 1 : 0;
+      if (fastExits >= 3) {
+        console.error(`\n  ⚠ The pool server keeps crashing — not restarting it again. Log: ${PROXY_LOG}`);
+        proxyChild = null;
+        return;
+      }
+      console.error(`\n  ⚠ The pool server died (${signal || `exit code ${code}`}) — restarting it. Log: ${PROXY_LOG}`);
+      const t = setTimeout(() => {
+        if (!stopping) spawnSupervised();
+      }, 500);
+      t.unref?.();
+    });
+  };
+
   const already = await healthy(port);
   if (!already) {
     console.log(`\nStarting the pool server on ${baseUrl} …`);
-    proxyChild = startProxy(bun, port);
-    proxyChild.on('error', (e) => console.error(`Pool server error: ${e.message}`));
+    spawnSupervised();
     const ok = await waitHealthy(port);
     if (!ok) {
+      stopping = true;
       try {
-        proxyChild.kill();
+        proxyChild?.kill();
       } catch {}
       throw new Error(
         `The pool server did not become healthy on ${baseUrl}.\n` + `  Check the log: ${PROXY_LOG}`
@@ -262,6 +456,7 @@ export async function runPool({ extraArgs = [], skipPermissions = true, dryRun =
   }
 
   const stopProxy = () => {
+    stopping = true;
     if (proxyChild) {
       try {
         proxyChild.kill();
@@ -273,13 +468,29 @@ export async function runPool({ extraArgs = [], skipPermissions = true, dryRun =
   //    any other key pauses so you can read it, esc cancels.
   const status = await fetchStatus(port);
   printStatus(status, baseUrl);
-  process.stdout.write('  ' + C.dim('Launching Claude…  ') + C.dim('enter = now · any key = pause · esc = cancel'));
+  process.stdout.write('  ' + C.dim(`Launching ${harness === 'omp' ? 'omp' : 'Claude'}…  `) + C.dim('enter = now · any key = pause · esc = cancel'));
   const go = await holdOrContinue({ ms: 1500 });
   process.stdout.write('\n');
   if (!go) {
     stopProxy();
     console.log('Cancelled.');
     return 0;
+  }
+
+  if (harness === 'omp') {
+    try {
+      const liveModels = await fetchPoolModels(port);
+      return await launchOmp({
+        provider: poolOmpProvider(baseUrl, liveModels),
+        model,
+        apiKey,
+        extraArgs,
+        skipPermissions,
+        dryRun: false
+      });
+    } finally {
+      stopProxy();
+    }
   }
 
   // 4) Launch Claude Code pointed at the pool. Claude speaks the Anthropic API;
@@ -300,9 +511,10 @@ export async function runPool({ extraArgs = [], skipPermissions = true, dryRun =
 
   const claudeArgs = [];
   if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
+  if (model) claudeArgs.push('--model', model);
   claudeArgs.push(...extraArgs);
 
-  console.log('Launching Claude Code through the account pool…\n');
+  console.log(`Launching Claude Code through the account pool${model ? ' / ' + model : ''}…\n`);
   try {
     return await runInherit(claude, claudeArgs, env);
   } finally {

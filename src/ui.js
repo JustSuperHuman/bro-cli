@@ -9,17 +9,22 @@ export const isInteractive = Boolean(stdin.isTTY && stdout.isTTY);
 // conhost, macOS and Linux (Node's readline normalises the key sequences).
 // Returns the chosen item, or throws Error('cancelled') on Esc / Ctrl-C.
 // Optional `toggle` adds an on/off switch (flipped with Tab/Space) shown under the
-// list — handy for things like "Skip permissions". When present, the resolved
-// object carries `toggleOn` with the final state.
-export function select({ message, choices, startIndex = 0, toggle = null }) {
+// list — handy for things like "Skip permissions". `toggles` can add extra
+// keyed switches, each returned by name in `toggles`.
+export function select({ message, choices, startIndex = 0, toggle = null, toggles = [] }) {
   if (!isInteractive) {
     return Promise.reject(new Error('A terminal (TTY) is required to choose interactively. Use --provider / --model instead.'));
   }
   return new Promise((resolve, reject) => {
     let index = Math.max(0, Math.min(startIndex, choices.length - 1));
     let on = toggle ? Boolean(toggle.value) : false;
-    const lines = choices.length + 1 + (toggle ? 1 : 0); // message + choices (+ toggle row)
-    const hint = `\x1b[2m  ↑/↓ move · enter select${toggle ? ' · tab toggle' : ''} · esc cancel\x1b[0m`;
+    const keyed = toggles.map((t) => ({ ...t, value: Boolean(t.value) }));
+    const lines = choices.length + 1 + (toggle ? 1 : 0) + keyed.length; // message + choices (+ toggle rows)
+    const extraHints = [
+      toggle ? 'tab toggle' : null,
+      ...keyed.map((t) => `${t.key} ${t.shortLabel || 'toggle'}`)
+    ].filter(Boolean);
+    const hint = `\x1b[2m  ↑/↓ move · enter select${extraHints.length ? ' · ' + extraHints.join(' · ') : ''} · esc cancel\x1b[0m`;
 
     readline.emitKeypressEvents(stdin);
     stdin.setRawMode(true);
@@ -28,6 +33,20 @@ export function select({ message, choices, startIndex = 0, toggle = null }) {
     const toggleRow = () => {
       const state = on ? '\x1b[30;42m ON  \x1b[0m' : '\x1b[97;41m OFF \x1b[0m';
       return `  \x1b[2m[tab]\x1b[0m ${toggle.label}  ${state}`;
+    };
+
+    // A keyed toggle with both labels is a choice between two options, not an
+    // on/off state — show both side by side with the active one highlighted.
+    // Only single-label toggles get the green/red ON/OFF treatment.
+    const keyedRow = (t) => {
+      let state;
+      if (t.onLabel && t.offLabel) {
+        const seg = (label, active) => (active ? `\x1b[7m ${label} \x1b[0m` : `\x1b[2m ${label} \x1b[0m`);
+        state = seg(t.offLabel, !t.value) + '\x1b[2m│\x1b[0m' + seg(t.onLabel, t.value);
+      } else {
+        state = t.value ? `\x1b[30;42m ${t.onLabel || 'ON'} \x1b[0m` : `\x1b[97;41m ${t.offLabel || 'OFF'} \x1b[0m`;
+      }
+      return `  \x1b[2m[${t.key}]\x1b[0m ${t.label}  ${state}`;
     };
 
     const paint = (first) => {
@@ -42,6 +61,7 @@ export function select({ message, choices, startIndex = 0, toggle = null }) {
         stdout.write(i === index ? `\x1b[7m ❯ ${label} \x1b[0m\n` : `   ${label}\n`);
       });
       if (toggle) stdout.write(toggleRow() + '\n');
+      for (const t of keyed) stdout.write(keyedRow(t) + '\n');
       stdout.write(hint);
     };
 
@@ -65,10 +85,19 @@ export function select({ message, choices, startIndex = 0, toggle = null }) {
         paint(false);
       } else if (key.name === 'return' || key.name === 'enter') {
         cleanup();
-        resolve(toggle ? { ...choices[index], toggleOn: on } : choices[index]);
+        const choice = { ...choices[index] };
+        if (toggle) choice.toggleOn = on;
+        if (keyed.length) choice.toggles = Object.fromEntries(keyed.map((t) => [t.name || t.key, t.value]));
+        resolve(choice);
       } else if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
         cleanup();
         reject(new Error('cancelled'));
+      } else {
+        const t = keyed.find((item) => key.name === item.key || str === item.key);
+        if (t) {
+          t.value = !t.value;
+          paint(false);
+        }
       }
     };
 

@@ -14,7 +14,7 @@ import { runClaude } from "../subprocess/claude.ts";
 import type { Account } from "../accounts/types.ts";
 import { runWithFailover } from "./failover.ts";
 import { dashboardHtml } from "./dashboard.ts";
-import { proxyAnthropicMessages } from "../upstream/anthropic.ts";
+import { proxyAnthropicMessages, fetchUpstreamModels } from "../upstream/anthropic.ts";
 import {
   parseOpenAI,
   collectOpenAI,
@@ -32,6 +32,9 @@ const APPEND_SYSTEM_PROMPT =
   "You are being used as an API model endpoint. Respond directly to the user's request. " +
   "Do not ask clarifying questions unless strictly necessary; produce the best answer you can from the information given.";
 
+// Fallback list, used when the live Anthropic model list cannot be fetched
+// (no account available yet, or CLI backend). The aliases only work with the
+// CLI backend; the oauth proxy resolves them to real ids before forwarding.
 const MODELS = [
   "opus",
   "sonnet",
@@ -71,12 +74,15 @@ export function startServer(config: Config): void {
         });
       }
       if (req.method === "GET" && (path === "/v1/models" || path === "/models")) {
+        const upstream = await fetchUpstreamModels(mgr, config);
+        const list = upstream ?? MODELS.map((id) => ({ id, display_name: id }));
         return json({
           object: "list",
-          data: MODELS.map((m) => ({
-            id: m,
+          data: list.map((m) => ({
+            id: m.id,
             object: "model",
             created: 0,
+            display_name: m.display_name,
             owned_by: "anthropic-claude-max-pool",
           })),
         });

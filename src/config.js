@@ -11,6 +11,7 @@ export const CONFIG_PATH = path.join(BRO_DIR, 'config.json');
 const DEFAULT_CONFIG = {
   '#': 'bro config. Anything whose key/id/name starts with # is ignored.',
   '#docs': 'https://justgains.com',
+  defaultHarness: 'claude',
   dangerouslySkipPermissions: true,
   keys: {
     '#sakana': 'fish_xxx   (remove the # and rename the key to "sakana" to use it)',

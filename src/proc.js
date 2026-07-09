@@ -26,7 +26,7 @@ export function which(name, extraDirs = []) {
 // Where bun / npm drop globally-installed bin shims (so we can find `ccr`
 // even when that directory isn't on PATH — common on Windows).
 export function globalBinDirs() {
-  const dirs = [path.join(os.homedir(), '.bun', 'bin')];
+  const dirs = [path.join(os.homedir(), '.bun', 'bin'), path.join(os.homedir(), '.local', 'bin')];
   if (process.env.BUN_INSTALL) dirs.push(path.join(process.env.BUN_INSTALL, 'bin'));
   if (process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'npm'));
   try {
@@ -96,4 +96,50 @@ export function ensureProxy() {
   ccr = which('ccr', dirs);
   if (!ccr) throw new Error('Installed the proxy but could not locate the `ccr` binary. Add your global bin dir to PATH and retry.');
   return { ccr, dirs };
+}
+
+function runSyncInherit(file, args) {
+  const ext = path.extname(file).toLowerCase();
+  if (isWin && (ext === '.cmd' || ext === '.bat')) {
+    const line = [file, ...args].map(winQuote).join(' ');
+    return spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], {
+      stdio: 'inherit',
+      windowsVerbatimArguments: true
+    });
+  }
+  return spawnSync(file, args, { stdio: 'inherit' });
+}
+
+// Make sure Oh My Pi (`omp`) is available. Prefer Bun's package install because
+// it is the upstream recommended cross-platform package path; fall back to the
+// official install scripts when Bun is not present.
+export function ensureOmp() {
+  let dirs = globalBinDirs();
+  let omp = which('omp', dirs);
+  if (omp) return { omp, dirs };
+
+  const bun = which('bun', dirs);
+  if (bun) {
+    process.stdout.write('\nInstalling omp with bun — one time only…\n');
+    const r = runSyncInherit(bun, ['install', '-g', '@oh-my-pi/pi-coding-agent']);
+    if (r.status !== 0) throw new Error('omp install failed.');
+  } else if (isWin) {
+    const ps = which('powershell') || which('pwsh');
+    if (!ps) throw new Error('Need Bun or PowerShell on PATH to install omp. See https://omp.sh/');
+    process.stdout.write('\nInstalling omp with the official PowerShell installer — one time only…\n');
+    const r = runSyncInherit(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://omp.sh/install.ps1 | iex']);
+    if (r.status !== 0) throw new Error('omp install failed.');
+  } else {
+    const sh = which('sh');
+    const curl = which('curl');
+    if (!sh || !curl) throw new Error('Need Bun, or sh + curl, on PATH to install omp. See https://omp.sh/');
+    process.stdout.write('\nInstalling omp with the official shell installer — one time only…\n');
+    const r = runSyncInherit(sh, ['-c', 'curl -fsSL https://omp.sh/install | sh']);
+    if (r.status !== 0) throw new Error('omp install failed.');
+  }
+
+  dirs = globalBinDirs();
+  omp = which('omp', dirs);
+  if (!omp) throw new Error('Installed omp but could not locate the `omp` binary. Add your global bin dir to PATH and retry.');
+  return { omp, dirs };
 }

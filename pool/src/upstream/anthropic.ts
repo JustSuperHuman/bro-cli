@@ -43,6 +43,80 @@ interface ByteReader {
 
 const refreshLocks = new Map<string, Promise<ClaudeOauthCreds>>();
 
+export interface UpstreamModel {
+  id: string;
+  display_name: string;
+}
+
+// The upstream API only knows real model ids; the short aliases that the
+// Claude CLI accepts ("opus") 404 there. Resolved against the live model list
+// when possible, with a static fallback.
+const MODEL_ALIASES: Record<string, string> = {
+  opus: "claude-opus-4-8",
+  sonnet: "claude-sonnet-5",
+  haiku: "claude-haiku-4-5-20251001",
+};
+
+const MODELS_CACHE_MS = 5 * 60 * 1000;
+let modelsCache: { at: number; models: UpstreamModel[] } | null = null;
+
+/**
+ * Fetch the live model list from Anthropic using a pooled account's OAuth
+ * token. Returns null (so callers can fall back) when no account is available,
+ * the backend is not oauth, or the upstream call fails.
+ */
+export async function fetchUpstreamModels(
+  mgr: AccountManager,
+  config: Config,
+): Promise<UpstreamModel[] | null> {
+  if (config.backend !== "oauth") return null;
+  if (modelsCache && Date.now() - modelsCache.at < MODELS_CACHE_MS) return modelsCache.models;
+
+  const account = mgr.pick();
+  if (!account) return null;
+  try {
+    const token = await accessTokenFor(account, mgr, config, false);
+    const response = await fetch(modelsListUrl(config.anthropicApiBaseUrl), {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20",
+      },
+    });
+    if (!response.ok) return null;
+    const json = parseJson(await response.text());
+    const data = json?.data;
+    if (!Array.isArray(data)) return null;
+    const models: UpstreamModel[] = [];
+    for (const entry of data) {
+      const obj = asObject(entry);
+      const id = stringProp(obj, "id");
+      if (!id) continue;
+      models.push({ id, display_name: stringProp(obj, "display_name") ?? id });
+    }
+    if (models.length === 0) return null;
+    modelsCache = { at: Date.now(), models };
+    return models;
+  } catch {
+    return null;
+  }
+}
+
+/** Map a CLI-style alias ("opus") to a real model id; real ids pass through. */
+async function resolveModel(model: string, mgr: AccountManager, config: Config): Promise<string> {
+  const fallback = MODEL_ALIASES[model];
+  if (!fallback) return model;
+  const models = await fetchUpstreamModels(mgr, config);
+  // Upstream lists newest first, so the first family match is the latest.
+  const match = models?.find((m) => m.id.includes(model));
+  return match?.id ?? fallback;
+}
+
+function modelsListUrl(baseUrl: string): string {
+  const clean = baseUrl.replace(/\/+$/, "").replace(/\/v1(\/messages)?$/, "");
+  return `${clean}/v1/models?limit=1000`;
+}
+
 export async function proxyAnthropicMessages(
   body: unknown,
   incomingHeaders: Headers,
@@ -54,6 +128,12 @@ export async function proxyAnthropicMessages(
   const sessionKey = extractSessionKey(body);
   const first = mgr.pick(sessionKey);
   if (!first) return anthropicError(503, "overloaded_error", noAccountMessage(mgr));
+
+  const requestObj = asObject(body);
+  const requestedModel = stringProp(requestObj, "model");
+  if (requestedModel && MODEL_ALIASES[requestedModel]) {
+    body = { ...requestObj, model: await resolveModel(requestedModel, mgr, config) };
+  }
 
   const bodyText = JSON.stringify(body ?? {});
   const tried = new Set<string>();

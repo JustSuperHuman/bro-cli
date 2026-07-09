@@ -31,13 +31,19 @@ export function lastModelFor(providerId) {
   return (loadState().lastModelByProvider || {})[providerId];
 }
 
-// Remember the last provider overall, plus the last model used per provider, so
-// both menus open on the previous choice.
-export function rememberSelection(providerId, model) {
+export function lastHarness() {
+  return loadState().lastHarness;
+}
+
+// Remember the last provider overall, the last model used per provider, and the
+// last harness, so the menus open on the previous choices. `harness` is only
+// stored when given (flows like image gen don't involve one).
+export function rememberSelection(providerId, model, harness) {
   const cur = loadState();
   saveState({
     ...cur,
     lastProvider: providerId,
-    lastModelByProvider: { ...(cur.lastModelByProvider || {}), [providerId]: model ?? '' }
+    lastModelByProvider: { ...(cur.lastModelByProvider || {}), [providerId]: model ?? '' },
+    ...(harness ? { lastHarness: harness } : {})
   });
 }

@@ -44,6 +44,18 @@ bro accounts list             # show account status and usage
 bro accounts remove work      # delete a pooled account
 ```
 
+Use one logged-in account directly without the pool:
+
+```sh
+bro account                   # pick a Claude account profile from a menu
+bro account work              # launch Claude using the "work" profile
+bro --account personal        # same shortcut, explicit flag form
+```
+
+Profiles are the same standard Claude Code logins stored under
+`~/.claude-max-pool/accounts/<name>/`; `bro` switches by setting
+`CLAUDE_CONFIG_DIR` for that Claude launch and does not overwrite `~/.claude`.
+
 **Failover:** when the serving account's usage/rate limit runs out before any output has streamed, the pool transparently sidelines it and retries the turn on the next account — you just keep going. Set `CLAUDE_POOL_BACKEND=cli` to use the older subprocess backend. Requires Bun (`bro` finds it automatically; install from [bun.sh](https://bun.sh)). See [`pool/README.md`](./pool/README.md) for the pool's own docs, endpoints, and configuration.
 
 ## 🎨 Image Gen
@@ -83,6 +95,7 @@ Claude is next in the list and runs **natively** (your normal Claude login — n
 
 ```sh
 bro -p pool               # Multiple Claude Account Proxy (pool many plans)
+bro account work          # launch Claude using one logged-in account profile
 bro -p sakana -m fugu     # skip the menus
 bro --list                # list every provider + model
 bro update                # refresh the model list from GitHub, cache it locally

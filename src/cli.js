@@ -3,9 +3,9 @@ import { loadConfig, ensureDefaultConfig, setKey, CONFIG_PATH } from './config.j
 import { loadModels, mergeProviders, updateModels, REMOTE_URL } from './models.js';
 import { select, promptHidden } from './ui.js';
 import { launch } from './launch.js';
-import { runPool, runPoolAccounts, POOL_PROVIDER } from './pool.js';
+import { runPool, runPoolAccounts, runAccountProfile, POOL_PROVIDER, ACCOUNT_PROVIDER } from './pool.js';
 import { runImageGen, IMAGE_PROVIDER } from './imagegen.js';
-import { rememberSelection, lastProvider, lastModelFor } from './state.js';
+import { rememberSelection, lastProvider, lastModelFor, lastHarness } from './state.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
@@ -15,6 +15,7 @@ Usage:
   bro                    Pick a provider, then a model (interactive)
   bro -p pool            Multiple Claude Account Proxy — pool many Claude
                          plans, then launch Claude Code across them
+  bro account [name]     Pick/run one logged-in Claude account profile
   bro accounts list      List pool accounts
   bro accounts login <name>
                          Add/log in a Claude account for the pool
@@ -24,18 +25,22 @@ Usage:
                          web UI opens (images save to ./.bro/image-gen)
   bro image -p <api>     Skip the image API menu (e.g. bro image -p yunwu)
   bro -p <provider>      Skip the provider menu (id or name)
+  bro --account <name>   Launch Claude with a logged-in account profile
   bro -m <model>         Skip the model menu (use with -p)
+  bro --harness <name>   Choose harness: claude (default) or omp
+  bro --omp              Launch with omp instead of Claude Code; bro sets up
+                         the provider and omp picks the model (-m overrides)
   bro -l, --list         List every provider and model
   bro update             Refresh the model list from GitHub and cache it
   bro --dry-run          Show what would run; launch nothing
   bro --safe             Don't pass --dangerously-skip-permissions
   bro -h, --help         Show this help
   bro -v, --version      Show version
-  bro --resume <id>      Pick provider/model, then pass args to claude
-  bro -- <args...>       Force everything after -- straight to claude
+  bro --resume <id>      Pick provider/model, then pass args to the harness
+  bro -- <args...>       Force everything after -- straight to the harness
 
 Put bro flags first. The first unrecognized arg, and everything after it,
-is passed verbatim to claude after provider/model selection.
+is passed verbatim to the selected harness after provider/model selection.
 
 Config:  ${CONFIG_PATH}
 Models:  ${REMOTE_URL}
@@ -47,7 +52,11 @@ function parseArgs(argv) {
     const t = argv[i];
     if (t === '--') { a._.push(...argv.slice(i + 1)); break; }
     if (t === '--provider' || t === '-p') a.provider = argv[++i];
+    else if (t === '--account') { a.provider = 'account'; a.account = argv[++i]; }
     else if (t === '--model' || t === '-m') a.model = argv[++i];
+    else if (t === '--harness') a.harness = argv[++i];
+    else if (t === '--omp') a.harness = 'omp';
+    else if (t === '--claude') a.harness = 'claude';
     else if (t === '--list' || t === '-l') a.list = true;
     else if (t === 'update' || t === '--update') a.update = true;
     else if (t === 'image' || t === 'image-gen' || t === '--image') a.image = true;
@@ -55,6 +64,10 @@ function parseArgs(argv) {
     else if (t === '--safe') a.safe = true;
     else if (t === '--help' || t === '-h') a.help = true;
     else if (t === '--version' || t === '-v') a.version = true;
+    else if ((t === 'account' || t === 'profile' || t === 'switch') && !a.provider) {
+      a.provider = 'account';
+      if (argv[i + 1] && !argv[i + 1].startsWith('-')) a.account = argv[++i];
+    }
     else {
       // Unknown args belong to Claude. Once Claude args begin, preserve the
       // rest verbatim so values like `bro --resume update` are not re-parsed.
@@ -68,6 +81,8 @@ function parseArgs(argv) {
 const tagOf = (p) =>
   p.mode === 'pool'
     ? 'rotate accounts'
+    : p.mode === 'account'
+      ? 'pick login'
     : p.mode === 'image'
       ? 'web ui'
       : p.mode === 'native'
@@ -76,6 +91,12 @@ const tagOf = (p) =>
           ? 'anthropic-api'
           : 'via proxy';
 const modelLabel = (m) => (m.name ? `${m.name}  ${m.id ? `\x1b[2m(${m.id})\x1b[0m` : ''}` : m.id || '(default)');
+const normalizeHarness = (value) => {
+  const h = String(value || 'claude').toLowerCase();
+  if (h === 'claude' || h === 'claude-code') return 'claude';
+  if (h === 'omp' || h === 'oh-my-pi') return 'omp';
+  return null;
+};
 
 export async function main(argv) {
   if (argv[0] === 'accounts') {
@@ -102,6 +123,13 @@ export async function main(argv) {
 
   ensureDefaultConfig();
   const config = loadConfig();
+  // Flags win, then the harness used last time (the menu toggle is sticky),
+  // then the configured default.
+  let harness = normalizeHarness(args.harness || lastHarness() || config.defaultHarness || 'claude');
+  if (!harness) {
+    console.error(`Unknown harness: ${args.harness || config.defaultHarness}  (use: claude or omp)`);
+    return 1;
+  }
 
   // `bro image` goes straight to the image-gen web UI (no claude involved).
   if (args.image) {
@@ -110,7 +138,7 @@ export async function main(argv) {
 
   const data = await loadModels();
   // The account pool and image gen are always pinned on top — no models.json entry needed.
-  const providers = [POOL_PROVIDER, IMAGE_PROVIDER, ...mergeProviders(data, config.providers)];
+  const providers = [POOL_PROVIDER, ACCOUNT_PROVIDER, IMAGE_PROVIDER, ...mergeProviders(data, config.providers)];
 
   if (!providers.length) {
     console.error('No providers available. Check your network or ~/.bro/config.json.');
@@ -141,10 +169,20 @@ export async function main(argv) {
       choices: providers.map((p) => ({
         label: `${(p.name || p.id).padEnd(width)}  \x1b[2m${tagOf(p)}\x1b[0m`,
         value: p
-      }))
+      })),
+      toggles: [{
+        key: 'h',
+        name: 'ompHarness',
+        label: 'Harness',
+        value: harness === 'omp',
+        onLabel: 'OMP',
+        offLabel: 'CLAUDE',
+        shortLabel: 'harness'
+      }]
     }).catch(() => null);
     if (!choice) { console.log('Cancelled.'); return 0; }
     provider = choice.value;
+    if (choice.toggles?.ompHarness !== undefined) harness = choice.toggles.ompHarness ? 'omp' : 'claude';
   }
 
   // Image gen: pick an image API, then serve the local web UI.
@@ -153,25 +191,15 @@ export async function main(argv) {
     return runImageGen({ config, dryRun: args.dryRun });
   }
 
-  // Account pool: its own setup → start proxy → launch claude flow.
-  if (provider.mode === 'pool') {
-    const skipPool = !args.safe && config.dangerouslySkipPermissions !== false;
-    if (!args.dryRun) rememberSelection(provider.id, '');
-    const result = await runPool({
-      extraArgs: args._,
-      skipPermissions: skipPool,
-      dryRun: args.dryRun
-    });
-    if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
-    return typeof result === 'number' ? result : 0;
-  }
-
   // 2) model (+ an easy skip-permissions toggle — Tab to flip)
+  // With the omp harness the model menu is skipped: bro only writes the
+  // provider (and its model list) into omp's models.yml and lets omp pick the
+  // model itself. An explicit -m still forces one via --model.
   let model = args.model;
   let skip = !args.safe && config.dangerouslySkipPermissions !== false;
   const models = provider.models || [];
   if (model == null) {
-    if (!models.length) {
+    if (harness === 'omp' || !models.length) {
       model = '';
     } else {
       const lastM = lastModelFor(provider.id);
@@ -179,12 +207,52 @@ export async function main(argv) {
         message: `Choose a model for ${provider.name || provider.id}:`,
         startIndex: lastM != null ? Math.max(0, models.findIndex((m) => (m.id ?? '') === lastM)) : 0,
         choices: models.map((m) => ({ label: modelLabel(m), value: m.id ?? '' })),
-        toggle: { label: 'Skip permissions', value: skip }
+        toggle: { label: 'Skip permissions', value: skip },
+        toggles: [{
+          key: 'h',
+          name: 'ompHarness',
+          label: 'Harness',
+          value: harness === 'omp',
+          onLabel: 'OMP',
+          offLabel: 'CLAUDE',
+          shortLabel: 'harness'
+        }]
       }).catch(() => null);
       if (choice == null) { console.log('Cancelled.'); return 0; }
       model = choice.value;
       if (choice.toggleOn !== undefined) skip = choice.toggleOn;
+      if (choice.toggles?.ompHarness !== undefined) harness = choice.toggles.ompHarness ? 'omp' : 'claude';
     }
+  }
+
+  // Account pool: its own setup → start proxy → launch the selected harness
+  // against the local Anthropic-compatible pool endpoint.
+  if (provider.mode === 'pool') {
+    if (!args.dryRun) rememberSelection(provider.id, model, harness);
+    const result = await runPool({
+      model,
+      extraArgs: args._,
+      skipPermissions: skip,
+      harness,
+      dryRun: args.dryRun
+    });
+    if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
+    return typeof result === 'number' ? result : 0;
+  }
+
+  // Account profile: launch standard Claude Code using one isolated logged-in
+  // account directory. This is a direct login switch, not the multi-account pool.
+  if (provider.mode === 'account') {
+    if (!args.dryRun) rememberSelection(provider.id, model, 'claude');
+    const result = await runAccountProfile({
+      accountName: args.account,
+      model,
+      extraArgs: args._,
+      skipPermissions: skip,
+      dryRun: args.dryRun
+    });
+    if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
+    return typeof result === 'number' ? result : 0;
   }
 
   // 3) key (skipped for native Claude and noKey/local providers)
@@ -203,7 +271,7 @@ export async function main(argv) {
     }
   }
 
-  if (!args.dryRun) rememberSelection(provider.id, model);
+  if (!args.dryRun) rememberSelection(provider.id, model, harness);
 
   const result = await launch({
     provider,
@@ -211,6 +279,7 @@ export async function main(argv) {
     apiKey,
     extraArgs: args._,
     skipPermissions: skip,
+    harness,
     dryRun: args.dryRun
   });
 
