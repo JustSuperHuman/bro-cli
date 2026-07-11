@@ -27,6 +27,9 @@ const DEFAULT_PORT = 3456;
 const POOL_DIR = process.env.CLAUDE_POOL_DIR || path.join(os.homedir(), '.claude-max-pool');
 const ACCOUNTS_DIR = path.join(POOL_DIR, 'accounts');
 const PROXY_LOG = path.join(os.homedir(), '.bro', 'pool-proxy.log');
+const OAUTH_TOKEN_URL = process.env.CLAUDE_OAUTH_TOKEN_URL || 'https://platform.claude.com/v1/oauth/token';
+const OAUTH_CLIENT_ID = process.env.CLAUDE_OAUTH_CLIENT_ID || '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 
 // No model list here: bro never picks a model for the pool. Claude Code and
 // omp both have their own model pickers (which know about every model the
@@ -85,10 +88,99 @@ function accountDirFor(name) {
   return path.join(ACCOUNTS_DIR, name);
 }
 
-function accountLabel(a) {
+function usagePercent(value) {
+  return typeof value === 'number' ? `${Math.round(value)}%` : '—';
+}
+
+export function usageSummary(payload) {
+  const fable = Array.isArray(payload && payload.limits)
+    ? payload.limits.find((limit) =>
+        limit && limit.kind === 'weekly_scoped' && limit.scope?.model?.display_name === 'Fable'
+      )
+    : null;
+  return {
+    session: payload?.five_hour?.utilization ?? null,
+    weekly: payload?.seven_day?.utilization ?? null,
+    fable: fable?.percent ?? null
+  };
+}
+
+export function accountLabel(a) {
   const state = a.authenticated ? 'ready' : 'logged out';
   const plan = a.subscriptionType ? ` · ${a.subscriptionType}` : '';
+  if (a.authenticated && a.usageStats) {
+    const usage = `5h ${usagePercent(a.usageStats.session)} · week ${usagePercent(a.usageStats.weekly)} · Fable ${usagePercent(a.usageStats.fable)}`;
+    return `${a.name}  \x1b[2m${usage}${plan}\x1b[0m`;
+  }
+  if (a.authenticated && a.usageStats === null) return `${a.name}  \x1b[2musage unavailable${plan}\x1b[0m`;
   return `${a.name}  \x1b[2m${state}${plan}\x1b[0m`;
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = 6000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function refreshAccountToken(account) {
+  const credentialsPath = path.join(accountDirFor(account.name), '.credentials.json');
+  const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+  const oauth = credentials?.claudeAiOauth;
+  if (!oauth?.refreshToken) throw new Error('missing OAuth refresh token');
+  const response = await fetchWithTimeout(OAUTH_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: oauth.refreshToken, client_id: OAUTH_CLIENT_ID })
+  });
+  if (!response.ok) throw new Error(`OAuth refresh failed (${response.status})`);
+  const body = await response.json();
+  if (!body.access_token) throw new Error('OAuth refresh returned no access token');
+  oauth.accessToken = body.access_token;
+  oauth.refreshToken = body.refresh_token || oauth.refreshToken;
+  oauth.expiresAt = Date.now() + Number(body.expires_in || 3600) * 1000;
+  if (typeof body.scope === 'string') oauth.scopes = body.scope.split(/\s+/).filter(Boolean);
+  fs.writeFileSync(credentialsPath, JSON.stringify(credentials, null, 2));
+  return oauth.accessToken;
+}
+
+async function fetchAccountUsage(account) {
+  const credentialsPath = path.join(accountDirFor(account.name), '.credentials.json');
+  const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+  const oauth = credentials?.claudeAiOauth;
+  if (!oauth?.accessToken) throw new Error('missing OAuth access token');
+  let token = oauth.accessToken;
+  if (oauth.expiresAt && oauth.expiresAt <= Date.now()) token = await refreshAccountToken(account);
+
+  const request = (accessToken) =>
+    fetchWithTimeout(USAGE_URL, {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+        accept: 'application/json'
+      }
+    });
+  let response = await request(token);
+  if (response.status === 401) response = await request(await refreshAccountToken(account));
+  if (!response.ok) throw new Error(`usage request failed (${response.status})`);
+  return usageSummary(await response.json());
+}
+
+async function loadAccountUsages(accounts) {
+  return Promise.all(
+    accounts.map(async (account) => {
+      if (!account.authenticated) return account;
+      try {
+        return { ...account, usageStats: await fetchAccountUsage(account) };
+      } catch {
+        return { ...account, usageStats: null };
+      }
+    })
+  );
 }
 
 async function chooseAccountProfile(preferredName) {
@@ -99,7 +191,7 @@ async function chooseAccountProfile(preferredName) {
   };
 
   while (true) {
-    const accounts = listAccounts();
+    let accounts = listAccounts();
     if (preferredName) {
       const found = accounts.find((a) => a.name === preferredName);
       if (!found) throw new Error(`Unknown account profile: ${preferredName}. Run "bro accounts list" to see profiles.`);
@@ -108,6 +200,12 @@ async function chooseAccountProfile(preferredName) {
       await runPoolCli(needBun(), ['accounts', 'login', preferredName]);
       preferredName = null;
       continue;
+    }
+
+    if (accounts.some((account) => account.authenticated)) {
+      process.stdout.write('\x1b[2mLoading profile usage…\x1b[0m\r');
+      accounts = await loadAccountUsages(accounts);
+      process.stdout.write('\x1b[2K\r');
     }
 
     const choices = [

@@ -5,6 +5,7 @@ import { select, promptHidden } from './ui.js';
 import { launch } from './launch.js';
 import { runPool, runPoolAccounts, runAccountProfile, POOL_PROVIDER, ACCOUNT_PROVIDER } from './pool.js';
 import { runImageGen, IMAGE_PROVIDER } from './imagegen.js';
+import { runCodex, runCodexCommand, CODEX_PROVIDER } from './codex.js';
 import { rememberSelection, lastProvider, lastModelFor, lastHarness } from './state.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -24,6 +25,12 @@ Usage:
   bro image              Image generation — pick an API, then a self-hosted
                          web UI opens (images save to ./.bro/image-gen)
   bro image -p <api>     Skip the image API menu (e.g. bro image -p yunwu)
+  bro -p codex           Run Claude Code on your ChatGPT subscription — logs
+                         in, fetches the live model list, and bridges through a
+                         local Anthropic-compatible server (no codex CLI needed)
+  bro codex login        Log in to (or switch) your ChatGPT subscription
+  bro codex status       Show ChatGPT subscription login status
+  bro codex logout       Remove stored ChatGPT credentials
   bro -p <provider>      Skip the provider menu (id or name)
   bro --account <name>   Launch Claude with a logged-in account profile
   bro -m <model>         Skip the model menu (use with -p)
@@ -83,6 +90,8 @@ const tagOf = (p) =>
     ? 'rotate accounts'
     : p.mode === 'account'
       ? 'pick login'
+    : p.mode === 'codex'
+      ? 'chatgpt login'
     : p.mode === 'image'
       ? 'web ui'
       : p.mode === 'native'
@@ -101,6 +110,9 @@ const normalizeHarness = (value) => {
 export async function main(argv) {
   if (argv[0] === 'accounts') {
     return runPoolAccounts(argv.slice(1));
+  }
+  if (argv[0] === 'codex' && ['login', 'logout', 'status'].includes(argv[1])) {
+    return runCodexCommand(argv.slice(1));
   }
 
   const args = parseArgs(argv);
@@ -138,7 +150,7 @@ export async function main(argv) {
 
   const data = await loadModels();
   // The account pool and image gen are always pinned on top — no models.json entry needed.
-  const providers = [POOL_PROVIDER, ACCOUNT_PROVIDER, IMAGE_PROVIDER, ...mergeProviders(data, config.providers)];
+  const providers = [POOL_PROVIDER, ACCOUNT_PROVIDER, CODEX_PROVIDER, IMAGE_PROVIDER, ...mergeProviders(data, config.providers)];
 
   if (!providers.length) {
     console.error('No providers available. Check your network or ~/.bro/config.json.');
@@ -189,6 +201,20 @@ export async function main(argv) {
   if (provider.mode === 'image') {
     if (!args.dryRun) rememberSelection(provider.id, lastModelFor(provider.id) ?? '');
     return runImageGen({ config, dryRun: args.dryRun });
+  }
+
+  // Codex: ensure the ChatGPT subscription login, fetch its live model list,
+  // pick one, and launch the codex CLI (its own harness — claude/omp not used).
+  if (provider.mode === 'codex') {
+    const result = await runCodex({
+      model: args.model,
+      harness,
+      extraArgs: args._,
+      skipPermissions: !args.safe && config.dangerouslySkipPermissions !== false,
+      dryRun: args.dryRun
+    });
+    if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
+    return typeof result === 'number' ? result : 0;
   }
 
   // 2) model (+ an easy skip-permissions toggle — Tab to flip)

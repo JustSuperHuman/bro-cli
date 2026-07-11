@@ -55,8 +55,32 @@ bro --account personal        # same shortcut, explicit flag form
 Profiles are the same standard Claude Code logins stored under
 `~/.claude-max-pool/accounts/<name>/`; `bro` switches by setting
 `CLAUDE_CONFIG_DIR` for that Claude launch and does not overwrite `~/.claude`.
+The interactive profile menu shows each account's current five-hour, weekly,
+and Fable usage before you choose one.
 
 **Failover:** when the serving account's usage/rate limit runs out before any output has streamed, the pool transparently sidelines it and retries the turn on the next account — you just keep going. Set `CLAUDE_POOL_BACKEND=cli` to use the older subprocess backend. Requires Bun (`bro` finds it automatically; install from [bun.sh](https://bun.sh)). See [`pool/README.md`](./pool/README.md) for the pool's own docs, endpoints, and configuration.
+
+## Codex (ChatGPT subscription)
+
+`bro -p codex` (pinned in the menu) runs **Claude Code itself on your ChatGPT subscription** — the GPT‑5.x Codex models, driving Claude Code's normal harness (tools, agentic loop, streaming). No `codex` CLI, no extra packages, no API key: just your ChatGPT login.
+
+How it works:
+
+1. **Login** — a built-in ChatGPT OAuth sign-in (the same flow the Codex CLI uses) opens in your browser and stores credentials at `~/.bro/codex-auth.json`. If you already have the Codex CLI logged in, that login is reused automatically. Tokens are refreshed on their own as they expire.
+2. **Models** — the list is fetched live from your subscription, so it always matches what you can actually run (GPT‑5.6‑Sol, GPT‑5.5, Codex‑Spark, …). Falls back to a cache, then a small built-in list, when offline.
+3. **Bridge** — `bro` starts a tiny local Anthropic-compatible server that translates Claude Code's `/v1/messages` calls into OpenAI Responses-API calls against the ChatGPT Codex backend, and streams the answers back (tool calls, thinking, and usage all mapped through). It's pure Node — nothing to install.
+4. **Launch** — Claude Code runs pointed at the bridge (`ANTHROPIC_BASE_URL`). Pick a model in the usual menu (Tab toggles skip-permissions); `-m <model>` skips it. When Claude exits, the bridge is torn down.
+
+```sh
+bro -p codex              # pick a GPT-5.x model, launch Claude Code on it
+bro -p codex -m gpt-5.5   # skip the menu
+bro -p codex --omp        # use the omp harness instead of Claude Code
+bro codex login           # log in / switch ChatGPT account
+bro codex status          # show login + plan
+bro codex logout          # remove stored credentials
+```
+
+Add `:effort` to a model to set reasoning depth, e.g. `bro -p codex -m gpt-5.6-sol:high`. This impersonates a Codex client to a subscription backend, which is outside OpenAI's normal API terms — use it on your own account at your own discretion.
 
 ## 🎨 Image Gen
 
@@ -96,6 +120,7 @@ Claude is next in the list and runs **natively** (your normal Claude login — n
 ```sh
 bro -p pool               # Multiple Claude Account Proxy (pool many plans)
 bro account work          # launch Claude using one logged-in account profile
+bro -p codex              # Codex on your ChatGPT subscription (live model list)
 bro -p sakana -m fugu     # skip the menus
 bro --list                # list every provider + model
 bro update                # refresh the model list from GitHub, cache it locally
