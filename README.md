@@ -44,6 +44,22 @@ bro accounts list             # show account status and usage
 bro accounts remove work      # delete a pooled account
 ```
 
+Report lifetime output tokens from the local history of every account-switcher
+profile, plus Codex when its local data directory is installed:
+
+```sh
+bro tokens
+```
+
+The report automatically opens the native `~/.claude` profile and every
+isolated switcher profile in a background pseudo-terminal, then reads the
+all-time `Total tokens` shown by Claude's own `/stats`
+screen, cycling all three date ranges to select the all-time maximum; it does
+not make an API turn. Codex is marked unavailable because its
+CLI does not currently expose a lifetime token total; `bro` will not label a
+session-history estimate as lifetime. Automatic Claude refresh currently uses
+the `winpty` bundled with Git for Windows.
+
 Use one logged-in account directly without the pool:
 
 ```sh

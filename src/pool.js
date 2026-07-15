@@ -436,7 +436,7 @@ export async function runAccountProfile({ accountName = '', model = '', extraArg
       account: accountName || '(menu)',
       accounts,
       claude: {
-        cmd: which('claude') || 'claude',
+        cmd: which('claude', globalBinDirs()) || 'claude',
         args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(model ? ['--model', model] : []), ...extraArgs],
         env: account ? { CLAUDE_CONFIG_DIR: accountDirFor(account.name) } : { CLAUDE_CONFIG_DIR: '(selected account profile)' }
       }
@@ -449,7 +449,7 @@ export async function runAccountProfile({ accountName = '', model = '', extraArg
     return 0;
   }
 
-  const claude = which('claude');
+  const claude = which('claude', globalBinDirs());
   if (!claude) throw new Error('The `claude` CLI was not found. Install Claude Code: https://claude.com/claude-code');
 
   const env = { ...process.env, CLAUDE_CONFIG_DIR: accountDirFor(account.name) };
@@ -493,7 +493,7 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
       });
     } else {
       out.claude = {
-        cmd: which('claude') || 'claude',
+        cmd: which('claude', globalBinDirs()) || 'claude',
         args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(model ? ['--model', model] : []), ...extraArgs],
         env: { ANTHROPIC_BASE_URL: baseUrl }
       };
@@ -593,7 +593,7 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
 
   // 4) Launch Claude Code pointed at the pool. Claude speaks the Anthropic API;
   //    the pool serves /v1/messages and routes across account OAuth tokens.
-  const claude = which('claude');
+  const claude = which('claude', globalBinDirs());
   if (!claude) {
     stopProxy();
     throw new Error('The `claude` CLI was not found. Install Claude Code: https://claude.com/claude-code');

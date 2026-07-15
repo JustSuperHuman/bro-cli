@@ -63,6 +63,49 @@ function mergeImageApis(configApis = []) {
   return apis;
 }
 
+// ---------- help ----------
+
+// Built from the live API list so it never drifts from what actually runs
+// (including any extra APIs added via `imageApis` in ~/.bro/config.json).
+export function imageHelp(config = {}) {
+  const apis = mergeImageApis(config.imageApis);
+  const width = Math.max(...apis.map((a) => a.id.length), 8);
+  const apiLines = apis
+    .map((a) => {
+      const models = (a.models || []).map((m) => m.id).join(', ') || '(no models listed)';
+      return `  ${a.id.padEnd(width)}  ${a.name || a.id}\n  ${' '.repeat(width)}  \x1b[2m${models}\x1b[0m`;
+    })
+    .join('\n');
+
+  return `bro image — generate images from a local web UI.
+
+Usage:
+  bro image              Pick an image API, then open the web UI
+  bro image -p <api>     Skip the API menu (e.g. bro image -p yunwu)
+  bro image help         Show this help
+
+How it works:
+  Pick an API (or pass -p). bro starts a small local server and opens
+  it in your browser. Type a prompt, optionally drop in reference
+  images, and generated images stream into the gallery. Everything
+  runs on your machine — nothing is uploaded except to the image API.
+
+Image APIs:
+${apiLines}
+
+  Keys are shared with the chat provider of the same id, so a saved
+  yunwu key just works. Add more APIs via the "imageApis" array in
+  your config file.
+
+Files (relative to the current directory):
+  Output:   ./.bro/image-gen   generated images + history.jsonl
+  Context:  ./.bro/context     reference images you upload
+
+Ctrl-C stops the server.
+
+Config:  ${CONFIG_PATH}`;
+}
+
 // ---------- generation ----------
 
 const EXT_BY_TYPE = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };

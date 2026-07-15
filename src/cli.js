@@ -4,8 +4,9 @@ import { loadModels, mergeProviders, updateModels, REMOTE_URL } from './models.j
 import { select, promptHidden } from './ui.js';
 import { launch } from './launch.js';
 import { runPool, runPoolAccounts, runAccountProfile, POOL_PROVIDER, ACCOUNT_PROVIDER } from './pool.js';
-import { runImageGen, IMAGE_PROVIDER } from './imagegen.js';
+import { runImageGen, imageHelp, IMAGE_PROVIDER } from './imagegen.js';
 import { runCodex, runCodexCommand, CODEX_PROVIDER } from './codex.js';
+import { runTokenReport } from './token-report.js';
 import { rememberSelection, lastProvider, lastModelFor, lastHarness } from './state.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -25,12 +26,14 @@ Usage:
   bro image              Image generation — pick an API, then a self-hosted
                          web UI opens (images save to ./.bro/image-gen)
   bro image -p <api>     Skip the image API menu (e.g. bro image -p yunwu)
+  bro image help         Image-generation help (APIs, models, file paths)
   bro -p codex           Run Claude Code on your ChatGPT subscription — logs
                          in, fetches the live model list, and bridges through a
                          local Anthropic-compatible server (no codex CLI needed)
   bro codex login        Log in to (or switch) your ChatGPT subscription
   bro codex status       Show ChatGPT subscription login status
   bro codex logout       Remove stored ChatGPT credentials
+  bro tokens             Lifetime tokens for all Claude profiles + Codex
   bro -p <provider>      Skip the provider menu (id or name)
   bro --account <name>   Launch Claude with a logged-in account profile
   bro -m <model>         Skip the model menu (use with -p)
@@ -41,7 +44,7 @@ Usage:
   bro update             Refresh the model list from GitHub and cache it
   bro --dry-run          Show what would run; launch nothing
   bro --safe             Don't pass --dangerously-skip-permissions
-  bro -h, --help         Show this help
+  bro help, -h, --help   Show this help (bro help image for image help)
   bro -v, --version      Show version
   bro --resume <id>      Pick provider/model, then pass args to the harness
   bro -- <args...>       Force everything after -- straight to the harness
@@ -107,12 +110,32 @@ const normalizeHarness = (value) => {
   return null;
 };
 
+// `help` as a bare word (not just -h/--help), plus topic help, so a lost user
+// typing `bro help`, `bro help image`, or `bro image help` lands somewhere
+// useful instead of having the word passed through to the harness.
+const isHelpWord = (a) => a === 'help' || a === '-h' || a === '--help';
+const isImageWord = (a) => a === 'image' || a === 'image-gen' || a === '--image';
+
 export async function main(argv) {
+  if (['tokens', 'token-report'].includes(argv[0])) {
+    return runTokenReport();
+  }
   if (argv[0] === 'accounts') {
     return runPoolAccounts(argv.slice(1));
   }
   if (argv[0] === 'codex' && ['login', 'logout', 'status'].includes(argv[1])) {
     return runCodexCommand(argv.slice(1));
+  }
+
+  // Help dispatch: `bro help [topic]` and `bro image help|-h|--help`.
+  if (argv[0] === 'help' || (isImageWord(argv[0]) && isHelpWord(argv[1]))) {
+    if (isImageWord(argv[0]) || isImageWord(argv[1])) {
+      ensureDefaultConfig();
+      console.log(imageHelp(loadConfig()));
+    } else {
+      console.log(HELP);
+    }
+    return 0;
   }
 
   const args = parseArgs(argv);

@@ -20,6 +20,29 @@ interface PersistedState {
   usage: Record<string, AccountUsage>;
 }
 
+/**
+ * Read Claude Code's OAuth credentials from the macOS login Keychain, returning
+ * the raw JSON string (same shape as .credentials.json) or null if unavailable.
+ * No-op (null) on non-macOS platforms.
+ */
+function readMacKeychainCreds(): string | null {
+  if (process.platform !== "darwin") return null;
+  try {
+    const proc = Bun.spawnSync([
+      "security",
+      "find-generic-password",
+      "-s",
+      "Claude Code-credentials",
+      "-w",
+    ]);
+    if (proc.exitCode !== 0) return null;
+    const out = proc.stdout.toString().trim();
+    return out.startsWith("{") ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 export class AccountManager {
   private config: Config;
   private usage: Record<string, AccountUsage> = {};
@@ -114,12 +137,39 @@ export class AccountManager {
   importCurrent(name: string): void {
     this.create(name);
     const src = join(defaultClaudeConfigDir(), ".credentials.json");
-    if (!existsSync(src)) {
-      throw new Error(
-        `No credentials found at ${src}. Log in with the base 'claude' CLI first, or use 'accounts login ${name}'.`,
-      );
+    if (existsSync(src)) {
+      copyFileSync(src, this.credsPath(name));
+      return;
     }
-    copyFileSync(src, this.credsPath(name));
+    // macOS stores the login in the Keychain rather than a file.
+    const keychain = readMacKeychainCreds();
+    if (keychain) {
+      writeFileSync(this.credsPath(name), keychain);
+      return;
+    }
+    throw new Error(
+      process.platform === "darwin"
+        ? `No Claude credentials found (looked at ${src} and the macOS Keychain). ` +
+          `Log in with the base 'claude' CLI first, or use 'accounts login ${name}'.`
+        : `No credentials found at ${src}. Log in with the base 'claude' CLI first, or use 'accounts login ${name}'.`,
+    );
+  }
+
+  /**
+   * macOS only: Claude Code writes OAuth credentials to a single shared login
+   * Keychain entry instead of a per-CLAUDE_CONFIG_DIR file, so a fresh
+   * `accounts login` leaves the account directory empty. Snapshot whatever is
+   * currently in the Keychain into this account's credentials file so the pool
+   * (which reads per-account files) can use it. No-op off macOS or when the
+   * account already has a file. Returns true if it captured credentials.
+   */
+  captureKeychainInto(name: string): boolean {
+    if (process.platform !== "darwin") return false;
+    if (existsSync(this.credsPath(name))) return false;
+    const keychain = readMacKeychainCreds();
+    if (!keychain) return false;
+    writeFileSync(this.credsPath(name), keychain);
+    return true;
   }
 
   private assertValidName(name: string): void {

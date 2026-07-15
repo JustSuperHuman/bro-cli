@@ -212,7 +212,7 @@ export async function launch({ provider, model, apiKey, extraArgs = [], skipPerm
   if (dryRun) {
     return {
       via: provider.mode === 'native' ? 'native Claude' : 'anthropic-compatible',
-      cmd: which('claude') || 'claude',
+      cmd: which('claude', globalBinDirs()) || 'claude',
       args: claudeArgs,
       baseUrl: provider.mode === 'anthropic' ? provider.baseUrl : '(default)'
     };

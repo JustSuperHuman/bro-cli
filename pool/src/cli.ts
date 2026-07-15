@@ -94,6 +94,10 @@ Pool dir: ${config.accountsDir}`);
       });
       await proc.exited;
 
+      // macOS writes the login to the shared Keychain, not the account dir —
+      // snapshot it into this account's file so the pool can read it.
+      mgr.captureKeychainInto(name);
+
       const acct = mgr.getAccount(name);
       if (acct.authenticated) {
         console.log(`\n✓ "${name}" is authenticated (${acct.subscriptionType ?? "plan unknown"}, tier ${acct.rateLimitTier ?? "-"}).`);
