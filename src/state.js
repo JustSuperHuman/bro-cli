@@ -35,6 +35,16 @@ export function lastHarness() {
   return loadState().lastHarness;
 }
 
+// Remember only the per-provider pick, without making the provider the default
+// — for flows like image gen that shouldn't steal the picker's start position.
+export function rememberModelFor(providerId, model) {
+  const cur = loadState();
+  saveState({
+    ...cur,
+    lastModelByProvider: { ...(cur.lastModelByProvider || {}), [providerId]: model ?? '' }
+  });
+}
+
 // Remember the last provider overall, the last model used per provider, and the
 // last harness, so the menus open on the previous choices. `harness` is only
 // stored when given (flows like image gen don't involve one).

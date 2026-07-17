@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { loadConfig, ensureDefaultConfig, setKey, CONFIG_PATH } from './config.js';
 import { loadModels, loadOpenRouterModels, mergeProviders, updateModels, REMOTE_URL } from './models.js';
-import { select, promptHidden, isInteractive } from './ui.js';
+import { select, selectColumns, promptHidden, isInteractive } from './ui.js';
 import { launch } from './launch.js';
-import { runPool, runPoolAccounts, runAccountProfile, POOL_PROVIDER, ACCOUNT_PROVIDER } from './pool.js';
-import { runImageGen, imageHelp, IMAGE_PROVIDER } from './imagegen.js';
+import { runPool, runPoolAccounts, runAccountProfile, accountProfileChoices, POOL_PROVIDER, ACCOUNT_PROVIDER } from './pool.js';
+import { runImageGen, imageHelp, mergeImageApis, IMAGE_PROVIDER } from './imagegen.js';
 import { runCodex, runCodexCommand, CODEX_PROVIDER } from './codex.js';
 import { runTokenReport } from './token-report.js';
 import { rememberSelection, lastProvider, lastModelFor, lastHarness } from './state.js';
@@ -87,6 +87,15 @@ function parseArgs(argv) {
   }
   return a;
 }
+
+// Quirky BRO CLI banner over the picker. Cyan fade, shades on.
+const BANNER = [
+  '\x1b[96m   ___  ___  ____     _______   ____\x1b[0m',
+  '\x1b[96m  / _ )/ _ \\/ __ \\   / ___/ /  /  _/\x1b[0m',
+  '\x1b[36m / _  / , _/ /_/ /  / /__/ /___/ /\x1b[0m',
+  '\x1b[36m/____/_/|_|\\____/   \\___/____/___/\x1b[0m  (⌐■_■)',
+  ''
+].join('\n');
 
 const tagOf = (p) =>
   p.mode === 'pool'
@@ -173,7 +182,7 @@ export async function main(argv) {
 
   const data = await loadModels();
   // The account pool and image gen are always pinned on top — no models.json entry needed.
-  const providers = [POOL_PROVIDER, ACCOUNT_PROVIDER, CODEX_PROVIDER, IMAGE_PROVIDER, ...mergeProviders(data, config.providers)];
+  const providers = [IMAGE_PROVIDER, POOL_PROVIDER, ACCOUNT_PROVIDER, CODEX_PROVIDER, ...mergeProviders(data, config.providers)];
 
   if (!providers.length) {
     console.error('No providers available. Check your network or ~/.bro/config.json.');
@@ -188,23 +197,65 @@ export async function main(argv) {
     return 0;
   }
 
-  // 1) provider
+  // 1) provider + model in one two-column picker: the left column lists
+  // providers, the right column live-previews the highlighted provider's
+  // models (OpenRouter's live catalogue loads while you browse; Image Gen
+  // shows its image APIs). Enter takes the highlighted model; →/← moves
+  // between the columns.
   let provider;
+  let picked = null; // combined-picker result (null when -p skipped the menu)
+  let skip = !args.safe && config.dangerouslySkipPermissions !== false;
   if (args.provider) {
     provider = providers.find(
       (p) => p.id === args.provider || (p.name || '').toLowerCase() === args.provider.toLowerCase()
     );
     if (!provider) { console.error(`Unknown provider: ${args.provider}  (try: bro --list)`); return 1; }
   } else {
-    const width = Math.max(...providers.map((p) => (p.name || p.id).length));
+    const modelChildren = (models) => (models || []).map((m) => ({ label: modelLabel(m), value: m.id ?? '' }));
+    const childrenFor = (p) => {
+      if (p.mode === 'image') {
+        return mergeImageApis(config.imageApis).map((a) => ({
+          label: `${a.name || a.id}  \x1b[2m${a.models?.[0]?.id || ''}\x1b[0m`,
+          value: a.id
+        }));
+      }
+      if (p.id === 'openrouter') return async () => modelChildren((await loadOpenRouterModels()) || p.models);
+      // Account profiles with live usage stats (5h/week/Fable) in the right pane.
+      if (p.mode === 'account') return accountProfileChoices;
+      return (p.models || []).length ? modelChildren(p.models) : null;
+    };
+    // Providers that are ready to launch (key saved / env var / no key needed)
+    // go on top in green, the rest below a divider.
+    const hasKey = (id, keyEnv) => Boolean(config.keys?.[id] || (keyEnv && process.env[keyEnv]));
+    const isConfigured = (p) => {
+      if (p.mode === 'image') return mergeImageApis(config.imageApis).some((a) => hasKey(a.id, a.keyEnv));
+      if (p.mode === 'native' || p.noKey || ['pool', 'account', 'codex'].includes(p.mode)) return true;
+      return hasKey(p.id, p.keyEnv);
+    };
+    const toChoice = (p, configured) => ({
+      label: p.name || p.id,
+      value: p,
+      color: configured ? '\x1b[32m' : '',
+      detail: tagOf(p),
+      children: childrenFor(p),
+      childValue: lastModelFor(p.id)
+    });
+    const ready = providers.filter((p) => isConfigured(p));
+    const rest = providers.filter((p) => !isConfigured(p));
+    const choices = [
+      ...ready.map((p) => toChoice(p, true)),
+      ...(ready.length && rest.length ? [{ divider: true }] : []),
+      ...rest.map((p) => toChoice(p, false))
+    ];
+
     const lastP = lastProvider();
-    const choice = await select({
-      message: 'Choose a provider:',
-      startIndex: Math.max(0, providers.findIndex((p) => p.id === lastP)),
-      choices: providers.map((p) => ({
-        label: `${(p.name || p.id).padEnd(width)}  \x1b[2m${tagOf(p)}\x1b[0m`,
-        value: p
-      })),
+    const choice = await selectColumns({
+      message: 'Choose a provider and model:',
+      startIndex: Math.max(0, choices.findIndex((c) => c.value?.id === lastP)),
+      choices,
+      clearScreen: true,
+      banner: BANNER,
+      toggle: { label: 'Skip permissions', value: skip },
       toggles: [{
         key: 'h',
         name: 'ompHarness',
@@ -217,13 +268,16 @@ export async function main(argv) {
     }).catch(() => null);
     if (!choice) { console.log('Cancelled.'); return 0; }
     provider = choice.value;
+    picked = choice;
+    if (choice.toggleOn !== undefined) skip = choice.toggleOn;
     if (choice.toggles?.ompHarness !== undefined) harness = choice.toggles.ompHarness ? 'omp' : 'claude';
   }
 
-  // Image gen: pick an image API, then serve the local web UI.
+  // Image gen: the picker's right column already chose the image API (falls
+  // back to imagegen's own menu when it didn't), then serve the local web UI.
+  // Deliberately not remembered as the default provider — it's the exception.
   if (provider.mode === 'image') {
-    if (!args.dryRun) rememberSelection(provider.id, lastModelFor(provider.id) ?? '');
-    return runImageGen({ config, dryRun: args.dryRun });
+    return runImageGen({ config, apiId: picked?.child?.value, dryRun: args.dryRun });
   }
 
   // Codex: ensure the ChatGPT subscription login, fetch its live model list,
@@ -240,22 +294,27 @@ export async function main(argv) {
     return typeof result === 'number' ? result : 0;
   }
 
+  // 2) model — usually already picked in the combined menu above. With the
+  // omp harness the model is left to omp itself (bro only writes the provider
+  // into omp's models.yml), unless one was explicitly picked in the model
+  // column or forced with -m.
+  // (The account provider's picker children are profiles, not models.)
+  let model = args.model;
+  if (model == null && picked?.child && provider.mode !== 'account' && (harness !== 'omp' || picked.childFocused)) {
+    model = picked.child.value;
+  }
+
   // OpenRouter: swap in the live catalogue (Anthropic, OpenAI, Moonshot, GLM)
-  // so the model menu always shows what's current. On fetch failure the cached
-  // copy is used; failing that, the static list from models.json stays.
-  if (provider.id === 'openrouter' && !args.dryRun) {
+  // when the model still has to be chosen here (-p path) or omp needs the
+  // current model list. On fetch failure the cached copy is used; failing
+  // that, the static list from models.json stays.
+  if (provider.id === 'openrouter' && !args.dryRun && (model == null || harness === 'omp')) {
     if (isInteractive) process.stdout.write('\x1b[2mFetching OpenRouter models…\x1b[0m\r');
     const live = await loadOpenRouterModels();
     if (isInteractive) process.stdout.write('\x1b[2K');
     if (live) provider.models = live;
   }
 
-  // 2) model (+ an easy skip-permissions toggle — Tab to flip)
-  // With the omp harness the model menu is skipped: bro only writes the
-  // provider (and its model list) into omp's models.yml and lets omp pick the
-  // model itself. An explicit -m still forces one via --model.
-  let model = args.model;
-  let skip = !args.safe && config.dangerouslySkipPermissions !== false;
   const models = provider.models || [];
   if (model == null) {
     if (harness === 'omp' || !models.length) {
@@ -302,9 +361,11 @@ export async function main(argv) {
   // Account profile: launch standard Claude Code using one isolated logged-in
   // account directory. This is a direct login switch, not the multi-account pool.
   if (provider.mode === 'account') {
-    if (!args.dryRun) rememberSelection(provider.id, model, 'claude');
+    const accountName = args.account || picked?.child?.value || '';
+    // Remember the account (not a model) so the picker preselects it next time.
+    if (!args.dryRun) rememberSelection(provider.id, accountName, 'claude');
     const result = await runAccountProfile({
-      accountName: args.account,
+      accountName,
       model,
       extraArgs: args._,
       skipPermissions: skip,

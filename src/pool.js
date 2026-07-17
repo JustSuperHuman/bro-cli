@@ -88,8 +88,13 @@ function accountDirFor(name) {
   return path.join(ACCOUNTS_DIR, name);
 }
 
+// Usage percentages carry their own color by pressure (green → amber → red)
+// so the stats read at a glance instead of being one dim blur.
 function usagePercent(value) {
-  return typeof value === 'number' ? `${Math.round(value)}%` : '—';
+  if (typeof value !== 'number') return '\x1b[2m—\x1b[0m';
+  const pct = Math.round(value);
+  const color = pct >= 80 ? '\x1b[31m' : pct >= 50 ? '\x1b[33m' : '\x1b[32m';
+  return `${color}${pct}%\x1b[0m`;
 }
 
 export function usageSummary(payload) {
@@ -107,13 +112,14 @@ export function usageSummary(payload) {
 
 export function accountLabel(a) {
   const state = a.authenticated ? 'ready' : 'logged out';
-  const plan = a.subscriptionType ? ` · ${a.subscriptionType}` : '';
+  const plan = a.subscriptionType ? ` \x1b[2m· ${a.subscriptionType}\x1b[0m` : '';
   if (a.authenticated && a.usageStats) {
-    const usage = `5h ${usagePercent(a.usageStats.session)} · week ${usagePercent(a.usageStats.weekly)} · Fable ${usagePercent(a.usageStats.fable)}`;
-    return `${a.name}  \x1b[2m${usage}${plan}\x1b[0m`;
+    const u = a.usageStats;
+    const usage = `\x1b[2m5h\x1b[0m ${usagePercent(u.session)} \x1b[2m· wk\x1b[0m ${usagePercent(u.weekly)} \x1b[2m· Fable\x1b[0m ${usagePercent(u.fable)}`;
+    return `${a.name}  ${usage}${plan}`;
   }
-  if (a.authenticated && a.usageStats === null) return `${a.name}  \x1b[2musage unavailable${plan}\x1b[0m`;
-  return `${a.name}  \x1b[2m${state}${plan}\x1b[0m`;
+  if (a.authenticated && a.usageStats === null) return `${a.name}  \x1b[2musage unavailable\x1b[0m${plan}`;
+  return `${a.name}  \x1b[2m${state}\x1b[0m${plan}`;
 }
 
 async function fetchWithTimeout(url, options, timeoutMs = 6000) {
@@ -181,6 +187,18 @@ async function loadAccountUsages(accounts) {
       }
     })
   );
+}
+
+// Account list for the two-column picker's right pane: one entry per profile
+// with live usage stats in the label, plus a manage entry (empty value) that
+// falls through to the full account menu.
+export async function accountProfileChoices() {
+  let accounts = listAccounts();
+  if (accounts.some((a) => a.authenticated)) accounts = await loadAccountUsages(accounts);
+  return [
+    ...accounts.map((a) => ({ label: accountLabel(a), value: a.name })),
+    { label: 'Log in / manage accounts…', value: '' }
+  ];
 }
 
 async function chooseAccountProfile(preferredName) {

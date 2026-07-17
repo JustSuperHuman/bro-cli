@@ -7,14 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { setKey, CONFIG_PATH } from './config.js';
 import { loadOpenRouterImageModels } from './models.js';
 import { select, promptHidden, isInteractive } from './ui.js';
-import { rememberSelection, lastModelFor } from './state.js';
+import { rememberModelFor, lastModelFor } from './state.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UI_HTML = path.join(__dirname, 'imagegen.html');
 
 // The provider-menu entry that routes into this flow (mode 'image' is handled
 // in cli.js before any claude launching logic).
-export const IMAGE_PROVIDER = { id: 'image-gen', name: '🎨 Image Gen', mode: 'image', models: [] };
+export const IMAGE_PROVIDER = { id: 'image-gen', name: '🎨 Start Image Gen WebUI', mode: 'image', models: [] };
 
 // Image APIs. All are OpenAI-compatible `/images/generations` endpoints; keys are
 // shared with the chat providers of the same id (so the saved yunwu key just works).
@@ -63,7 +63,7 @@ export const IMAGE_APIS = [
   }
 ];
 
-function mergeImageApis(configApis = []) {
+export function mergeImageApis(configApis = []) {
   const apis = IMAGE_APIS.map((a) => ({ ...a, models: [...a.models] }));
   const byId = new Map(apis.map((a) => [a.id, a]));
   for (const c of configApis) {
@@ -614,7 +614,9 @@ export async function runImageGen({ config, apiId, dryRun = false }) {
     console.log(`Saved to ${CONFIG_PATH}`);
   }
 
-  rememberSelection(IMAGE_PROVIDER.id, api.id);
+  // Remember the API for next time's preselection, but don't make image gen
+  // the default provider — it's a side tool, not the daily driver.
+  rememberModelFor(IMAGE_PROVIDER.id, api.id);
   fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(ctxDir, { recursive: true });
 
