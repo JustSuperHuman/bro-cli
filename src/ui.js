@@ -19,12 +19,21 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
     let index = Math.max(0, Math.min(startIndex, choices.length - 1));
     let on = toggle ? Boolean(toggle.value) : false;
     const keyed = toggles.map((t) => ({ ...t, value: Boolean(t.value) }));
-    const lines = choices.length + 1 + (toggle ? 1 : 0) + keyed.length; // message + choices (+ toggle rows)
+    // Long lists scroll inside a viewport sized to the terminal — the repaint
+    // moves the cursor up by a fixed row count, so it must never exceed the
+    // screen height.
+    const overhead = 2 + (toggle ? 1 : 0) + keyed.length; // message + hint (+ toggle rows)
+    const visible = Math.max(3, Math.min(choices.length, (stdout.rows || 30) - overhead - 1));
+    let offset = Math.max(0, Math.min(index - visible + 1, choices.length - visible));
+    const lines = visible + 1 + (toggle ? 1 : 0) + keyed.length; // message + visible choices (+ toggle rows)
     const extraHints = [
       toggle ? 'tab toggle' : null,
       ...keyed.map((t) => `${t.key} ${t.shortLabel || 'toggle'}`)
     ].filter(Boolean);
-    const hint = `\x1b[2m  ↑/↓ move · enter select${extraHints.length ? ' · ' + extraHints.join(' · ') : ''} · esc cancel\x1b[0m`;
+    const hint = () => {
+      const pos = choices.length > visible ? ` · ${index + 1}/${choices.length}` : '';
+      return `\x1b[2m  ↑/↓ move · enter select${extraHints.length ? ' · ' + extraHints.join(' · ') : ''}${pos} · esc cancel\x1b[0m`;
+    };
 
     readline.emitKeypressEvents(stdin);
     stdin.setRawMode(true);
@@ -56,13 +65,18 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
       }
       readline.clearScreenDown(stdout);
       stdout.write(`\x1b[1m${message}\x1b[0m\n`);
-      choices.forEach((c, i) => {
+      for (let i = offset; i < offset + visible; i++) {
+        const c = choices[i];
         const label = c.label ?? c.name ?? String(c.value);
-        stdout.write(i === index ? `\x1b[7m ❯ ${label} \x1b[0m\n` : `   ${label}\n`);
-      });
+        const more =
+          i === offset && offset > 0 ? ' \x1b[2m↑\x1b[0m'
+          : i === offset + visible - 1 && i < choices.length - 1 ? ' \x1b[2m↓\x1b[0m'
+          : '';
+        stdout.write(i === index ? `\x1b[7m ❯ ${label} \x1b[0m${more}\n` : `   ${label}${more}\n`);
+      }
       if (toggle) stdout.write(toggleRow() + '\n');
       for (const t of keyed) stdout.write(keyedRow(t) + '\n');
-      stdout.write(hint);
+      stdout.write(hint());
     };
 
     const cleanup = () => {
@@ -76,9 +90,13 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
       if (!key) return;
       if (key.name === 'up' || key.name === 'k') {
         index = (index - 1 + choices.length) % choices.length;
+        if (index < offset) offset = index;
+        else if (index >= offset + visible) offset = index - visible + 1;
         paint(false);
       } else if (key.name === 'down' || key.name === 'j') {
         index = (index + 1) % choices.length;
+        if (index < offset) offset = index;
+        else if (index >= offset + visible) offset = index - visible + 1;
         paint(false);
       } else if (toggle && (key.name === 'tab' || key.name === 'space')) {
         on = !on;

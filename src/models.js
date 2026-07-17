@@ -68,6 +68,78 @@ export async function updateModels() {
   };
 }
 
+// Live OpenRouter catalogue — pulled fresh each time the OpenRouter provider is
+// selected so the model menu always shows what's current. Only models from
+// these authors are kept. Falls back to the last successful fetch (cached in
+// ~/.bro/openrouter.cache.json), or null so the caller keeps its static list.
+export const OPENROUTER_CACHE = path.join(BRO_DIR, 'openrouter.cache.json');
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/models';
+const OPENROUTER_AUTHORS = ['anthropic', 'openai', 'moonshotai', 'z-ai'];
+
+export async function loadOpenRouterModels() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    const res = await fetch(OPENROUTER_URL, { signal: ctrl.signal, headers: { accept: 'application/json', connection: 'close' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const json = await res.json();
+    const models = pickOpenRouterModels(json?.data);
+    if (!models.length) throw new Error('no matching models');
+    fs.mkdirSync(BRO_DIR, { recursive: true });
+    fs.writeFileSync(OPENROUTER_CACHE, JSON.stringify(models, null, 2));
+    return models;
+  } catch {
+    const cached = readJson(OPENROUTER_CACHE);
+    return Array.isArray(cached) && cached.length ? cached : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Live OpenRouter image-model catalogue — models whose output modalities include
+// "image" (Gemini image / Nano Banana and friends). Used by the image-gen flow so
+// its model menu always shows what's current. Falls back to the last successful
+// fetch, or null so the caller keeps its static list.
+export const OPENROUTER_IMAGE_CACHE = path.join(BRO_DIR, 'openrouter-image.cache.json');
+
+export async function loadOpenRouterImageModels() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    const res = await fetch(OPENROUTER_URL, { signal: ctrl.signal, headers: { accept: 'application/json', connection: 'close' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const json = await res.json();
+    const models = (Array.isArray(json?.data) ? json.data : [])
+      .filter((m) => m?.id && (m.architecture?.output_modalities || []).includes('image'))
+      .sort((a, b) => (b.created || 0) - (a.created || 0))
+      .map((m) => ({ id: m.id, name: m.name || m.id, via: 'chat' }));
+    if (!models.length) throw new Error('no image models');
+    fs.mkdirSync(BRO_DIR, { recursive: true });
+    fs.writeFileSync(OPENROUTER_IMAGE_CACHE, JSON.stringify(models, null, 2));
+    return models;
+  } catch {
+    const cached = readJson(OPENROUTER_IMAGE_CACHE);
+    return Array.isArray(cached) && cached.length ? cached : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Keep the wanted authors, grouped in OPENROUTER_AUTHORS order, newest first
+// within each group.
+function pickOpenRouterModels(data) {
+  if (!Array.isArray(data)) return [];
+  const author = (m) => String(m.id).split('/')[0];
+  return data
+    .filter((m) => m?.id && OPENROUTER_AUTHORS.includes(author(m)))
+    .sort(
+      (a, b) =>
+        OPENROUTER_AUTHORS.indexOf(author(a)) - OPENROUTER_AUTHORS.indexOf(author(b)) ||
+        (b.created || 0) - (a.created || 0)
+    )
+    .map((m) => ({ id: m.id, name: m.name || m.id }));
+}
+
 // Merge the user's custom providers into the remote list:
 //   - same id  -> append models (and override baseUrl/mode/keyEnv/noKey if given)
 //   - new id   -> add as a new provider

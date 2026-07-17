@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { loadConfig, ensureDefaultConfig, setKey, CONFIG_PATH } from './config.js';
-import { loadModels, mergeProviders, updateModels, REMOTE_URL } from './models.js';
-import { select, promptHidden } from './ui.js';
+import { loadModels, loadOpenRouterModels, mergeProviders, updateModels, REMOTE_URL } from './models.js';
+import { select, promptHidden, isInteractive } from './ui.js';
 import { launch } from './launch.js';
 import { runPool, runPoolAccounts, runAccountProfile, POOL_PROVIDER, ACCOUNT_PROVIDER } from './pool.js';
 import { runImageGen, imageHelp, IMAGE_PROVIDER } from './imagegen.js';
@@ -238,6 +238,16 @@ export async function main(argv) {
     });
     if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
     return typeof result === 'number' ? result : 0;
+  }
+
+  // OpenRouter: swap in the live catalogue (Anthropic, OpenAI, Moonshot, GLM)
+  // so the model menu always shows what's current. On fetch failure the cached
+  // copy is used; failing that, the static list from models.json stays.
+  if (provider.id === 'openrouter' && !args.dryRun) {
+    if (isInteractive) process.stdout.write('\x1b[2mFetching OpenRouter models…\x1b[0m\r');
+    const live = await loadOpenRouterModels();
+    if (isInteractive) process.stdout.write('\x1b[2K');
+    if (live) provider.models = live;
   }
 
   // 2) model (+ an easy skip-permissions toggle — Tab to flip)

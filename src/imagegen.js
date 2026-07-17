@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setKey, CONFIG_PATH } from './config.js';
+import { loadOpenRouterImageModels } from './models.js';
 import { select, promptHidden, isInteractive } from './ui.js';
 import { rememberSelection, lastModelFor } from './state.js';
 
@@ -42,6 +43,23 @@ export const IMAGE_APIS = [
       { id: 'gpt-image-1', name: 'GPT Image 1' },
       { id: 'dall-e-3', name: 'DALL·E 3' }
     ]
+  },
+  {
+    // OpenRouter has no /images/generations endpoint — image models are served
+    // through chat completions with `modalities` set (handled by the via:'chat'
+    // path). The model list is refreshed live from their catalogue on selection;
+    // these are just the offline fallback.
+    id: 'openrouter',
+    name: 'OpenRouter',
+    chatUrl: 'https://openrouter.ai/api/v1/chat/completions',
+    chatBody: { modalities: ['image', 'text'] },
+    keyEnv: 'OPENROUTER_API_KEY',
+    keyUrl: 'https://openrouter.ai/keys',
+    models: [
+      { id: 'google/gemini-3.1-flash-image', name: 'Nano Banana 2 (Gemini 3.1 Flash Image)', via: 'chat' },
+      { id: 'google/gemini-3-pro-image', name: 'Nano Banana Pro (Gemini 3 Pro Image)', via: 'chat' },
+      { id: 'openai/gpt-5-image', name: 'GPT-5 Image', via: 'chat' }
+    ]
   }
 ];
 
@@ -52,7 +70,7 @@ function mergeImageApis(configApis = []) {
     if (!c || !c.id) continue;
     const existing = byId.get(c.id);
     if (existing) {
-      for (const f of ['imagesUrl', 'keyEnv', 'keyUrl', 'name']) if (c[f] != null) existing[f] = c[f];
+      for (const f of ['imagesUrl', 'chatUrl', 'chatBody', 'editsUrl', 'keyEnv', 'keyUrl', 'name']) if (c[f] != null) existing[f] = c[f];
       for (const m of c.models || []) existing.models.push(m);
     } else {
       const np = { ...c, models: [...(c.models || [])] };
@@ -142,6 +160,7 @@ function editsUrlOf(api) {
 }
 
 function usesChatApi(api, model) {
+  if (!api.imagesUrl) return true; // chat-only API (e.g. OpenRouter)
   const known = (api.models || []).find((m) => m.id === model);
   if (known) return known.via === 'chat';
   return /gemini|flash-image|banana/i.test(model);
@@ -220,10 +239,12 @@ async function generateOne({ api, apiKey, prompt, model, size, quality, images =
       const userContent = images.length
         ? [{ type: 'text', text: prompt }, ...images.map((im) => ({ type: 'image_url', image_url: { url: im.dataUrl } }))]
         : prompt;
+      // `chatBody` carries API-specific extras, e.g. OpenRouter's required
+      // `modalities: ['image', 'text']` for image output.
       const json = await postJson(
         chatUrlOf(api),
         apiKey,
-        { model, messages: [{ role: 'user', content: userContent }] },
+        { model, messages: [{ role: 'user', content: userContent }], ...(api.chatBody || {}) },
         ctrl.signal
       );
       const msg = json.choices?.[0]?.message || {};
@@ -564,8 +585,20 @@ export async function runImageGen({ config, apiId, dryRun = false }) {
   const ctxDir = path.join(process.cwd(), '.bro', 'context');
 
   if (dryRun) {
-    console.log(JSON.stringify({ via: 'image-gen web ui', api: api.id, imagesUrl: api.imagesUrl, outDir, ctxDir }, null, 2));
+    console.log(
+      JSON.stringify({ via: 'image-gen web ui', api: api.id, imagesUrl: api.imagesUrl || api.chatUrl, outDir, ctxDir }, null, 2)
+    );
     return 0;
+  }
+
+  // OpenRouter: swap in the live image-model catalogue (models whose output
+  // modalities include "image") so the menu always shows what's current. On
+  // fetch failure the cached copy is used; failing that, the static list stays.
+  if (api.id === 'openrouter') {
+    if (isInteractive) process.stdout.write('\x1b[2mFetching OpenRouter image models…\x1b[0m\r');
+    const live = await loadOpenRouterImageModels();
+    if (isInteractive) process.stdout.write('\x1b[2K');
+    if (live) api.models = live;
   }
 
   // Key: shared with the chat provider of the same id, so a saved yunwu key is reused.
