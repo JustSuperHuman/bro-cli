@@ -69,12 +69,11 @@ export async function updateModels() {
 }
 
 // Live OpenRouter catalogue — pulled fresh each time the OpenRouter provider is
-// selected so the model menu always shows what's current. Only models from
-// these authors are kept. Falls back to the last successful fetch (cached in
+// selected so the model menu always shows everything currently available.
+// Falls back to the last successful fetch (cached in
 // ~/.bro/openrouter.cache.json), or null so the caller keeps its static list.
 export const OPENROUTER_CACHE = path.join(BRO_DIR, 'openrouter.cache.json');
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/models';
-const OPENROUTER_AUTHORS = ['anthropic', 'openai', 'moonshotai', 'z-ai'];
 
 export async function loadOpenRouterModels() {
   const ctrl = new AbortController();
@@ -83,8 +82,8 @@ export async function loadOpenRouterModels() {
     const res = await fetch(OPENROUTER_URL, { signal: ctrl.signal, headers: { accept: 'application/json', connection: 'close' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const json = await res.json();
-    const models = pickOpenRouterModels(json?.data);
-    if (!models.length) throw new Error('no matching models');
+    const models = mapOpenRouterModels(json?.data);
+    if (!models.length) throw new Error('no models');
     fs.mkdirSync(BRO_DIR, { recursive: true });
     fs.writeFileSync(OPENROUTER_CACHE, JSON.stringify(models, null, 2));
     return models;
@@ -125,18 +124,13 @@ export async function loadOpenRouterImageModels() {
   }
 }
 
-// Keep the wanted authors, grouped in OPENROUTER_AUTHORS order, newest first
-// within each group.
-function pickOpenRouterModels(data) {
+// Keep every valid catalogue entry. New models appear first; ids break ties so
+// the order remains deterministic if OpenRouter returns equal timestamps.
+export function mapOpenRouterModels(data) {
   if (!Array.isArray(data)) return [];
-  const author = (m) => String(m.id).split('/')[0];
   return data
-    .filter((m) => m?.id && OPENROUTER_AUTHORS.includes(author(m)))
-    .sort(
-      (a, b) =>
-        OPENROUTER_AUTHORS.indexOf(author(a)) - OPENROUTER_AUTHORS.indexOf(author(b)) ||
-        (b.created || 0) - (a.created || 0)
-    )
+    .filter((m) => m?.id)
+    .sort((a, b) => (b.created || 0) - (a.created || 0) || String(a.id).localeCompare(String(b.id)))
     .map((m) => ({ id: m.id, name: m.name || m.id }));
 }
 

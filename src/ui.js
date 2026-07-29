@@ -5,13 +5,61 @@ const stdout = process.stdout;
 
 export const isInteractive = Boolean(stdin.isTTY && stdout.isTTY);
 
+// If the process dies while a menu owns the screen (crash, SIGTERM), put the
+// terminal back: cursor visible, autowrap on, cooked input. Armed by the
+// selectors below while they're live, disarmed in their cleanup.
+let restoreSeq = null;
+process.on('exit', () => {
+  if (!restoreSeq) return;
+  stdout.write(restoreSeq);
+  try { stdin.setRawMode(false); } catch {}
+});
+
 // ---------- ANSI-aware text measurement (for column layouts) ----------
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const stripAnsi = (s) => String(s ?? '').replace(ANSI_RE, '');
 
-// Approximate terminal cell width — CJK and emoji occupy two columns.
+// Match every whitespace-separated search term against both the visible label
+// and the underlying value. This lets "claude sonnet" and a precise provider
+// id such as "anthropic/claude-sonnet" work equally well. Choices whose value
+// isn't a plain string (a session record, say) can offer `filterText` as the
+// hidden half of the haystack. Dividers are group labels for the unfiltered
+// list, so a search drops them rather than leaving rules over nothing.
+export function filterChoices(choices, query) {
+  const terms = String(query || '').trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return choices;
+  return choices.filter((choice) => {
+    if (choice?.divider) return false;
+    const label = choice?.label ?? choice?.name ?? '';
+    const extra = choice?.filterText ?? (typeof choice?.value === 'string' ? choice.value : '');
+    const haystack = `${stripAnsi(label)} ${extra}`.toLocaleLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+// Nearest non-divider row at or after `from`, searching in `dir`; falls back to
+// the other direction so a divider at either end can't strand the cursor.
+export function selectableIndex(items, from, dir = 1) {
+  for (let i = from; i >= 0 && i < items.length; i += dir) if (!items[i]?.divider) return i;
+  for (let i = from; i >= 0 && i < items.length; i -= dir) if (!items[i]?.divider) return i;
+  return -1;
+}
+
+// Approximate terminal cell width — CJK and emoji occupy two columns,
+// combining marks / joiners / variation selectors occupy none (they overlay
+// or merge with the previous glyph, so counting them misaligns columns).
 function charWidth(cp) {
+  if (
+    cp === 0x200b || cp === 0x200c || cp === 0x200d || cp === 0xfeff ||
+    (cp >= 0x0300 && cp <= 0x036f) ||
+    (cp >= 0x1ab0 && cp <= 0x1aff) ||
+    (cp >= 0x1dc0 && cp <= 0x1dff) ||
+    (cp >= 0x20d0 && cp <= 0x20ff) ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    (cp >= 0xfe20 && cp <= 0xfe2f)
+  )
+    return 0;
   return (cp >= 0x1100 && cp <= 0x115f) ||
     (cp >= 0x2e80 && cp <= 0x303e) ||
     (cp >= 0x3041 && cp <= 0x33ff) ||
@@ -38,7 +86,7 @@ function visWidth(s) {
 // Pad or truncate to exactly `width` visible columns. ANSI codes pass through
 // (they're zero-width) and a reset is appended so styles can't leak into the
 // padding or the next cell.
-function fit(s, width) {
+export function fit(s, width) {
   s = String(s ?? '');
   const overflow = visWidth(s) > width;
   const budget = overflow ? Math.max(0, width - 1) : width;
@@ -93,92 +141,190 @@ function renderKeyedRow(t) {
 
 // A tiny zero-dependency arrow-key list selector. Works in Windows Terminal,
 // conhost, macOS and Linux (Node's readline normalises the key sequences).
+// ↑/↓ (or k/j) move with wrap-around; pgup/pgdn page; home/end jump.
 // Returns the chosen item, or throws Error('cancelled') on Esc / Ctrl-C.
 // Optional `toggle` adds an on/off switch (flipped with Tab/Space) shown under the
 // list — handy for things like "Skip permissions". `toggles` can add extra
-// keyed switches, each returned by name in `toggles`.
-export function select({ message, choices, startIndex = 0, toggle = null, toggles = [] }) {
+// keyed switches, each returned by name in `toggles`. With `filterable`, typing
+// narrows the list by label/value; Backspace edits and Esc clears the filter.
+export function select({ message, choices, startIndex = 0, toggle = null, toggles = [], filterable = false }) {
   if (!isInteractive) {
     return Promise.reject(new Error('A terminal (TTY) is required to choose interactively. Use --provider / --model instead.'));
   }
   return new Promise((resolve, reject) => {
-    let index = Math.max(0, Math.min(startIndex, choices.length - 1));
+    const allChoices = choices;
+    let items = allChoices;
+    let query = '';
+    let index = Math.max(0, Math.min(startIndex, items.length - 1));
     let on = toggle ? Boolean(toggle.value) : false;
     const keyed = toggles.map((t) => ({ ...t, value: Boolean(t.value) }));
     // Long lists scroll inside a viewport sized to the terminal — the repaint
-    // moves the cursor up by a fixed row count, so it must never exceed the
-    // screen height.
-    const overhead = 2 + (toggle ? 1 : 0) + keyed.length; // message + hint (+ toggle rows)
-    const visible = Math.max(3, Math.min(choices.length, (stdout.rows || 30) - overhead - 1));
-    let offset = Math.max(0, Math.min(index - visible + 1, choices.length - visible));
-    const lines = visible + 1 + (toggle ? 1 : 0) + keyed.length; // message + visible choices (+ toggle rows)
+    // moves the cursor up by the row count of the previous paint, so it must
+    // never exceed the screen height. Recomputed on terminal resize.
+    let visible, lines;
+    const layout = () => {
+      const overhead = 2 + (toggle ? 1 : 0) + keyed.length; // message + hint (+ toggle rows)
+      // Reserve one result row for the "no matches" state. Otherwise never
+      // paint more rows than the filtered list contains.
+      visible = Math.min(Math.max(1, items.length), Math.max(3, (stdout.rows || 30) - overhead - 1));
+      lines = visible + 1 + (toggle ? 1 : 0) + keyed.length; // message + visible choices (+ toggle rows)
+    };
+    layout();
+    let offset = Math.max(0, Math.min(index - visible + 1, items.length - visible));
+    let paintedLines = 0;
     const extraHints = [
       toggle ? 'tab toggle' : null,
       ...keyed.map((t) => `${t.key} ${t.shortLabel || 'toggle'}`)
     ].filter(Boolean);
     const hint = () => {
-      const pos = choices.length > visible ? ` · ${index + 1}/${choices.length}` : '';
-      return `\x1b[2m  ↑/↓ move · enter select${extraHints.length ? ' · ' + extraHints.join(' · ') : ''}${pos} · esc cancel\x1b[0m`;
+      const search = filterable
+        ? query
+          ? ` · filter: "${query}" ${items.length}/${allChoices.length} · backspace edit · esc clear`
+          : ` · type to filter ${allChoices.length}`
+        : '';
+      const pos = items.length > visible ? ` · ${index + 1}/${items.length}` : '';
+      return `\x1b[2m  ↑/↓ move · enter select${search}${extraHints.length ? ' · ' + extraHints.join(' · ') : ''}${pos} · esc cancel\x1b[0m`;
+    };
+
+    const applyFilter = () => {
+      const selected = items[index]?.value;
+      items = filterChoices(allChoices, query);
+      const preserved = items.findIndex((choice) => choice.value === selected);
+      index = preserved >= 0 ? preserved : 0;
+      offset = 0;
+      layout();
     };
 
     readline.emitKeypressEvents(stdin);
     stdin.setRawMode(true);
     stdin.resume();
+    restoreSeq = '\x1b[?25h\x1b[?7h';
+    stdout.write('\x1b[?25l');
 
     const toggleRow = () => renderToggleRow(toggle, on);
     const keyedRow = renderKeyedRow;
 
-    const paint = (first) => {
-      if (!first) {
-        readline.cursorTo(stdout, 0);
-        readline.moveCursor(stdout, 0, -lines);
-      }
-      readline.clearScreenDown(stdout);
-      stdout.write(`\x1b[1m${message}\x1b[0m\n`);
+    // mode: 'first' paints in place, 'repaint' overdraws the previous frame,
+    // 'fresh' wipes the screen (after a resize the old rows have rewrapped and
+    // the cursor-up math no longer holds). Autowrap is off while painting so a
+    // row longer than the terminal truncates instead of wrapping — a wrapped
+    // row would make the frame taller than `lines` and every repaint after it
+    // would leave a stale copy of the menu behind.
+    const paint = (mode) => {
+      if (index < offset) offset = index;
+      else if (index >= offset + visible) offset = index - visible + 1;
+      offset = Math.max(0, Math.min(offset, items.length - visible));
+      let out = '\x1b[?7l';
+      if (mode === 'repaint') out += `\r\x1b[${paintedLines}A`;
+      else if (mode === 'fresh') out += '\x1b[2J\x1b[H';
+      out += '\x1b[0J';
+      out += `\x1b[1m${message}\x1b[0m\n`;
       for (let i = offset; i < offset + visible; i++) {
-        const c = choices[i];
+        const c = items[i];
+        if (!c) {
+          out += `\x1b[2m   No matches for "${query}"\x1b[0m\n`;
+          continue;
+        }
         const label = c.label ?? c.name ?? String(c.value);
         const more =
           i === offset && offset > 0 ? ' \x1b[2m↑\x1b[0m'
-          : i === offset + visible - 1 && i < choices.length - 1 ? ' \x1b[2m↓\x1b[0m'
+          : i === offset + visible - 1 && i < items.length - 1 ? ' \x1b[2m↓\x1b[0m'
           : '';
         // The highlighted row is inverse over the plain label — embedded ANSI
         // resets would cut the highlight short and hurt readability.
-        stdout.write(i === index ? `\x1b[7m ❯ ${stripAnsi(label)} \x1b[0m${more}\n` : `   ${label}${more}\n`);
+        out += i === index ? `\x1b[7m ❯ ${stripAnsi(label)} \x1b[0m${more}\n` : `   ${label}${more}\n`;
       }
-      if (toggle) stdout.write(toggleRow() + '\n');
-      for (const t of keyed) stdout.write(keyedRow(t) + '\n');
-      stdout.write(hint());
+      if (toggle) out += toggleRow() + '\n';
+      for (const t of keyed) out += keyedRow(t) + '\n';
+      out += hint();
+      out += '\x1b[?7h';
+      stdout.write(out);
+      paintedLines = lines;
     };
 
+    // Terminals fire resize continuously while the window is dragged — a full
+    // clear+repaint per event strobes. Coalesce to one repaint per pause.
+    let resizeTimer = null;
+    const onResize = () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        layout();
+        paint('fresh');
+      }, 80);
+    };
+    stdout.on('resize', onResize);
+
     const cleanup = () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
       stdin.removeListener('keypress', onKey);
+      stdout.removeListener('resize', onResize);
       stdin.setRawMode(false);
       stdin.pause();
-      stdout.write('\n');
+      restoreSeq = null;
+      stdout.write('\x1b[?25h\x1b[?7h\n');
+    };
+
+    // Page/home/end jumps are clamped, not wrapped — wrapping past the end on
+    // a page jump is disorienting. Arrow keys keep their wrap-around.
+    const jump = (dir, step) => {
+      if (!items.length) return;
+      index = Math.max(0, Math.min(items.length - 1, index + dir * step));
+      paint('repaint');
     };
 
     const onKey = (str, key) => {
       if (!key) return;
-      if (key.name === 'up' || key.name === 'k') {
-        index = (index - 1 + choices.length) % choices.length;
-        if (index < offset) offset = index;
-        else if (index >= offset + visible) offset = index - visible + 1;
-        paint(false);
-      } else if (key.name === 'down' || key.name === 'j') {
-        index = (index + 1) % choices.length;
-        if (index < offset) offset = index;
-        else if (index >= offset + visible) offset = index - visible + 1;
-        paint(false);
+      const printable = !key.ctrl && !key.meta && typeof str === 'string' && [...str].length === 1 && str >= ' ';
+      const reserved = !query && (
+        key.name === 'j' ||
+        key.name === 'k' ||
+        keyed.some((item) => key.name === item.key || str === item.key) ||
+        (toggle && key.name === 'space')
+      );
+      if (filterable && key.name === 'backspace' && query) {
+        query = [...query].slice(0, -1).join('');
+        applyFilter();
+        paint('repaint');
+      } else if (filterable && key.ctrl && key.name === 'u' && query) {
+        query = '';
+        applyFilter();
+        paint('repaint');
+      } else if (filterable && printable && !reserved) {
+        query += str;
+        applyFilter();
+        paint('repaint');
+      } else if ((key.name === 'up' || key.name === 'k') && items.length) {
+        index = (index - 1 + items.length) % items.length;
+        paint('repaint');
+      } else if ((key.name === 'down' || key.name === 'j') && items.length) {
+        index = (index + 1) % items.length;
+        paint('repaint');
+      } else if (key.name === 'pageup') {
+        jump(-1, visible);
+      } else if (key.name === 'pagedown') {
+        jump(1, visible);
+      } else if (key.name === 'home') {
+        jump(-1, Infinity);
+      } else if (key.name === 'end') {
+        jump(1, Infinity);
       } else if (toggle && (key.name === 'tab' || key.name === 'space')) {
         on = !on;
-        paint(false);
+        paint('repaint');
       } else if (key.name === 'return' || key.name === 'enter') {
+        if (!items.length) {
+          stdout.write('\x07');
+          return;
+        }
         cleanup();
-        const choice = { ...choices[index] };
+        const choice = { ...items[index] };
         if (toggle) choice.toggleOn = on;
         if (keyed.length) choice.toggles = Object.fromEntries(keyed.map((t) => [t.name || t.key, t.value]));
         resolve(choice);
+      } else if (key.name === 'escape' && filterable && query) {
+        query = '';
+        applyFilter();
+        paint('repaint');
       } else if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
         cleanup();
         reject(new Error('cancelled'));
@@ -186,13 +332,13 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
         const t = keyed.find((item) => key.name === item.key || str === item.key);
         if (t) {
           t.value = !t.value;
-          paint(false);
+          paint('repaint');
         }
       }
     };
 
     stdin.on('keypress', onKey);
-    paint(true);
+    paint('first');
   });
 }
 
@@ -204,11 +350,13 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
 //                                       with a "loading…" placeholder
 //   - null / undefined / []             right column shows `detail` text instead
 // `childValue` preselects the child whose value matches (e.g. the last-used model).
+// `filterableChildren` lets typing narrow that choice's children by label/value.
 // A `{ divider: true }` entry renders as a rule across the left column and is
 // skipped by the cursor. `color` (an ANSI code like '\x1b[32m') tints a row.
 // `clearScreen` wipes the terminal before the first paint.
 //
-// Keys: ↑/↓ move in the focused column, →/← switch columns, enter selects.
+// Keys: ↑/↓ move in the focused column, pgup/pgdn page, home/end jump,
+// →/← switch columns, enter selects.
 // Enter on the left column takes the highlighted child as-is (or none).
 // Resolves { ...choice, child: {label,value}|null, childFocused, toggleOn?, toggles? };
 // rejects Error('cancelled') on Esc / Ctrl-C. `toggle`/`toggles` as in select().
@@ -229,24 +377,42 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     const labelOf = (c) => (c.divider ? '' : c.label ?? c.name ?? String(c.value));
 
     // Per-choice child state. `lazy` children load on first highlight.
-    const kids = choices.map((c) => ({
-      status:
-        c.divider ? 'none'
-        : typeof c.children === 'function' ? 'lazy'
-        : Array.isArray(c.children) && c.children.length ? 'ready'
-        : 'none',
-      items: Array.isArray(c.children) && !c.divider ? c.children : [],
-      index: 0,
-      offset: 0
-    }));
+    const kids = choices.map((c) => {
+      const items = Array.isArray(c.children) && !c.divider ? c.children : [];
+      return {
+        status:
+          c.divider ? 'none'
+          : typeof c.children === 'function' ? 'lazy'
+          : items.length ? 'ready'
+          : 'none',
+        allItems: items,
+        items,
+        query: '',
+        index: 0,
+        offset: 0
+      };
+    });
 
     const applyChildStart = (i) => {
       const k = kids[i];
       const want = choices[i].childValue;
       // '' is "nothing remembered", not a value to match.
-      if (want) k.index = Math.max(0, k.items.findIndex((x) => x.value === want));
+      const found = want ? k.items.findIndex((x) => x.value === want) : -1;
+      k.index = Math.max(0, selectableIndex(k.items, found >= 0 ? found : 0));
     };
     kids.forEach((_, i) => applyChildStart(i));
+
+    const applyChildFilter = (i) => {
+      const k = kids[i];
+      const selected = k.items[k.index]?.value;
+      k.items = filterChoices(k.allItems, k.query);
+      const preserved = k.items.findIndex((item) => item.value === selected);
+      k.index = Math.max(0, selectableIndex(k.items, preserved >= 0 ? preserved : 0));
+      k.offset = 0;
+    };
+
+    // The highlighted child, or null when the column is empty / on a divider.
+    const childAt = (k) => (k.status === 'ready' && !k.items[k.index]?.divider ? k.items[k.index] : null);
 
     const ensureLoaded = (i) => {
       const k = kids[i];
@@ -255,29 +421,41 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
       Promise.resolve()
         .then(() => choices[i].children())
         .then((items) => {
-          k.items = Array.isArray(items) ? items : [];
-          k.status = k.items.length ? 'ready' : 'none';
+          k.allItems = Array.isArray(items) ? items : [];
+          k.items = filterChoices(k.allItems, k.query);
+          k.status = k.allItems.length ? 'ready' : 'none';
           applyChildStart(i);
         })
         .catch(() => {
           k.status = 'none';
         })
         .finally(() => {
-          if (!finished && index === i) paint(false);
+          if (!finished && index === i) {
+            layout();
+            paint('repaint');
+          }
         });
     };
 
-    // ---- layout: fixed row count so the repaint cursor-up math stays valid ----
-    const cols = stdout.columns || 80;
-    const bannerRows = banner ? banner.split('\n').length : 0;
-    const overhead = 2 + bannerRows + (toggle ? 1 : 0) + keyed.length; // banner + message + hint (+ toggle rows)
-    const tallest = Math.max(choices.length, ...kids.map((k) => k.items.length));
-    const visible = Math.max(3, Math.min(tallest, (stdout.rows || 30) - overhead - 1));
-    const lines = visible + 1 + (toggle ? 1 : 0) + keyed.length;
-    // Left column hugs its widest label; the right column takes the rest.
-    const leftW = Math.min(Math.max(...choices.map((c) => visWidth(labelOf(c))), 10) + 2, Math.floor((cols - 4) / 2));
-    const rightW = Math.max(10, cols - leftW - 4);
+    // ---- layout: known row count so the repaint cursor-up math stays valid.
+    // Recomputed on terminal resize (which triggers a fresh full repaint). ----
+    let cols, visible, lines, leftW, rightW;
+    const layout = () => {
+      cols = stdout.columns || 80;
+      const bannerRows = banner ? banner.split('\n').length : 0;
+      const overhead = 2 + bannerRows + (toggle ? 1 : 0) + keyed.length; // banner + message + hint (+ toggle rows)
+      const tallest = Math.max(choices.length, ...kids.map((k) => k.items.length));
+      // At least 3 rows even on a tiny terminal, but never taller than the
+      // tallest column — extra rows would just paint blank.
+      visible = Math.min(tallest, Math.max(3, (stdout.rows || 30) - overhead - 1));
+      lines = visible + 1 + (toggle ? 1 : 0) + keyed.length;
+      // Left column hugs its widest label; the right column takes the rest.
+      leftW = Math.min(Math.max(...choices.map((c) => visWidth(labelOf(c))), 10) + 2, Math.floor((cols - 4) / 2));
+      rightW = Math.max(10, cols - leftW - 4);
+    };
+    layout();
     let leftOffset = 0;
+    let paintedLines = 0;
 
     const clampOffset = (offset, idx, len) => {
       if (idx < offset) offset = idx;
@@ -294,11 +472,19 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
       // Positions count real rows only, not dividers.
       const selPos = choices.slice(0, index + 1).filter((c) => !c.divider).length;
       const selTotal = choices.filter((c) => !c.divider).length;
+      const kidPos = k.items.slice(0, k.index + 1).filter((c) => !c.divider).length;
+      const kidTotal = k.items.filter((c) => !c.divider).length;
+      const kidAll = k.allItems.filter((c) => !c.divider).length;
       const pos = [
         choices.length > visible ? `${selPos}/${selTotal}` : null,
-        k.status === 'ready' && k.items.length > visible ? `→ ${k.index + 1}/${k.items.length}` : null
+        k.status === 'ready' && k.items.length > visible ? `→ ${kidPos}/${kidTotal}` : null
       ].filter(Boolean);
-      return `\x1b[2m  ↑/↓ move · →/← column · enter select${extraHints.length ? ' · ' + extraHints.join(' · ') : ''}${pos.length ? ' · ' + pos.join(' ') : ''} · esc cancel\x1b[0m`;
+      const search = choices[index].filterableChildren
+        ? k.query
+          ? ` · filter: "${k.query}" ${kidTotal}/${kidAll} · backspace edit · esc clear`
+          : ` · → then type to filter ${kidAll || ''}`.trimEnd()
+        : '';
+      return `\x1b[2m  ↑/↓ move · →/← column · enter select${search}${extraHints.length ? ' · ' + extraHints.join(' · ') : ''}${pos.length ? ' · ' + pos.join(' ') : ''} · esc cancel\x1b[0m`;
     };
 
     // cell(): fixed-width column cell. The focused selection is inverse video
@@ -311,20 +497,37 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
       return color ? `${color}${fit('  ' + stripAnsi(raw), width)}\x1b[0m` : fit('  ' + raw, width);
     };
 
+    // A divider row: a rule, or a labelled rule that names the group beneath it.
+    const dividerCell = (label, width) => {
+      const text = stripAnsi(label ?? '');
+      if (!text) return `\x1b[2m${'─'.repeat(width)}\x1b[0m`;
+      const rule = Math.max(0, width - visWidth(text) - 4);
+      return `\x1b[2m── ${text} ${'─'.repeat(rule)}\x1b[0m`;
+    };
+
     readline.emitKeypressEvents(stdin);
     stdin.setRawMode(true);
     stdin.resume();
+    restoreSeq = '\x1b[?25h\x1b[?7h';
+    stdout.write('\x1b[?25l');
 
-    const paint = (first) => {
-      if (first) {
-        if (clearScreen) stdout.write('\x1b[2J\x1b[H');
-        if (banner) stdout.write(banner + '\n');
+    // mode: 'first' honours clearScreen/banner, 'repaint' overdraws the
+    // previous frame, 'fresh' wipes the screen and repaints banner and all
+    // (used after a resize, when the old rows have rewrapped and the cursor-up
+    // math no longer holds). Autowrap is off while painting so a row longer
+    // than the terminal truncates instead of wrapping — a wrapped row would
+    // make the frame taller than `lines` and every repaint after it would
+    // leave a stale copy of the menu behind.
+    const paint = (mode) => {
+      let out = '\x1b[?7l';
+      if (mode === 'repaint') {
+        out += `\r\x1b[${paintedLines}A`;
       } else {
-        readline.cursorTo(stdout, 0);
-        readline.moveCursor(stdout, 0, -lines);
+        if (mode === 'fresh' || clearScreen) out += '\x1b[2J\x1b[H';
+        if (banner) out += banner + '\n';
       }
-      readline.clearScreenDown(stdout);
-      stdout.write(`\x1b[1m${message}\x1b[0m\n`);
+      out += '\x1b[0J';
+      out += `\x1b[1m${message}\x1b[0m\n`;
       const k = kids[index];
       leftOffset = clampOffset(leftOffset, index, choices.length);
       if (k.status === 'ready') k.offset = clampOffset(k.offset, k.index, k.items.length);
@@ -332,28 +535,58 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
         const li = leftOffset + r;
         const left =
           li >= choices.length ? ' '.repeat(leftW)
-          : choices[li].divider ? `\x1b[2m${'─'.repeat(leftW)}\x1b[0m`
+          : choices[li].divider ? dividerCell(choices[li].label, leftW)
           : cell(labelOf(choices[li]), leftW, li === index, focus === 'left', choices[li].color);
         let right = '';
         if (k.status === 'ready') {
-          const ri = k.offset + r;
-          if (ri < k.items.length) right = cell(labelOf(k.items[ri]), rightW, ri === k.index, focus === 'right');
+          if (!k.items.length && r === 0) {
+            right = `\x1b[2m  No matches for "${k.query}"\x1b[0m`;
+          } else {
+            const ri = k.offset + r;
+            const item = k.items[ri];
+            if (item) {
+              right = item.divider
+                ? dividerCell(item.label, rightW)
+                : cell(labelOf(item), rightW, ri === k.index, focus === 'right', item.color);
+            }
+          }
         } else if (r === 0) {
           right = k.status === 'none' ? `\x1b[2m  ${choices[index].detail || ''}\x1b[0m` : '\x1b[2m  loading…\x1b[0m';
         }
-        stdout.write(`${left} \x1b[2m│\x1b[0m ${right}\n`);
+        out += `${left} \x1b[2m│\x1b[0m ${right}\n`;
       }
-      if (toggle) stdout.write(renderToggleRow(toggle, on) + '\n');
-      for (const t of keyed) stdout.write(renderKeyedRow(t) + '\n');
-      stdout.write(hint());
+      if (toggle) out += renderToggleRow(toggle, on) + '\n';
+      for (const t of keyed) out += renderKeyedRow(t) + '\n';
+      out += hint();
+      out += '\x1b[?7h';
+      stdout.write(out);
+      paintedLines = lines;
     };
+
+    // Terminals fire resize continuously while the window is dragged — a full
+    // clear+repaint per event strobes. Coalesce to one repaint per pause.
+    let resizeTimer = null;
+    const onResize = () => {
+      if (finished) return;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        if (finished) return;
+        layout();
+        paint('fresh');
+      }, 80);
+    };
+    stdout.on('resize', onResize);
 
     const cleanup = () => {
       finished = true;
+      if (resizeTimer) clearTimeout(resizeTimer);
       stdin.removeListener('keypress', onKey);
+      stdout.removeListener('resize', onResize);
       stdin.setRawMode(false);
       stdin.pause();
-      stdout.write('\n');
+      restoreSeq = null;
+      stdout.write('\x1b[?25h\x1b[?7h\n');
     };
 
     const move = (dir) => {
@@ -364,38 +597,103 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
         ensureLoaded(index);
       } else {
         const k = kids[index];
-        k.index = (k.index + dir + k.items.length) % k.items.length;
+        // Wrap around the child list, stepping over group dividers. The counter
+        // bounds the walk so a list of nothing but dividers can't spin forever.
+        for (let n = 0; n < k.items.length; n++) {
+          k.index = (k.index + dir + k.items.length) % k.items.length;
+          if (!k.items[k.index]?.divider) break;
+        }
       }
-      paint(false);
+      layout();
+      paint('repaint');
+    };
+
+    // Page/home/end jump in the focused column. Clamped, not wrapped —
+    // wrapping past the end on a page jump is disorienting. If the landing
+    // row is a divider, keep going in the same direction (or back off it at
+    // a list boundary).
+    const jump = (dir, step) => {
+      if (focus === 'left') {
+        let i = Math.max(0, Math.min(choices.length - 1, index + dir * step));
+        while (choices[i].divider && i + dir >= 0 && i + dir < choices.length) i += dir;
+        while (choices[i].divider) i -= dir;
+        index = i;
+        ensureLoaded(index);
+      } else {
+        const k = kids[index];
+        if (k.items.length) {
+          const landed = Math.max(0, Math.min(k.items.length - 1, k.index + dir * step));
+          k.index = Math.max(0, selectableIndex(k.items, landed, dir));
+        }
+      }
+      layout();
+      paint('repaint');
     };
 
     const onKey = (str, key) => {
       if (!key) return;
-      if (key.name === 'up' || key.name === 'k') move(-1);
+      const k = kids[index];
+      const filterable = Boolean(choices[index].filterableChildren);
+      const printable = !key.ctrl && !key.meta && typeof str === 'string' && [...str].length === 1 && str >= ' ';
+      const reserved = !k.query && focus === 'left' && (
+        key.name === 'j' ||
+        key.name === 'k' ||
+        keyed.some((item) => key.name === item.key || str === item.key) ||
+        (toggle && key.name === 'space')
+      );
+      if (filterable && key.name === 'backspace' && k.query) {
+        k.query = [...k.query].slice(0, -1).join('');
+        applyChildFilter(index);
+        layout();
+        paint('repaint');
+      } else if (filterable && key.ctrl && key.name === 'u' && k.query) {
+        k.query = '';
+        applyChildFilter(index);
+        layout();
+        paint('repaint');
+      } else if (filterable && printable && !reserved) {
+        k.query += str;
+        focus = 'right';
+        applyChildFilter(index);
+        layout();
+        paint('repaint');
+      } else if (key.name === 'up' || key.name === 'k') move(-1);
       else if (key.name === 'down' || key.name === 'j') move(1);
+      else if (key.name === 'pageup') jump(-1, visible);
+      else if (key.name === 'pagedown') jump(1, visible);
+      else if (key.name === 'home') jump(-1, Infinity);
+      else if (key.name === 'end') jump(1, Infinity);
       else if (key.name === 'right') {
-        const k = kids[index];
         if (focus === 'left' && k.status === 'ready' && k.items.length) {
           focus = 'right';
-          paint(false);
+          paint('repaint');
         }
       } else if (key.name === 'left') {
         if (focus === 'right') {
           focus = 'left';
-          paint(false);
+          paint('repaint');
         }
       } else if (toggle && (key.name === 'tab' || key.name === 'space')) {
         on = !on;
-        paint(false);
+        paint('repaint');
       } else if (key.name === 'return' || key.name === 'enter') {
-        const k = kids[index];
+        if (filterable && focus === 'right' && !k.items.length) {
+          stdout.write('\x07');
+          return;
+        }
         cleanup();
         const choice = { ...choices[index] };
-        choice.child = k.status === 'ready' && k.items.length ? { ...k.items[k.index] } : null;
+        const child = childAt(k);
+        choice.child = child ? { ...child } : null;
         choice.childFocused = focus === 'right';
         if (toggle) choice.toggleOn = on;
         if (keyed.length) choice.toggles = Object.fromEntries(keyed.map((t) => [t.name || t.key, t.value]));
         resolve(choice);
+      } else if (key.name === 'escape' && filterable && k.query) {
+        k.query = '';
+        applyChildFilter(index);
+        layout();
+        paint('repaint');
       } else if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
         cleanup();
         reject(new Error('cancelled'));
@@ -403,14 +701,14 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
         const t = keyed.find((item) => key.name === item.key || str === item.key);
         if (t) {
           t.value = !t.value;
-          paint(false);
+          paint('repaint');
         }
       }
     };
 
     stdin.on('keypress', onKey);
     ensureLoaded(index);
-    paint(true);
+    paint('first');
   });
 }
 
@@ -490,6 +788,9 @@ export function promptHidden(message) {
         stdout.write('\n');
         resolve(value.trim());
       } else if (key && key.ctrl && key.name === 'c') {
+        stdin.removeListener('keypress', onKey);
+        stdin.setRawMode(false);
+        stdin.pause();
         stdout.write('\n');
         process.exit(130);
       } else if (key && key.name === 'backspace') {

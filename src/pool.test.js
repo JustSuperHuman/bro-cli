@@ -11,8 +11,9 @@ test('profile usage preserves the limits users use to choose an account', () => 
   });
 
   expect(usage).toEqual({ session: 17, weekly: 28, fable: 53 });
-  expect(accountLabel({ name: 'James', authenticated: true, subscriptionType: 'max', usageStats: usage }))
-    .toContain('5h 17% · week 28% · Fable 53%');
+  const plain = accountLabel({ name: 'James', authenticated: true, subscriptionType: 'max', usageStats: usage })
+    .replace(/\x1b\[[0-9;]*m/g, '');
+  expect(plain).toContain('5h 17% · wk 28% · Fable 53%');
 });
 
 test('a stats outage does not hide or disable an authenticated profile', () => {

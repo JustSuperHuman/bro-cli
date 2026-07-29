@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { which, globalBinDirs, runInherit } from './proc.js';
 import { select, prompt, holdOrContinue } from './ui.js';
 import { launchOmp } from './launch.js';
+import { listSessions, sessionLabel } from './sessions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const POOL_ROOT = path.join(__dirname, '..', 'pool');
@@ -26,6 +27,8 @@ const POOL_ENTRY = path.join(POOL_ROOT, 'src', 'index.ts');
 const DEFAULT_PORT = 3456;
 const POOL_DIR = process.env.CLAUDE_POOL_DIR || path.join(os.homedir(), '.claude-max-pool');
 const ACCOUNTS_DIR = path.join(POOL_DIR, 'accounts');
+// Claude Code's own config dir — the login used when no profile is selected.
+const DEFAULT_CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const PROXY_LOG = path.join(os.homedir(), '.bro', 'pool-proxy.log');
 const OAUTH_TOKEN_URL = process.env.CLAUDE_OAUTH_TOKEN_URL || 'https://platform.claude.com/v1/oauth/token';
 const OAUTH_CLIENT_ID = process.env.CLAUDE_OAUTH_CLIENT_ID || '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
@@ -192,13 +195,54 @@ async function loadAccountUsages(accounts) {
 // Account list for the two-column picker's right pane: one entry per profile
 // with live usage stats in the label, plus a manage entry (empty value) that
 // falls through to the full account menu.
+//
+// Below the profiles come the sessions those profiles can resume — this
+// project's first, then everything else with its path, all reachable by typing
+// to filter. A session row carries the profile that owns it, so picking one
+// resumes it under the right login (and in the right directory) without the
+// user having to remember which account they were on.
 export async function accountProfileChoices() {
   let accounts = listAccounts();
   if (accounts.some((a) => a.authenticated)) accounts = await loadAccountUsages(accounts);
-  return [
+
+  const rows = [
     ...accounts.map((a) => ({ label: accountLabel(a), value: a.name })),
     { label: 'Log in / manage accounts…', value: '' }
   ];
+
+  let sessions = [];
+  try {
+    sessions = await listSessions({
+      sources: [
+        // The machine's own Claude login owns sessions too — a profile can't
+        // resume them (different config dir), so they run without one.
+        { account: null, configDir: DEFAULT_CLAUDE_DIR },
+        ...accounts
+          .filter((a) => a.authenticated)
+          .map((a) => ({ account: a.name, configDir: accountDirFor(a.name) }))
+      ]
+    });
+  } catch {
+    // Session history is a convenience — never let it cost you the account menu.
+    return rows;
+  }
+
+  const toRow = (s, showPath) => ({
+    label: sessionLabel(s, { showPath }),
+    value: { kind: 'session', id: s.id, account: s.account, cwd: s.cwd, title: s.title },
+    // Searchable beyond the visible label: the id (pasted from elsewhere) and
+    // the full path, which the row may have shortened to fit.
+    filterText: `${s.id} ${s.cwd} ${s.branch} ${s.account}`
+  });
+  const current = sessions.filter((s) => s.current);
+  const others = sessions.filter((s) => !s.current);
+  if (current.length) {
+    rows.push({ divider: true, label: 'resume · this project' }, ...current.map((s) => toRow(s, false)));
+  }
+  if (others.length) {
+    rows.push({ divider: true, label: 'resume · other projects' }, ...others.map((s) => toRow(s, true)));
+  }
+  return rows;
 }
 
 async function chooseAccountProfile(preferredName) {
@@ -443,25 +487,37 @@ function poolOmpProvider(baseUrl, models) {
   };
 }
 
-export async function runAccountProfile({ accountName = '', model = '', extraArgs = [], skipPermissions = true, dryRun = false } = {}) {
+// `session` (from the picker's resume rows) adds --resume and runs claude in
+// that session's own directory, so resuming a session from another project
+// lands in that project instead of wherever bro was started.
+export async function runAccountProfile({ accountName = '', model = '', extraArgs = [], skipPermissions = true, session = null, dryRun = false } = {}) {
   const accounts = listAccounts();
+  const resumeArgs = session?.id ? ['--resume', session.id] : [];
+  const cwd = session?.cwd && session.cwd !== process.cwd() ? session.cwd : undefined;
+  // A session from the machine's own Claude login (no profile) has to run
+  // against that login's config dir — a profile simply doesn't have the
+  // transcript, so --resume would fail to find it.
+  const local = Boolean(session && !session.account);
 
   if (dryRun) {
     const account = accountName ? accounts.find((a) => a.name === accountName) : null;
     return {
-      via: 'claude account profile',
+      via: local ? 'claude local login' : 'claude account profile',
       poolDir: POOL_DIR,
-      account: accountName || '(menu)',
+      account: local ? '(this machine)' : accountName || '(menu)',
       accounts,
+      ...(session ? { resume: session.id, cwd: session.cwd } : {}),
       claude: {
         cmd: which('claude', globalBinDirs()) || 'claude',
-        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(model ? ['--model', model] : []), ...extraArgs],
-        env: account ? { CLAUDE_CONFIG_DIR: accountDirFor(account.name) } : { CLAUDE_CONFIG_DIR: '(selected account profile)' }
+        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(model ? ['--model', model] : []), ...resumeArgs, ...extraArgs],
+        env: local
+          ? { CLAUDE_CONFIG_DIR: '(unset — this machine\'s login)' }
+          : account ? { CLAUDE_CONFIG_DIR: accountDirFor(account.name) } : { CLAUDE_CONFIG_DIR: '(selected account profile)' }
       }
     };
   }
 
-  const account = await chooseAccountProfile(accountName);
+  const account = local ? { name: 'this machine' } : await chooseAccountProfile(accountName);
   if (!account) {
     console.log('Cancelled.');
     return 0;
@@ -470,7 +526,10 @@ export async function runAccountProfile({ accountName = '', model = '', extraArg
   const claude = which('claude', globalBinDirs());
   if (!claude) throw new Error('The `claude` CLI was not found. Install Claude Code: https://claude.com/claude-code');
 
-  const env = { ...process.env, CLAUDE_CONFIG_DIR: accountDirFor(account.name) };
+  // Local sessions inherit CLAUDE_CONFIG_DIR from the environment — that is
+  // where they were found, so it is where --resume has to look.
+  const env = { ...process.env };
+  if (!local) env.CLAUDE_CONFIG_DIR = accountDirFor(account.name);
   for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_DISABLE_1M_CONTEXT']) {
     delete env[k];
   }
@@ -479,10 +538,19 @@ export async function runAccountProfile({ accountName = '', model = '', extraArg
   const claudeArgs = [];
   if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
   if (model) claudeArgs.push('--model', model);
-  claudeArgs.push(...extraArgs);
+  claudeArgs.push(...resumeArgs, ...extraArgs);
 
-  console.log(`\nLaunching Claude Code as ${account.name}${model ? ' / ' + model : ''}...\n`);
-  return runInherit(claude, claudeArgs, env);
+  if (cwd && !fs.existsSync(cwd)) {
+    console.error(`\nThat session's directory is gone: ${cwd}`);
+    return 1;
+  }
+
+  const title = String(session?.title || session?.id || '');
+  const banner = session
+    ? `Resuming “${title.length > 60 ? title.slice(0, 59) + '…' : title}”`
+    : 'Launching Claude Code';
+  console.log(`\n${banner} as ${account.name}${model ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}...\n`);
+  return runInherit(claude, claudeArgs, env, { cwd });
 }
 
 export async function runPool({ model = '', extraArgs = [], skipPermissions = true, harness = 'claude', dryRun = false } = {}) {

@@ -18,6 +18,8 @@ Usage:
   bro -p pool            Multiple Claude Account Proxy — pool many Claude
                          plans, then launch Claude Code across them
   bro account [name]     Pick/run one logged-in Claude account profile
+                         (plain "bro" lists resumable sessions under the
+                         profiles too — type to search them)
   bro accounts list      List pool accounts
   bro accounts login <name>
                          Add/log in a Claude account for the pool
@@ -220,7 +222,8 @@ export async function main(argv) {
         }));
       }
       if (p.id === 'openrouter') return async () => modelChildren((await loadOpenRouterModels()) || p.models);
-      // Account profiles with live usage stats (5h/week/Fable) in the right pane.
+      // Account profiles with live usage stats (5h/week/Fable) in the right
+      // pane, followed by the sessions those profiles can resume.
       if (p.mode === 'account') return accountProfileChoices;
       return (p.models || []).length ? modelChildren(p.models) : null;
     };
@@ -238,6 +241,7 @@ export async function main(argv) {
       color: configured ? '\x1b[32m' : '',
       detail: tagOf(p),
       children: childrenFor(p),
+      filterableChildren: p.id === 'openrouter' || p.mode === 'account',
       childValue: lastModelFor(p.id)
     });
     const ready = providers.filter((p) => isConfigured(p));
@@ -304,10 +308,10 @@ export async function main(argv) {
     model = picked.child.value;
   }
 
-  // OpenRouter: swap in the live catalogue (Anthropic, OpenAI, Moonshot, GLM)
-  // when the model still has to be chosen here (-p path) or omp needs the
-  // current model list. On fetch failure the cached copy is used; failing
-  // that, the static list from models.json stays.
+  // OpenRouter: swap in its complete live catalogue when the model still has
+  // to be chosen here (-p path) or omp needs the current model list. On fetch
+  // failure the cached copy is used; failing that, the static list from
+  // models.json stays.
   if (provider.id === 'openrouter' && !args.dryRun && (model == null || harness === 'omp')) {
     if (isInteractive) process.stdout.write('\x1b[2mFetching OpenRouter models…\x1b[0m\r');
     const live = await loadOpenRouterModels();
@@ -325,6 +329,7 @@ export async function main(argv) {
         message: `Choose a model for ${provider.name || provider.id}:`,
         startIndex: lastM != null ? Math.max(0, models.findIndex((m) => (m.id ?? '') === lastM)) : 0,
         choices: models.map((m) => ({ label: modelLabel(m), value: m.id ?? '' })),
+        filterable: provider.id === 'openrouter',
         toggle: { label: 'Skip permissions', value: skip },
         toggles: [{
           key: 'h',
@@ -361,12 +366,17 @@ export async function main(argv) {
   // Account profile: launch standard Claude Code using one isolated logged-in
   // account directory. This is a direct login switch, not the multi-account pool.
   if (provider.mode === 'account') {
-    const accountName = args.account || picked?.child?.value || '';
+    // The right column mixes profiles (a string name) with resumable sessions
+    // (an object). A session already knows the profile that owns it.
+    const child = picked?.child?.value;
+    const session = child && typeof child === 'object' && child.kind === 'session' ? child : null;
+    const accountName = args.account || session?.account || (typeof child === 'string' ? child : '');
     // Remember the account (not a model) so the picker preselects it next time.
     if (!args.dryRun) rememberSelection(provider.id, accountName, 'claude');
     const result = await runAccountProfile({
       accountName,
       model,
+      session,
       extraArgs: args._,
       skipPermissions: skip,
       dryRun: args.dryRun

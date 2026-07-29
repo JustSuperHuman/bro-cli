@@ -43,8 +43,10 @@ function winQuote(a) {
 }
 
 // Spawn inheriting stdio. Handles Windows .cmd/.bat shims (npm), which can't be
-// spawned directly. Resolves with the child's exit code.
-export function runInherit(file, args, env = process.env) {
+// spawned directly. `cwd` runs the child in another directory (resuming a
+// session from a different project) without moving bro's own process.
+// Resolves with the child's exit code.
+export function runInherit(file, args, env = process.env, { cwd } = {}) {
   return new Promise((resolve) => {
     const ext = path.extname(file).toLowerCase();
     let child;
@@ -53,10 +55,11 @@ export function runInherit(file, args, env = process.env) {
       child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], {
         stdio: 'inherit',
         env,
+        cwd,
         windowsVerbatimArguments: true
       });
     } else {
-      child = spawn(file, args, { stdio: 'inherit', env });
+      child = spawn(file, args, { stdio: 'inherit', env, cwd });
     }
     child.on('exit', (code) => resolve(code ?? 0));
     child.on('error', (err) => {

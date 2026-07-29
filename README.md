@@ -20,7 +20,7 @@ bro
 ```
 
 1. Scroll to a **provider** and press enter.
-2. Scroll to a **model** and press enter. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there.
+2. Scroll to a **model** and press enter. OpenRouter loads its complete live model catalog; move to its model column and type to filter by model name or id. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there.
 3. First time on a paid provider it asks for an API key and saves it.
 
 Your last provider + model are remembered and pre-selected next time (per provider).
@@ -73,6 +73,22 @@ Profiles are the same standard Claude Code logins stored under
 `CLAUDE_CONFIG_DIR` for that Claude launch and does not overwrite `~/.claude`.
 The interactive profile menu shows each account's current five-hour, weekly,
 and Fable usage before you choose one.
+
+### Resuming a session
+
+Under the profiles in that same menu are the sessions you can pick up again —
+this project's first, then every other project's with its path. Start typing to
+search all of them at once by prompt, project path, git branch, profile, or
+session id.
+
+Each row knows which login owns it (`local` is this machine's own Claude login,
+the rest are pool profiles), so a session resumes under the right account
+without you having to remember which one you were on. Choosing a session from
+another project runs Claude in *that* project's directory.
+
+Session history is read from `~/.claude/projects/` and each profile's own
+`projects/` directory, and cached in `~/.bro/sessions.cache.json` — the first
+scan takes a moment, later ones are instant.
 
 **Failover:** when the serving account's usage/rate limit runs out before any output has streamed, the pool transparently sidelines it and retries the turn on the next account — you just keep going. Set `CLAUDE_POOL_BACKEND=cli` to use the older subprocess backend. Requires Bun (`bro` finds it automatically; install from [bun.sh](https://bun.sh)). See [`pool/README.md`](./pool/README.md) for the pool's own docs, endpoints, and configuration.
 
