@@ -4,6 +4,11 @@
 // stores credentials at ~/.bro/codex-auth.json in Codex's own auth.json format.
 // If the Codex CLI *is* installed and logged in, its ~/.codex/auth.json is
 // reused automatically instead of asking the user to sign in again.
+//
+// Every entry point takes an optional Codex home directory (a login profile —
+// see codex-profiles.js). Given one, credentials are read from and written to
+// that profile's auth.json alone, which is the same file the codex CLI reads
+// when it runs with CODEX_HOME pointed there: one sign-in serves both.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,8 +24,16 @@ const CALLBACK_PORT = 1455; // must match the client's registered redirect URI
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/auth/callback`;
 
 export const BRO_AUTH_PATH = path.join(BRO_DIR, 'codex-auth.json');
-const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-const CODEX_CLI_AUTH_PATH = path.join(CODEX_HOME, 'auth.json');
+const defaultCodexHome = () => process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+
+// Where to look for credentials. A profile keeps its own auth.json and nothing
+// else is consulted; the local login falls back to bro's own file, which is
+// where `bro codex login` signs in without disturbing the codex CLI's.
+const authPaths = (home) =>
+  home ? [path.join(home, 'auth.json')] : [BRO_AUTH_PATH, path.join(defaultCodexHome(), 'auth.json')];
+
+// The file a fresh sign-in should be written to.
+export const authPathFor = (home) => (home ? path.join(home, 'auth.json') : BRO_AUTH_PATH);
 
 function readJson(p) {
   try {
@@ -47,10 +60,11 @@ function accountIdFromTokens(tokens) {
   return null;
 }
 
-// Load stored credentials: bro's own file first, then the Codex CLI's.
+// Load stored credentials for a login: a profile's auth.json, or — for the
+// local login — bro's own file first, then the Codex CLI's.
 // Returns { accessToken, refreshToken, accountId, path } or null.
-export function loadCodexAuth() {
-  for (const p of [BRO_AUTH_PATH, CODEX_CLI_AUTH_PATH]) {
+export function loadCodexAuth(home = '') {
+  for (const p of authPaths(home)) {
     const tokens = readJson(p)?.tokens;
     if (tokens?.access_token && tokens?.refresh_token) {
       return {
@@ -64,8 +78,8 @@ export function loadCodexAuth() {
   return null;
 }
 
-export function isCodexLoggedIn() {
-  return loadCodexAuth() != null;
+export function isCodexLoggedIn(home = '') {
+  return loadCodexAuth(home) != null;
 }
 
 // Persist tokens back to whichever file they came from, preserving the Codex
@@ -79,7 +93,7 @@ function saveTokens(file, tokens) {
   fs.writeFileSync(file, JSON.stringify(existing, null, 2));
 }
 
-async function refreshTokens(auth) {
+async function refreshTokens(auth, home = '') {
   const res = await fetch(`${ISSUER}/oauth/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -98,24 +112,27 @@ async function refreshTokens(auth) {
     ...(body.refresh_token ? { refresh_token: body.refresh_token } : {}),
     ...(body.id_token ? { id_token: body.id_token } : {})
   });
-  return loadCodexAuth();
+  return loadCodexAuth(home);
 }
 
 // Return credentials with a non-expired access token, refreshing (and
 // persisting) when it expires within the next minute. `force` skips the
 // expiry check — used after an upstream 401.
-export async function freshCodexAuth({ force = false } = {}) {
-  let auth = loadCodexAuth();
+export async function freshCodexAuth({ force = false, home = '' } = {}) {
+  let auth = loadCodexAuth(home);
   if (!auth) throw new Error('Not logged in to a ChatGPT subscription. Run: bro codex login');
   const exp = jwtPayload(auth.accessToken)?.exp;
-  if (force || (exp && exp * 1000 < Date.now() + 60_000)) auth = await refreshTokens(auth);
+  if (force || (exp && exp * 1000 < Date.now() + 60_000)) auth = await refreshTokens(auth, home);
   return auth;
 }
 
-export function codexLogout() {
+// Sign a login out by dropping its stored credentials. Only bro's own file
+// and profile auth.json files are ever removed — the codex CLI's own login is
+// bro's to read, not to delete.
+export function codexLogout(home = '') {
   let removed = false;
   try {
-    fs.unlinkSync(BRO_AUTH_PATH);
+    fs.unlinkSync(authPathFor(home));
     removed = true;
   } catch {
     /* nothing stored */
@@ -137,8 +154,9 @@ function openBrowser(url) {
 }
 
 // Interactive PKCE login: starts the localhost callback server, opens the
-// browser sign-in, exchanges the code, and stores tokens at BRO_AUTH_PATH.
-export async function codexLogin({ timeoutMs = 10 * 60 * 1000 } = {}) {
+// browser sign-in, exchanges the code, and stores tokens for the chosen login
+// — a profile's own auth.json, or bro's file when there is no profile.
+export async function codexLogin({ timeoutMs = 10 * 60 * 1000, home = '' } = {}) {
   const verifier = crypto.randomBytes(64).toString('base64url');
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
   const state = crypto.randomBytes(32).toString('base64url');
@@ -217,15 +235,16 @@ export async function codexLogin({ timeoutMs = 10 * 60 * 1000 } = {}) {
     refresh_token: body.refresh_token
   };
   tokens.account_id = accountIdFromTokens(tokens);
-  saveTokens(BRO_AUTH_PATH, tokens);
+  const file = authPathFor(home);
+  saveTokens(file, tokens);
 
   const plan = jwtPayload(body.id_token)?.['https://api.openai.com/auth']?.chatgpt_plan_type;
-  console.log(`Logged in to ChatGPT${plan ? ` (${plan} plan)` : ''}. Credentials saved to ${BRO_AUTH_PATH}`);
-  return loadCodexAuth();
+  console.log(`Logged in to ChatGPT${plan ? ` (${plan} plan)` : ''}. Credentials saved to ${file}`);
+  return loadCodexAuth(home);
 }
 
-export function codexAuthStatus() {
-  const auth = loadCodexAuth();
+export function codexAuthStatus(home = '') {
+  const auth = loadCodexAuth(home);
   if (!auth) return { loggedIn: false };
   const claim = jwtPayload(auth.accessToken)?.['https://api.openai.com/auth'] || {};
   return {

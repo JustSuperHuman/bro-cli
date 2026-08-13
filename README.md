@@ -20,7 +20,7 @@ bro
 ```
 
 1. Scroll to a **provider** and press enter.
-2. Scroll to a **model** and press enter. OpenRouter loads its complete live model catalog; move to its model column and type to filter by model name or id. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there.
+2. Scroll to a **model** and press enter. OpenRouter loads its complete live model catalog; move to its model column and type to filter by model name or id. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there, and **h** to rotate the harness (Claude Code · omp · codex).
 3. First time on a paid provider it asks for an API key and saves it.
 
 Your last provider + model are remembered and pre-selected next time (per provider).
@@ -81,10 +81,11 @@ this project's first, then every other project's with its path. Start typing to
 search all of them at once by prompt, project path, git branch, profile, or
 session id.
 
-Each row knows which login owns it (`local` is this machine's own Claude login,
-the rest are pool profiles), so a session resumes under the right account
-without you having to remember which one you were on. Choosing a session from
-another project runs Claude in *that* project's directory.
+After you choose a session, `bro` asks which login should resume it and
+preselects its owner (`local` is this machine's own Claude login; the rest are
+pool profiles). Choosing another profile creates a fork there, leaving the
+original profile's session untouched. A session from another project still
+runs Claude in *that* project's directory.
 
 Session history is read from `~/.claude/projects/` and each profile's own
 `projects/` directory, and cached in `~/.bro/sessions.cache.json` — the first
@@ -98,7 +99,7 @@ scan takes a moment, later ones are instant.
 
 How it works:
 
-1. **Login** — a built-in ChatGPT OAuth sign-in (the same flow the Codex CLI uses) opens in your browser and stores credentials at `~/.bro/codex-auth.json`. If you already have the Codex CLI logged in, that login is reused automatically. Tokens are refreshed on their own as they expire.
+1. **Login** — a built-in ChatGPT OAuth sign-in (the same flow the Codex CLI uses) opens in your browser and stores credentials at `~/.bro/codex-auth.json`. If you already have the Codex CLI logged in, that login is reused automatically. Tokens are refreshed on their own as they expire. Several ChatGPT accounts? See [Codex profiles](#codex-profiles).
 2. **Models** — the list is fetched live from your subscription, so it always matches what you can actually run (GPT‑5.6‑Sol, GPT‑5.5, Codex‑Spark, …). Falls back to a cache, then a small built-in list, when offline.
 3. **Bridge** — `bro` starts a tiny local Anthropic-compatible server that translates Claude Code's `/v1/messages` calls into OpenAI Responses-API calls against the ChatGPT Codex backend, and streams the answers back (tool calls, thinking, and usage all mapped through). It's pure Node — nothing to install.
 4. **Launch** — Claude Code runs pointed at the bridge (`ANTHROPIC_BASE_URL`). Pick a model in the usual menu (Tab toggles skip-permissions); `-m <model>` skips it. When Claude exits, the bridge is torn down.
@@ -107,12 +108,95 @@ How it works:
 bro -p codex              # pick a GPT-5.x model, launch Claude Code on it
 bro -p codex -m gpt-5.5   # skip the menu
 bro -p codex --omp        # use the omp harness instead of Claude Code
-bro codex login           # log in / switch ChatGPT account
+bro -p codex --codex      # run the codex CLI itself (no bridge, no model menu)
 bro codex status          # show login + plan
-bro codex logout          # remove stored credentials
 ```
 
 Add `:effort` to a model to set reasoning depth, e.g. `bro -p codex -m gpt-5.6-sol:high`. This impersonates a Codex client to a subscription backend, which is outside OpenAI's normal API terms — use it on your own account at your own discretion.
+
+### Codex profiles
+
+Codex switches logins the same way Claude does, because it keeps its state the
+same way: everything for one login — credentials, sessions, settings, history —
+lives in one directory, `CODEX_HOME`. So a **Codex profile** is another such
+directory under `~/.bro/codex-profiles/<name>`, and `bro` switches by pointing
+`CODEX_HOME` at it for that launch. Your own `~/.codex` is never written to.
+
+A new profile starts as a copy of your codex settings (`config.toml`,
+`AGENTS.md`, prompts, skills, hooks) so it behaves like the codex you already
+configured, then goes its own way with its own ChatGPT login and its own
+sessions. The sign-in is `bro`'s own OAuth flow writing that profile's
+`auth.json` — the same file the `codex` CLI reads when it runs there, so one
+sign-in serves both the CLI and the bridge.
+
+```sh
+bro codex                 # pick a profile or session (like bro account)
+bro codex work            # run codex under the "work" profile
+bro codex profiles        # list profiles and where they live
+bro codex login work      # sign a new/existing profile in
+bro codex import primary  # copy this machine's Codex login into a profile
+bro codex status work     # login state and plan for one profile
+bro codex logout work     # drop that profile's credentials
+bro codex remove work     # delete the profile, sessions and all
+bro -p codex --account work --codex   # launch a profile straight from the menus
+```
+
+Profiles show up in the Codex row's right-hand column with their plan, exactly
+like Claude accounts show theirs — this machine's login first, then each
+profile, then the sessions they can resume.
+
+### Resuming a Codex session
+
+Under those profiles are the Codex sessions you can pick up again — this
+project's first, then every other project's with its path. Start typing to
+search all of them at once by prompt, project path, git branch, profile, or
+session id.
+
+After you choose one, `bro` asks which login should resume it and preselects its
+owner. Choosing another profile stages a copy there and runs `codex fork`, so
+the original login's conversation is left exactly as it was and the continuation
+becomes a new session under the profile you picked. A session from another
+project still runs codex in *that* project's directory. This happens whichever
+harness the toggle is showing: a Codex rollout is a codex conversation, and only
+the codex CLI can read it back.
+
+```sh
+bro codex resume          # the same list on its own
+bro codex resume <id>     # straight back into one you already know
+```
+
+Sessions are read from `~/.codex/sessions/` (or `$CODEX_HOME`) plus each
+profile's own `sessions/`, and cached in `~/.bro/codex-sessions.cache.json` —
+the first scan takes a moment, later ones are instant. Sub-agent threads and
+`codex exec` runs are left out: codex's own picker hides them too, and neither
+is a conversation you can pick up.
+
+## Harnesses
+
+The `[h]` switch under both menus rotates through the coding agent `bro`
+launches, and the choice sticks until you change it:
+
+| Harness | What runs | Works with |
+| --- | --- | --- |
+| `CLAUDE` | Claude Code (default) | every provider |
+| `OMP` | [omp](https://omp.sh/), which picks its own model | every provider |
+| `CODEX` | the `codex` CLI | your ChatGPT login, or a provider serving OpenAI's Responses API |
+
+```sh
+bro --claude              # force Claude Code for this launch
+bro --omp                 # force omp
+bro --codex               # force the codex CLI
+bro --harness codex       # same, long form (claude | omp | codex)
+```
+
+Codex is the narrow one: as of codex 0.147 it speaks only OpenAI's Responses
+API, so it runs on your ChatGPT subscription or against an OpenAI-format
+provider that serves `/responses` — `bro` writes that provider into codex's
+config for the one run (`-c model_providers.…`, key passed by environment
+variable) and never touches `~/.codex/config.toml`. Anthropic-shaped providers
+— native Claude, the account pool, OpenRouter, Z.ai — have no route into codex
+and are refused up front rather than failing mid-turn. Skip-permissions maps to
+codex's `--dangerously-bypass-approvals-and-sandbox`.
 
 ## 🎨 Image Gen
 
@@ -153,6 +237,9 @@ Claude is next in the list and runs **natively** (your normal Claude login — n
 bro -p pool               # Multiple Claude Account Proxy (pool many plans)
 bro account work          # launch Claude using one logged-in account profile
 bro -p codex              # Codex on your ChatGPT subscription (live model list)
+bro codex                 # pick a Codex profile or session
+bro codex resume          # resume a Codex session
+bro --codex               # launch the codex CLI as the harness (also --omp)
 bro -p sakana -m fugu     # skip the menus
 bro --list                # list every provider + model
 bro update                # refresh the model list from GitHub, cache it locally

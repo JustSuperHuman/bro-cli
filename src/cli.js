@@ -5,9 +5,9 @@ import { select, selectColumns, promptHidden, isInteractive } from './ui.js';
 import { launch } from './launch.js';
 import { runPool, runPoolAccounts, runAccountProfile, accountProfileChoices, POOL_PROVIDER, ACCOUNT_PROVIDER } from './pool.js';
 import { runImageGen, imageHelp, mergeImageApis, IMAGE_PROVIDER } from './imagegen.js';
-import { runCodex, runCodexCommand, CODEX_PROVIDER } from './codex.js';
+import { runCodex, runCodexCommand, codexProfileChoices, CODEX_PROVIDER } from './codex.js';
 import { runTokenReport } from './token-report.js';
-import { rememberSelection, lastProvider, lastModelFor, lastHarness } from './state.js';
+import { rememberSelection, lastProvider, lastModelFor, lastProfileFor, lastHarness } from './state.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
@@ -18,8 +18,7 @@ Usage:
   bro -p pool            Multiple Claude Account Proxy — pool many Claude
                          plans, then launch Claude Code across them
   bro account [name]     Pick/run one logged-in Claude account profile
-                         (plain "bro" lists resumable sessions under the
-                         profiles too — type to search them)
+                         (sessions are listed too; choose their resume profile)
   bro accounts list      List pool accounts
   bro accounts login <name>
                          Add/log in a Claude account for the pool
@@ -32,16 +31,31 @@ Usage:
   bro -p codex           Run Claude Code on your ChatGPT subscription — logs
                          in, fetches the live model list, and bridges through a
                          local Anthropic-compatible server (no codex CLI needed)
-  bro codex login        Log in to (or switch) your ChatGPT subscription
-  bro codex status       Show ChatGPT subscription login status
-  bro codex logout       Remove stored ChatGPT credentials
+                         (Codex profiles and their sessions are listed too)
+  bro codex [name]       Pick a Codex profile or session (like bro account),
+                         or run the codex CLI under the named profile
+  bro codex profiles     List Codex login profiles
+  bro codex login [name] Log in a ChatGPT account (name = a profile of its own)
+  bro codex import <name>
+                         Copy this machine's Codex login into a profile
+  bro codex remove <name>
+                         Delete a Codex profile (its login and sessions)
+  bro codex resume [id]  Resume a Codex session (picker when no id given)
+  bro codex status [name]
+                         Show login status for a profile / this machine
+  bro codex logout [name]
+                         Remove stored ChatGPT credentials
   bro tokens             Lifetime tokens for all Claude profiles + Codex
   bro -p <provider>      Skip the provider menu (id or name)
-  bro --account <name>   Launch Claude with a logged-in account profile
+  bro --account <name>   Launch with a logged-in profile (Claude, or the Codex
+                         profile of that name with -p codex)
   bro -m <model>         Skip the model menu (use with -p)
-  bro --harness <name>   Choose harness: claude (default) or omp
+  bro --harness <name>   Choose harness: claude (default), omp or codex
   bro --omp              Launch with omp instead of Claude Code; bro sets up
                          the provider and omp picks the model (-m overrides)
+  bro --codex            Launch the codex CLI instead of Claude Code (your
+                         ChatGPT login, or a provider serving OpenAI's
+                         Responses API)
   bro -l, --list         List every provider and model
   bro update             Refresh the model list from GitHub and cache it
   bro --dry-run          Show what would run; launch nothing
@@ -64,11 +78,15 @@ function parseArgs(argv) {
     const t = argv[i];
     if (t === '--') { a._.push(...argv.slice(i + 1)); break; }
     if (t === '--provider' || t === '-p') a.provider = argv[++i];
-    else if (t === '--account') { a.provider = 'account'; a.account = argv[++i]; }
+    // --account names a login profile. On its own that means the Claude
+    // account switcher; alongside -p it just names the profile (Codex has
+    // them too), so an explicit provider is never overridden.
+    else if (t === '--account') { a.account = argv[++i]; a.provider = a.provider || 'account'; }
     else if (t === '--model' || t === '-m') a.model = argv[++i];
     else if (t === '--harness') a.harness = argv[++i];
     else if (t === '--omp') a.harness = 'omp';
     else if (t === '--claude') a.harness = 'claude';
+    else if (t === '--codex') a.harness = 'codex';
     else if (t === '--list' || t === '-l') a.list = true;
     else if (t === 'update' || t === '--update') a.update = true;
     else if (t === 'image' || t === 'image-gen' || t === '--image') a.image = true;
@@ -118,8 +136,24 @@ const normalizeHarness = (value) => {
   const h = String(value || 'claude').toLowerCase();
   if (h === 'claude' || h === 'claude-code') return 'claude';
   if (h === 'omp' || h === 'oh-my-pi') return 'omp';
+  if (h === 'codex' || h === 'codex-cli') return 'codex';
   return null;
 };
+
+// The [h] switch under both pickers rotates through the harnesses rather than
+// flipping one on, so every option is visible before you commit to it.
+const HARNESS_TOGGLE = (harness) => ({
+  key: 'h',
+  name: 'harness',
+  label: 'Harness',
+  value: harness,
+  options: [
+    { label: 'CLAUDE', value: 'claude' },
+    { label: 'OMP', value: 'omp' },
+    { label: 'CODEX', value: 'codex' }
+  ],
+  shortLabel: 'harness'
+});
 
 // `help` as a bare word (not just -h/--help), plus topic help, so a lost user
 // typing `bro help`, `bro help image`, or `bro image help` lands somewhere
@@ -134,8 +168,16 @@ export async function main(argv) {
   if (argv[0] === 'accounts') {
     return runPoolAccounts(argv.slice(1));
   }
-  if (argv[0] === 'codex' && ['login', 'logout', 'status'].includes(argv[1])) {
-    return runCodexCommand(argv.slice(1));
+  // `bro codex` on its own opens the Codex switcher, the way `bro account`
+  // does for Claude; with a sub-command it manages logins and sessions, and
+  // with a bare word it launches that profile. A flag is nobody's profile —
+  // those keep falling through to the normal provider/harness path.
+  if (argv[0] === 'codex' && (argv[1] == null || !argv[1].startsWith('-'))) {
+    ensureDefaultConfig();
+    const config = loadConfig();
+    return runCodexCommand(argv.slice(1), {
+      skipPermissions: !argv.includes('--safe') && config.dangerouslySkipPermissions !== false
+    });
   }
 
   // Help dispatch: `bro help [topic]` and `bro image help|-h|--help`.
@@ -173,7 +215,7 @@ export async function main(argv) {
   // then the configured default.
   let harness = normalizeHarness(args.harness || lastHarness() || config.defaultHarness || 'claude');
   if (!harness) {
-    console.error(`Unknown harness: ${args.harness || config.defaultHarness}  (use: claude or omp)`);
+    console.error(`Unknown harness: ${args.harness || config.defaultHarness}  (use: claude, omp or codex)`);
     return 1;
   }
 
@@ -225,6 +267,10 @@ export async function main(argv) {
       // Account profiles with live usage stats (5h/week/Fable) in the right
       // pane, followed by the sessions those profiles can resume.
       if (p.mode === 'account') return accountProfileChoices;
+      // Codex logins with the sessions they can resume — the same shape as the
+      // account pane. (Its models come from the subscription and are chosen
+      // after the login, not here.)
+      if (p.mode === 'codex') return codexProfileChoices;
       return (p.models || []).length ? modelChildren(p.models) : null;
     };
     // Providers that are ready to launch (key saved / env var / no key needed)
@@ -241,8 +287,10 @@ export async function main(argv) {
       color: configured ? '\x1b[32m' : '',
       detail: tagOf(p),
       children: childrenFor(p),
-      filterableChildren: p.id === 'openrouter' || p.mode === 'account',
-      childValue: lastModelFor(p.id)
+      filterableChildren: p.id === 'openrouter' || p.mode === 'account' || p.mode === 'codex',
+      // Codex's pane lists logins rather than models, so it reopens on the
+      // login used last.
+      childValue: p.mode === 'codex' ? lastProfileFor(p.id) : lastModelFor(p.id)
     });
     const ready = providers.filter((p) => isConfigured(p));
     const rest = providers.filter((p) => !isConfigured(p));
@@ -260,21 +308,13 @@ export async function main(argv) {
       clearScreen: true,
       banner: BANNER,
       toggle: { label: 'Skip permissions', value: skip },
-      toggles: [{
-        key: 'h',
-        name: 'ompHarness',
-        label: 'Harness',
-        value: harness === 'omp',
-        onLabel: 'OMP',
-        offLabel: 'CLAUDE',
-        shortLabel: 'harness'
-      }]
+      toggles: [HARNESS_TOGGLE(harness)]
     }).catch(() => null);
     if (!choice) { console.log('Cancelled.'); return 0; }
     provider = choice.value;
     picked = choice;
     if (choice.toggleOn !== undefined) skip = choice.toggleOn;
-    if (choice.toggles?.ompHarness !== undefined) harness = choice.toggles.ompHarness ? 'omp' : 'claude';
+    if (choice.toggles?.harness) harness = choice.toggles.harness;
   }
 
   // Image gen: the picker's right column already chose the image API (falls
@@ -284,12 +324,24 @@ export async function main(argv) {
     return runImageGen({ config, apiId: picked?.child?.value, dryRun: args.dryRun });
   }
 
-  // Codex: ensure the ChatGPT subscription login, fetch its live model list,
-  // pick one, and launch the codex CLI (its own harness — claude/omp not used).
+  // Codex: with the claude/omp harness this ensures the ChatGPT subscription
+  // login, fetches its live model list, picks one and bridges the harness to
+  // it. With the codex harness — or a session picked from the right column,
+  // which only the codex CLI can read — it runs codex itself instead.
   if (provider.mode === 'codex') {
+    // The right column mixes logins (a string name, '' for this machine's),
+    // the manage entry and resumable sessions (objects).
+    const child = picked?.child?.value;
+    const session = child?.kind === 'codex-session' ? child : null;
     const result = await runCodex({
       model: args.model,
       harness,
+      profile: args.account || (typeof child === 'string' ? child : ''),
+      session,
+      // A session picked here came from a list spanning every login, so the
+      // launcher asks which one should resume it.
+      chooseProfile: Boolean(session),
+      manage: child?.manage === true,
       extraArgs: args._,
       skipPermissions: !args.safe && config.dangerouslySkipPermissions !== false,
       dryRun: args.dryRun
@@ -331,20 +383,12 @@ export async function main(argv) {
         choices: models.map((m) => ({ label: modelLabel(m), value: m.id ?? '' })),
         filterable: provider.id === 'openrouter',
         toggle: { label: 'Skip permissions', value: skip },
-        toggles: [{
-          key: 'h',
-          name: 'ompHarness',
-          label: 'Harness',
-          value: harness === 'omp',
-          onLabel: 'OMP',
-          offLabel: 'CLAUDE',
-          shortLabel: 'harness'
-        }]
+        toggles: [HARNESS_TOGGLE(harness)]
       }).catch(() => null);
       if (choice == null) { console.log('Cancelled.'); return 0; }
       model = choice.value;
       if (choice.toggleOn !== undefined) skip = choice.toggleOn;
-      if (choice.toggles?.ompHarness !== undefined) harness = choice.toggles.ompHarness ? 'omp' : 'claude';
+      if (choice.toggles?.harness) harness = choice.toggles.harness;
     }
   }
 
@@ -359,7 +403,9 @@ export async function main(argv) {
       harness,
       dryRun: args.dryRun
     });
-    if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
+    // A dry run normally describes what would happen; a refused combination
+    // has already said why and only has its exit code left to report.
+    if (args.dryRun && typeof result !== 'number') { console.log(JSON.stringify(result, null, 2)); return 0; }
     return typeof result === 'number' ? result : 0;
   }
 
@@ -367,12 +413,15 @@ export async function main(argv) {
   // account directory. This is a direct login switch, not the multi-account pool.
   if (provider.mode === 'account') {
     // The right column mixes profiles (a string name) with resumable sessions
-    // (an object). A session already knows the profile that owns it.
+    // (an object). Sessions carry their source owner; the launcher asks which
+    // profile should resume them.
     const child = picked?.child?.value;
     const session = child && typeof child === 'object' && child.kind === 'session' ? child : null;
-    const accountName = args.account || session?.account || (typeof child === 'string' ? child : '');
+    // A selected session deliberately leaves the destination account open:
+    // runAccountProfile asks which login should resume it, preselecting owner.
+    const accountName = args.account || (session ? '' : (typeof child === 'string' ? child : ''));
     // Remember the account (not a model) so the picker preselects it next time.
-    if (!args.dryRun) rememberSelection(provider.id, accountName, 'claude');
+    if (!args.dryRun && !session) rememberSelection(provider.id, accountName, 'claude');
     const result = await runAccountProfile({
       accountName,
       model,

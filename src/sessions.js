@@ -1,4 +1,6 @@
-// Claude Code session discovery.
+// Claude Code session discovery, plus the pieces Codex's own discovery
+// (codex-sessions.js) reuses: head reads, the description cache, bounded
+// concurrency, and the shared row rendering.
 //
 // Claude Code writes one JSONL transcript per session under
 // <config dir>/projects/<encoded cwd>/<session id>.jsonl, where the directory
@@ -50,14 +52,14 @@ export function encodeProjectDir(cwd) {
   return String(cwd || '').replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-const samePath = (a, b) =>
+export const samePath = (a, b) =>
   Boolean(a) && Boolean(b) &&
   (process.platform === 'win32'
     ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()
     : path.resolve(a) === path.resolve(b));
 
 // Read at most `bytes` from the head of a file without loading the whole thing.
-function readHead(file, bytes = HEAD_BYTES) {
+export function readHead(file, bytes = HEAD_BYTES) {
   let fd = null;
   try {
     fd = fs.openSync(file, 'r');
@@ -84,7 +86,7 @@ function textOf(content) {
 
 // Strip the "[Image: …]" preambles Claude Code prepends to pasted screenshots so
 // a prompt that came with one still shows its words instead of image geometry.
-const clean = (s) =>
+export const clean = (s) =>
   String(s || '')
     .replace(/\[Image:[^\]]*\]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -94,7 +96,8 @@ const isNoise = (s) => NOISE_PREFIX.some((p) => s.startsWith(p));
 
 // Sessions opened by a slash command carry no typed prompt at all. The command
 // is what the user chose, so it names the session rather than hiding it.
-function commandTitle(s) {
+// Both harnesses wrap them the same way.
+export function commandTitle(s) {
   const name = /<command-name>\s*(\/?[^<\s]+)/.exec(s);
   if (!name) return '';
   const args = /<command-args>\s*([^<]*)/.exec(s);
@@ -103,7 +106,7 @@ function commandTitle(s) {
 
 // Long prompts are truncated everywhere they're shown; storing the whole thing
 // only bloats the cache.
-const MAX_TITLE = 200;
+export const MAX_TITLE = 200;
 
 // Pull { title, cwd, branch } out of a transcript's opening entries. Returns
 // title '' when the session holds no real prompt — those are abandoned starts
@@ -157,19 +160,22 @@ export function describeTranscript(text) {
   return { title: title || command, cwd, branch };
 }
 
-function loadCache() {
+// Description caches are keyed by transcript path and live one file per
+// harness — each listing prunes the entries it no longer sees, so sharing one
+// file between harnesses would have them delete each other's rows every run.
+export function loadCache(file = CACHE_PATH) {
   try {
-    const cache = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
+    const cache = JSON.parse(fs.readFileSync(file, 'utf8'));
     return cache && typeof cache === 'object' ? cache : {};
   } catch {
     return {};
   }
 }
 
-function saveCache(cache) {
+export function saveCache(cache, file = CACHE_PATH) {
   try {
     fs.mkdirSync(BRO_DIR, { recursive: true });
-    fs.writeFileSync(CACHE_PATH, JSON.stringify(cache));
+    fs.writeFileSync(file, JSON.stringify(cache));
   } catch {
     /* best-effort — a missing cache only costs a rescan */
   }
@@ -217,7 +223,7 @@ function statSessions(configDir, account) {
   return out;
 }
 
-async function mapLimited(items, limit, fn) {
+export async function mapLimited(items, limit, fn) {
   const out = new Array(items.length);
   let next = 0;
   const worker = async () => {
@@ -304,13 +310,18 @@ export function shortPath(p, max = 34) {
 // One session row: age, prompt, then dim metadata (path when the session is
 // from another project, git branch, and the profile that can resume it).
 // The prompt gets a fixed width so the metadata lines up down the column.
-export function sessionLabel(session, { showPath = false, titleWidth = 42 } = {}) {
+// `owner` is the trailing tag — a Claude row with no profile is the machine's
+// own login ('local') rather than a pooled account. Codex rows pass '' because
+// every Codex session resumes under the one ChatGPT login.
+export function sessionLabel(
+  session,
+  { showPath = false, titleWidth = 42, owner = session.account || 'local' } = {}
+) {
   const age = relativeTime(session.mtime).padStart(3);
   const meta = [
     showPath ? shortPath(session.cwd) : null,
     session.branch || null,
-    // No profile means the machine's own Claude login, not a pooled account.
-    session.account || 'local'
+    owner || null
   ].filter(Boolean).join(' · ');
   return `\x1b[2m${age}\x1b[0m ${fit(session.title, titleWidth)} \x1b[2m${meta}\x1b[0m`;
 }

@@ -131,6 +131,118 @@ export async function launchOmp({ provider, model, apiKey, extraArgs = [], skipP
   return runInherit(omp, ompArgs, env);
 }
 
+// --- codex CLI harness -----------------------------------------------------
+
+// The provider slot bro describes to codex, and the env var it reads the key
+// from. Both only exist for the life of one launch: `codex -c key=value`
+// overrides config in memory, so ~/.codex/config.toml is never touched.
+const CODEX_PROVIDER_SLOT = 'bro';
+const CODEX_KEY_ENV = 'BRO_PROVIDER_API_KEY';
+
+// TOML-quote a value so codex parses it as a string rather than guessing —
+// bare URLs and names with spaces are not valid TOML on their own.
+const toml = (value) => JSON.stringify(String(value ?? ''));
+
+// Describe the chosen provider to codex. Codex talks to its own ChatGPT login
+// (the codex provider, which needs no description at all) or to any endpoint
+// serving OpenAI's Responses API — as of codex 0.147 the older
+// /chat/completions wire format is refused outright, so a provider that only
+// offers that will be turned away by codex itself. Anthropic-shaped providers
+// — the native Claude login, the account pool, OpenRouter/Z.ai via
+// ANTHROPIC_BASE_URL — have no route in at all and are refused here, before
+// anything is spawned.
+export function codexProviderConfig(provider, apiKey) {
+  if (provider.mode === 'codex') return { args: [], env: {} };
+  if (provider.mode !== 'openai') {
+    throw new Error(
+      `The codex harness can't run ${provider.name || provider.id}: it speaks the Anthropic API, and codex only talks to OpenAI-compatible endpoints.\n` +
+        '  Use the claude or omp harness for this provider (press h in the picker, or pass --claude / --omp),\n' +
+        '  or choose "Codex (ChatGPT subscription)" to run codex on your ChatGPT login.'
+    );
+  }
+  const args = [
+    '-c', `model_provider=${toml(CODEX_PROVIDER_SLOT)}`,
+    '-c', `model_providers.${CODEX_PROVIDER_SLOT}.name=${toml(provider.name || provider.id)}`,
+    '-c', `model_providers.${CODEX_PROVIDER_SLOT}.base_url=${toml(normalizeOpenAiBaseUrl(provider.baseUrl))}`,
+    '-c', `model_providers.${CODEX_PROVIDER_SLOT}.wire_api=${toml('responses')}`
+  ];
+  const env = {};
+  // A key is named, never inlined: codex reads it from the environment, so it
+  // stays out of the process list. Local providers that need none say so by
+  // leaving env_key unset.
+  if (apiKey) {
+    args.push('-c', `model_providers.${CODEX_PROVIDER_SLOT}.env_key=${toml(CODEX_KEY_ENV)}`);
+    env[CODEX_KEY_ENV] = apiKey;
+  }
+  return { args, env };
+}
+
+// Launch the codex CLI.
+//   home         the login profile's CODEX_HOME (blank = this machine's own)
+//   resume/fork  continue an existing rollout by id, or fork it into a new one
+//                — forking is what a cross-profile resume does, so the source
+//                login's conversation is never continued in place
+//   cwd          run in that session's project instead of here
+// Skipping permissions is codex's sandbox+approval bypass, the same bargain
+// --dangerously-skip-permissions makes for Claude Code.
+export async function launchCodex({
+  provider,
+  model,
+  apiKey,
+  extraArgs = [],
+  skipPermissions = true,
+  home = '',
+  profile = '',
+  resume = '',
+  resumeTitle = '',
+  sourceProfile = '',
+  fork = false,
+  cwd = '',
+  dryRun = false
+}) {
+  const { args: providerArgs, env: providerEnv } = codexProviderConfig(provider, apiKey);
+  const codexArgs = [];
+  if (resume) codexArgs.push(fork ? 'fork' : 'resume', resume);
+  if (skipPermissions) codexArgs.push('--dangerously-bypass-approvals-and-sandbox');
+  if (model) codexArgs.push('--model', model);
+  codexArgs.push(...providerArgs, ...extraArgs);
+
+  if (dryRun) {
+    return {
+      via: provider.mode === 'codex' ? 'codex CLI (ChatGPT login)' : `codex CLI → ${provider.name || provider.id}`,
+      cmd: which('codex', globalBinDirs()) || 'codex',
+      args: codexArgs,
+      ...(home ? { codexHome: home } : {}),
+      ...(providerEnv[CODEX_KEY_ENV] ? { env: { [CODEX_KEY_ENV]: '(api key)' } } : {}),
+      ...(resume ? { resume, cwd: cwd || process.cwd() } : {}),
+      model: model || '(codex default)'
+    };
+  }
+
+  const codex = which('codex', globalBinDirs());
+  if (!codex) throw new Error('The `codex` CLI was not found. Install it: npm install -g @openai/codex');
+  if (cwd && !fs.existsSync(cwd)) throw new Error(`That session's directory is gone: ${cwd}`);
+
+  const env = { ...process.env, ...providerEnv, NODE_NO_WARNINGS: '1' };
+  // A profile is a whole codex home: credentials, sessions and settings. No
+  // profile means the machine's own, so the user's own CODEX_HOME stands.
+  if (home) env.CODEX_HOME = home;
+
+  const title = resumeTitle.length > 60 ? resumeTitle.slice(0, 59) + '…' : resumeTitle;
+  const named = title ? ` “${title}”` : '';
+  const as = profile ? ` as ${profile}` : '';
+  const banner = resume
+    ? fork
+      ? `Forking Codex session${named} from ${sourceProfile || 'this machine'} and resuming${as || ' locally'}`
+      : `Resuming Codex session${named}${as}`
+    : `Launching Codex${provider.mode === 'codex' ? as : ' / ' + (provider.name || provider.id)}`;
+  console.log(`\n${banner}${model ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}…`);
+  if (provider.mode !== 'codex') {
+    console.log(`\x1b[2m  codex calls ${normalizeOpenAiBaseUrl(provider.baseUrl)}/responses — a provider that only serves /chat/completions will refuse it.\x1b[0m`);
+  }
+  return runInherit(codex, codexArgs, env, cwd ? { cwd } : undefined);
+}
+
 // Upsert this provider into the proxy's config and point its default route at the
 // chosen model. Existing (hand-edited) providers in the file are preserved.
 function writeCcrConfig(provider, model, apiKey) {
@@ -163,7 +275,8 @@ function writeCcrConfig(provider, model, apiKey) {
   fs.writeFileSync(CCR_CONFIG, JSON.stringify(cfg, null, 2));
 }
 
-// Launch claude for the chosen provider/model.
+// Launch the chosen harness for the chosen provider/model. With the claude
+// harness:
 //   native    -> run claude with the user's own login
 //   anthropic -> point claude at an Anthropic-compatible base URL
 //   openai    -> route claude through the proxy (ccr)
@@ -171,6 +284,9 @@ function writeCcrConfig(provider, model, apiKey) {
 export async function launch({ provider, model, apiKey, extraArgs = [], skipPermissions = true, harness = 'claude', dryRun = false }) {
   if (harness === 'omp') {
     return launchOmp({ provider, model, apiKey, extraArgs, skipPermissions, dryRun });
+  }
+  if (harness === 'codex') {
+    return launchCodex({ provider, model, apiKey, extraArgs, skipPermissions, dryRun });
   }
 
   const claudeArgs = [];

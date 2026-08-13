@@ -35,6 +35,21 @@ export function lastHarness() {
   return loadState().lastHarness;
 }
 
+// The login profile last used with a provider that has several (Codex today),
+// kept apart from the model so a switcher and a model menu don't overwrite
+// each other's memory.
+export function lastProfileFor(providerId) {
+  return (loadState().lastProfileByProvider || {})[providerId];
+}
+
+export function rememberProfile(providerId, profile) {
+  const cur = loadState();
+  saveState({
+    ...cur,
+    lastProfileByProvider: { ...(cur.lastProfileByProvider || {}), [providerId]: profile ?? '' }
+  });
+}
+
 // Remember only the per-provider pick, without making the provider the default
 // — for flows like image gen that shouldn't steal the picker's start position.
 export function rememberModelFor(providerId, model) {

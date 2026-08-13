@@ -74,11 +74,12 @@ function mapModelList(list) {
   return models.length ? models : null;
 }
 
-// Live model list for the logged-in subscription. Falls back to bro's cache,
-// then the Codex CLI's cache (if that happens to exist), then a static list.
-export async function fetchCodexModels() {
+// Live model list for the logged-in subscription — `home` picks the login
+// profile whose credentials to ask with. Falls back to bro's cache, then the
+// Codex CLI's cache (if that happens to exist), then a static list.
+export async function fetchCodexModels({ home = '' } = {}) {
   try {
-    const auth = await freshCodexAuth();
+    const auth = await freshCodexAuth({ home });
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 10000);
     try {
@@ -106,7 +107,7 @@ export async function fetchCodexModels() {
   }
   return (
     readJson(MODELS_CACHE) ||
-    mapModelList(readJson(path.join(CODEX_HOME, 'models_cache.json'))?.models) ||
+    mapModelList(readJson(path.join(home || CODEX_HOME, 'models_cache.json'))?.models) ||
     FALLBACK_MODELS
   );
 }
@@ -382,7 +383,9 @@ async function readBody(req) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export function startCodexBridge({ port = DEFAULT_PORT, defaultModel = '', models = [], effort = '', quiet = true } = {}) {
+// `home` is the Codex login profile the bridge speaks for; without one it uses
+// the local login (bro's own credentials, or the codex CLI's).
+export function startCodexBridge({ port = DEFAULT_PORT, defaultModel = '', models = [], effort = '', quiet = true, home = '' } = {}) {
   const sessionId = crypto.randomUUID();
   const byId = new Map(models.map((m) => [m.id, m]));
   const smallModel =
@@ -422,7 +425,7 @@ export function startCodexBridge({ port = DEFAULT_PORT, defaultModel = '', model
     // One retry after a forced token refresh on 401.
     let upstream;
     for (let attempt = 0; ; attempt++) {
-      const auth = await freshCodexAuth({ force: attempt > 0 });
+      const auth = await freshCodexAuth({ force: attempt > 0, home });
       upstream = await fetch(BACKEND_URL, {
         method: 'POST',
         headers: backendHeaders(auth, sessionId),

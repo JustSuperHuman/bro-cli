@@ -125,14 +125,37 @@ function renderToggleRow(toggle, on) {
   return `  \x1b[2m[tab]\x1b[0m ${toggle.label}  ${state}`;
 }
 
-// A keyed toggle with both labels is a choice between two options, not an
-// on/off state — show both side by side with the active one highlighted.
-// Only single-label toggles get the green/red ON/OFF treatment.
+// A keyed toggle is either an on/off switch or — with `options` (or both
+// labels) — a rotation through named values, which is a choice rather than a
+// state. Rotations show every option side by side with the active one
+// highlighted; only true switches get the green/red ON/OFF treatment.
+export function normalizeKeyed(toggles) {
+  return toggles.map((t) => {
+    const options = t.options?.length
+      ? t.options.map((o) => (typeof o === 'string' ? { label: o, value: o } : o))
+      : t.onLabel && t.offLabel
+        ? [{ label: t.offLabel, value: false }, { label: t.onLabel, value: true }]
+        : null;
+    if (!options) return { ...t, value: Boolean(t.value) };
+    return { ...t, options, index: Math.max(0, options.findIndex((o) => o.value === t.value)) };
+  });
+}
+
+export const cycleKeyed = (t) => {
+  if (t.options) t.index = (t.index + 1) % t.options.length;
+  else t.value = !t.value;
+};
+
+// Current value of every keyed toggle, by name — the shape handed back with a
+// selection.
+export const keyedValues = (keyed) =>
+  Object.fromEntries(keyed.map((t) => [t.name || t.key, t.options ? t.options[t.index].value : t.value]));
+
 function renderKeyedRow(t) {
   let state;
-  if (t.onLabel && t.offLabel) {
+  if (t.options) {
     const seg = (label, active) => (active ? `\x1b[7m ${label} \x1b[0m` : `\x1b[2m ${label} \x1b[0m`);
-    state = seg(t.offLabel, !t.value) + '\x1b[2m│\x1b[0m' + seg(t.onLabel, t.value);
+    state = t.options.map((o, i) => seg(o.label, i === t.index)).join('\x1b[2m│\x1b[0m');
   } else {
     state = t.value ? `\x1b[30;42m ${t.onLabel || 'ON'} \x1b[0m` : `\x1b[97;41m ${t.offLabel || 'OFF'} \x1b[0m`;
   }
@@ -145,8 +168,10 @@ function renderKeyedRow(t) {
 // Returns the chosen item, or throws Error('cancelled') on Esc / Ctrl-C.
 // Optional `toggle` adds an on/off switch (flipped with Tab/Space) shown under the
 // list — handy for things like "Skip permissions". `toggles` can add extra
-// keyed switches, each returned by name in `toggles`. With `filterable`, typing
-// narrows the list by label/value; Backspace edits and Esc clears the filter.
+// keyed switches, each returned by name in `toggles`; one given `options`
+// ([{label,value}]) cycles through them instead of flipping on/off. With
+// `filterable`, typing narrows the list by label/value; Backspace edits and
+// Esc clears the filter.
 export function select({ message, choices, startIndex = 0, toggle = null, toggles = [], filterable = false }) {
   if (!isInteractive) {
     return Promise.reject(new Error('A terminal (TTY) is required to choose interactively. Use --provider / --model instead.'));
@@ -157,7 +182,7 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
     let query = '';
     let index = Math.max(0, Math.min(startIndex, items.length - 1));
     let on = toggle ? Boolean(toggle.value) : false;
-    const keyed = toggles.map((t) => ({ ...t, value: Boolean(t.value) }));
+    const keyed = normalizeKeyed(toggles);
     // Long lists scroll inside a viewport sized to the terminal — the repaint
     // moves the cursor up by the row count of the previous paint, so it must
     // never exceed the screen height. Recomputed on terminal resize.
@@ -319,7 +344,7 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
         cleanup();
         const choice = { ...items[index] };
         if (toggle) choice.toggleOn = on;
-        if (keyed.length) choice.toggles = Object.fromEntries(keyed.map((t) => [t.name || t.key, t.value]));
+        if (keyed.length) choice.toggles = keyedValues(keyed);
         resolve(choice);
       } else if (key.name === 'escape' && filterable && query) {
         query = '';
@@ -331,7 +356,7 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
       } else {
         const t = keyed.find((item) => key.name === item.key || str === item.key);
         if (t) {
-          t.value = !t.value;
+          cycleKeyed(t);
           paint('repaint');
         }
       }
@@ -371,7 +396,7 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     while (choices[index]?.divider && index < choices.length - 1) index++;
     let focus = 'left';
     let on = toggle ? Boolean(toggle.value) : false;
-    const keyed = toggles.map((t) => ({ ...t, value: Boolean(t.value) }));
+    const keyed = normalizeKeyed(toggles);
     let finished = false;
 
     const labelOf = (c) => (c.divider ? '' : c.label ?? c.name ?? String(c.value));
@@ -687,7 +712,7 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
         choice.child = child ? { ...child } : null;
         choice.childFocused = focus === 'right';
         if (toggle) choice.toggleOn = on;
-        if (keyed.length) choice.toggles = Object.fromEntries(keyed.map((t) => [t.name || t.key, t.value]));
+        if (keyed.length) choice.toggles = keyedValues(keyed);
         resolve(choice);
       } else if (key.name === 'escape' && filterable && k.query) {
         k.query = '';
@@ -700,7 +725,7 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
       } else {
         const t = keyed.find((item) => key.name === item.key || str === item.key);
         if (t) {
-          t.value = !t.value;
+          cycleKeyed(t);
           paint('repaint');
         }
       }

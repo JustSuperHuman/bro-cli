@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { filterChoices, selectableIndex } from './ui.js';
+import { cycleKeyed, filterChoices, keyedValues, normalizeKeyed, selectableIndex } from './ui.js';
 
 const choices = [
   { label: '\x1b[1mClaude Sonnet 5\x1b[0m', value: 'anthropic/claude-sonnet-5' },
@@ -32,6 +32,28 @@ test('a search drops group dividers instead of leaving rules over nothing', () =
   const rows = [{ divider: true, label: 'this project' }, ...choices];
   expect(filterChoices(rows, 'claude')).toEqual([choices[0]]);
   expect(filterChoices(rows, '')).toBe(rows);
+});
+
+test('a keyed toggle with options rotates through them and wraps', () => {
+  const harness = { key: 'h', name: 'harness', value: 'omp', options: ['claude', 'omp', 'codex'] };
+  const [keyed] = normalizeKeyed([harness]);
+
+  expect(keyedValues([keyed])).toEqual({ harness: 'omp' });
+  cycleKeyed(keyed);
+  expect(keyedValues([keyed])).toEqual({ harness: 'codex' });
+  cycleKeyed(keyed);
+  expect(keyedValues([keyed])).toEqual({ harness: 'claude' });
+});
+
+test('an unknown starting value opens the rotation on its first option', () => {
+  const [keyed] = normalizeKeyed([{ key: 'h', name: 'harness', value: 'gone', options: ['claude', 'omp'] }]);
+  expect(keyedValues([keyed])).toEqual({ harness: 'claude' });
+});
+
+test('a keyed toggle without options stays a plain on/off switch', () => {
+  const [keyed] = normalizeKeyed([{ key: 's', name: 'skip', value: true }]);
+  cycleKeyed(keyed);
+  expect(keyedValues([keyed])).toEqual({ skip: false });
 });
 
 test('the cursor lands past a divider, from either direction', () => {
