@@ -4,11 +4,12 @@ import { BRO_DIR } from './config.js';
 
 // Volatile UI state (last picks) — kept out of config.json so we never churn the
 // user's hand-edited keys/providers.
-const STATE_PATH = path.join(BRO_DIR, 'state.json');
+const DEFAULT_STATE_PATH = path.join(BRO_DIR, 'state.json');
+const statePath = () => process.env.BRO_STATE_PATH || DEFAULT_STATE_PATH;
 
 function loadState() {
   try {
-    return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+    return JSON.parse(fs.readFileSync(statePath(), 'utf8'));
   } catch {
     return {};
   }
@@ -16,8 +17,9 @@ function loadState() {
 
 function saveState(next) {
   try {
-    fs.mkdirSync(BRO_DIR, { recursive: true });
-    fs.writeFileSync(STATE_PATH, JSON.stringify(next, null, 2));
+    const target = statePath();
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify(next, null, 2));
   } catch {
     /* best-effort */
   }
@@ -33,6 +35,13 @@ export function lastModelFor(providerId) {
 
 export function lastHarness() {
   return loadState().lastHarness;
+}
+
+// Harness choice is persisted independently of provider/model completion so a
+// picker selection survives a later login, install or launch failure.
+export function rememberHarness(harness) {
+  const cur = loadState();
+  saveState({ ...cur, lastHarness: harness });
 }
 
 // The login profile last used with a provider that has several (Codex today),

@@ -15,9 +15,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { which, globalBinDirs, runInherit } from './proc.js';
+import { which, globalBinDirs, runInherit, ensureBun, ensureClaude } from './proc.js';
 import { select, selectColumns, prompt, holdOrContinue } from './ui.js';
-import { launchOmp } from './launch.js';
+import { launchOmp, launchPi } from './launch.js';
 import { listSessions } from './sessions.js';
 import { chooseResumeProfile, sessionRows, stageFiles } from './profiles.js';
 
@@ -36,8 +36,8 @@ const OAUTH_CLIENT_ID = process.env.CLAUDE_OAUTH_CLIENT_ID || '9d1c250a-e61b-44d
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 
 // No model list here: bro never picks a model for the pool. Claude Code and
-// omp both have their own model pickers (which know about every model the
-// accounts can use, unlike a hardcoded list). -m still forces one.
+// omp have their own model pickers; Pi receives the pool's live model list and
+// starts on its first concrete model. -m still forces one for every harness.
 export const POOL_PROVIDER = {
   id: 'pool',
   name: 'Multiple Claude Account Proxy',
@@ -389,15 +389,7 @@ export function stageSessionForProfile(session, { sourceConfigDir, targetConfigD
 // --- bun discovery ---------------------------------------------------------
 
 function findBun() {
-  const bun = which('bun', globalBinDirs());
-  if (!bun) {
-    throw new Error(
-      'This feature needs Bun to run the pool server.\n' +
-        '  Install it: https://bun.sh  (curl -fsSL https://bun.sh/install | bash)\n' +
-        '  or:  npm install -g bun'
-    );
-  }
-  return bun;
+  return ensureBun().bun;
 }
 
 // Run a pool CLI sub-command (`accounts …`) with inherited stdio so interactive
@@ -562,7 +554,7 @@ async function fetchPoolModels(port) {
   }
 }
 
-function poolOmpProvider(baseUrl, models) {
+function poolHarnessProvider(baseUrl, models) {
   return {
     ...POOL_PROVIDER,
     mode: 'anthropic',
@@ -655,8 +647,7 @@ export async function runAccountProfile({
     return 0;
   }
 
-  const claude = which('claude', globalBinDirs());
-  if (!claude) throw new Error('The `claude` CLI was not found. Install Claude Code: https://claude.com/claude-code');
+  const { claude, dirs } = ensureClaude();
 
   const sourceConfigDir = session ? configDirForAccount(session.account) : null;
   const targetConfigDir = local ? DEFAULT_CLAUDE_DIR : accountDirFor(account.name);
@@ -682,6 +673,7 @@ export async function runAccountProfile({
     delete env[k];
   }
   env.NODE_NO_WARNINGS = '1';
+  env.PATH = [...dirs, env.PATH || ''].join(path.delimiter);
 
   const claudeArgs = [];
   if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
@@ -733,11 +725,19 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
     };
     if (harness === 'omp') {
       out.omp = await launchOmp({
-        provider: poolOmpProvider(baseUrl),
+        provider: poolHarnessProvider(baseUrl),
         model,
         apiKey,
         extraArgs,
         skipPermissions,
+        dryRun: true
+      });
+    } else if (harness === 'pi') {
+      out.pi = await launchPi({
+        provider: poolHarnessProvider(baseUrl),
+        model,
+        apiKey,
+        extraArgs,
         dryRun: true
       });
     } else {
@@ -815,7 +815,8 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
   //    any other key pauses so you can read it, esc cancels.
   const status = await fetchStatus(port);
   printStatus(status, baseUrl);
-  process.stdout.write('  ' + C.dim(`Launching ${harness === 'omp' ? 'omp' : 'Claude'}…  `) + C.dim('enter = now · any key = pause · esc = cancel'));
+  const harnessLabel = harness === 'omp' ? 'omp' : harness === 'pi' ? 'Pi' : 'Claude';
+  process.stdout.write('  ' + C.dim(`Launching ${harnessLabel}…  `) + C.dim('enter = now · any key = pause · esc = cancel'));
   const go = await holdOrContinue({ ms: 1500 });
   process.stdout.write('\n');
   if (!go) {
@@ -828,7 +829,7 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
     try {
       const liveModels = await fetchPoolModels(port);
       return await launchOmp({
-        provider: poolOmpProvider(baseUrl, liveModels),
+        provider: poolHarnessProvider(baseUrl, liveModels),
         model,
         apiKey,
         extraArgs,
@@ -839,13 +840,30 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
       stopProxy();
     }
   }
+  if (harness === 'pi') {
+    try {
+      const liveModels = await fetchPoolModels(port);
+      return await launchPi({
+        provider: poolHarnessProvider(baseUrl, liveModels),
+        model,
+        apiKey,
+        extraArgs,
+        dryRun: false
+      });
+    } finally {
+      stopProxy();
+    }
+  }
 
   // 4) Launch Claude Code pointed at the pool. Claude speaks the Anthropic API;
   //    the pool serves /v1/messages and routes across account OAuth tokens.
-  const claude = which('claude', globalBinDirs());
-  if (!claude) {
+  let claude;
+  let claudeDirs;
+  try {
+    ({ claude, dirs: claudeDirs } = ensureClaude());
+  } catch (error) {
     stopProxy();
-    throw new Error('The `claude` CLI was not found. Install Claude Code: https://claude.com/claude-code');
+    throw error;
   }
 
   const env = { ...process.env };
@@ -855,6 +873,7 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
   env.ANTHROPIC_BASE_URL = baseUrl;
   env.ANTHROPIC_AUTH_TOKEN = process.env.PROXY_API_KEY || 'claude-max-pool';
   env.NODE_NO_WARNINGS = '1';
+  env.PATH = [...claudeDirs, env.PATH || ''].join(path.delimiter);
 
   const claudeArgs = [];
   if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');

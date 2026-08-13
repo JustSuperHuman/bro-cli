@@ -7,11 +7,11 @@ import { runPool, runPoolAccounts, runAccountProfile, accountProfileChoices, POO
 import { runImageGen, imageHelp, mergeImageApis, IMAGE_PROVIDER } from './imagegen.js';
 import { runCodex, runCodexCommand, codexProfileChoices, CODEX_PROVIDER } from './codex.js';
 import { runTokenReport } from './token-report.js';
-import { rememberSelection, lastProvider, lastModelFor, lastProfileFor, lastHarness } from './state.js';
+import { rememberSelection, rememberHarness, lastProvider, lastModelFor, lastProfileFor, lastHarness } from './state.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
-const HELP = `bro — run Claude Code against any provider/model.
+const HELP = `bro — run your preferred coding harness against any provider/model.
 
 Usage:
   bro                    Pick a provider, then a model (interactive)
@@ -50,9 +50,11 @@ Usage:
   bro --account <name>   Launch with a logged-in profile (Claude, or the Codex
                          profile of that name with -p codex)
   bro -m <model>         Skip the model menu (use with -p)
-  bro --harness <name>   Choose harness: claude (default), omp or codex
+  bro --harness <name>   Choose harness: claude (default), omp, pi or codex
   bro --omp              Launch with omp instead of Claude Code; bro sets up
                          the provider and omp picks the model (-m overrides)
+  bro --pi               Launch with Pi; bro sets up the provider/model and
+                         passes API credentials only through the environment
   bro --codex            Launch the codex CLI instead of Claude Code (your
                          ChatGPT login, or a provider serving OpenAI's
                          Responses API)
@@ -67,6 +69,7 @@ Usage:
 
 Put bro flags first. The first unrecognized arg, and everything after it,
 is passed verbatim to the selected harness after provider/model selection.
+Missing harnesses are installed automatically on first use.
 
 Config:  ${CONFIG_PATH}
 Models:  ${REMOTE_URL}
@@ -85,6 +88,7 @@ function parseArgs(argv) {
     else if (t === '--model' || t === '-m') a.model = argv[++i];
     else if (t === '--harness') a.harness = argv[++i];
     else if (t === '--omp') a.harness = 'omp';
+    else if (t === '--pi') a.harness = 'pi';
     else if (t === '--claude') a.harness = 'claude';
     else if (t === '--codex') a.harness = 'codex';
     else if (t === '--list' || t === '-l') a.list = true;
@@ -136,6 +140,7 @@ const normalizeHarness = (value) => {
   const h = String(value || 'claude').toLowerCase();
   if (h === 'claude' || h === 'claude-code') return 'claude';
   if (h === 'omp' || h === 'oh-my-pi') return 'omp';
+  if (h === 'pi' || h === 'pi-coding-agent') return 'pi';
   if (h === 'codex' || h === 'codex-cli') return 'codex';
   return null;
 };
@@ -150,6 +155,7 @@ const HARNESS_TOGGLE = (harness) => ({
   options: [
     { label: 'CLAUDE', value: 'claude' },
     { label: 'OMP', value: 'omp' },
+    { label: 'PI', value: 'pi' },
     { label: 'CODEX', value: 'codex' }
   ],
   shortLabel: 'harness'
@@ -215,9 +221,13 @@ export async function main(argv) {
   // then the configured default.
   let harness = normalizeHarness(args.harness || lastHarness() || config.defaultHarness || 'claude');
   if (!harness) {
-    console.error(`Unknown harness: ${args.harness || config.defaultHarness}  (use: claude, omp or codex)`);
+    console.error(`Unknown harness: ${args.harness || config.defaultHarness}  (use: claude, omp, pi or codex)`);
     return 1;
   }
+
+  // A command-line harness is already a completed selection. Persist it now,
+  // even when setup or provider authentication later fails. Dry runs stay pure.
+  if (!args.dryRun && !args.image && args.harness) rememberHarness(harness);
 
   // `bro image` goes straight to the image-gen web UI (no claude involved).
   if (args.image) {
@@ -315,6 +325,7 @@ export async function main(argv) {
     picked = choice;
     if (choice.toggleOn !== undefined) skip = choice.toggleOn;
     if (choice.toggles?.harness) harness = choice.toggles.harness;
+    if (!args.dryRun) rememberHarness(harness);
   }
 
   // Image gen: the picker's right column already chose the image API (falls
@@ -389,6 +400,7 @@ export async function main(argv) {
       model = choice.value;
       if (choice.toggleOn !== undefined) skip = choice.toggleOn;
       if (choice.toggles?.harness) harness = choice.toggles.harness;
+      if (!args.dryRun) rememberHarness(harness);
     }
   }
 
@@ -421,7 +433,7 @@ export async function main(argv) {
     // runAccountProfile asks which login should resume it, preselecting owner.
     const accountName = args.account || (session ? '' : (typeof child === 'string' ? child : ''));
     // Remember the account (not a model) so the picker preselects it next time.
-    if (!args.dryRun && !session) rememberSelection(provider.id, accountName, 'claude');
+    if (!args.dryRun && !session) rememberSelection(provider.id, accountName);
     const result = await runAccountProfile({
       accountName,
       model,

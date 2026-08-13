@@ -1,5 +1,16 @@
 import { expect, test } from 'bun:test';
-import { codexProviderConfig, launchCodex } from './launch.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  codexProviderConfig,
+  launchCodex,
+  launchPi,
+  piModelFor,
+  piProviderEntry,
+  piProviderId,
+  writePiConfig
+} from './launch.js';
 
 const deepseek = { id: 'deepseek', name: 'DeepSeek', mode: 'openai', baseUrl: 'https://api.deepseek.com/chat/completions' };
 const codex = { id: 'codex', name: 'Codex (ChatGPT subscription)', mode: 'codex' };
@@ -77,4 +88,91 @@ test('--safe leaves codex its sandbox and approval prompts', async () => {
   const plan = await launchCodex({ provider: codex, model: 'gpt-5.6-codex', skipPermissions: false, dryRun: true });
   expect(plan.args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
   expect(plan.args).toEqual(['--model', 'gpt-5.6-codex']);
+});
+
+test('Pi gets a namespaced custom provider and never persists the provider key', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bro-pi-models-'));
+  const file = path.join(root, 'models.json');
+  const provider = {
+    ...deepseek,
+    models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }]
+  };
+
+  try {
+    fs.writeFileSync(file, JSON.stringify({ keep: true, providers: { personal: { api: 'openai-completions' } } }));
+    writePiConfig(provider, 'deepseek-reasoner', file);
+    const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const entry = config.providers['bro-deepseek'];
+
+    expect(config.keep).toBe(true);
+    expect(config.providers.personal).toEqual({ api: 'openai-completions' });
+    expect(entry.baseUrl).toBe('https://api.deepseek.com');
+    expect(entry.api).toBe('openai-completions');
+    expect(entry.apiKey).toBe('BRO_PI_API_KEY');
+    expect(entry.authHeader).toBe(true);
+    expect(entry.models.map((model) => model.id)).toEqual(['deepseek-reasoner', 'deepseek-chat']);
+    expect(piProviderEntry(provider, 'deepseek-reasoner:high').models[0].id).toBe('deepseek-reasoner');
+    expect(fs.readFileSync(file, 'utf8')).not.toContain('sk-test');
+  } finally {
+    if (path.dirname(path.resolve(root)) !== path.resolve(os.tmpdir())) throw new Error('Unexpected temporary test path');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Pi uses built-in Anthropic natively and custom Anthropic endpoints through bro', async () => {
+  const native = {
+    id: 'anthropic',
+    name: 'Claude',
+    mode: 'native',
+    models: [{ name: 'Default' }, { id: 'claude-opus-4-8' }]
+  };
+  const openrouter = {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    mode: 'anthropic',
+    baseUrl: 'https://openrouter.ai/api',
+    models: [{ id: 'anthropic/claude-opus-4.6' }]
+  };
+  expect(piProviderId(native)).toBe('anthropic');
+  expect(piProviderId(openrouter)).toBe('bro-openrouter');
+  expect(piModelFor(native, '')).toBe('claude-opus-4-8');
+  expect(piProviderEntry(openrouter, 'anthropic/claude-opus-4.6').api).toBe('anthropic-messages');
+
+  const nativePlan = await launchPi({ provider: native, model: '', dryRun: true });
+  expect(nativePlan.args).toEqual(['--provider', 'anthropic', '--model', 'claude-opus-4-8']);
+  const routedPlan = await launchPi({
+    provider: openrouter,
+    model: 'anthropic/claude-opus-4.6',
+    apiKey: 'secret-key',
+    extraArgs: ['--continue'],
+    dryRun: true
+  });
+  expect(routedPlan.args).toEqual([
+    '--provider', 'bro-openrouter',
+    '--model', 'anthropic/claude-opus-4.6',
+    '--continue'
+  ]);
+  expect(routedPlan.env).toEqual({ BRO_PI_API_KEY: '(api key)' });
+  expect(JSON.stringify(routedPlan)).not.toContain('secret-key');
+});
+
+test('an invalid Pi models file is preserved instead of overwritten', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bro-pi-invalid-'));
+  const file = path.join(root, 'models.json');
+  try {
+    fs.writeFileSync(file, '{ definitely not json');
+    expect(() => writePiConfig(deepseek, 'deepseek-chat', file)).toThrow(/not valid JSON/);
+    expect(fs.readFileSync(file, 'utf8')).toBe('{ definitely not json');
+  } finally {
+    if (path.dirname(path.resolve(root)) !== path.resolve(os.tmpdir())) throw new Error('Unexpected temporary test path');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Pi refuses an empty custom provider instead of restoring an unrelated model', async () => {
+  await expect(launchPi({
+    provider: { id: 'empty', name: 'Empty provider', mode: 'openai', baseUrl: 'http://localhost:1234/v1' },
+    model: '',
+    dryRun: true
+  })).rejects.toThrow(/needs a concrete model/);
 });

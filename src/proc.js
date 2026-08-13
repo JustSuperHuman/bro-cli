@@ -113,6 +113,115 @@ function runSyncInherit(file, args) {
   return spawnSync(file, args, { stdio: 'inherit' });
 }
 
+// Every selectable coding harness can repair its own missing global command.
+// npm is the broadest cross-platform path for the Node-based harnesses; Bun is
+// a fallback (and omp's required runtime). Pi's upstream install explicitly
+// recommends --ignore-scripts because it has no required lifecycle scripts.
+export const HARNESS_INSTALLS = Object.freeze({
+  claude: Object.freeze({
+    label: 'Claude Code',
+    command: 'claude',
+    packageName: '@anthropic-ai/claude-code',
+    managers: ['npm', 'bun']
+  }),
+  omp: Object.freeze({
+    label: 'omp',
+    command: 'omp',
+    packageName: '@oh-my-pi/pi-coding-agent',
+    managers: ['bun']
+  }),
+  pi: Object.freeze({
+    label: 'Pi',
+    command: 'pi',
+    packageName: '@earendil-works/pi-coding-agent',
+    managers: ['npm', 'bun'],
+    installOptions: ['--ignore-scripts']
+  }),
+  codex: Object.freeze({
+    label: 'Codex',
+    command: 'codex',
+    packageName: '@openai/codex',
+    managers: ['npm', 'bun']
+  })
+});
+
+export function globalInstallArgs(spec) {
+  return ['install', '-g', ...(spec.installOptions || []), spec.packageName];
+}
+
+// The small dependency-injection surface makes the install behavior testable
+// without touching a developer's real global packages.
+export function ensureGlobalPackage(spec, {
+  binDirs = globalBinDirs,
+  find = which,
+  run = runSyncInherit,
+  announce = (message) => process.stdout.write(message)
+} = {}) {
+  let dirs = binDirs();
+  let executable = find(spec.command, dirs);
+  if (executable) return { executable, dirs };
+
+  let manager = '';
+  let managerPath = '';
+  for (const candidate of spec.managers) {
+    const found = find(candidate, dirs);
+    if (found) {
+      manager = candidate;
+      managerPath = found;
+      break;
+    }
+  }
+  if (!managerPath) {
+    throw new Error(
+      `Need ${spec.managers.join(' or ')} on PATH to install ${spec.label} (${spec.packageName}).`
+    );
+  }
+
+  announce(`\nInstalling ${spec.label} with ${manager} — one time only…\n`);
+  const result = run(managerPath, globalInstallArgs(spec));
+  if (result.status !== 0) throw new Error(`${spec.label} install failed.`);
+
+  dirs = binDirs();
+  executable = find(spec.command, dirs);
+  if (!executable) {
+    throw new Error(
+      `Installed ${spec.label} but could not locate the \`${spec.command}\` binary. Add your global bin directory to PATH and retry.`
+    );
+  }
+  return { executable, dirs };
+}
+
+export function ensureHarnessTool(name, options) {
+  const spec = HARNESS_INSTALLS[name];
+  if (!spec) throw new Error(`Unknown harness installer: ${name}`);
+  return ensureGlobalPackage(spec, options);
+}
+
+export function ensureClaude(options) {
+  const { executable, dirs } = ensureHarnessTool('claude', options);
+  return { claude: executable, dirs };
+}
+
+export function ensureCodex(options) {
+  const { executable, dirs } = ensureHarnessTool('codex', options);
+  return { codex: executable, dirs };
+}
+
+export function ensurePi(options) {
+  const { executable, dirs } = ensureHarnessTool('pi', options);
+  return { pi: executable, dirs };
+}
+
+export function ensureBun(options) {
+  const { executable, dirs } = ensureGlobalPackage({
+    label: 'Bun',
+    command: 'bun',
+    packageName: 'bun',
+    managers: ['npm']
+  }, options);
+  return { bun: executable, dirs };
+}
+
 // Make sure Oh My Pi (`omp`) is available. Prefer Bun's package install because
 // it is the upstream recommended cross-platform package path; fall back to the
 // official install scripts when Bun is not present.
@@ -123,9 +232,8 @@ export function ensureOmp() {
 
   const bun = which('bun', dirs);
   if (bun) {
-    process.stdout.write('\nInstalling omp with bun — one time only…\n');
-    const r = runSyncInherit(bun, ['install', '-g', '@oh-my-pi/pi-coding-agent']);
-    if (r.status !== 0) throw new Error('omp install failed.');
+    const installed = ensureHarnessTool('omp');
+    return { omp: installed.executable, dirs: installed.dirs };
   } else if (isWin) {
     const ps = which('powershell') || which('pwsh');
     if (!ps) throw new Error('Need Bun or PowerShell on PATH to install omp. See https://omp.sh/');

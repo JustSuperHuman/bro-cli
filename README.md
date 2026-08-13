@@ -1,6 +1,6 @@
 # bro
 
-Run [Claude Code](https://claude.com/claude-code) against **any** model — Claude natively, or any OpenAI/Anthropic-compatible API through a proxy that installs itself.
+Run your preferred coding harness against **any** model — [Claude Code](https://claude.com/claude-code), [omp](https://omp.sh/), [Pi](https://github.com/earendil-works/pi), or the Codex CLI — with native, OpenAI-compatible, and Anthropic-compatible providers wired up for you.
 
 Pick a provider, pick a model, go.
 
@@ -11,7 +11,10 @@ npm install -g bro-claude
 # or: bun install -g bro-claude
 ```
 
-You also need the `claude` CLI installed (that's the thing `bro` launches).
+`bro` is the only package you install up front. Whichever harness you select is
+installed globally on first use if its command is missing; the pool's Bun
+runtime and the OpenAI-to-Anthropic proxy are repaired the same way. The
+installers and command discovery work on Windows, macOS, and Linux.
 
 ## Use
 
@@ -20,20 +23,22 @@ bro
 ```
 
 1. Scroll to a **provider** and press enter.
-2. Scroll to a **model** and press enter. OpenRouter loads its complete live model catalog; move to its model column and type to filter by model name or id. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there, and **h** to rotate the harness (Claude Code · omp · codex).
+2. Scroll to a **model** and press enter. OpenRouter loads its complete live model catalog; move to its model column and type to filter by model name or id. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there, and **h** to rotate the harness (Claude Code · omp · Pi · Codex).
 3. First time on a paid provider it asks for an API key and saves it.
 
-Your last provider + model are remembered and pre-selected next time (per provider).
+Your last provider + model are remembered and pre-selected next time (per
+provider). The harness is saved the moment you choose it, so it remains selected
+even if a later login, install, or launch fails.
 
 ## Multiple Claude Account Proxy
 
-The **top** option in the menu (`bro -p pool`) pools any number of Claude Max / Team logins behind one local endpoint and launches Claude Code across all of them — so a single session draws from several plans and **fails over automatically** the moment one runs out of usage.
+The **top** option in the menu (`bro -p pool`) pools any number of Claude Max / Team logins behind one local endpoint and launches Claude Code, omp, or Pi across all of them — so a single session draws from several plans and **fails over automatically** the moment one runs out of usage.
 
 Pick it and `bro` handles everything:
 
 1. **Setup** — if you have no pooled accounts yet, it offers to log in a new one (opens Claude to sign in) or import the login already on this machine. Add as many as you like; each is stored in its own isolated config dir under `~/.claude-max-pool/`.
 2. **Start the proxy** — launches the pool server (in `pool/`, runs on [Bun](https://bun.sh)) in the background and waits for it to go healthy. A live dashboard shows each account's auth state, plan, rate tier, and rolling usage at `http://127.0.0.1:3456/`.
-3. **Launch Claude** — starts Claude Code pointed at the pool (`ANTHROPIC_BASE_URL`). The pool forwards Claude's Anthropic `/v1/messages` calls directly to Anthropic with the least-loaded account's OAuth token by default, without nesting another `claude --print` subprocess. When Claude exits, the proxy is stopped.
+3. **Launch the harness** — points Claude Code, omp, or Pi at the pool. The pool forwards Anthropic `/v1/messages` calls directly to Anthropic with the least-loaded account's OAuth token by default. When the harness exits, the proxy is stopped.
 
 Manage pool accounts directly through `bro`:
 
@@ -95,19 +100,20 @@ scan takes a moment, later ones are instant.
 
 ## Codex (ChatGPT subscription)
 
-`bro -p codex` (pinned in the menu) runs **Claude Code itself on your ChatGPT subscription** — the GPT‑5.x Codex models, driving Claude Code's normal harness (tools, agentic loop, streaming). No `codex` CLI, no extra packages, no API key: just your ChatGPT login.
+`bro -p codex` (pinned in the menu) runs your selected harness on your **ChatGPT subscription** — the GPT‑5.x Codex models driving Claude Code, omp, or Pi through a local bridge. The Codex harness runs its own CLI directly. No API key is needed: just your ChatGPT login.
 
 How it works:
 
 1. **Login** — a built-in ChatGPT OAuth sign-in (the same flow the Codex CLI uses) opens in your browser and stores credentials at `~/.bro/codex-auth.json`. If you already have the Codex CLI logged in, that login is reused automatically. Tokens are refreshed on their own as they expire. Several ChatGPT accounts? See [Codex profiles](#codex-profiles).
 2. **Models** — the list is fetched live from your subscription, so it always matches what you can actually run (GPT‑5.6‑Sol, GPT‑5.5, Codex‑Spark, …). Falls back to a cache, then a small built-in list, when offline.
-3. **Bridge** — `bro` starts a tiny local Anthropic-compatible server that translates Claude Code's `/v1/messages` calls into OpenAI Responses-API calls against the ChatGPT Codex backend, and streams the answers back (tool calls, thinking, and usage all mapped through). It's pure Node — nothing to install.
-4. **Launch** — Claude Code runs pointed at the bridge (`ANTHROPIC_BASE_URL`). Pick a model in the usual menu (Tab toggles skip-permissions); `-m <model>` skips it. When Claude exits, the bridge is torn down.
+3. **Bridge** — `bro` starts a tiny local Anthropic-compatible server that translates the harness's `/v1/messages` calls into OpenAI Responses-API calls against the ChatGPT Codex backend, and streams the answers back (tool calls, thinking, and usage all mapped through). It's pure Node — nothing to install.
+4. **Launch** — Claude Code, omp, or Pi runs pointed at the bridge. Pick a model in the usual menu (Tab toggles skip-permissions where the harness supports it); `-m <model>` skips it. When the harness exits, the bridge is torn down.
 
 ```sh
 bro -p codex              # pick a GPT-5.x model, launch Claude Code on it
 bro -p codex -m gpt-5.5   # skip the menu
 bro -p codex --omp        # use the omp harness instead of Claude Code
+bro -p codex --pi         # use Pi through the same subscription bridge
 bro -p codex --codex      # run the codex CLI itself (no bridge, no model menu)
 bro codex status          # show login + plan
 ```
@@ -180,14 +186,30 @@ launches, and the choice sticks until you change it:
 | --- | --- | --- |
 | `CLAUDE` | Claude Code (default) | every provider |
 | `OMP` | [omp](https://omp.sh/), which picks its own model | every provider |
+| `PI` | [Pi](https://github.com/earendil-works/pi), with bro's selected provider/model | every model provider and subscription bridge |
 | `CODEX` | the `codex` CLI | your ChatGPT login, or a provider serving OpenAI's Responses API |
 
 ```sh
 bro --claude              # force Claude Code for this launch
 bro --omp                 # force omp
+bro --pi                  # force Pi
 bro --codex               # force the codex CLI
-bro --harness codex       # same, long form (claude | omp | codex)
+bro --harness pi          # same, long form (claude | omp | pi | codex)
 ```
+
+For custom/API providers, `bro` upserts only its namespaced provider entry in
+`~/.pi/agent/models.json` (or `$PI_CODING_AGENT_DIR/models.json`); existing Pi
+settings and providers stay intact. The real API key is supplied in a
+launch-only environment variable, never written to that file or exposed in
+command arguments. Pi has no permission popups, so
+the skip-permissions toggle does not add a Pi flag. On native Windows, Pi itself
+requires a Bash shell; Git for Windows satisfies that upstream requirement.
+
+If a harness command is missing, first use installs the official package:
+`@anthropic-ai/claude-code`, `@oh-my-pi/pi-coding-agent`,
+`@earendil-works/pi-coding-agent`, or `@openai/codex`. npm is used where
+available, with Bun as the supported fallback; omp uses Bun or its official
+platform installer.
 
 Codex is the narrow one: as of codex 0.147 it speaks only OpenAI's Responses
 API, so it runs on your ChatGPT subscription or against an OpenAI-format
@@ -229,7 +251,7 @@ The response includes the saved file name and metadata; download the image from 
 
 ## Providers
 
-Claude is next in the list and runs **natively** (your normal Claude login — no proxy). Other Anthropic-compatible providers (OpenRouter, Z.ai) just point Claude at their endpoint. OpenAI-format providers (Sakana, OpenAI, DeepSeek, Groq, …) are routed through [`claude-code-router`](https://github.com/musistudio/claude-code-router), which `bro` installs for you the first time you need it.
+Claude is next in the list and runs **natively** with the Claude harness (your normal Claude login — no proxy). Other Anthropic-compatible providers (OpenRouter, Z.ai) are passed directly to Claude, omp, or Pi. OpenAI-format providers (Sakana, OpenAI, DeepSeek, Groq, …) use [`claude-code-router`](https://github.com/musistudio/claude-code-router) for Claude, while omp and Pi receive native provider entries. `bro` installs any missing helper on first use.
 
 ### Flags
 
@@ -239,7 +261,7 @@ bro account work          # launch Claude using one logged-in account profile
 bro -p codex              # Codex on your ChatGPT subscription (live model list)
 bro codex                 # pick a Codex profile or session
 bro codex resume          # resume a Codex session
-bro --codex               # launch the codex CLI as the harness (also --omp)
+bro --pi                  # launch Pi (also --omp / --codex / --claude)
 bro -p sakana -m fugu     # skip the menus
 bro --list                # list every provider + model
 bro update                # refresh the model list from GitHub, cache it locally
@@ -247,11 +269,11 @@ bro --dry-run             # show what would run, launch nothing
 bro --safe                # don't pass --dangerously-skip-permissions
 bro --resume <session-id> # pick provider/model, then resume Claude there
 bro -p pool --resume <id> # resume through the Multiple Claude Account Proxy
-bro -- --help             # force a bro flag name through to claude
+bro -- --help             # force a bro flag name through to the harness
 ```
 
 Put `bro`'s own flags first. The first unrecognized argument, and everything
-after it, is passed verbatim to the Claude session after provider/model
+after it, is passed verbatim to the selected harness after provider/model
 selection.
 
 ## Config

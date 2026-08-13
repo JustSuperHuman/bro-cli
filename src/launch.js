@@ -1,10 +1,24 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { which, globalBinDirs, runInherit, ensureProxy, ensureOmp } from './proc.js';
+import {
+  which,
+  globalBinDirs,
+  runInherit,
+  ensureProxy,
+  ensureClaude,
+  ensureCodex,
+  ensureOmp,
+  ensurePi
+} from './proc.js';
 
 const CCR_CONFIG = path.join(os.homedir(), '.claude-code-router', 'config.json');
 const OMP_MODELS = path.join(os.homedir(), '.omp', 'agent', 'models.yml');
+export const PI_MODELS = path.join(os.homedir(), '.pi', 'agent', 'models.json');
+const PI_KEY_ENV = 'BRO_PI_API_KEY';
+export const piModelsPath = () => process.env.PI_CODING_AGENT_DIR
+  ? path.join(process.env.PI_CODING_AGENT_DIR, 'models.json')
+  : PI_MODELS;
 
 function yamlString(value) {
   return JSON.stringify(String(value ?? ''));
@@ -131,6 +145,106 @@ export async function launchOmp({ provider, model, apiKey, extraArgs = [], skipP
   return runInherit(omp, ompArgs, env);
 }
 
+// --- Pi harness ------------------------------------------------------------
+
+function piApiFor(provider) {
+  if (provider.mode === 'anthropic' || provider.mode === 'native') return 'anthropic-messages';
+  return 'openai-completions';
+}
+
+// Keep bro-managed providers in their own namespace so an OpenRouter/OpenAI
+// entry cannot replace Pi's built-in provider or the user's own overrides.
+export function piProviderId(provider) {
+  if (provider.mode === 'native') return 'anthropic';
+  const safe = String(provider.id || 'provider')
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'provider';
+  return `bro-${safe}`;
+}
+
+export function piModelFor(provider, model) {
+  return model || (provider.models || []).find((entry) => entry?.id)?.id || '';
+}
+
+function piConfiguredModelId(model, knownIds) {
+  if (!model || knownIds.includes(model)) return model;
+  return model.replace(/:(?:off|minimal|low|medium|high|xhigh|max)$/i, '');
+}
+
+export function piProviderEntry(provider, model) {
+  const ids = (provider.models || []).map((entry) => entry?.id).filter(Boolean);
+  const configuredModel = piConfiguredModelId(model, ids);
+  if (configuredModel && !ids.includes(configuredModel)) ids.unshift(configuredModel);
+  const baseUrl = provider.mode === 'openai' ? normalizeOpenAiBaseUrl(provider.baseUrl) : provider.baseUrl;
+  return {
+    ...(baseUrl ? { baseUrl } : {}),
+    api: piApiFor(provider),
+    // Pi resolves this as an environment variable at request time. The actual
+    // provider key therefore never lands in models.json or the process list.
+    apiKey: PI_KEY_ENV,
+    authHeader: true,
+    models: ids.map((id) => {
+      const info = (provider.models || []).find((entry) => entry?.id === id) || {};
+      return { id, ...(info.name ? { name: info.name } : {}) };
+    })
+  };
+}
+
+export function writePiConfig(provider, model, modelsPath = piModelsPath()) {
+  if (provider.mode === 'native') return;
+
+  let config = {};
+  if (fs.existsSync(modelsPath)) {
+    try {
+      config = JSON.parse(fs.readFileSync(modelsPath, 'utf8'));
+    } catch (error) {
+      throw new Error(`Could not update Pi's provider config because ${modelsPath} is not valid JSON: ${error.message}`);
+    }
+  }
+  if (!config || Array.isArray(config) || typeof config !== 'object') {
+    throw new Error(`Could not update Pi's provider config because ${modelsPath} must contain a JSON object.`);
+  }
+  if (config.providers != null && (Array.isArray(config.providers) || typeof config.providers !== 'object')) {
+    throw new Error(`Could not update Pi's provider config because its "providers" value must be an object.`);
+  }
+
+  config.providers = { ...(config.providers || {}), [piProviderId(provider)]: piProviderEntry(provider, model) };
+  fs.mkdirSync(path.dirname(modelsPath), { recursive: true });
+  fs.writeFileSync(modelsPath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+export async function launchPi({ provider, model, apiKey, extraArgs = [], dryRun = false }) {
+  const providerId = piProviderId(provider);
+  // Pi only applies --provider when --model is also present. Resolve a blank
+  // bro "default" row to the provider's first concrete model so it cannot
+  // silently restore a model from a different provider.
+  const activeModel = piModelFor(provider, model);
+  if (!activeModel) {
+    throw new Error(`Pi needs a concrete model for ${provider.name || provider.id}. Pass --model or add models to the provider config.`);
+  }
+  const piArgs = ['--provider', providerId];
+  if (activeModel) piArgs.push('--model', activeModel);
+  piArgs.push(...extraArgs);
+
+  if (dryRun) {
+    return {
+      via: provider.mode === 'native' ? 'pi (native provider)' : `pi → ${provider.name || provider.id}`,
+      cmd: which('pi', globalBinDirs()) || 'pi',
+      args: piArgs,
+      ...(provider.mode !== 'native' ? { piModels: piModelsPath(), env: { [PI_KEY_ENV]: apiKey ? '(api key)' : '(not needed)' } } : {}),
+      model: activeModel || '(pi default)'
+    };
+  }
+
+  writePiConfig(provider, activeModel);
+  const { pi, dirs } = ensurePi();
+  const env = { ...process.env, PATH: [...dirs, process.env.PATH || ''].join(path.delimiter) };
+  if (provider.mode !== 'native') env[PI_KEY_ENV] = apiKey || 'not-needed';
+  console.log(`\nLaunching ${provider.name || provider.id}${activeModel ? ' / ' + activeModel : ''} with Pi…`);
+  return runInherit(pi, piArgs, env);
+}
+
 // --- codex CLI harness -----------------------------------------------------
 
 // The provider slot bro describes to codex, and the env var it reads the key
@@ -219,11 +333,15 @@ export async function launchCodex({
     };
   }
 
-  const codex = which('codex', globalBinDirs());
-  if (!codex) throw new Error('The `codex` CLI was not found. Install it: npm install -g @openai/codex');
+  const { codex, dirs } = ensureCodex();
   if (cwd && !fs.existsSync(cwd)) throw new Error(`That session's directory is gone: ${cwd}`);
 
-  const env = { ...process.env, ...providerEnv, NODE_NO_WARNINGS: '1' };
+  const env = {
+    ...process.env,
+    ...providerEnv,
+    NODE_NO_WARNINGS: '1',
+    PATH: [...dirs, process.env.PATH || ''].join(path.delimiter)
+  };
   // A profile is a whole codex home: credentials, sessions and settings. No
   // profile means the machine's own, so the user's own CODEX_HOME stands.
   if (home) env.CODEX_HOME = home;
@@ -285,6 +403,9 @@ export async function launch({ provider, model, apiKey, extraArgs = [], skipPerm
   if (harness === 'omp') {
     return launchOmp({ provider, model, apiKey, extraArgs, skipPermissions, dryRun });
   }
+  if (harness === 'pi') {
+    return launchPi({ provider, model, apiKey, extraArgs, dryRun });
+  }
   if (harness === 'codex') {
     return launchCodex({ provider, model, apiKey, extraArgs, skipPermissions, dryRun });
   }
@@ -305,12 +426,13 @@ export async function launch({ provider, model, apiKey, extraArgs = [], skipPerm
       };
     }
     writeCcrConfig(provider, model, apiKey);
+    const { dirs: claudeDirs } = ensureClaude();
     const { ccr, dirs } = ensureProxy();
     const env = { ...process.env, NODE_NO_WARNINGS: '1' };
     for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_DISABLE_1M_CONTEXT']) {
       delete env[k];
     }
-    env.PATH = [...dirs, env.PATH].join(path.delimiter);
+    env.PATH = [...dirs, ...claudeDirs, env.PATH].join(path.delimiter);
     console.log(`\nLaunching ${provider.name || provider.id} / ${model} via the proxy…`);
     return runInherit(ccr, ['code', ...claudeArgs], env);
   }
@@ -334,8 +456,8 @@ export async function launch({ provider, model, apiKey, extraArgs = [], skipPerm
     };
   }
 
-  const claude = which('claude');
-  if (!claude) throw new Error('The `claude` CLI was not found. Install Claude Code: https://claude.com/claude-code');
+  const { claude, dirs } = ensureClaude();
+  env.PATH = [...dirs, env.PATH || ''].join(path.delimiter);
   console.log(`\nLaunching ${provider.name || provider.id}${model ? ' / ' + model : ''}…`);
   return runInherit(claude, claudeArgs, env);
 }

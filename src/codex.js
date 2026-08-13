@@ -6,9 +6,9 @@
 // setting CLAUDE_CONFIG_DIR, Codex switches by setting CODEX_HOME — the shared
 // picker rows, resume-destination prompt and staging live in profiles.js.
 //
-// Two harnesses can run against a Codex login:
+// Three harness paths can run against a Codex login:
 //
-//   claude / omp — bro ensures the login (its own PKCE flow in codex-auth.js;
+//   claude / omp / pi — bro ensures the login (its own PKCE flow in codex-auth.js;
 //     an existing codex CLI login is reused), fetches that subscription's live
 //     model list, starts the local Anthropic⇄Codex translation bridge
 //     (codex-bridge.js), points the harness at it via ANTHROPIC_BASE_URL, and
@@ -22,12 +22,13 @@
 // read it back.
 
 import fs from 'node:fs';
-import { which, globalBinDirs, runInherit } from './proc.js';
+import path from 'node:path';
+import { ensureClaude, runInherit } from './proc.js';
 import { select, selectColumns, prompt } from './ui.js';
 import { rememberSelection, rememberProfile, lastModelFor } from './state.js';
 import { isCodexLoggedIn, codexLogin, codexLogout, codexAuthStatus } from './codex-auth.js';
 import { fetchCodexModels, startCodexBridge, DEFAULT_PORT } from './codex-bridge.js';
-import { launchCodex, launchOmp } from './launch.js';
+import { launchCodex, launchOmp, launchPi } from './launch.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { samePath } from './sessions.js';
 import { chooseResumeProfile, sessionRows, stageFiles } from './profiles.js';
@@ -406,7 +407,7 @@ export async function runCodex({
     }
     const models = await fetchCodexModels({ home: homeOf(target) });
     return {
-      via: 'codex (chatgpt subscription) → local bridge → ' + (harness === 'omp' ? 'omp' : 'claude'),
+      via: 'codex (chatgpt subscription) → local bridge → ' + (harness === 'omp' ? 'omp' : harness === 'pi' ? 'pi' : 'claude'),
       profile: profile || '(this machine)',
       auth: isCodexLoggedIn(homeOf(target)) ? 'logged in' : 'not logged in (login would run)',
       bridge: `http://127.0.0.1:${DEFAULT_PORT}  (Anthropic-compatible)`,
@@ -492,8 +493,8 @@ export async function runCodex({
   process.stdout.write('\x1b[2K\r');
 
   let skip = skipPermissions;
-  // Claude Code always needs a concrete model (it also makes background calls);
-  // omp does its own model routing, so only prompt for claude.
+  // Claude Code and Pi need a concrete bridge model. omp does its own model
+  // routing, so it alone can skip bro's picker.
   if (!model && harness !== 'omp') {
     const choice = await chooseModel(models, skip);
     if (choice == null) { console.log('Cancelled.'); return 0; }
@@ -532,9 +533,23 @@ export async function runCodex({
         dryRun: false
       });
     }
+    if (harness === 'pi') {
+      return await launchPi({
+        provider: {
+          ...CODEX_PROVIDER,
+          mode: 'anthropic',
+          baseUrl: bridge.baseUrl,
+          disable1mContext: true,
+          models: models.map((entry) => ({ id: entry.id, name: entry.name }))
+        },
+        model: activeModel,
+        apiKey: 'bro-codex',
+        extraArgs,
+        dryRun: false
+      });
+    }
 
-    const claude = which('claude', globalBinDirs());
-    if (!claude) throw new Error('The `claude` CLI was not found. Install Claude Code: https://claude.com/claude-code');
+    const { claude, dirs } = ensureClaude();
 
     const env = { ...process.env };
     delete env.CLAUDE_CONFIG_DIR;
@@ -543,6 +558,7 @@ export async function runCodex({
     env.ANTHROPIC_AUTH_TOKEN = 'bro-codex';
     env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
     env.NODE_NO_WARNINGS = '1';
+    env.PATH = [...dirs, env.PATH || ''].join(path.delimiter);
 
     const claudeArgs = [];
     if (skip) claudeArgs.push('--dangerously-skip-permissions');

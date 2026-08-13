@@ -35,10 +35,12 @@ test('a search drops group dividers instead of leaving rules over nothing', () =
 });
 
 test('a keyed toggle with options rotates through them and wraps', () => {
-  const harness = { key: 'h', name: 'harness', value: 'omp', options: ['claude', 'omp', 'codex'] };
+  const harness = { key: 'h', name: 'harness', value: 'omp', options: ['claude', 'omp', 'pi', 'codex'] };
   const [keyed] = normalizeKeyed([harness]);
 
   expect(keyedValues([keyed])).toEqual({ harness: 'omp' });
+  cycleKeyed(keyed);
+  expect(keyedValues([keyed])).toEqual({ harness: 'pi' });
   cycleKeyed(keyed);
   expect(keyedValues([keyed])).toEqual({ harness: 'codex' });
   cycleKeyed(keyed);

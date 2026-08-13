@@ -1,7 +1,7 @@
 {
   "name": "bro-claude",
-  "version": "0.4.1",
-  "description": "Run Claude Code against any model provider — Claude native, or any OpenAI/Anthropic-compatible API via an auto-installed proxy. Pick a provider, pick a model, go.",
+  "version": "0.4.2",
+  "description": "Run Claude Code, omp, Pi, or Codex against native, OpenAI-compatible, and Anthropic-compatible model providers.",
   "type": "module",
   "bin": {
     "bro": "bin/bro.js"
@@ -24,6 +24,10 @@
   "keywords": [
     "claude",
     "claude-code",
+    "coding-agent",
+    "pi",
+    "codex",
+    "omp",
     "cli",
     "llm",
     "ai",
