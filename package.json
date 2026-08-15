@@ -19,7 +19,9 @@
   },
   "scripts": {
     "start": "node bin/bro.js",
-    "bro": "node bin/bro.js"
+    "bro": "node bin/bro.js",
+    "deploy": "node scripts/deploy.js",
+    "deploy:check": "node scripts/deploy.js --dry-run"
   },
   "keywords": [
     "claude",
