@@ -29,13 +29,28 @@ const stripAnsi = (s) => String(s ?? '').replace(ANSI_RE, '');
 export function filterChoices(choices, query) {
   const terms = String(query || '').trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return choices;
-  return choices.filter((choice) => {
+  const matches = choices.filter((choice) => {
     if (choice?.divider) return false;
-    const label = choice?.label ?? choice?.name ?? '';
+    const rawLabel = choice?.label ?? choice?.name ?? '';
+    // A width-dependent label renders differently per paint, so search relies
+    // on the row's filterText instead.
+    const label = typeof rawLabel === 'function' ? '' : rawLabel;
     const extra = choice?.filterText ?? (typeof choice?.value === 'string' ? choice.value : '');
     const haystack = `${stripAnsi(label)} ${extra}`.toLocaleLowerCase();
     return terms.every((term) => haystack.includes(term));
   });
+  // Column headers describe the rows, so they stay above whatever matched.
+  if (!matches.length) return matches;
+  const headers = choices.filter((choice) => choice?.divider && choice?.header);
+  return headers.length ? [...headers, ...matches] : matches;
+}
+
+// A row's text for `width` visible columns. Labels may be functions of the
+// width so a row can lay its columns out for the space it actually gets.
+export function renderLabel(choice, width) {
+  if (!choice || choice.divider) return '';
+  const label = choice.label ?? choice.name ?? String(choice.value);
+  return typeof label === 'function' ? label(width) : label;
 }
 
 // Nearest non-divider row at or after `from`, searching in `dir`; falls back to
@@ -172,7 +187,9 @@ function renderKeyedRow(t) {
 // ([{label,value}]) cycles through them instead of flipping on/off. With
 // `filterable`, typing narrows the list by label/value; Backspace edits and
 // Esc clears the filter.
-export function select({ message, choices, startIndex = 0, toggle = null, toggles = [], filterable = false }) {
+// `header` (a string or a function of the row width) is painted dim between
+// the message and the list — column headings for rows laid out in columns.
+export function select({ message, choices, startIndex = 0, toggle = null, toggles = [], filterable = false, header = null }) {
   if (!isInteractive) {
     return Promise.reject(new Error('A terminal (TTY) is required to choose interactively. Use --provider / --model instead.'));
   }
@@ -186,13 +203,16 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
     // Long lists scroll inside a viewport sized to the terminal — the repaint
     // moves the cursor up by the row count of the previous paint, so it must
     // never exceed the screen height. Recomputed on terminal resize.
-    let visible, lines;
+    let visible, lines, rowW;
+    const headerRows = header ? 1 : 0;
     const layout = () => {
-      const overhead = 2 + (toggle ? 1 : 0) + keyed.length; // message + hint (+ toggle rows)
+      const overhead = 2 + headerRows + (toggle ? 1 : 0) + keyed.length; // message + hint (+ header, toggle rows)
       // Reserve one result row for the "no matches" state. Otherwise never
       // paint more rows than the filtered list contains.
       visible = Math.min(Math.max(1, items.length), Math.max(3, (stdout.rows || 30) - overhead - 1));
-      lines = visible + 1 + (toggle ? 1 : 0) + keyed.length; // message + visible choices (+ toggle rows)
+      lines = visible + 1 + headerRows + (toggle ? 1 : 0) + keyed.length; // message + visible choices (+ header, toggle rows)
+      // Rows are indented three columns and may carry a scroll marker.
+      rowW = Math.max(20, (stdout.columns || 80) - 6);
     };
     layout();
     let offset = Math.max(0, Math.min(index - visible + 1, items.length - visible));
@@ -244,13 +264,14 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
       else if (mode === 'fresh') out += '\x1b[2J\x1b[H';
       out += '\x1b[0J';
       out += `\x1b[1m${message}\x1b[0m\n`;
+      if (header) out += `\x1b[2m   ${typeof header === 'function' ? header(rowW) : header}\x1b[0m\n`;
       for (let i = offset; i < offset + visible; i++) {
         const c = items[i];
         if (!c) {
           out += `\x1b[2m   No matches for "${query}"\x1b[0m\n`;
           continue;
         }
-        const label = c.label ?? c.name ?? String(c.value);
+        const label = renderLabel(c, rowW);
         const more =
           i === offset && offset > 0 ? ' \x1b[2m↑\x1b[0m'
           : i === offset + visible - 1 && i < items.length - 1 ? ' \x1b[2m↓\x1b[0m'
@@ -399,7 +420,10 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     const keyed = normalizeKeyed(toggles);
     let finished = false;
 
-    const labelOf = (c) => (c.divider ? '' : c.label ?? c.name ?? String(c.value));
+    const labelOf = (c, width) => renderLabel(c, width);
+    // Lazy loaders that keep refining their rows (a live catalogue filling in
+    // measurements) are told to stop when the picker closes.
+    const loading = new AbortController();
 
     // Per-choice child state. `lazy` children load on first highlight.
     const kids = choices.map((c) => {
@@ -439,17 +463,40 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     // The highlighted child, or null when the column is empty / on a divider.
     const childAt = (k) => (k.status === 'ready' && !k.items[k.index]?.divider ? k.items[k.index] : null);
 
+    // Swap in a new row set while keeping the cursor on the same value and the
+    // typed filter applied — how a loader pushes refinements after its first
+    // result.
+    const replaceItems = (i, items) => {
+      const k = kids[i];
+      const selected = k.items[k.index]?.value;
+      k.allItems = Array.isArray(items) ? items : [];
+      k.items = filterChoices(k.allItems, k.query);
+      k.status = k.allItems.length ? 'ready' : 'none';
+      const preserved = selected !== undefined ? k.items.findIndex((item) => item.value === selected) : -1;
+      if (preserved >= 0) k.index = preserved;
+      else applyChildStart(i);
+    };
+
+    // A lazy loader is called with { update, signal }: `update(items)` replaces
+    // the rows any time later (ignored once the picker has closed), `signal`
+    // aborts when it closes.
     const ensureLoaded = (i) => {
       const k = kids[i];
       if (k.status !== 'lazy') return;
       k.status = 'loading';
+      const update = (items) => {
+        if (finished || k.status === 'loading') return;
+        replaceItems(i, items);
+        if (index === i) {
+          layout();
+          paint('repaint');
+        }
+      };
       Promise.resolve()
-        .then(() => choices[i].children())
+        .then(() => choices[i].children({ update, signal: loading.signal }))
         .then((items) => {
-          k.allItems = Array.isArray(items) ? items : [];
-          k.items = filterChoices(k.allItems, k.query);
-          k.status = k.allItems.length ? 'ready' : 'none';
-          applyChildStart(i);
+          k.status = 'ready';
+          replaceItems(i, items);
         })
         .catch(() => {
           k.status = 'none';
@@ -475,7 +522,7 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
       visible = Math.min(tallest, Math.max(3, (stdout.rows || 30) - overhead - 1));
       lines = visible + 1 + (toggle ? 1 : 0) + keyed.length;
       // Left column hugs its widest label; the right column takes the rest.
-      leftW = Math.min(Math.max(...choices.map((c) => visWidth(labelOf(c))), 10) + 2, Math.floor((cols - 4) / 2));
+      leftW = Math.min(Math.max(...choices.map((c) => visWidth(labelOf(c, cols))), 10) + 2, Math.floor((cols - 4) / 2));
       rightW = Math.max(10, cols - leftW - 4);
     };
     layout();
@@ -522,9 +569,14 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
       return color ? `${color}${fit('  ' + stripAnsi(raw), width)}\x1b[0m` : fit('  ' + raw, width);
     };
 
-    // A divider row: a rule, or a labelled rule that names the group beneath it.
-    const dividerCell = (label, width) => {
-      const text = stripAnsi(label ?? '');
+    // A divider row: a rule, or a labelled rule that names the group beneath
+    // it. A `header` divider is column headings instead, aligned with the rows.
+    const dividerCell = (item, width) => {
+      if (item.header) {
+        const heading = typeof item.label === 'function' ? item.label(width - 2) : item.label ?? '';
+        return `\x1b[2m${fit('  ' + stripAnsi(heading), width)}\x1b[0m`;
+      }
+      const text = stripAnsi(item.label ?? '');
       if (!text) return `\x1b[2m${'─'.repeat(width)}\x1b[0m`;
       const rule = Math.max(0, width - visWidth(text) - 4);
       return `\x1b[2m── ${text} ${'─'.repeat(rule)}\x1b[0m`;
@@ -560,8 +612,8 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
         const li = leftOffset + r;
         const left =
           li >= choices.length ? ' '.repeat(leftW)
-          : choices[li].divider ? dividerCell(choices[li].label, leftW)
-          : cell(labelOf(choices[li]), leftW, li === index, focus === 'left', choices[li].color);
+          : choices[li].divider ? dividerCell(choices[li], leftW)
+          : cell(labelOf(choices[li], leftW - 2), leftW, li === index, focus === 'left', choices[li].color);
         let right = '';
         if (k.status === 'ready') {
           if (!k.items.length && r === 0) {
@@ -571,8 +623,8 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
             const item = k.items[ri];
             if (item) {
               right = item.divider
-                ? dividerCell(item.label, rightW)
-                : cell(labelOf(item), rightW, ri === k.index, focus === 'right', item.color);
+                ? dividerCell(item, rightW)
+                : cell(labelOf(item, rightW - 2), rightW, ri === k.index, focus === 'right', item.color);
             }
           }
         } else if (r === 0) {
@@ -605,6 +657,7 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
 
     const cleanup = () => {
       finished = true;
+      loading.abort();
       if (resizeTimer) clearTimeout(resizeTimer);
       stdin.removeListener('keypress', onKey);
       stdout.removeListener('resize', onResize);

@@ -11,6 +11,18 @@ import {
   ensureOmp,
   ensurePi
 } from './proc.js';
+import { launchDsh } from './deepseek.js';
+import { note } from './out.js';
+import { browserBackend, claudeBrowserEnabled, prepareClaudeBrowser, usesThirdPartyAuth } from './claude-browser.js';
+import { CHROME_MCP_SERVER_NAME } from './chrome-mcp.js';
+import { MCP_CHROME_SERVER_NAME } from './mcp-chrome-server.js';
+
+// What a dry run should say about the browser: the built-in flag for a
+// claude.ai login, the explicitly configured server for everything else.
+const describeBrowserWiring = (env, bridged = usesThirdPartyAuth(env)) =>
+  browserBackend() === 'mcp-chrome'
+    ? `mcp__${MCP_CHROME_SERVER_NAME}__* (--mcp-config, mcp-chrome extension)`
+    : bridged ? `mcp__${CHROME_MCP_SERVER_NAME}__* (--mcp-config)` : '--chrome';
 
 const CCR_CONFIG = path.join(os.homedir(), '.claude-code-router', 'config.json');
 const OMP_MODELS = path.join(os.homedir(), '.omp', 'agent', 'models.yml');
@@ -141,7 +153,7 @@ export async function launchOmp({ provider, model, apiKey, extraArgs = [], skipP
   writeOmpConfig(provider, model, apiKey);
   const { omp, dirs } = ensureOmp();
   const env = { ...process.env, PATH: [...dirs, process.env.PATH || ''].join(path.delimiter) };
-  console.log(`\nLaunching ${provider.name || provider.id}${model ? ' / ' + model : ''} with omp…`);
+  note(`\nLaunching ${provider.name || provider.id}${model ? ' / ' + model : ''} with omp…`);
   return runInherit(omp, ompArgs, env);
 }
 
@@ -241,7 +253,7 @@ export async function launchPi({ provider, model, apiKey, extraArgs = [], dryRun
   const { pi, dirs } = ensurePi();
   const env = { ...process.env, PATH: [...dirs, process.env.PATH || ''].join(path.delimiter) };
   if (provider.mode !== 'native') env[PI_KEY_ENV] = apiKey || 'not-needed';
-  console.log(`\nLaunching ${provider.name || provider.id}${activeModel ? ' / ' + activeModel : ''} with Pi…`);
+  note(`\nLaunching ${provider.name || provider.id}${activeModel ? ' / ' + activeModel : ''} with Pi…`);
   return runInherit(pi, piArgs, env);
 }
 
@@ -354,11 +366,11 @@ export async function launchCodex({
       ? `Forking Codex session${named} from ${sourceProfile || 'this machine'} and resuming${as || ' locally'}`
       : `Resuming Codex session${named}${as}`
     : `Launching Codex${provider.mode === 'codex' ? as : ' / ' + (provider.name || provider.id)}`;
-  console.log(`\n${banner}${model ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}…`);
+  note(`\n${banner}${model ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}…`);
   if (provider.mode !== 'codex') {
-    console.log(`\x1b[2m  codex calls ${normalizeOpenAiBaseUrl(provider.baseUrl)}/responses — a provider that only serves /chat/completions will refuse it.\x1b[0m`);
+    note(`\x1b[2m  codex calls ${normalizeOpenAiBaseUrl(provider.baseUrl)}/responses — a provider that only serves /chat/completions will refuse it.\x1b[0m`);
   }
-  return runInherit(codex, codexArgs, env, cwd ? { cwd } : undefined);
+  return runInherit(codex, codexArgs, env, { ...(cwd ? { cwd } : {}), terminalAgent: 'codex' });
 }
 
 // Upsert this provider into the proxy's config and point its default route at the
@@ -399,7 +411,33 @@ function writeCcrConfig(provider, model, apiKey) {
 //   anthropic -> point claude at an Anthropic-compatible base URL
 //   openai    -> route claude through the proxy (ccr)
 // With { dryRun: true } nothing is spawned or written; returns a description.
-export async function launch({ provider, model, apiKey, extraArgs = [], skipPermissions = true, harness = 'claude', dryRun = false }) {
+export async function launch({
+  provider,
+  model,
+  apiKey,
+  providers = [],
+  providerKeys = {},
+  extraArgs = [],
+  skipPermissions = true,
+  harness = 'claude',
+  // No terminal is watching, so the browser is joined but never raised.
+  headless = false,
+  dryRun = false,
+  preferredProfile = null
+}) {
+  if (harness === 'dsh') {
+    return launchDsh({
+      provider,
+      model,
+      apiKey,
+      providers,
+      providerKeys,
+      extraArgs,
+      skipPermissions,
+      dryRun,
+      preferredProfile
+    });
+  }
   if (harness === 'omp') {
     return launchOmp({ provider, model, apiKey, extraArgs, skipPermissions, dryRun });
   }
@@ -412,6 +450,9 @@ export async function launch({ provider, model, apiKey, extraArgs = [], skipPerm
 
   const claudeArgs = [];
   if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
+  const browserEnabled = claudeBrowserEnabled()
+    && !extraArgs.includes('--no-chrome')
+    && !extraArgs.includes('--chrome');
   if (model) claudeArgs.push('--model', provider.mode === 'openai' ? `${provider.id},${model}` : model);
   claudeArgs.push(...extraArgs);
 
@@ -422,19 +463,26 @@ export async function launch({ provider, model, apiKey, extraArgs = [], skipPerm
         cmd: which('ccr', globalBinDirs()) || 'ccr',
         args: ['code', ...claudeArgs],
         ccrConfig: CCR_CONFIG,
-        route: `${provider.id},${model}`
+        route: `${provider.id},${model}`,
+        ...(browserEnabled ? { browser: describeBrowserWiring(null, true) } : {})
       };
     }
     writeCcrConfig(provider, model, apiKey);
-    const { dirs: claudeDirs } = ensureClaude();
+    const { claude, dirs: claudeDirs } = ensureClaude();
     const { ccr, dirs } = ensureProxy();
     const env = { ...process.env, NODE_NO_WARNINGS: '1' };
     for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_DISABLE_1M_CONTEXT']) {
       delete env[k];
     }
     env.PATH = [...dirs, ...claudeDirs, env.PATH].join(path.delimiter);
-    console.log(`\nLaunching ${provider.name || provider.id} / ${model} via the proxy…`);
-    return runInherit(ccr, ['code', ...claudeArgs], env);
+    // The proxy sets its own credentials on the session it spawns, so this
+    // route always ends up on non-claude.ai auth however clean bro's env looks.
+    const browser = browserEnabled
+      ? await prepareClaudeBrowser({ claudePath: claude, baseEnv: env, skipPermissions, bridged: true, autoStart: !headless })
+      : null;
+    if (browser) Object.assign(env, browser.env);
+    note(`\nLaunching ${provider.name || provider.id} / ${model} via the proxy…`);
+    return runInherit(ccr, ['code', ...(browser?.args || []), ...claudeArgs], env, { terminalAgent: 'claude' });
   }
 
   // native + anthropic-compatible both run the claude CLI directly.
@@ -452,12 +500,20 @@ export async function launch({ provider, model, apiKey, extraArgs = [], skipPerm
       via: provider.mode === 'native' ? 'native Claude' : 'anthropic-compatible',
       cmd: which('claude', globalBinDirs()) || 'claude',
       args: claudeArgs,
-      baseUrl: provider.mode === 'anthropic' ? provider.baseUrl : '(default)'
+      baseUrl: provider.mode === 'anthropic' ? provider.baseUrl : '(default)',
+      ...(browserEnabled ? { browser: describeBrowserWiring(env) } : {})
     };
   }
 
   const { claude, dirs } = ensureClaude();
   env.PATH = [...dirs, env.PATH || ''].join(path.delimiter);
-  console.log(`\nLaunching ${provider.name || provider.id}${model ? ' / ' + model : ''}…`);
-  return runInherit(claude, claudeArgs, env);
+  // A native login gets Claude Code's own --chrome; an Anthropic-compatible
+  // provider gets the same browser through the MCP server, because the
+  // ANTHROPIC_AUTH_TOKEN set just above switches the built-in wiring off.
+  const browser = browserEnabled
+    ? await prepareClaudeBrowser({ claudePath: claude, baseEnv: env, skipPermissions, autoStart: !headless })
+    : null;
+  if (browser) Object.assign(env, browser.env);
+  note(`\nLaunching ${provider.name || provider.id}${model ? ' / ' + model : ''}…`);
+  return runInherit(claude, [...(browser?.args || []), ...claudeArgs], env, { terminalAgent: 'claude' });
 }

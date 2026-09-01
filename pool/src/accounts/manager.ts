@@ -43,6 +43,23 @@ function readMacKeychainCreds(): string | null {
   }
 }
 
+/** Persist a rotated default Claude login back to the same macOS Keychain item. */
+function writeMacKeychainCreds(raw: string): void {
+  if (process.platform !== "darwin") return;
+  const proc = Bun.spawnSync([
+    "security",
+    "add-generic-password",
+    "-U",
+    "-s",
+    "Claude Code-credentials",
+    "-w",
+    raw,
+  ]);
+  if (proc.exitCode !== 0) {
+    throw new Error("Could not update Claude Code credentials in the macOS Keychain");
+  }
+}
+
 export class AccountManager {
   private config: Config;
   private usage: Record<string, AccountUsage> = {};
@@ -103,15 +120,27 @@ export class AccountManager {
 
   /** Names of every account directory present in the pool. */
   listNames(): string[] {
-    if (!existsSync(this.config.accountsDir)) return [];
-    return readdirSync(this.config.accountsDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-      .sort();
+    const names = existsSync(this.config.accountsDir)
+      ? readdirSync(this.config.accountsDir, { withFileTypes: true })
+          .filter((d) => d.isDirectory())
+          .map((d) => d.name)
+      : [];
+    if (this.config.directClaudeConfigDir) {
+      names.push(this.config.directClaudeAccountName || "claude-code-login");
+    }
+    return [...new Set(names)].sort();
   }
 
   configDirFor(name: string): string {
+    if (this.isDirectAccount(name)) return this.config.directClaudeConfigDir!;
     return join(this.config.accountsDir, name);
+  }
+
+  private isDirectAccount(name: string): boolean {
+    return Boolean(
+      this.config.directClaudeConfigDir &&
+        name === (this.config.directClaudeAccountName || "claude-code-login"),
+    );
   }
 
   private credsPath(name: string): string {
@@ -120,12 +149,14 @@ export class AccountManager {
 
   create(name: string): void {
     this.assertValidName(name);
+    if (this.isDirectAccount(name)) throw new Error(`Account "${name}" is the active Claude Code login`);
     const dir = this.configDirFor(name);
     if (existsSync(dir)) throw new Error(`Account "${name}" already exists`);
     mkdirSync(dir, { recursive: true });
   }
 
   remove(name: string): void {
+    if (this.isDirectAccount(name)) throw new Error(`Account "${name}" is the active Claude Code login`);
     const dir = this.configDirFor(name);
     if (!existsSync(dir)) throw new Error(`Account "${name}" does not exist`);
     rmSync(dir, { recursive: true, force: true });
@@ -184,7 +215,19 @@ export class AccountManager {
 
   private readCreds(name: string): CredentialsFile | null {
     const p = this.credsPath(name);
-    if (!existsSync(p)) return null;
+    if (!existsSync(p)) {
+      if (this.isDirectAccount(name)) {
+        const keychain = readMacKeychainCreds();
+        if (keychain) {
+          try {
+            return JSON.parse(keychain) as CredentialsFile;
+          } catch {
+            return null;
+          }
+        }
+      }
+      return null;
+    }
     try {
       return JSON.parse(readFileSync(p, "utf8")) as CredentialsFile;
     } catch {
@@ -199,6 +242,11 @@ export class AccountManager {
   updateOAuthCreds(name: string, oauth: NonNullable<CredentialsFile["claudeAiOauth"]>): void {
     const existing = this.readCreds(name) ?? {};
     const next: CredentialsFile = { ...existing, claudeAiOauth: oauth };
+    if (this.isDirectAccount(name) && process.platform === "darwin" && !existsSync(this.credsPath(name))) {
+      writeMacKeychainCreds(JSON.stringify(next));
+      return;
+    }
+    mkdirSync(this.configDirFor(name), { recursive: true });
     writeFileSync(this.credsPath(name), JSON.stringify(next, null, 2));
   }
 

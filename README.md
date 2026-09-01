@@ -1,6 +1,6 @@
 # bro
 
-Run your preferred coding harness against **any** model — [Claude Code](https://claude.com/claude-code), [omp](https://omp.sh/), [Pi](https://github.com/earendil-works/pi), or the Codex CLI — with native, OpenAI-compatible, and Anthropic-compatible providers wired up for you.
+Run your preferred coding harness against **any** model — [Claude Code](https://claude.com/claude-code), [omp](https://omp.sh/), [Pi](https://github.com/earendil-works/pi), the Codex CLI, or [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — with native, OpenAI-compatible, and Anthropic-compatible providers wired up for you.
 
 Pick a provider, pick a model, go.
 
@@ -23,22 +23,115 @@ bro
 ```
 
 1. Scroll to a **provider** and press enter.
-2. Scroll to a **model** and press enter. OpenRouter loads its complete live model catalog; move to its model column and type to filter by model name or id. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there, and **h** to rotate the harness (Claude Code · omp · Pi · Codex).
+2. Scroll to a **model** and press enter. OpenRouter loads its complete live model catalog; move to its model column and type to filter by model name or id. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there, and **h** to rotate the harness (Claude Code · omp · Pi · Codex · DeepSeek).
 3. First time on a paid provider it asks for an API key and saves it.
+
+Every model row shows how the model compares, in columns that adapt to the terminal width:
+
+```
+model                          age  cost  $/M in·out   speed  tok/s  quality
+Anthropic: Claude Sonnet 5     2mo  $$$$· $2·$10       ●●●○○ 57t/s   ★★★★★ 72
+DeepSeek: DeepSeek V3         1.7y  $$··· $0.26·$1.03  ●●○○○ 32t/s   ★★★☆☆ 45
+```
+
+| Column | Meaning | Source |
+| --- | --- | --- |
+| **age** | Time since the model was published (`new` in its first week). | OpenRouter catalog |
+| **cost** | `$`–`$$$$$` on a 3:1 input-weighted blend of the per-million-token prices shown beside it (`·····` = free). | OpenRouter catalog |
+| **speed** | `●`–`●●●●●` from the median tokens/second across the model's hosts over the last 30 minutes. | OpenRouter endpoint stats |
+| **quality** | `★`–`★★★★★` relative to the best coding score in the list; the number is Artificial Analysis' coding index (intelligence index when there is no coding score). | OpenRouter catalog (`benchmarks`) |
+
+A blank cell means nothing is known, not a low score. Narrow terminals drop the numbers first, then the cost and speed columns.
+
+Everything updates from OpenRouter automatically. The catalog is refreshed when it is more than a few hours old (a copy fetched in the meantime is used at once). Speed is only reported to authenticated callers, so it appears once an OpenRouter key is saved or `OPENROUTER_API_KEY` is set: bro measures the newest models in the background while the picker is open, repainting rows as numbers arrive, and keeps each measurement for a day. Other providers' models (Z.ai's GLM, DeepSeek, OpenAI…) are matched to the same catalog by model id, so they get age and quality too; cost is hidden for your own Claude login and local models, where the list price is not what you pay. `bro update` refreshes the catalog and re-measures every model.
 
 Your last provider + model are remembered and pre-selected next time (per
 provider). The harness is saved the moment you choose it, so it remains selected
 even if a later login, install, or launch fails.
 
+### Terminal Companion integration
+
+When an interactive Claude Code or Codex launch runs inside Terminal Companion's
+WindowsTerminalDev/terminal-web bridge, `bro` identifies the foreground agent
+automatically. The phone can then show that terminal as Claude or Codex, alert
+when it needs input, and render terminal questions as one-tap options. No bro
+setting or special launch command is required; account selection, resumed and
+forked sessions, the pool, and Claude-on-Codex routes use the same lifecycle.
+
+The handshake is a TTY-only terminal OSC frame containing exactly the protocol
+version, agent (`claude` or `codex`), and `active`/`inactive` state. It never
+contains a profile, path, command line, environment value, session id, or
+credential, and it is silent for headless/piped runs so bro's stdout contract
+stays unchanged. This enables Terminal Assist for an existing TUI; it does not
+claim that an ACP client has taken ownership of that conversation.
+
+## Headless — one answer, on stdout
+
+`--print` runs Claude Code non-interactively against any provider: it answers
+once and exits. **stdout carries the model's answer and nothing else** — bro's
+own "Launching…" progress goes to stderr — so it pipes and substitutes like any
+other command:
+
+```sh
+bro -p zai -m glm-5.3 --print "Summarise src/launch.js in one sentence"
+bro -p anthropic --print "Explain this diff" < changes.patch
+echo "What does this error mean?" | bro -p zai -m glm-5.3 --print
+
+review=$(bro -p zai -m glm-5.3 --print "Review the staged changes")
+bro -p zai -m glm-5.3 --print "List 3 risks" --output-format json | jq -r .result
+```
+
+A prompt and piped stdin combine: the pipe is the material, the prompt is the
+instruction. A prompt that *starts* with `-` has to be piped — Claude Code reads
+a leading dash as a flag no matter how it is quoted, and bro says so rather than
+letting it fail obscurely.
+
+Anything after `--print` is handed to Claude Code untouched, so its own headless
+flags work as documented — `--output-format json|stream-json`, `--verbose`,
+`--resume <id>`, `--allowed-tools`, `--max-turns`:
+
+```sh
+bro -p zai -m glm-5.3 --print "Fix the failing test" --output-format stream-json --verbose
+bro -p zai -m glm-5.3 --print "…" --allowed-tools "Read,Grep,Edit" --max-turns 8
+```
+
+`bro -p` was `--provider` long before Claude Code's `-p` meant print, which is
+why the flag is spelled out. The old way still works if you prefer it:
+`bro -p zai -m glm-5.3 -- -p "prompt"`.
+
+Headless runs are built for scripts and CI:
+
+| | |
+|---|---|
+| **stdout is clean** | only the harness writes to it; bro's progress goes to stderr |
+| **never prompts** | no provider menu, no model menu, no API-key prompt — it fails with a message and exit 1 instead of hanging |
+| **exit codes mean something** | `0` on success, `1` when bro cannot proceed |
+| **defaults are left alone** | a scripted run does not overwrite the provider/model/harness your interactive `bro` reopens on |
+| **no windows appear** | the [shared browser](#one-shared-browser-for-every-model) is still attached if it is already running, but a headless run never opens one |
+| **`-m` is optional** | without it bro takes the first model in the provider's list — the row the menu would have started on |
+
+A missing key is a hard error rather than a prompt, so set it once
+interactively (or via the provider's env var, e.g. `ZAI_API_KEY`) before
+scripting against it.
+
+Every other route works headless too — the account pool, a named login, and the
+Codex bridge all reach Claude Code the same way:
+
+```sh
+bro -p pool --print "Summarise today's commits"          # across pooled plans
+bro --account <name> --print "Draft the release notes"   # one logged-in profile
+bro -p codex --print "Explain this stack trace"          # ChatGPT subscription
+```
+
 ## Multiple Claude Account Proxy
 
-The **top** option in the menu (`bro -p pool`) pools any number of Claude Max / Team logins behind one local endpoint and launches Claude Code, omp, or Pi across all of them — so a single session draws from several plans and **fails over automatically** the moment one runs out of usage.
+The **top** option in the menu (`bro -p pool`) pools any number of Claude Max / Team logins behind one local endpoint and launches Claude Code, omp, Pi, or DeepSeek Harness across all of them — so a single session draws from several plans and **fails over automatically** the moment one runs out of usage.
 
 Pick it and `bro` handles everything:
 
 1. **Setup** — if you have no pooled accounts yet, it offers to log in a new one (opens Claude to sign in) or import the login already on this machine. Add as many as you like; each is stored in its own isolated config dir under `~/.claude-max-pool/`.
 2. **Start the proxy** — launches the pool server (in `pool/`, runs on [Bun](https://bun.sh)) in the background and waits for it to go healthy. A live dashboard shows each account's auth state, plan, rate tier, and rolling usage at `http://127.0.0.1:3456/`.
-3. **Launch the harness** — points Claude Code, omp, or Pi at the pool. The pool forwards Anthropic `/v1/messages` calls directly to Anthropic with the least-loaded account's OAuth token by default. When the harness exits, the proxy is stopped.
+3. **Launch the harness** — points Claude Code, omp, Pi, or DeepSeek Harness at the pool. The pool forwards Anthropic `/v1/messages` calls directly to Anthropic with the least-loaded account's OAuth token by default. When the harness exits, the proxy is stopped.
 
 Manage pool accounts directly through `bro`:
 
@@ -49,21 +142,69 @@ bro accounts list             # show account status and usage
 bro accounts remove work      # delete a pooled account
 ```
 
-Report lifetime output tokens from the local history of every account-switcher
-profile, plus Codex when its local data directory is installed:
+See rolling total token usage for this machine's login plus every managed
+Claude and Codex profile in one table:
+
+```sh
+bro profiles
+```
+
+The report shows rolling **24-hour**, **7-day**, and **30-day** totals to the
+minute. It runs the pinned `ccusage` CLI in offline mode for each profile, so
+Claude streaming records and Codex token deltas, forks, and subagent replays
+use its maintained accounting logic. Totals include input, cached, and output
+tokens; no account API request is made.
+
+Report lifetime and last-30-day tokens for the local `~/.claude` account, every
+account-switcher profile, and every Codex profile, banded by provider with a
+subtotal each and one grand total:
 
 ```sh
 bro tokens
 ```
 
-The report automatically opens the native `~/.claude` profile and every
-isolated switcher profile in a background pseudo-terminal, then reads the
-all-time `Total tokens` shown by Claude's own `/stats`
-screen, cycling all three date ranges to select the all-time maximum; it does
-not make an API turn. Codex is marked unavailable because its
-CLI does not currently expose a lifetime token total; `bro` will not label a
-session-history estimate as lifetime. Automatic Claude refresh currently uses
-the `winpty` bundled with Git for Windows.
+```
+┌──────────┬─────────────┬────────────────┬────────────────┬─────────────────┐
+│ Provider │ Profile     │       Lifetime │       Last 30d │ 30d share       │
+├──────────┼─────────────┼────────────────┼────────────────┼─────────────────┤
+│ Claude   │ local       │ 78,683,523,672 │ 19,094,386,598 │ ██████▋░░░  66% │
+│          │ claude-1    │              — │              — │                 │
+│          │ claude-4    │  4,739,383,426 │  4,248,274,580 │ █▌░░░░░░░░  15% │
+├──────────┼─────────────┼────────────────┼────────────────┼─────────────────┤
+│ Claude   │ subtotal    │ 87,047,077,041 │ 24,199,450,626 │ ████████▍░  84% │
+├──────────┼─────────────┼────────────────┼────────────────┼─────────────────┤
+│ Codex    │ local       │  8,134,045,086 │  4,758,157,576 │ █▋░░░░░░░░  16% │
+├──────────┼─────────────┼────────────────┼────────────────┼─────────────────┤
+│ All      │ TOTAL       │ 95,181,122,127 │ 28,957,608,202 │ ██████████ 100% │
+└──────────┴─────────────┴────────────────┴────────────────┴─────────────────┘
+```
+
+Each provider is read through whichever counter it actually keeps, and the
+report says which under the table rather than blending them silently:
+
+* **Claude** comes from each profile's `stats-cache.json` — the same file the
+  `/stats` screen renders from, with no pseudo-terminal and no API turn.
+  *Lifetime* is Claude's all-time per-model counter, which keeps counting after
+  older days roll off, and is the one figure `/stats` never shows. *Last 30d* is
+  summed from the daily rows Claude retains and matches the default range on
+  `/stats`.
+* **Codex** keeps no lifetime counter of its own, so both columns are
+  reconstructed from its retained session logs by the pinned `ccusage` CLI in
+  offline mode. That is a floor rather than a ledger, and it is labelled as one.
+
+Totals include input, output, and cache tokens. Profiles with no stats cache, or
+whose cache stopped updating before the window opened, are listed under **Notes**
+with the reason, so an empty row is never mistaken for an unused account.
+
+Note that `bro tokens` and `bro profiles` will not agree on Claude: the former
+reports Claude's own counters, while the latter re-derives usage from retained
+session transcripts, which are pruned and deduplicated.
+
+Both reports read the local account from `~/.claude` and the local Codex home
+from `~/.codex`, deliberately ignoring any `CLAUDE_CONFIG_DIR` / `CODEX_HOME`
+inherited from the surrounding shell — otherwise running either command from
+inside a pooled session would report that pool profile as "local" and drop the
+real local account from the table.
 
 Use one logged-in account directly without the pool:
 
@@ -78,6 +219,76 @@ Profiles are the same standard Claude Code logins stored under
 `CLAUDE_CONFIG_DIR` for that Claude launch and does not overwrite `~/.claude`.
 The interactive profile menu shows each account's current five-hour, weekly,
 and Fable usage before you choose one.
+
+### One shared browser for every model
+
+On Windows, `bro` gives every Claude Code session the Edge profile you already
+use through [hangwin/mcp-chrome](https://github.com/hangwin/mcp-chrome). It uses
+the extension's loopback Streamable HTTP endpoint at
+`http://127.0.0.1:12306/mcp`: no remote-debugging flag, ports 9222/9223, second
+browser profile, or Claude-account-specific browser bridge.
+
+```sh
+bro browser setup             # give sessions your own browser (Edge by default)
+bro browser setup chrome      # …or name one
+bro browser use edge          # pin which browser sessions drive, for good
+bro browser open              # open the shared browser
+bro browser test              # run an MCP handshake and safely list tabs
+bro browser status            # show extension + browser + bridge readiness
+bro browser clean             # delete unused bro browser data from earlier setups
+bro browser disable           # stop connecting sessions to the browser
+bro browser setup edge --claude-extension # opt into Anthropic's older integration
+```
+
+Install the unpacked mcp-chrome extension in Edge once. `bro browser setup`
+then installs the pinned `mcp-chrome-bridge`, registers its native host for the
+current Windows user and Edge, writes this exact config plus the `bro-browser`
+skill into every Claude profile, and tests `get_windows_and_tabs`:
+
+```json
+{
+  "mcpServers": {
+    "streamable-mcp-server": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:12306/mcp"
+    }
+  }
+}
+```
+
+Bro starts Claude with `--no-chrome`, loads the profile-scoped MCP config, and
+sets `CLAUDE_CODE_ENABLE_CFC=false`, so Claude's built-in Chrome integration
+cannot compete. mcp-chrome 1.0.31 has an upstream multi-client singleton bug;
+Bro applies the reviewed per-transport factory fix from upstream PR #354 until
+that fix ships in a release, then verifies the actual browser tool rather than
+trusting a port check.
+
+The browser is also the `[b]` switch in the main menu — `OFF · AUTO · EDGE ·
+CHROME …`, listing browsers where mcp-chrome is installed. It persists, so it is
+a decision you make once. Pass `--no-chrome` to bypass browser tools for one
+session. If Edge is closed, `bro` starts it on the next interactive launch.
+Use `bro browser status` for the quick loopback check and `bro browser test` for
+the complete MCP handshake, tool listing, and safe tab-list call.
+
+**Why another Claude account gets it too.** mcp-chrome is local and tied to the
+signed-in browser profile, not a Claude account. Bro writes the same endpoint
+into the local Claude home and every managed account profile. The tools arrive
+under `mcp__streamable-mcp-server__*` in each one.
+
+**Which browser.** Keep one mcp-chrome extension connected per port. If both
+Edge and Chrome run the extension on 12306, whichever native host binds first
+wins. `bro browser use edge` remembers which browser Bro opens, but it cannot
+override another already-running extension that owns that fixed port.
+
+The older `bro browser setup edge --claude-extension` route remains available
+for Anthropic's account-scoped browser integration. Its optional `--dedicated`
+mode maintains a separate Edge user-data directory
+(`~/.bro/claude-browser/edge-shared/`) with its own one-time `claude.ai`
+sign-in, loads an unmodified-in-store copy of the Claude extension that
+prefers Claude Code's native host over Claude Desktop's, and moves that
+browser plus its sessions into a private named-pipe namespace via a small Bun
+preload so it never competes with the stock bridge. The signed Claude Code
+executable is never patched.
 
 ### Resuming a session
 
@@ -100,20 +311,21 @@ scan takes a moment, later ones are instant.
 
 ## Codex (ChatGPT subscription)
 
-`bro -p codex` (pinned in the menu) runs your selected harness on your **ChatGPT subscription** — the GPT‑5.x Codex models driving Claude Code, omp, or Pi through a local bridge. The Codex harness runs its own CLI directly. No API key is needed: just your ChatGPT login.
+`bro -p codex` (pinned in the menu) runs your selected harness on your **ChatGPT subscription** — the GPT‑5.x Codex models driving Claude Code, omp, Pi, or DeepSeek Harness through a local bridge. The Codex harness runs its own CLI directly. No API key is needed: just your ChatGPT login.
 
 How it works:
 
 1. **Login** — a built-in ChatGPT OAuth sign-in (the same flow the Codex CLI uses) opens in your browser and stores credentials at `~/.bro/codex-auth.json`. If you already have the Codex CLI logged in, that login is reused automatically. Tokens are refreshed on their own as they expire. Several ChatGPT accounts? See [Codex profiles](#codex-profiles).
 2. **Models** — the list is fetched live from your subscription, so it always matches what you can actually run (GPT‑5.6‑Sol, GPT‑5.5, Codex‑Spark, …). Falls back to a cache, then a small built-in list, when offline.
 3. **Bridge** — `bro` starts a tiny local Anthropic-compatible server that translates the harness's `/v1/messages` calls into OpenAI Responses-API calls against the ChatGPT Codex backend, and streams the answers back (tool calls, thinking, and usage all mapped through). It's pure Node — nothing to install.
-4. **Launch** — Claude Code, omp, or Pi runs pointed at the bridge. Pick a model in the usual menu (Tab toggles skip-permissions where the harness supports it); `-m <model>` skips it. When the harness exits, the bridge is torn down.
+4. **Launch** — Claude Code, omp, Pi, or DeepSeek Harness runs pointed at the bridge. Pick a model in the usual menu (Tab toggles skip-permissions where the harness supports it); `-m <model>` skips it. When the harness exits, the bridge is torn down.
 
 ```sh
 bro -p codex              # pick a GPT-5.x model, launch Claude Code on it
 bro -p codex -m gpt-5.5   # skip the menu
 bro -p codex --omp        # use the omp harness instead of Claude Code
 bro -p codex --pi         # use Pi through the same subscription bridge
+bro -p codex --dsh        # use DeepSeek Harness through the bridge
 bro -p codex --codex      # run the codex CLI itself (no bridge, no model menu)
 bro codex status          # show login + plan
 ```
@@ -188,14 +400,79 @@ launches, and the choice sticks until you change it:
 | `OMP` | [omp](https://omp.sh/), which picks its own model | every provider |
 | `PI` | [Pi](https://github.com/earendil-works/pi), with bro's selected provider/model | every model provider and subscription bridge |
 | `CODEX` | the `codex` CLI | your ChatGPT login, or a provider serving OpenAI's Responses API |
+| `DEEPSEEK` | DeepSeek Harness Web UI (`dsh web`) | every API provider, the account pool, and the Codex subscription bridge |
 
 ```sh
 bro --claude              # force Claude Code for this launch
 bro --omp                 # force omp
 bro --pi                  # force Pi
 bro --codex               # force the codex CLI
-bro --harness pi          # same, long form (claude | omp | pi | codex)
+bro --dsh                 # force DeepSeek Harness Web
+bro --harness dsh         # same, long form (claude | omp | pi | codex | dsh)
 ```
+
+### DeepSeek Harness provider compatibility
+
+DeepSeek Harness already owns a first-class provider/model switcher, so bro
+does not replace it with a single locked route. For each launch, bro supplies a
+temporary DSH composition overlay containing every merged bro API provider and
+all of its models. API routes are namespaced as `bro-<provider>` and labelled
+`Bro · <Provider>`. Claude uses DSH's `anthropic` catalog route so current
+thinking modes, context windows, modalities, and token limits are inherited.
+DSH's installed catalog, providers added in its Models page, credentials,
+settings, sessions, and plugins remain untouched. OpenRouter is hydrated from
+its complete live catalog before the overlay is built.
+
+The provider/model selected in bro becomes DSH's composition default for a
+fresh profile. A model previously selected inside DSH deliberately wins over
+that default, and you can switch providers or models normally in the Web UI.
+Keys from `~/.bro/config.json` are supplied through per-process environment
+references and are never written into the temporary overlay or command line.
+DSH's own credential store and user settings can override any bro route.
+
+Every DeepSeek launch through `bro` also autoloads a **Profiles** action in
+DSH's sidebar. It combines this machine's Claude Code login, every Claude
+account under `~/.claude-max-pool/accounts/`, this machine's Codex login, and
+every Codex profile under `~/.bro/codex-profiles/`. Claude rows show the live
+five-hour, weekly, and Fable meters; Codex rows show its primary and secondary
+rate-limit windows. Logged-out profiles remain visible but disabled, and one
+failed usage request or bridge does not hide the other accounts.
+
+Choose a row to change the active DSH session's real provider route. The
+current model is kept when that profile offers it; otherwise the route's
+default model is selected. DSH's built-in model picker sees the same change,
+so the next request actually uses that login. Account credentials remain in
+their Claude/Codex stores behind launch-scoped loopback bridges. The plugin is
+linked from the installed `bro` package and is refreshed automatically with
+`bro`; after adding or logging into a new profile, restart DSH once so its
+provider route can be created.
+
+`--safe` maps to DSH's `workspace-write` permission mode; the normal
+skip-permissions setting maps to `danger-full-access`. Arguments after bro's
+flags go to the Web app, for example `bro -p deepseek --dsh --port 4080`. Bro
+opens the exact readiness URL DSH prints, then keeps DSH in the foreground. Set
+`BRO_DSH_NO_OPEN=1` when a supervisor should own the browser lifecycle.
+
+DeepSeek Harness is currently a developer preview and requires Node.js 22.19.x
+or 24+. A missing `dsh` command installs `@deepseek-ai/dsh@latest` on first use.
+Because the preview moves quickly, it also has an explicit update path:
+
+```sh
+bro harness install dsh   # optional eager install
+bro harness update dsh    # reinstall the current npm latest tag
+bro update dsh            # short alias for the same update
+```
+
+Selecting Claude automatically connects the active Claude Code OAuth login
+(`$CLAUDE_CONFIG_DIR` or `~/.claude`) through a private, refresh-safe loopback
+Anthropic bridge. Token refreshes are persisted back to the real Claude login,
+the accessible Claude model list is loaded live, and the real OAuth token never
+enters DSH's settings, patch, command line, or environment. The bridge exists
+only while DSH is running. If Claude Code is logged out, run `claude` and finish
+`/login`; `ANTHROPIC_API_KEY` remains a supported fallback. The multi-account
+pool still provides account rotation/failover, while Codex subscription access
+uses bro's Codex bridge. Claude CLI transcripts remain CLI-specific; DSH keeps
+its own resumable sessions in its normal harness home.
 
 For custom/API providers, `bro` upserts only its namespaced provider entry in
 `~/.pi/agent/models.json` (or `$PI_CODING_AGENT_DIR/models.json`); existing Pi
@@ -207,7 +484,8 @@ requires a Bash shell; Git for Windows satisfies that upstream requirement.
 
 If a harness command is missing, first use installs the official package:
 `@anthropic-ai/claude-code`, `@oh-my-pi/pi-coding-agent`,
-`@earendil-works/pi-coding-agent`, or `@openai/codex`. npm is used where
+`@earendil-works/pi-coding-agent`, `@openai/codex`, or
+`@deepseek-ai/dsh@latest`. npm is used where
 available, with Bun as the supported fallback; omp uses Bun or its official
 platform installer.
 
@@ -220,51 +498,107 @@ variable) and never touches `~/.codex/config.toml`. Anthropic-shaped providers
 and are refused up front rather than failing mid-turn. Skip-permissions maps to
 codex's `--dangerously-bypass-approvals-and-sandbox`.
 
-## 🎨 Image Gen
+## ✦ JustImagine — images & video
 
-`bro image` (also the second option in the menu) doesn't launch Claude at all — it asks which image API to use (Yunwu with `gpt-image-2` first, plus OpenAI), then serves a local web UI and opens it in your browser.
-
-- **Prompt fast** — type, press Enter, keep typing. Every generation is a card that shimmers while it works and fades the image in when it lands.
-- **Concurrent by design** — the batch stepper fires N generations at once, and you can keep firing more while others are still running.
-- **Switch models in the UI** — pick from the API's list (including chat-routed models like `gemini-3.1-flash-image`) or type any custom model id. Size and quality knobs included where the API supports them.
-- **Reference images** — paste, drag-drop, or attach images to the prompt as context. They're saved to `./.bro/context/` named by content hash (the same image is never stored twice) and appear in a library strip for one-click reuse. Image-API models route through `/images/edits`; chat-routed models get them as vision input.
-- **Files land in `./.bro/image-gen/`** of the directory you launched from, with a `history.jsonl` so the gallery survives reloads.
+`bro imagine` (also the first option in the menu) doesn't launch a harness at all. It asks which image API to use, then serves a local gallery and opens it in your browser. Everything runs on your machine; nothing leaves it except the call to the generation API.
 
 ```sh
-bro image             # pick an image API, then the web UI opens
-bro image -p yunwu    # skip the API menu
+bro imagine                    # pick an API, then the gallery opens
+bro imagine -p openrouter      # skip the API menu
+bro imagine --root D:/Art      # keep the gallery somewhere else
+bro imagine service install    # run it in the background, at every login
 ```
 
-Keys are shared with the chat provider of the same id, so a saved Yunwu key just works. Add your own APIs via `imageApis` in `~/.bro/config.json` (merged by `id`, same as providers).
+- **Images** — any OpenAI-shaped `/images/generations` API, plus the chat-routed image models (Gemini / Nano Banana, GPT-5 Image) that aggregators serve through `/chat/completions`. Size and quality knobs where the API supports them.
+- **Video** — OpenRouter's video API: Veo 3.1, Sora 2 Pro, Seedance 2.x, Wan 3.0, Kling v3, Hailuo 3, Runway Gen-4.5, Grok Imagine and the rest of the catalogue, refreshed live at startup (a bundled snapshot keeps it working offline). Each model's own duration, resolution, aspect-ratio, audio and seed options drive the controls, so you can only ask for a combination that model actually accepts. Attach a reference image and a model with first-frame conditioning animates it.
+- **Model picker** — the model menu rates every model so you can compare them at a glance, with columns that appear only when there is something to show:
 
-### Image Gen HTTP API
+  | Column | Image models | Video models |
+  | --- | --- | --- |
+  | **age** | time since the model was published (`new` in its first week) | same |
+  | **cost** | estimated price per picture, from OpenRouter's output-token price and the family's tokens per image | OpenRouter's list price per second of video at 720p (or the plain rate), with a 5-second estimate on hover |
+  | **speed** | how long that model has actually taken in this gallery (median of your own generations) | same |
+  | **quality** | Design Arena head-to-head rank in the image category; a GA model borrows the score measured on its preview release | not published yet, so left out |
 
-The image-gen web UI is backed by local JSON routes, and scripts can call the same routes directly while `bro image` is running. Start the server, copy the printed `http://127.0.0.1:<port>` URL, then call `/api/generate`:
+  Everything refreshes from OpenRouter when the gallery starts; speed fills in as you generate. A blank cell means nothing is known, not a low score. Type in the menu to filter, use the arrow keys and Enter to pick.
+- **Folders, not batches** — the sidebar is the folder tree of your gallery root, and whatever you generate lands in the folder you have selected. Make folders, nest them, rename them inline, drag generations between them or move a selection with one menu. **Deleting a folder deletes every generation inside it**, including its metadata and cached thumbnails.
+- **✨ Improve the prompt** — the button beside the prompt box rewrites a one-line idea into something the picked model can work with, server-side on `gemini-3.7-flash` via the same OpenRouter key. It knows what it's writing for: an image model gets composition and light, a video model gets a named camera move and what changes across the shot (bounded by that model's real clip length), and a character's description gets the permanent look only. Picked characters keep their names and are never re-described. `↺` puts back exactly what you typed. Ctrl+Enter does the same from the keyboard.
+- **Repeatable characters** — a cast you define once and reuse everywhere. Give a character a name, a description and a few reference images; pick it in the composer and its pictures ride along with the prompt while it's named in the text, so the same face comes back shot after shot. Paste, drop or browse images straight into a character's reference area — or, with no photos to start from, **Draw 5 reference shots** builds the sheet for you on Nano Banana 2: one portrait from the description, then four more angles drawn *from that portrait*, so they are one character rather than five people matching the same sentence. Pick the ones worth keeping; the rest are discarded. A generation you liked can be promoted into one of its references (`👤` on the card), which is how a character sharpens as you work. The library is global — `~/.bro/justimagine/characters` — so it's there in every gallery and in the background service.
+- **Reference images** — paste, drag-drop or attach. They're saved under `.context/` named by content hash (the same picture is never stored twice) and appear in a strip for one-click reuse.
+- **Built to stay quick** — generation is asynchronous on the server and streamed to the page over server-sent events, so a five-minute video survives a reload and no request is held open. The grid loads cached thumbnails, not originals; posters are captured once in the browser and reused forever; a video tile downloads no video bytes until you open it, and then over byte ranges so it can seek. Images load on approach and drop their decode again once well out of view.
+
+```text
+<root>/                    folder "" — generations made at the top level
+  history.jsonl            metadata for the media beside it
+  <name>/                  a folder you made; nests arbitrarily
+  .context/                reference images
+  .thumbs/                 derived posters (safe to delete)
+
+~/.bro/justimagine/characters/
+  nora/character.json      name, description, cover
+  nora/refs/<sha>.png      that character's own reference images
+```
+
+> Characters are reference-driven, not trained. That's the same mechanism as Higgsfield's avatars and its `nano_banana_2 --image ref.png` path — good, and better the more references you give it — but it is not Higgsfield's *Soul Character*, which trains a model on a face. Nano Banana Pro holds a likeness best for stills; for video, the references go to `input_references` so the character guides the shot without pinning frame one.
+
+Metadata lives per folder rather than in one index, so a folder survives being moved by hand and deleting one leaves nothing dangling. A gallery from the old `bro image` (`./.bro/image-gen`) is folded into the new root the first time you run it.
+
+Keys are shared with the chat provider of the same id, so a saved Yunwu key just works; video always uses the `openrouter` key. Add your own APIs via `imageApis` in `~/.bro/config.json` (merged by `id`, same as providers).
+
+### Run it as a background service
+
+One switch turns JustImagine into a service that starts at login and keeps running — **no admin or root required on any platform**:
 
 ```sh
-curl -s http://127.0.0.1:8790/api/generate \
+bro imagine service install [--root <dir>] [--port <n>]
+bro imagine service status | start | stop | restart | logs | uninstall
+bro imagine open               # open whatever is running
+```
+
+| Platform | Mechanism |
+| --- | --- |
+| Windows | Task Scheduler task with a logon trigger, registered from XML (`/SC ONLOGON` needs elevation; the same trigger as XML does not) and launched through a `wscript` shim so no console window ever appears |
+| macOS | launchd LaunchAgent in `~/Library/LaunchAgents` with `RunAtLoad` + `KeepAlive` |
+| Linux | systemd `--user` unit with `Restart=always`, or an XDG autostart entry where there is no systemd |
+
+The service defaults to `~/JustImagine` on port 8791, logs to `~/.bro/justimagine/service.log`, and `uninstall` leaves your gallery completely untouched.
+
+### JustImagine HTTP API
+
+The gallery is backed by local JSON routes, and scripts can call the same routes while it is running:
+
+```sh
+curl -s http://127.0.0.1:8791/api/generate \
   -H "content-type: application/json" \
-  -d '{"prompt":"a clean product photo of a steel water bottle","model":"gpt-image-2","size":"1024x1024","quality":"high"}'
+  -d '{"kind":"video","folder":"Campaign","model":"google/veo-3.1",
+       "prompt":"a slow dolly across a rain-streaked window at night",
+       "duration":8,"resolution":"1080p","audio":true}'
 ```
 
-The response includes the saved file name and metadata; download the image from `/images/<file>`. Reference images use the same flow as the UI: upload a base64 data URL to `/api/context`, then pass the returned context file names as `images` in `/api/generate`. See [docs/image-api.md](./docs/image-api.md) for the complete route list and examples.
+That returns job ids immediately; watch `/api/events` for progress and the finished item. See [docs/justimagine-api.md](./docs/justimagine-api.md) for the complete route list, the folder model, and reference-image handling.
 
 ## Providers
 
-Claude is next in the list and runs **natively** with the Claude harness (your normal Claude login — no proxy). Other Anthropic-compatible providers (OpenRouter, Z.ai) are passed directly to Claude, omp, or Pi. OpenAI-format providers (Sakana, OpenAI, DeepSeek, Groq, …) use [`claude-code-router`](https://github.com/musistudio/claude-code-router) for Claude, while omp and Pi receive native provider entries. `bro` installs any missing helper on first use.
+Claude is next in the list and runs **natively** with the Claude harness (your normal Claude login — no proxy). Other Anthropic-compatible providers (OpenRouter, Z.ai) are passed directly to Claude, omp, Pi, or DeepSeek Harness. OpenAI-format providers (Sakana, OpenAI, DeepSeek, Groq, …) use [`claude-code-router`](https://github.com/musistudio/claude-code-router) for Claude, while omp, Pi, and DeepSeek Harness receive native provider entries. `bro` installs any missing helper on first use.
 
 ### Flags
 
 ```sh
 bro -p pool               # Multiple Claude Account Proxy (pool many plans)
 bro account work          # launch Claude using one logged-in account profile
+bro browser setup         # give every model bro launches your own browser
+bro browser use edge      # pin which browser sessions drive
+bro browser status        # show browser/extension/bridge readiness
 bro -p codex              # Codex on your ChatGPT subscription (live model list)
 bro codex                 # pick a Codex profile or session
 bro codex resume          # resume a Codex session
-bro --pi                  # launch Pi (also --omp / --codex / --claude)
+bro --pi                  # launch Pi (also --omp / --codex / --dsh / --claude)
 bro -p sakana -m fugu     # skip the menus
+bro -p zai -m glm-5.3 --print "prompt"
+                          # headless: one answer on stdout, then exit
 bro --list                # list every provider + model
 bro update                # refresh the model list from GitHub, cache it locally
+bro update dsh            # update DeepSeek Harness to npm latest
 bro --dry-run             # show what would run, launch nothing
 bro --safe                # don't pass --dangerously-skip-permissions
 bro --resume <session-id> # pick provider/model, then resume Claude there
@@ -275,6 +609,9 @@ bro -- --help             # force a bro flag name through to the harness
 Put `bro`'s own flags first. The first unrecognized argument, and everything
 after it, is passed verbatim to the selected harness after provider/model
 selection.
+
+`bro`'s own progress is written to stderr, so stdout only ever carries what the
+harness printed — see [Headless](#headless--one-answer-on-stdout).
 
 ## Config
 

@@ -15,6 +15,10 @@ export interface Config {
   poolDir: string;
   /** Directory holding one sub-directory per account (each a CLAUDE_CONFIG_DIR). */
   accountsDir: string;
+  /** Optional existing Claude config dir exposed as one account without copying credentials. */
+  directClaudeConfigDir?: string;
+  /** Account label used for directClaudeConfigDir. */
+  directClaudeAccountName?: string;
   /** File where rolling usage counters are persisted between restarts. */
   usageFile: string;
   /** Path to the `claude` executable. */
@@ -64,10 +68,17 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   const poolDir = process.env.CLAUDE_POOL_DIR || join(homedir(), ".claude-max-pool");
   const accountsDir = join(poolDir, "accounts");
   const usageFile = join(poolDir, "usage.json");
+  const directClaudeConfigDir = process.env.CLAUDE_DIRECT_CONFIG_DIR || "";
 
   const config: Config = {
     poolDir,
     accountsDir,
+    ...(directClaudeConfigDir
+      ? {
+          directClaudeConfigDir,
+          directClaudeAccountName: process.env.CLAUDE_DIRECT_ACCOUNT_NAME || "claude-code-login",
+        }
+      : {}),
     usageFile,
     claudeBin: process.env.CLAUDE_BIN || "claude",
     backend: backendEnv(),

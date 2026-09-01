@@ -29,6 +29,9 @@ import { rememberSelection, rememberProfile, lastModelFor } from './state.js';
 import { isCodexLoggedIn, codexLogin, codexLogout, codexAuthStatus } from './codex-auth.js';
 import { fetchCodexModels, startCodexBridge, DEFAULT_PORT } from './codex-bridge.js';
 import { launchCodex, launchOmp, launchPi } from './launch.js';
+import { launchDsh } from './deepseek.js';
+import { note } from './out.js';
+import { prepareClaudeBrowser } from './claude-browser.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { samePath } from './sessions.js';
 import { chooseResumeProfile, sessionRows, stageFiles } from './profiles.js';
@@ -377,6 +380,9 @@ export async function runCodex({
   chooseProfile = false,
   extraArgs = [],
   skipPermissions = true,
+  providers = [],
+  providerKeys = {},
+  headless = false,
   dryRun = false
 } = {}) {
   // A Codex session is a codex-CLI rollout: only codex can read it, so
@@ -406,8 +412,15 @@ export async function runCodex({
       };
     }
     const models = await fetchCodexModels({ home: homeOf(target) });
-    return {
-      via: 'codex (chatgpt subscription) → local bridge → ' + (harness === 'omp' ? 'omp' : harness === 'pi' ? 'pi' : 'claude'),
+    const bridgeProvider = {
+      ...CODEX_PROVIDER,
+      mode: 'anthropic',
+      baseUrl: `http://127.0.0.1:${DEFAULT_PORT}`,
+      disable1mContext: true,
+      models: models.map((entry) => ({ id: entry.id, name: entry.name }))
+    };
+    const out = {
+      via: 'codex (chatgpt subscription) → local bridge → ' + (harness === 'omp' ? 'omp' : harness === 'pi' ? 'pi' : harness === 'dsh' ? 'DeepSeek Harness' : 'claude'),
       profile: profile || '(this machine)',
       auth: isCodexLoggedIn(homeOf(target)) ? 'logged in' : 'not logged in (login would run)',
       bridge: `http://127.0.0.1:${DEFAULT_PORT}  (Anthropic-compatible)`,
@@ -415,6 +428,24 @@ export async function runCodex({
       models: models.map((m) => m.id),
       harness
     };
+    if (harness === 'dsh') {
+      out.dsh = await launchDsh({
+        provider: bridgeProvider,
+        model,
+        apiKey: 'bro-codex',
+        providers: [bridgeProvider, ...providers],
+        providerKeys: { ...providerKeys, [bridgeProvider.id]: 'bro-codex' },
+        extraArgs,
+        skipPermissions,
+        dryRun: true,
+        reuseCodex: {
+          home: homeOf(target),
+          provider: bridgeProvider,
+          models: bridgeProvider.models
+        }
+      });
+    }
+    return out;
   }
 
   // The picker's "Log in / manage…" row opens the full profile menu.
@@ -456,8 +487,10 @@ export async function runCodex({
   // neither bro's model menu nor the bridge.
   if (runCli) {
     // Resuming is a one-off jump back into an old conversation — it shouldn't
-    // rewrite the provider/model the picker opens on next time.
-    if (!session) {
+    // rewrite the provider/model the picker opens on next time. A headless
+    // run is a one-off for the same reason: a script doing a job, not someone
+    // choosing what to use from now on.
+    if (!session && !headless) {
       rememberSelection(CODEX_PROVIDER.id, model, harness);
       rememberProfile(CODEX_PROVIDER.id, profile);
     }
@@ -488,14 +521,19 @@ export async function runCodex({
     }
   }
 
-  process.stdout.write('\x1b[2mFetching Codex models…\x1b[0m\r');
+  process.stderr.write('\x1b[2mFetching Codex models…\x1b[0m\r');
   const models = await fetchCodexModels({ home });
-  process.stdout.write('\x1b[2K\r');
+  process.stderr.write('\x1b[2K\r');
 
   let skip = skipPermissions;
   // Claude Code and Pi need a concrete bridge model. omp does its own model
   // routing, so it alone can skip bro's picker.
-  if (!model && harness !== 'omp') {
+  if (!model && harness !== 'omp' && headless) {
+    // Nothing to pick with: take the subscription's first model, the row the
+    // picker would have opened on.
+    model = models[0]?.id || '';
+    if (models.length > 1) note(`\x1b[2mNo -m given; using ${model || 'the default model'}.\x1b[0m`);
+  } else if (!model && harness !== 'omp') {
     const choice = await chooseModel(models, skip);
     if (choice == null) { console.log('Cancelled.'); return 0; }
     model = choice.value;
@@ -512,8 +550,10 @@ export async function runCodex({
     return 1;
   }
 
-  rememberSelection(CODEX_PROVIDER.id, model, harness);
-  rememberProfile(CODEX_PROVIDER.id, profile);
+  if (!headless) {
+    rememberSelection(CODEX_PROVIDER.id, model, harness);
+    rememberProfile(CODEX_PROVIDER.id, profile);
+  }
 
   const stop = () => bridge.close().catch(() => {});
   try {
@@ -548,6 +588,30 @@ export async function runCodex({
         dryRun: false
       });
     }
+    if (harness === 'dsh') {
+      const bridgeProvider = {
+        ...CODEX_PROVIDER,
+        mode: 'anthropic',
+        baseUrl: bridge.baseUrl,
+        disable1mContext: true,
+        models: models.map((entry) => ({ id: entry.id, name: entry.name }))
+      };
+      return await launchDsh({
+        provider: bridgeProvider,
+        model: activeModel,
+        apiKey: 'bro-codex',
+        providers: [bridgeProvider, ...providers],
+        providerKeys: { ...providerKeys, [bridgeProvider.id]: 'bro-codex' },
+        extraArgs,
+        skipPermissions: skip,
+        dryRun: false,
+        reuseCodex: {
+          home: homeOf(profile),
+          provider: bridgeProvider,
+          models: bridgeProvider.models
+        }
+      });
+    }
 
     const { claude, dirs } = ensureClaude();
 
@@ -560,16 +624,25 @@ export async function runCodex({
     env.NODE_NO_WARNINGS = '1';
     env.PATH = [...dirs, env.PATH || ''].join(path.delimiter);
 
+    // Claude runs against the local Codex bridge here, so its own browser
+    // wiring is off (that needs a claude.ai login) and the browser arrives
+    // through the MCP server instead.
+    const browser = extraArgs.includes('--no-chrome') || extraArgs.includes('--chrome')
+      ? null
+      : await prepareClaudeBrowser({ claudePath: claude, baseEnv: env, skipPermissions: skip, autoStart: !headless });
+    if (browser) Object.assign(env, browser.env);
+
     const claudeArgs = [];
     if (skip) claudeArgs.push('--dangerously-skip-permissions');
+    claudeArgs.push(...(browser?.args || []));
     if (activeModel) claudeArgs.push('--model', activeModel);
     claudeArgs.push(...extraArgs);
 
-    console.log(
+    note(
       `\nLaunching Claude Code on ${profile ? `Codex profile "${profile}"` : 'your ChatGPT subscription'}${activeModel ? ' / ' + activeModel : ''}…`
     );
-    console.log(`\x1b[2m  bridge: ${bridge.baseUrl}\x1b[0m\n`);
-    return await runInherit(claude, claudeArgs, env);
+    note(`\x1b[2m  bridge: ${bridge.baseUrl}\x1b[0m\n`);
+    return await runInherit(claude, claudeArgs, env, { terminalAgent: 'claude' });
   } finally {
     stop();
   }

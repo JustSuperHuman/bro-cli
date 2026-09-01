@@ -18,8 +18,12 @@ import { fileURLToPath } from 'node:url';
 import { which, globalBinDirs, runInherit, ensureBun, ensureClaude } from './proc.js';
 import { select, selectColumns, prompt, holdOrContinue } from './ui.js';
 import { launchOmp, launchPi } from './launch.js';
+import { launchDsh } from './deepseek.js';
+import { note } from './out.js';
+import { fetchClaudeUsage, usageSummary } from './claude-usage.js';
 import { listSessions } from './sessions.js';
 import { chooseResumeProfile, sessionRows, stageFiles } from './profiles.js';
+import { claudeBrowserEnabled, prepareClaudeBrowser } from './claude-browser.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const POOL_ROOT = path.join(__dirname, '..', 'pool');
@@ -31,9 +35,6 @@ const ACCOUNTS_DIR = path.join(POOL_DIR, 'accounts');
 // Claude Code's own config dir — the login used when no profile is selected.
 const DEFAULT_CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const PROXY_LOG = path.join(os.homedir(), '.bro', 'pool-proxy.log');
-const OAUTH_TOKEN_URL = process.env.CLAUDE_OAUTH_TOKEN_URL || 'https://platform.claude.com/v1/oauth/token';
-const OAUTH_CLIENT_ID = process.env.CLAUDE_OAUTH_CLIENT_ID || '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 
 // No model list here: bro never picks a model for the pool. Claude Code and
 // omp have their own model pickers; Pi receives the pool's live model list and
@@ -110,18 +111,7 @@ function usagePercent(value) {
   return `${color}${pct}%\x1b[0m`;
 }
 
-export function usageSummary(payload) {
-  const fable = Array.isArray(payload && payload.limits)
-    ? payload.limits.find((limit) =>
-        limit && limit.kind === 'weekly_scoped' && limit.scope?.model?.display_name === 'Fable'
-      )
-    : null;
-  return {
-    session: payload?.five_hour?.utilization ?? null,
-    weekly: payload?.seven_day?.utilization ?? null,
-    fable: fable?.percent ?? null
-  };
-}
+export { usageSummary };
 
 export function accountLabel(a) {
   const state = a.authenticated ? 'ready' : 'logged out';
@@ -135,58 +125,8 @@ export function accountLabel(a) {
   return `${a.name}  \x1b[2m${state}\x1b[0m${plan}`;
 }
 
-async function fetchWithTimeout(url, options, timeoutMs = 6000) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: ctrl.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function refreshAccountToken(account) {
-  const credentialsPath = path.join(accountDirFor(account.name), '.credentials.json');
-  const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
-  const oauth = credentials?.claudeAiOauth;
-  if (!oauth?.refreshToken) throw new Error('missing OAuth refresh token');
-  const response = await fetchWithTimeout(OAUTH_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: oauth.refreshToken, client_id: OAUTH_CLIENT_ID })
-  });
-  if (!response.ok) throw new Error(`OAuth refresh failed (${response.status})`);
-  const body = await response.json();
-  if (!body.access_token) throw new Error('OAuth refresh returned no access token');
-  oauth.accessToken = body.access_token;
-  oauth.refreshToken = body.refresh_token || oauth.refreshToken;
-  oauth.expiresAt = Date.now() + Number(body.expires_in || 3600) * 1000;
-  if (typeof body.scope === 'string') oauth.scopes = body.scope.split(/\s+/).filter(Boolean);
-  fs.writeFileSync(credentialsPath, JSON.stringify(credentials, null, 2));
-  return oauth.accessToken;
-}
-
 async function fetchAccountUsage(account) {
-  const credentialsPath = path.join(accountDirFor(account.name), '.credentials.json');
-  const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
-  const oauth = credentials?.claudeAiOauth;
-  if (!oauth?.accessToken) throw new Error('missing OAuth access token');
-  let token = oauth.accessToken;
-  if (oauth.expiresAt && oauth.expiresAt <= Date.now()) token = await refreshAccountToken(account);
-
-  const request = (accessToken) =>
-    fetchWithTimeout(USAGE_URL, {
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'oauth-2025-04-20',
-        accept: 'application/json'
-      }
-    });
-  let response = await request(token);
-  if (response.status === 401) response = await request(await refreshAccountToken(account));
-  if (!response.ok) throw new Error(`usage request failed (${response.status})`);
-  return usageSummary(await response.json());
+  return fetchClaudeUsage({ configDir: accountDirFor(account.name) });
 }
 
 async function loadAccountUsages(accounts) {
@@ -288,9 +228,9 @@ async function chooseAccountProfile(preferredName) {
     }
 
     if (accounts.some((account) => account.authenticated)) {
-      process.stdout.write('\x1b[2mLoading profile usage…\x1b[0m\r');
+      process.stderr.write('\x1b[2mLoading profile usage…\x1b[0m\r');
       accounts = await loadAccountUsages(accounts);
-      process.stdout.write('\x1b[2K\r');
+      process.stderr.write('\x1b[2K\r');
     }
 
     const choices = [
@@ -510,9 +450,9 @@ function printStatus(status, baseUrl) {
   const nameW = Math.max(4, ...accounts.map((a) => a.name.length));
   const planW = Math.max(4, ...accounts.map((a) => (a.subscriptionType || '?').length));
 
-  console.log('');
-  console.log('  ' + C.bold('Multiple Claude Account Proxy') + C.dim(`  —  ${avail} of ${accounts.length} ready`));
-  console.log('');
+  note('');
+  note('  ' + C.bold('Multiple Claude Account Proxy') + C.dim(`  —  ${avail} of ${accounts.length} ready`));
+  note('');
   for (const a of accounts) {
     const dot = a.available ? C.green('●') : a.authenticated ? C.amber('●') : C.red('●');
     const u = a.usage || {};
@@ -520,14 +460,14 @@ function printStatus(status, baseUrl) {
     const usage = C.dim(`${(u.windowRequests || 0)} req · ${tok} tok`);
     const tier = C.dim(a.rateLimitTier || '-');
     const state = a.available ? '' : '  ' + C.amber(a.unavailableReason || 'unavailable');
-    console.log(
+    note(
       `  ${dot} ${a.name.padEnd(nameW)}  ${(a.subscriptionType || '?').padEnd(planW)}  ${tier}   ${usage}${state}`
     );
   }
-  console.log('');
-  console.log('  ' + C.dim('Dashboard ') + `${baseUrl}/`);
-  console.log('  ' + C.dim('Endpoint  ') + `${baseUrl}` + C.dim('  (Anthropic-compatible · pooled)'));
-  console.log('');
+  note('');
+  note('  ' + C.dim('Dashboard ') + `${baseUrl}/`);
+  note('  ' + C.dim('Endpoint  ') + `${baseUrl}` + C.dim('  (Anthropic-compatible · pooled)'));
+  note('');
 }
 
 // --- entry point -----------------------------------------------------------
@@ -577,6 +517,7 @@ export async function runAccountProfile({
   skipPermissions = true,
   session = null,
   resumeWithLocal = false,
+  headless = false,
   dryRun = false
 } = {}) {
   const accounts = listAccounts();
@@ -589,6 +530,16 @@ export async function runAccountProfile({
       ? (local ? DEFAULT_CLAUDE_DIR : configDirForAccount(targetName))
       : (targetName ? configDirForAccount(targetName) : null);
     const crossProfile = Boolean(session && !samePath(sourceConfigDir, targetConfigDir));
+    const browserEnabled = claudeBrowserEnabled()
+      && !extraArgs.includes('--no-chrome')
+      && !extraArgs.includes('--chrome');
+    const claudePath = which('claude', globalBinDirs()) || 'claude';
+    const dryEnv = { ...process.env };
+    if (targetConfigDir) dryEnv.CLAUDE_CONFIG_DIR = targetConfigDir;
+    else if (local) delete dryEnv.CLAUDE_CONFIG_DIR;
+    const browser = browserEnabled
+      ? await prepareClaudeBrowser({ claudePath, baseEnv: dryEnv, skipPermissions, autoStart: false })
+      : null;
     const resumeArgs = session?.id
       ? ['--resume', session.id, ...(crossProfile ? ['--fork-session'] : [])]
       : [];
@@ -604,11 +555,14 @@ export async function runAccountProfile({
         forkSession: crossProfile
       } : {}),
       claude: {
-        cmd: which('claude', globalBinDirs()) || 'claude',
-        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(model ? ['--model', model] : []), ...resumeArgs, ...extraArgs],
-        env: local
-          ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR || '(unset — this machine\'s login)' }
-          : targetConfigDir ? { CLAUDE_CONFIG_DIR: targetConfigDir } : { CLAUDE_CONFIG_DIR: '(selected account profile)' }
+        cmd: claudePath,
+        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(browser?.args || []), ...(model ? ['--model', model] : []), ...resumeArgs, ...extraArgs],
+        env: {
+          ...(local
+            ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR || '(unset — this machine\'s login)' }
+            : targetConfigDir ? { CLAUDE_CONFIG_DIR: targetConfigDir } : { CLAUDE_CONFIG_DIR: '(selected account profile)' }),
+          ...(browser ? { CLAUDE_CODE_ENABLE_CFC: browser.env.CLAUDE_CODE_ENABLE_CFC } : {})
+        }
       }
     };
   }
@@ -675,8 +629,19 @@ export async function runAccountProfile({
   env.NODE_NO_WARNINGS = '1';
   env.PATH = [...dirs, env.PATH || ''].join(path.delimiter);
 
+  // An account profile is a claude.ai login, but only the login the browser
+  // extension is signed into (the "owner") can use Claude Code's own --chrome
+  // wiring — the bridge answers other accounts with an empty browser list.
+  // prepareClaudeBrowser detects that and hands foreign logins the browser
+  // server running as the owner instead.
+  const browser = extraArgs.includes('--no-chrome') || extraArgs.includes('--chrome')
+    ? null
+    : await prepareClaudeBrowser({ claudePath: claude, baseEnv: env, skipPermissions, autoStart: !headless });
+  if (browser) Object.assign(env, browser.env);
+
   const claudeArgs = [];
   if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
+  claudeArgs.push(...(browser?.args || []));
   if (model) claudeArgs.push('--model', model);
   claudeArgs.push(...resumeArgs, ...extraArgs);
 
@@ -688,24 +653,33 @@ export async function runAccountProfile({
       ? `Forking “${shortTitle}” from ${sourceName} and resuming as ${account.name}`
       : `Resuming “${shortTitle}” as ${account.name}`
     : `Launching Claude Code as ${account.name}`;
-  console.log(`\n${banner}${model ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}...\n`);
+  note(`\n${banner}${model ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}...\n`);
 
   const staged = crossProfile
     ? stageSessionForProfile(session, { sourceConfigDir, targetConfigDir })
     : null;
   try {
-    return await runInherit(claude, claudeArgs, env, { cwd });
+    return await runInherit(claude, claudeArgs, env, { cwd, terminalAgent: 'claude' });
   } finally {
     staged?.cleanup();
   }
 }
 
-export async function runPool({ model = '', extraArgs = [], skipPermissions = true, harness = 'claude', dryRun = false } = {}) {
+export async function runPool({
+  model = '',
+  extraArgs = [],
+  skipPermissions = true,
+  harness = 'claude',
+  providers = [],
+  providerKeys = {},
+  headless = false,
+  dryRun = false
+} = {}) {
   // The pool endpoint is Anthropic-shaped — codex only speaks OpenAI's wire
   // formats, so there is nothing to point it at here.
   if (harness === 'codex') {
     console.error('The codex harness can\'t use the account pool: the pool serves the Anthropic API, and codex only talks to OpenAI-compatible endpoints.');
-    console.error('  Use the claude or omp harness for the pool (press h in the picker, or pass --claude / --omp).');
+    console.error('  Use claude, omp, Pi, or DeepSeek Harness for the pool (press h in the picker, or pass --claude / --omp / --pi / --dsh).');
     return 1;
   }
 
@@ -738,6 +712,18 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
         model,
         apiKey,
         extraArgs,
+        dryRun: true
+      });
+    } else if (harness === 'dsh') {
+      const bridgeProvider = poolHarnessProvider(baseUrl);
+      out.dsh = await launchDsh({
+        provider: bridgeProvider,
+        model,
+        apiKey,
+        providers: [bridgeProvider, ...providers],
+        providerKeys: { ...providerKeys, [bridgeProvider.id]: apiKey },
+        extraArgs,
+        skipPermissions,
         dryRun: true
       });
     } else {
@@ -788,7 +774,7 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
 
   const already = await healthy(port);
   if (!already) {
-    console.log(`\nStarting the pool server on ${baseUrl} …`);
+    note(`\nStarting the pool server on ${baseUrl} …`);
     spawnSupervised();
     const ok = await waitHealthy(port);
     if (!ok) {
@@ -815,10 +801,15 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
   //    any other key pauses so you can read it, esc cancels.
   const status = await fetchStatus(port);
   printStatus(status, baseUrl);
-  const harnessLabel = harness === 'omp' ? 'omp' : harness === 'pi' ? 'Pi' : 'Claude';
-  process.stdout.write('  ' + C.dim(`Launching ${harnessLabel}…  `) + C.dim('enter = now · any key = pause · esc = cancel'));
-  const go = await holdOrContinue({ ms: 1500 });
-  process.stdout.write('\n');
+  const harnessLabel = harness === 'omp' ? 'omp' : harness === 'pi' ? 'Pi' : harness === 'dsh' ? 'DeepSeek Harness' : 'Claude';
+  // A headless run has no one to hold for, and its stdout belongs to the
+  // harness — so neither the pause nor the line offering it happens there.
+  let go = true;
+  if (!headless) {
+    process.stderr.write('  ' + C.dim(`Launching ${harnessLabel}…  `) + C.dim('enter = now · any key = pause · esc = cancel'));
+    go = await holdOrContinue({ ms: 1500 });
+    process.stderr.write('\n');
+  }
   if (!go) {
     stopProxy();
     console.log('Cancelled.');
@@ -854,6 +845,24 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
       stopProxy();
     }
   }
+  if (harness === 'dsh') {
+    try {
+      const liveModels = await fetchPoolModels(port);
+      const bridgeProvider = poolHarnessProvider(baseUrl, liveModels);
+      return await launchDsh({
+        provider: bridgeProvider,
+        model,
+        apiKey,
+        providers: [bridgeProvider, ...providers],
+        providerKeys: { ...providerKeys, [bridgeProvider.id]: apiKey },
+        extraArgs,
+        skipPermissions,
+        dryRun: false
+      });
+    } finally {
+      stopProxy();
+    }
+  }
 
   // 4) Launch Claude Code pointed at the pool. Claude speaks the Anthropic API;
   //    the pool serves /v1/messages and routes across account OAuth tokens.
@@ -875,14 +884,23 @@ export async function runPool({ model = '', extraArgs = [], skipPermissions = tr
   env.NODE_NO_WARNINGS = '1';
   env.PATH = [...claudeDirs, env.PATH || ''].join(path.delimiter);
 
+  // The pool serves Claude over a local ANTHROPIC_BASE_URL with its own token,
+  // which is exactly the auth shape that switches Claude Code's own browser
+  // wiring off — so these sessions reach the browser through the MCP server.
+  const browser = extraArgs.includes('--no-chrome') || extraArgs.includes('--chrome')
+    ? null
+    : await prepareClaudeBrowser({ claudePath: claude, baseEnv: env, skipPermissions, autoStart: !headless });
+  if (browser) Object.assign(env, browser.env);
+
   const claudeArgs = [];
   if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
+  claudeArgs.push(...(browser?.args || []));
   if (model) claudeArgs.push('--model', model);
   claudeArgs.push(...extraArgs);
 
-  console.log(`Launching Claude Code through the account pool${model ? ' / ' + model : ''}…\n`);
+  note(`Launching Claude Code through the account pool${model ? ' / ' + model : ''}…\n`);
   try {
-    return await runInherit(claude, claudeArgs, env);
+    return await runInherit(claude, claudeArgs, env, { terminalAgent: 'claude' });
   } finally {
     stopProxy();
   }

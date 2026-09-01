@@ -1,0 +1,2433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JustImagine</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23ffd51a'/%3E%3Cpath d='M18.4 7.6 21.1 15.3 28.8 18 21.1 20.7 18.4 28.4 15.7 20.7 8 18 15.7 15.3Z' fill='%23171717'/%3E%3Cpath d='M25.6 25.1 32.6 29.1 25.6 33.1Z' fill='%23171717'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;900&display=swap">
+<style>
+  /* JustGains brand register: warm paper neutrals, racing-yellow accent, ink
+     pills for emphasis, Montserrat throughout with weight doing the hierarchy.
+     House rules come with it — never #000/#fff, no gradients on brand
+     surfaces, elevation from surface steps rather than shadow. */
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f1ea;
+    --surface: #f8f5ee;
+    --surface-2: #ebe7de;
+    --surface-3: #e1dbcc;
+    --border: #d8d2c5;
+    --border-strong: #c3bba8;
+    --text: #171717;
+    --text-2: #5f5a52;
+    --text-3: #6e675a;
+    --accent: #ffd51a;
+    --accent-2: #ffbf00;
+    /* Yellow can't carry text on paper — accent copy uses the deep gold. */
+    --accent-hover: #7a5c00;
+    --accent-ink: #2f2908;
+    --accent-soft: #fff5c1;
+    --accent-line: #ffdf41;
+    --ink: #171717;
+    --ink-text: #f4f1ea;
+    --danger: #be0a0a;
+    --danger-soft: #fdeceb;
+    --shadow: 0 1px 2px rgba(23, 23, 23, .04);
+    --shadow-lg: 0 2px 6px rgba(23, 23, 23, .08), 0 12px 34px rgba(23, 23, 23, .16);
+    --radius: 16px;
+    --sans: 'Montserrat', ui-sans-serif, -apple-system, 'Segoe UI', system-ui, sans-serif;
+    --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+    --ease: cubic-bezier(.16, 1, .3, 1);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #090909;
+      --surface: #151515;
+      --surface-2: #1f1d19;
+      --surface-3: #292620;
+      --border: #2d2a23;
+      --border-strong: #453f33;
+      --text: #f4f1ea;
+      --text-2: #cfc8bb;
+      --text-3: #8c8574;
+      --accent: #f2c300;
+      --accent-2: #ffd51a;
+      --accent-hover: #f2c300;
+      --accent-ink: #2f2908;
+      --accent-soft: #2b2206;
+      --accent-line: #574712;
+      /* The signature pill inverts in dark so it still reads as emphasis. */
+      --ink: #f4f1ea;
+      --ink-text: #171717;
+      --danger: #fd6060;
+      --danger-soft: #38100f;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3);
+      --shadow-lg: 0 2px 6px rgba(0, 0, 0, .4), 0 12px 34px rgba(0, 0, 0, .55);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 500 15px/1.5 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+  button, select, input, textarea { font: inherit; color: inherit; }
+
+  .wrap { max-width: 1440px; margin: 0 auto; padding: 0 24px 96px; }
+
+  /* ---------- header / logo ---------- */
+  header { display: flex; align-items: center; gap: 14px; padding: 26px 2px 12px; }
+  .logo { display: flex; align-items: center; gap: 11px; text-decoration: none; color: inherit; }
+  .logo svg { display: block; }
+  .logo .word { font: 500 24px/1 var(--sans); letter-spacing: -.025em; white-space: nowrap; }
+  .logo .word b { font-weight: 900; }
+  .head-meta { color: var(--text-2); font-size: 13px; display: flex; gap: 9px; align-items: center; flex-wrap: wrap; min-width: 0; }
+  .head-meta .dot { color: var(--border-strong); }
+  #rootDir { cursor: pointer; border-bottom: 1px dotted var(--border-strong); font-family: var(--mono); font-size: 12px; }
+  #rootDir:hover { color: var(--text); }
+  #activeBadge { display: none; margin-left: auto; font-size: 12.5px; font-weight: 700; color: var(--ink-text); background: var(--ink); padding: 5px 13px; border-radius: 999px; white-space: nowrap; }
+  #activeBadge.on { display: inline-flex; align-items: center; gap: 7px; }
+  #activeBadge .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; transform: scale(.75); } }
+  #offline { display: none; margin-left: auto; font-size: 12.5px; font-weight: 700; color: var(--danger); background: var(--danger-soft); border: 1px solid currentColor; padding: 5px 13px; border-radius: 999px; }
+  #offline.on { display: inline-block; }
+
+  /* ---------- layout ---------- */
+  .main { display: flex; align-items: flex-start; gap: 22px; margin-top: 6px; }
+  .content { flex: 1; min-width: 0; }
+  #sidebar {
+    flex: none; width: 224px;
+    position: sticky; top: 14px;
+    max-height: calc(100vh - 28px); overflow-y: auto; overscroll-behavior: contain;
+    padding: 2px 2px 8px;
+  }
+  .side-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 8px; }
+  .side-head span { font-size: 12px; font-weight: 700; color: var(--text-2); }
+  .side-head button { all: unset; cursor: pointer; margin-left: auto; font-size: 12px; font-weight: 600; color: var(--text-2); padding: 3px 10px; border-radius: 999px; }
+  .side-head button:hover { background: var(--ink); color: var(--ink-text); }
+
+  .row {
+    position: relative; display: flex; align-items: center; gap: 6px;
+    cursor: pointer; padding: 6px 8px; border-radius: 10px;
+    border: 1px solid transparent; user-select: none;
+  }
+  .row:hover { background: var(--surface); border-color: var(--border); }
+  .row.active { background: var(--surface); border-color: var(--accent); }
+  .row.active > .name { color: var(--accent-hover); font-weight: 700; }
+  .row.drop { background: var(--accent-soft); border-color: var(--accent); border-style: dashed; }
+  .row .tw { flex: none; width: 13px; text-align: center; color: var(--text-3); font-size: 9px; transition: transform .12s var(--ease); }
+  .row .tw.open { transform: rotate(90deg); }
+  .row .tw.leaf { visibility: hidden; }
+  .row .ico { flex: none; font-size: 12px; opacity: .8; }
+  .row .name { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .n { flex: none; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .row .acts { display: none; gap: 2px; }
+  .row:hover .acts { display: flex; }
+  .row:hover .n { display: none; }
+  .row .acts button { all: unset; cursor: pointer; width: 19px; height: 19px; border-radius: 999px; display: grid; place-items: center; font-size: 11px; color: var(--text-2); }
+  .row .acts button:hover { background: var(--surface-3); color: var(--text); }
+  .row .acts button.del:hover { background: var(--danger-soft); color: var(--danger); }
+  .row input.rename { all: unset; flex: 1; min-width: 0; font-size: 13px; background: var(--surface-2); border-radius: 8px; padding: 1px 8px; }
+  .kids { margin-left: 11px; border-left: 1px solid var(--border); padding-left: 3px; }
+
+  /* ---------- sidebar tabs: folders / cast ---------- */
+  .sidetabs { display: flex; background: var(--surface-2); border-radius: 999px; padding: 3px; gap: 2px; margin: 0 2px 8px; }
+  .sidetabs button { all: unset; cursor: pointer; flex: 1; text-align: center; padding: 5px 0; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+  .sidetabs button.on { background: var(--ink); color: var(--ink-text); font-weight: 700; }
+
+  /* ---------- cast ---------- */
+  .cast-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 10px; cursor: pointer; border: 1px solid transparent; position: relative; }
+  .cast-row:hover { background: var(--surface); border-color: var(--border); }
+  .cast-row.on { background: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .cast-row .face {
+    flex: none; width: 30px; height: 30px; border-radius: 50%; object-fit: cover;
+    background: var(--accent); display: grid; place-items: center;
+    color: var(--accent-ink); font-size: 12px; font-weight: 900; overflow: hidden;
+  }
+  .cast-row .face img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cast-row .who { flex: 1; min-width: 0; }
+  .cast-row .who b { display: block; font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cast-row .who span { display: block; font-size: 10.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cast-row .edit { all: unset; cursor: pointer; opacity: 0; font-size: 11px; font-weight: 600; color: var(--text-2); padding: 3px 9px; border-radius: 999px; }
+  .cast-row:hover .edit { opacity: 1; }
+  .cast-row .edit:hover { background: var(--ink); color: var(--ink-text); }
+  #castEmpty { font-size: 12px; color: var(--text-3); padding: 10px 8px; line-height: 1.5; }
+
+  /* character editor */
+  #editor { position: fixed; inset: 0; background: rgba(15, 14, 12, .62); backdrop-filter: blur(6px); display: none; align-items: center; justify-content: center; z-index: 120; padding: 24px; }
+  #editor.open { display: flex; }
+  .ed-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 24px; box-shadow: var(--shadow-lg); width: min(560px, 96vw); max-height: 90vh; overflow-y: auto; padding: 24px; }
+  .ed-panel h2 { font: 900 26px/1.05 var(--sans); letter-spacing: -.03em; margin: 0 0 6px; }
+  .ed-panel .hint { font-size: 12.5px; color: var(--text-2); margin-bottom: 18px; line-height: 1.5; }
+  .ed-field { margin-bottom: 14px; }
+  .ed-field label { display: block; font-size: 12px; font-weight: 700; color: var(--text-2); margin-bottom: 6px; }
+  .ed-field input, .ed-field textarea {
+    width: 100%; background: var(--surface-2); border: 1px solid transparent; border-radius: 12px;
+    padding: 9px 12px; font-size: 13.5px; outline: none; resize: vertical;
+  }
+  .ed-field input:focus, .ed-field textarea:focus { border-color: var(--accent); }
+  .ed-refs { display: flex; gap: 8px; flex-wrap: wrap; }
+  .ed-ref { position: relative; width: 68px; height: 68px; border-radius: 14px; overflow: hidden; border: 1px solid var(--border); cursor: pointer; }
+  .ed-ref img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ed-ref.cover { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .ed-ref .tag { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(transparent, rgba(23,23,23,.8)); color: #f4f1ea; font-size: 8.5px; font-weight: 700; text-align: center; padding: 7px 0 2px; }
+  .ed-ref .rm { all: unset; cursor: pointer; position: absolute; top: 3px; right: 3px; width: 17px; height: 17px; border-radius: 50%; background: #171717; color: #f4f1ea; font-size: 9px; display: none; align-items: center; justify-content: center; }
+  .ed-ref:hover .rm { display: flex; }
+  .ed-add { width: 68px; height: 68px; border-radius: 14px; border: 1px dashed var(--border-strong); display: grid; place-items: center; cursor: pointer; color: var(--text-3); font-size: 18px; }
+  .ed-add:hover { border-color: var(--accent); color: var(--accent-hover); }
+  .ed-field .prompt-wrap textarea { padding-right: 74px; }
+  #edDrop { font-size: 11.5px; color: var(--text-3); margin-top: 8px; line-height: 1.4; }
+  button.draw {
+    all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 7px;
+    margin-top: 10px; padding: 7px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+    background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line);
+  }
+  button.draw:hover { background: var(--accent); color: var(--accent-ink); }
+  button.draw.working { animation: twinkle .9s ease-in-out infinite; cursor: progress; }
+  button.draw.off { opacity: .4; cursor: not-allowed; }
+  button.draw.off:hover { background: var(--accent-soft); color: var(--accent); }
+  #edDrawNote { font-size: 11.5px; color: var(--text-3); margin-top: 7px; line-height: 1.4; }
+  /* a candidate is picked, not deleted — the tick is the whole interaction */
+  .ed-ref.cand { opacity: .55; }
+  .ed-ref.cand.on { opacity: 1; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .ed-ref .tick {
+    position: absolute; top: 4px; left: 4px; width: 18px; height: 18px; border-radius: 6px;
+    border: 1.5px solid rgba(255,255,255,.9); background: rgba(20,18,26,.4);
+    display: grid; place-items: center; color: #fff; font-size: 11px;
+  }
+  .ed-ref.cand.on .tick { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .cand-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .cand-actions button { all: unset; cursor: pointer; padding: 6px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600; background: var(--surface-2); }
+  .cand-actions button:hover { background: var(--surface-3); }
+  .cand-actions button.primary { background: var(--accent); color: var(--accent-ink); }
+  .cand-actions button.primary:hover { background: var(--accent-2); }
+  .cand-actions button.off { opacity: .4; cursor: not-allowed; }
+  .ed-panel.dragover { outline: 2px dashed var(--accent); outline-offset: -6px; }
+  .ed-panel.dragover #edDrop { color: var(--accent); }
+  .ed-actions { display: flex; gap: 8px; align-items: center; margin-top: 20px; }
+  .ed-actions .spacer { flex: 1; }
+  .ed-actions button { all: unset; cursor: pointer; padding: 8px 17px; border-radius: 999px; font-size: 13px; font-weight: 600; background: var(--surface-2); }
+  .ed-actions button:hover { background: var(--surface-3); }
+  .ed-actions button.primary { background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  .ed-actions button.primary:hover { background: var(--accent-2); }
+  .ed-actions button.danger { color: var(--danger); }
+  .ed-actions button.danger:hover { background: var(--danger-soft); }
+
+  /* the composer's cast picker */
+  #castPick { position: relative; }
+  #castBtn { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); border-radius: 999px; padding: 6px 13px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+  #castBtn:hover { background: var(--ink); color: var(--ink-text); }
+  #castBtn.has { background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  #castMenu {
+    display: none; position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
+    box-shadow: var(--shadow-lg); padding: 6px; min-width: 230px; max-height: 320px; overflow-y: auto;
+  }
+  #castMenu.open { display: block; }
+  #castMenu .none { font-size: 12px; color: var(--text-3); padding: 8px 10px; line-height: 1.5; }
+
+  @media (max-width: 980px) {
+    .main { display: block; }
+    #sidebar { position: static; width: auto; max-height: 220px; margin-bottom: 12px; }
+  }
+
+  /* ---------- composer ---------- */
+  .composer {
+    position: sticky; top: 14px; z-index: 40;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 24px; box-shadow: var(--shadow);
+    padding: 14px 16px 12px; transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+  }
+  .composer.dragover { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .composer textarea {
+    width: 100%; border: 0; outline: none; resize: none; background: transparent;
+    font-size: 15.5px; line-height: 1.55; padding: 4px 2px 8px; max-height: 180px;
+  }
+  .composer textarea::placeholder { color: var(--text-3); }
+
+  /* ---------- prompt tools ---------- */
+  .prompt-wrap { position: relative; }
+  /* Room for the buttons so a long prompt never runs under them. */
+  .prompt-wrap textarea { padding-right: 74px; }
+  .prompt-tools { position: absolute; top: 2px; right: 0; display: flex; gap: 3px; }
+  .prompt-tools button {
+    all: unset; cursor: pointer; width: 28px; height: 28px; border-radius: 9px;
+    display: grid; place-items: center; font-size: 14px; color: var(--text-3);
+    transition: background .15s, color .15s, transform .15s;
+  }
+  .prompt-tools button:hover { background: var(--surface-2); color: var(--text); }
+  #magic:hover { color: var(--accent); transform: scale(1.12) rotate(-8deg); }
+  #magic.working { animation: twinkle .9s ease-in-out infinite; cursor: progress; color: var(--accent); }
+  #magic.off { opacity: .35; cursor: not-allowed; transform: none; }
+  @keyframes twinkle { 50% { opacity: .35; transform: scale(.86) rotate(10deg); } }
+  #revert { color: var(--accent-hover); }
+
+  .modes { display: inline-flex; background: var(--surface-2); border-radius: 999px; padding: 3px; gap: 2px; }
+  .modes button { all: unset; cursor: pointer; padding: 5px 15px; border-radius: 999px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+  .modes button.on { background: var(--ink); color: var(--ink-text); font-weight: 700; }
+  .modes button.on[data-mode="video"] { color: var(--accent); }
+
+  .composer-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding-top: 2px; }
+  .ctl { display: flex; align-items: center; gap: 5px; }
+  .ctl > label { font-size: 12px; font-weight: 600; color: var(--text-3); }
+  .composer select, .composer input[type=text], .composer input[type=number] {
+    background: var(--surface-2); border: 1px solid transparent; border-radius: 999px;
+    padding: 6px 11px; font-size: 12.5px; font-weight: 500; outline: none; max-width: 260px;
+  }
+  .composer select:hover, .composer input:hover { border-color: var(--border-strong); }
+  .composer select:disabled { opacity: .4; cursor: not-allowed; }
+  .composer select:focus, .composer input:focus { border-color: var(--accent); }
+  #modelCustom { display: none; width: 190px; font-family: var(--mono); font-size: 11.5px; }
+
+  /* ---------- model picker ---------- */
+  #modelPick { position: relative; }
+  #modelBtn {
+    all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; max-width: 300px;
+    background: var(--surface-2); border: 1px solid transparent; border-radius: 999px;
+    padding: 6px 11px; font-size: 12.5px; font-weight: 600; color: var(--text);
+  }
+  #modelBtn:hover { border-color: var(--border-strong); }
+  #modelBtn:focus-visible { border-color: var(--accent); }
+  #modelBtn .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #modelBtn .tag { font-size: 11px; font-weight: 600; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #modelBtn .tag:empty { display: none; }
+  #modelBtn .caret { color: var(--text-3); font-size: 10px; }
+  /* Opens downward: the composer is pinned to the top of the page, so an
+     upward menu would run off the screen. Sized to what is left below it. */
+  #modelMenu {
+    display: none; position: absolute; top: calc(100% + 6px); left: 0; z-index: 60;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
+    box-shadow: var(--shadow-lg); padding: 6px; width: min(680px, calc(100vw - 40px)); max-height: min(460px, calc(100vh - 240px)); overflow-y: auto;
+  }
+  @media (max-width: 760px) { #modelMenu { left: auto; right: 0; } }
+  #modelMenu.open { display: block; }
+  .mm-search {
+    width: 100%; box-sizing: border-box; background: var(--surface-2); border: 1px solid transparent; border-radius: 12px;
+    padding: 7px 11px; font-size: 12.5px; outline: none; margin-bottom: 4px;
+  }
+  .mm-search:focus { border-color: var(--accent); }
+  .mm-head, .mm-row { display: grid; gap: 12px; align-items: center; padding: 6px 10px; }
+  .mm-head {
+    font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--text-3);
+    position: sticky; top: 0; background: var(--surface); z-index: 1; padding-top: 8px;
+  }
+  .mm-row { border-radius: 10px; cursor: pointer; border: 1px solid transparent; }
+  .mm-row:hover, .mm-row.focus { background: var(--surface-2); }
+  .mm-row.on { background: var(--surface-2); border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .mm-row .who { min-width: 0; }
+  .mm-row .who b { display: block; font-size: 12.5px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mm-row .who span { display: block; font-size: 10.5px; color: var(--text-3); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mm-row .who .note { font-family: var(--sans); font-style: normal; color: var(--accent-hover); font-weight: 600; }
+  .mm-row .age { font-size: 11.5px; font-weight: 600; color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .mm-row .age.new { color: var(--accent-hover); }
+  .fact { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .fact small { font-size: 10.5px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meter { display: inline-flex; gap: 3px; }
+  .meter i { display: block; width: 7px; height: 7px; border-radius: 50%; background: var(--surface-3); }
+  .meter i.f { background: var(--ink); }
+  .meter.q i.f { background: var(--accent); }
+  .mm-row.custom { display: flex; gap: 6px; color: var(--text-2); font-size: 12.5px; font-weight: 600; }
+  .mm-row.custom:before { content: '＋'; color: var(--text-3); }
+  .mm-none { padding: 10px; font-size: 12px; color: var(--text-3); }
+  .mm-foot { padding: 6px 10px 4px; font-size: 10.5px; color: var(--text-3); line-height: 1.5; }
+  #seed { width: 92px; font-family: var(--mono); }
+  .hide { display: none !important; }
+
+  .toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--text-2); cursor: pointer; user-select: none; }
+  .toggle input { accent-color: var(--accent); margin: 0; }
+
+  .stepper { display: inline-flex; align-items: center; background: var(--surface-2); border-radius: 999px; }
+  .stepper button { all: unset; cursor: pointer; width: 26px; height: 28px; text-align: center; color: var(--text-2); }
+  .stepper button:hover { color: var(--accent-hover); }
+  .stepper .count { min-width: 16px; text-align: center; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1; }
+
+  #go {
+    all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 8px;
+    background: var(--accent); color: var(--accent-ink);
+    padding: 8px 20px; border-radius: 999px; font-size: 13.5px; font-weight: 700;
+    transition: background-color .16s var(--ease), transform .16s var(--ease);
+  }
+  #go:hover { background: var(--accent-2); transform: translateY(-1px); }
+  #go kbd { font: inherit; font-size: 11px; font-weight: 600; opacity: .6; }
+  #go:disabled, #go.off { opacity: .4; cursor: not-allowed; transform: none; background: var(--accent); }
+
+  #attachBtn, #galleryBar button, .lb-bar button, .lb-bar a {
+    all: unset; cursor: pointer; background: var(--surface-2); border-radius: 999px;
+    padding: 6px 13px; font-size: 12.5px; font-weight: 600; color: var(--text-2);
+  }
+  #attachBtn:hover, #galleryBar button:hover, .lb-bar button:hover, .lb-bar a:hover { background: var(--ink); color: var(--ink-text); }
+
+  /* attachments + context library */
+  #attachRow { display: none; gap: 7px; flex-wrap: wrap; padding: 2px 0 8px; }
+  #attachRow.has { display: flex; }
+  .chip { position: relative; width: 54px; height: 54px; border-radius: 14px; overflow: hidden; border: 1px solid var(--border); }
+  .chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .chip .badge { position: absolute; left: 0; bottom: 0; right: 0; background: linear-gradient(transparent, rgba(23,23,23,.78)); color: #f4f1ea; font-size: 9px; font-weight: 700; text-align: center; padding: 6px 0 2px; }
+  .chip .rm, .ctx-item .rm {
+    all: unset; cursor: pointer; position: absolute; top: 3px; right: 3px;
+    width: 17px; height: 17px; border-radius: 50%; background: #171717; color: #f4f1ea;
+    font-size: 9px; display: none; align-items: center; justify-content: center;
+  }
+  .chip:hover .rm, .ctx-item:hover .rm { display: flex; }
+  #ctxBar { display: none; align-items: center; gap: 9px; padding-top: 10px; border-top: 1px solid var(--border); margin-top: 6px; }
+  #ctxBar.has { display: flex; }
+  .ctx-label { font-size: 12px; font-weight: 700; color: var(--text-3); flex: none; }
+  #ctxRow { display: flex; gap: 6px; overflow-x: auto; padding: 2px; }
+  .ctx-item { position: relative; flex: none; width: 38px; height: 38px; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); cursor: pointer; opacity: .62; transition: opacity .16s var(--ease); }
+  .ctx-item:hover { opacity: 1; }
+  .ctx-item.sel { opacity: 1; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .ctx-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  /* ---------- gallery ---------- */
+  #galleryBar { display: none; align-items: center; gap: 9px; padding: 18px 2px 6px; }
+  #galleryBar.has { display: flex; }
+  #galleryBar .where { font-size: 12.5px; color: var(--text-2); margin-right: auto; }
+  #galleryBar .where b { font-weight: 900; color: var(--text); }
+  #gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 14px; margin-top: 10px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    overflow: hidden; display: flex; flex-direction: column;
+    transition: border-color .16s var(--ease), transform .16s var(--ease);
+  }
+  .card:hover { transform: translateY(-2px); border-color: var(--border-strong); }
+  .card.hidden { display: none; }
+  .card.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .frame { position: relative; aspect-ratio: 1 / 1; background: var(--surface-2); display: grid; place-items: center; overflow: hidden; }
+  /* A video tile reads as a video even before its poster has been captured. */
+  .frame.video { background: var(--surface-3); }
+  .frame img, .frame video { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; opacity: 0; transition: opacity .28s var(--ease); }
+  .frame img.ready, .frame video.ready { opacity: 1; }
+  .frame .play {
+    position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
+  }
+  .frame .play i {
+    width: 44px; height: 44px; border-radius: 50%; background: rgba(23,23,23,.62);
+    backdrop-filter: blur(6px); display: grid; place-items: center; color: #f4f1ea; font-style: normal; font-size: 15px;
+    padding-left: 3px;
+  }
+  .frame .dur {
+    position: absolute; right: 7px; bottom: 7px; background: rgba(23,23,23,.72); color: #f4f1ea;
+    font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; font-variant-numeric: tabular-nums;
+  }
+  .card .pick {
+    position: absolute; left: 8px; top: 8px; width: 20px; height: 20px; border-radius: 999px;
+    border: 1.5px solid rgba(244,241,234,.85); background: rgba(23,23,23,.4);
+    display: none; place-items: center; cursor: pointer; color: #f4f1ea; font-size: 11px;
+  }
+  .frame:hover .pick, .card.sel .pick { display: grid; }
+  .card.sel .pick { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+  .gen-center { display: grid; place-items: center; gap: 9px; color: var(--text-3); }
+  .ring { width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--border-strong); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .gen-center .phase { font-size: 12px; font-weight: 700; color: var(--text-2); }
+  .gen-center .elapsed { font-size: 12px; font-variant-numeric: tabular-nums; }
+  .card.generating .frame { background: linear-gradient(100deg, var(--surface-2) 30%, var(--surface-3) 50%, var(--surface-2) 70%); background-size: 220% 100%; animation: sheen 1.6s linear infinite; }
+  @keyframes sheen { to { background-position: -220% 0; } }
+  .err-center { display: grid; place-items: center; gap: 8px; padding: 14px; text-align: center; }
+  .err-center .msg { font-size: 11.5px; color: var(--danger); line-height: 1.4; max-height: 96px; overflow: auto; }
+  .err-center button { all: unset; cursor: pointer; background: var(--surface-3); padding: 4px 13px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+
+  .meta { padding: 10px 12px 11px; display: flex; flex-direction: column; gap: 5px; }
+  .prompt-line { font-size: 12.5px; line-height: 1.4; color: var(--text); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .sub { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--text-3); }
+  .sub .model { color: var(--accent-hover); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
+  .sub .actions { margin-left: auto; display: flex; gap: 1px; }
+  .iconbtn { all: unset; cursor: pointer; width: 22px; height: 22px; border-radius: 999px; display: grid; place-items: center; color: var(--text-3); font-size: 12px; }
+  .iconbtn:hover { background: var(--surface-2); color: var(--text); }
+  .iconbtn.del:hover { background: var(--danger-soft); color: var(--danger); }
+
+  #empty { grid-column: 1 / -1; text-align: center; padding: 72px 20px; color: var(--text-3); }
+  #empty .big { font: 900 30px/1.05 var(--sans); letter-spacing: -.03em; color: var(--text); margin-bottom: 10px; }
+
+  /* selection bar — the signature ink pill, floating */
+  #selBar {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(140%);
+    background: var(--ink); color: var(--ink-text); border-radius: 999px;
+    box-shadow: var(--shadow-lg); padding: 8px 10px 8px 18px; display: flex; align-items: center; gap: 9px;
+    z-index: 60; transition: transform .28s var(--ease);
+  }
+  #selBar.on { transform: translateX(-50%) translateY(0); }
+  #selBar .n { font-size: 13px; font-weight: 700; }
+  #selBar select, #selBar button { all: unset; cursor: pointer; background: rgba(128,128,128,.24); border-radius: 999px; padding: 6px 13px; font-size: 12.5px; font-weight: 600; }
+  #selBar select { padding-right: 8px; }
+  #selBar button:hover { background: var(--accent); color: var(--accent-ink); }
+  #selBar button.del:hover { background: var(--danger); color: #f4f1ea; }
+
+  /* ---------- lightbox ---------- */
+  #lightbox { position: fixed; inset: 0; background: rgba(15, 14, 12, .9); backdrop-filter: blur(8px); display: none; align-items: center; justify-content: center; z-index: 100; padding: 28px; }
+  #lightbox.open { display: flex; }
+  .lb-panel { max-width: min(1180px, 96vw); max-height: 92vh; display: flex; flex-direction: column; gap: 10px; }
+  #lbImg, #lbVid { max-width: 100%; max-height: calc(92vh - 62px); border-radius: 18px; box-shadow: var(--shadow-lg); background: #171717; object-fit: contain; }
+  .lb-bar { display: flex; align-items: center; gap: 10px; background: var(--surface); border-radius: 18px; padding: 10px 14px; }
+  .lb-prompt { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-2); max-height: 44px; overflow-y: auto; line-height: 1.4; }
+  .lb-nav { all: unset; cursor: pointer; position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 68px; display: grid; place-items: center; color: #f4f1ea; font-size: 30px; opacity: .5; border-radius: 999px; transition: opacity .16s var(--ease); }
+  .lb-nav:hover { opacity: 1; background: rgba(244,241,234,.12); }
+  #lbPrev { left: 10px; } #lbNext { right: 10px; }
+  .lb-nav.hidden { display: none; }
+  .lb-count { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); color: rgba(244,241,234,.65); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* ---------- toasts ---------- */
+  #toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 7px; z-index: 200; }
+  .toast { background: var(--ink); color: var(--ink-text); box-shadow: var(--shadow-lg); border-radius: 16px; padding: 10px 15px; font-size: 12.5px; font-weight: 600; max-width: 340px; animation: rise .28s var(--ease); }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+
+  /* House rule: transforms and opacity only, and always honour the setting. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important; scroll-behavior: auto !important;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo" title="JustImagine">
+      <svg width="34" height="34" viewBox="0 0 40 40" aria-hidden="true">
+        <rect width="40" height="40" rx="12" fill="#ffd51a"/>
+        <path d="M18.4 7.6 21.1 15.3 28.8 18 21.1 20.7 18.4 28.4 15.7 20.7 8 18 15.7 15.3Z" fill="#171717"/>
+        <path d="M25.6 25.1 32.6 29.1 25.6 33.1Z" fill="#171717" opacity=".85"/>
+      </svg>
+      <div class="word">Just<b>Imagine</b></div>
+    </div>
+    <div class="head-meta">
+      <span class="dot">·</span>
+      <span id="rootDir" title="Click to copy the gallery folder">…</span>
+    </div>
+    <span id="activeBadge"><span class="pip"></span><span id="activeText"></span></span>
+    <span id="offline">reconnecting…</span>
+  </header>
+
+  <div class="main">
+  <aside id="sidebar">
+    <div class="sidetabs">
+      <button data-side="folders" class="on">Folders</button>
+      <button data-side="cast">Cast</button>
+    </div>
+
+    <div id="sideFolders">
+      <div class="side-head">
+        <span>Folders</span>
+        <button id="newFolder" title="New folder in the current folder">＋ new</button>
+      </div>
+      <div id="tree"></div>
+    </div>
+
+    <div id="sideCast" class="hide">
+      <div class="side-head">
+        <span>Characters</span>
+        <button id="newCharacter" title="Create a character">＋ new</button>
+      </div>
+      <div id="castList"></div>
+      <div id="castEmpty">
+        No characters yet. Make one, give it a couple of reference images, and pick it when you generate — every shot keeps the same face.
+      </div>
+    </div>
+  </aside>
+
+  <div class="content">
+  <div class="composer">
+    <div id="attachRow"></div>
+    <div class="prompt-wrap">
+      <textarea id="prompt" rows="1" placeholder="Describe an image… (Enter to generate · paste or drop images to use as reference)" autofocus></textarea>
+      <div class="prompt-tools">
+        <button id="revert" class="hide" title="Put back what you wrote">↺</button>
+        <button id="magic" title="Improve this prompt">✨</button>
+      </div>
+    </div>
+
+    <div class="composer-row">
+      <div class="modes">
+        <button data-mode="image" class="on">✦ Image</button>
+        <button data-mode="video">▶ Video</button>
+      </div>
+
+      <div class="ctl">
+        <button id="attachBtn" title="Add reference images — or paste / drag &amp; drop anywhere">＋ ref</button>
+        <input id="fileInput" type="file" accept="image/*" multiple hidden>
+      </div>
+
+      <div class="ctl" id="castPick">
+        <button id="castBtn" title="Put saved characters in this generation">👤 <span id="castLabel">cast</span> ▾</button>
+        <div id="castMenu"></div>
+      </div>
+
+      <div class="ctl" id="apiCtl">
+        <select id="api" title="Image API"></select>
+      </div>
+      <div class="ctl" id="modelPick">
+        <button id="modelBtn" title="Model"><span class="name" id="modelName">model</span><span class="tag" id="modelTag"></span><span class="caret">▾</span></button>
+        <div id="modelMenu" role="listbox"></div>
+        <input id="modelCustom" type="text" placeholder="model id…" spellcheck="false">
+      </div>
+
+      <!-- image knobs -->
+      <div class="ctl imageOnly">
+        <select id="size" title="Size">
+          <option value="auto">Auto size</option>
+          <option value="1024x1024">Square · 1024</option>
+          <option value="1536x1024">Landscape · 1536×1024</option>
+          <option value="1024x1536">Portrait · 1024×1536</option>
+          <option value="1792x1024">Wide · 1792×1024</option>
+          <option value="1024x1792">Tall · 1024×1792</option>
+        </select>
+      </div>
+      <div class="ctl imageOnly">
+        <select id="quality" title="Quality">
+          <option value="auto">Auto quality</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+      </div>
+
+      <!-- video knobs, populated from the selected model's own capabilities -->
+      <div class="ctl videoOnly hide"><select id="duration" title="Clip length"></select></div>
+      <div class="ctl videoOnly hide"><select id="resolution" title="Resolution"></select></div>
+      <div class="ctl videoOnly hide"><select id="aspect" title="Aspect ratio"></select></div>
+      <label class="toggle videoOnly hide" id="audioCtl" title="Generate a soundtrack"><input type="checkbox" id="audio"> audio</label>
+      <label class="toggle videoOnly hide" id="frameCtl" title="Use the first reference image as the opening frame"><input type="checkbox" id="firstFrame" checked> 1st frame</label>
+      <label class="toggle videoOnly hide" id="lastFrameCtl" title="Use the second reference image as the closing frame"><input type="checkbox" id="lastFrame"> last frame</label>
+      <div class="ctl videoOnly hide"><input id="seed" type="text" inputmode="numeric" placeholder="seed" title="Seed (blank = random)"></div>
+
+      <div class="ctl">
+        <label for="countUp">×</label>
+        <span class="stepper">
+          <button id="countDown" title="Fewer">−</button>
+          <span class="count" id="countVal">1</span>
+          <button id="countUp" title="More">+</button>
+        </span>
+      </div>
+      <div class="spacer"></div>
+      <button id="go">Generate <kbd>⏎</kbd></button>
+    </div>
+
+    <div id="ctxBar">
+      <span class="ctx-label">refs</span>
+      <div id="ctxRow"></div>
+    </div>
+  </div>
+
+  <div id="galleryBar">
+    <span class="where">in <b id="whereName">all</b> <span id="whereCount"></span></span>
+    <button id="refresh" title="Re-read this folder from disk">↻ refresh</button>
+    <button id="deleteFolder" title="Delete this folder and every generation inside it">Delete folder</button>
+  </div>
+
+  <div id="gallery">
+    <div id="empty">
+      <div class="big">Nothing in this folder yet</div>
+      <div>Type a prompt above and press Enter. Switch to ▶ Video for clips.</div>
+    </div>
+  </div>
+  </div><!-- /.content -->
+  </div><!-- /.main -->
+</div>
+
+<div id="selBar">
+  <span class="n" id="selCount"></span>
+  <select id="moveTo"><option value="">Move to…</option></select>
+  <button id="selClear">Clear</button>
+  <button id="selDelete" class="del">Delete</button>
+</div>
+
+<div id="lightbox">
+  <button id="lbPrev" class="lb-nav" title="Previous (←)">‹</button>
+  <button id="lbNext" class="lb-nav" title="Next (→)">›</button>
+  <span class="lb-count" id="lbCount"></span>
+  <div class="lb-panel">
+    <img id="lbImg" alt="">
+    <video id="lbVid" controls playsinline class="hide"></video>
+    <div class="lb-bar">
+      <div class="lb-prompt" id="lbPrompt"></div>
+      <button id="lbReuse">Reuse prompt</button>
+      <a id="lbDownload" download>Download</a>
+    </div>
+  </div>
+</div>
+
+<div id="editor">
+  <div class="ed-panel">
+    <h2 id="edTitle">New character</h2>
+    <div class="hint">
+      A name, a description, and a few reference images. Pick the character when you generate and its
+      pictures ride along with the prompt, so the same face comes back shot after shot.
+    </div>
+    <div class="ed-field">
+      <label for="edName">Name</label>
+      <input id="edName" type="text" placeholder="Nora" spellcheck="false" maxlength="60">
+    </div>
+    <div class="ed-field">
+      <label for="edDesc">Description</label>
+      <div class="prompt-wrap">
+        <textarea id="edDesc" rows="3" placeholder="early 30s, short dark curly hair, freckles, green field jacket"></textarea>
+        <div class="prompt-tools">
+          <button id="edRevert" class="hide" title="Put back what you wrote">↺</button>
+          <button id="edMagic" title="Improve this description">✨</button>
+        </div>
+      </div>
+    </div>
+    <div class="ed-field">
+      <label>Reference images <span id="edRefCount"></span></label>
+      <div class="ed-refs" id="edRefs"></div>
+      <div id="edDrop">Paste, drop or click ＋ to add images of this character</div>
+      <input id="edFile" type="file" accept="image/*" multiple hidden>
+      <button id="edDraw" class="draw">✦ Draw 5 reference shots</button>
+      <div id="edDrawNote"></div>
+    </div>
+    <div class="ed-field hide" id="edCandField">
+      <label>Generated shots <span id="edCandCount"></span></label>
+      <div class="ed-refs" id="edCands"></div>
+      <div class="cand-actions">
+        <button id="edKeep" class="primary">Keep selected</button>
+        <button id="edDiscard">Discard all</button>
+      </div>
+    </div>
+    <div class="ed-actions">
+      <button id="edDelete" class="danger">Delete</button>
+      <div class="spacer"></div>
+      <button id="edCancel">Cancel</button>
+      <button id="edSave" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+(async function () {
+  const $ = (id) => document.getElementById(id);
+  const api = (p, body) =>
+    fetch(p, body === undefined ? undefined : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (r) => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
+        return j;
+      });
+
+  const gallery = $('gallery'), empty = $('empty'), promptEl = $('prompt');
+  const apiSel = $('api'), modelBtn = $('modelBtn'), modelMenu = $('modelMenu'), modelCustom = $('modelCustom');
+  const sizeSel = $('size'), qualitySel = $('quality');
+  const durSel = $('duration'), resSel = $('resolution'), aspSel = $('aspect');
+  const audioEl = $('audio'), seedEl = $('seed'), firstFrameEl = $('firstFrame'), lastFrameEl = $('lastFrame');
+  const badge = $('activeBadge'), activeText = $('activeText');
+
+  const LS = 'justimagine:v1';
+  const load = () => { try { return JSON.parse(localStorage.getItem(LS) || '{}'); } catch { return {}; } };
+  const save = (patch) => { try { localStorage.setItem(LS, JSON.stringify({ ...load(), ...patch })); } catch {} };
+  let prefs = load();
+
+  let state = await api('/api/state');
+  let mode = prefs.mode === 'video' ? 'video' : 'image';
+  let folder = typeof prefs.folder === 'string' ? prefs.folder : '';
+  let count = Math.min(Math.max(prefs.count || 1, 1), 12);
+  // Composer state that persist() writes has to exist before anything can call
+  // persist() — and setting up the model menus does, during boot.
+  let cast = state.characters || [];
+  const picked = new Set(Array.isArray(prefs.cast) ? prefs.cast : []);
+  let ctxItems = state.context || [];
+  const attachments = []; // reference images attached to the next generation
+  $('countVal').textContent = count;
+  $('rootDir').textContent = state.root;
+  $('rootDir').onclick = async () => { try { await navigator.clipboard.writeText(state.root); toast('Gallery folder copied'); } catch {} };
+
+  // ---------- toasts ----------
+  function toast(msg) {
+    const t = document.createElement('div');
+    t.className = 'toast';
+    t.textContent = msg;
+    $('toasts').appendChild(t);
+    setTimeout(() => t.remove(), 3200);
+  }
+
+  // ================= models =================
+  const videoModels = state.videoModels || [];
+  const imageApis = state.apis || [];
+
+  for (const a of imageApis) {
+    const o = document.createElement('option');
+    o.value = a.id;
+    o.textContent = a.name + (a.hasKey ? '' : ' · no key');
+    apiSel.appendChild(o);
+  }
+  apiSel.value = imageApis.some((a) => a.id === prefs.api) ? prefs.api : state.defaultApi || imageApis[0]?.id || '';
+
+  const currentApi = () => imageApis.find((a) => a.id === apiSel.value) || imageApis[0];
+  const modelList = () => (mode === 'video' ? videoModels : currentApi()?.models || []);
+  // The picked row's id, or '__custom__' when the id is typed in by hand.
+  let modelChoice = '';
+  let modelQuery = '';
+  let modelFocus = -1;
+  const currentModel = () => (modelChoice === '__custom__' ? modelCustom.value.trim() : modelChoice);
+  const modelSpec = () => modelList().find((m) => m.id === currentModel());
+
+  // ---- the picker: one row per model with age · cost · speed · quality ----
+  // Facts arrive display-ready from the server (see model-info.js); a column
+  // nobody in the list has anything for is left out.
+  const FACT_COLS = [
+    { key: 'cost', head: 'cost', cls: '' },
+    { key: 'speed', head: 'speed', cls: '' },
+    { key: 'quality', head: 'quality', cls: 'q' }
+  ];
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  };
+  function meterEl(rating, cls) {
+    const m = el('span', 'meter' + (cls ? ' ' + cls : ''));
+    for (let i = 0; i < 5; i++) m.appendChild(el('i', i < rating ? 'f' : ''));
+    return m;
+  }
+  function factEl(fact, cls) {
+    const box = el('span', 'fact');
+    if (!fact) return box;
+    box.title = fact.title || '';
+    if (fact.rating != null) box.appendChild(meterEl(fact.rating, cls));
+    if (fact.label) box.appendChild(el('small', '', fact.label));
+    return box;
+  }
+  const modelMatches = (m) => {
+    const q = modelQuery.trim().toLowerCase();
+    return !q || `${m.name || ''} ${m.id}`.toLowerCase().includes(q);
+  };
+  // "Google: Gemini 3.1 Flash Image" → "Gemini 3.1 Flash Image"; the id row
+  // underneath still says who publishes it.
+  const shortName = (m) => (m.name || m.id).replace(/^[^:]+:\s+/, '');
+
+  function renderModelButton() {
+    const spec = modelSpec();
+    const custom = modelChoice === '__custom__';
+    $('modelName').textContent = custom ? (currentModel() || 'custom model') : spec ? shortName(spec) : currentModel() || 'model';
+    $('modelTag').textContent = spec?.facts?.cost?.label || '';
+    const f = spec?.facts || {};
+    modelBtn.title = spec
+      ? [spec.id, f.age?.title, f.cost?.title, f.speed && `Typically ${f.speed.label} here`, f.quality?.title].filter(Boolean).join('\n')
+      : 'Model';
+  }
+
+  function renderModelMenu() {
+    const list = modelList();
+    const cols = FACT_COLS.filter((c) => list.some((m) => m.facts?.[c.key]));
+    const hasAge = list.some((m) => m.facts?.age);
+    const grid = ['minmax(0, 1fr)', hasAge ? '44px' : null, ...cols.map(() => '84px')].filter(Boolean).join(' ');
+    modelMenu.innerHTML = '';
+
+    const search = el('input', 'mm-search');
+    search.type = 'search';
+    search.placeholder = `Filter ${list.length} models…`;
+    search.value = modelQuery;
+    search.oninput = () => { modelQuery = search.value; modelFocus = -1; renderModelMenu(); modelMenu.querySelector('.mm-search').focus(); };
+    search.onkeydown = onMenuKey;
+    modelMenu.appendChild(search);
+
+    const head = el('div', 'mm-head');
+    head.style.gridTemplateColumns = grid;
+    head.appendChild(el('span', '', 'model'));
+    if (hasAge) head.appendChild(el('span', '', 'age'));
+    for (const c of cols) head.appendChild(el('span', '', c.head));
+    modelMenu.appendChild(head);
+
+    const rows = list.filter(modelMatches);
+    if (!rows.length) modelMenu.appendChild(el('div', 'mm-none', `Nothing matches "${modelQuery}"`));
+    rows.forEach((m, i) => {
+      const row = el('div', 'mm-row' + (m.id === modelChoice ? ' on' : '') + (i === modelFocus ? ' focus' : ''));
+      row.style.gridTemplateColumns = grid;
+      row.setAttribute('role', 'option');
+      const who = el('div', 'who');
+      who.appendChild(el('b', '', shortName(m)));
+      const sub = el('span', '', m.id);
+      // An upscaler transforms a clip it is given; there is nothing for a bare
+      // prompt to upscale, so say so in the menu rather than in a failed job.
+      if (m.upscale) sub.appendChild(el('em', 'note', ' · needs a source video'));
+      who.appendChild(sub);
+      row.appendChild(who);
+      if (hasAge) {
+        const age = el('span', 'age' + (m.facts?.age?.label === 'new' ? ' new' : ''), m.facts?.age?.label || '');
+        age.title = m.facts?.age?.title || '';
+        row.appendChild(age);
+      }
+      for (const c of cols) row.appendChild(factEl(m.facts?.[c.key], c.cls));
+      row.onclick = () => chooseModel(m.id);
+      modelMenu.appendChild(row);
+    });
+
+    if (mode === 'image' || modelChoice === '__custom__') {
+      const custom = el('div', 'mm-row custom' + (modelChoice === '__custom__' ? ' on' : ''), 'Custom model id…');
+      custom.onclick = () => chooseModel('__custom__');
+      modelMenu.appendChild(custom);
+    }
+    if (cols.length) {
+      const notes = [];
+      if (cols.some((c) => c.key === 'cost')) notes.push(mode === 'video' ? 'cost: OpenRouter list price per second of video' : 'cost: estimated per image from OpenRouter list prices');
+      if (cols.some((c) => c.key === 'speed')) notes.push('speed: how long the model has taken in this gallery');
+      if (cols.some((c) => c.key === 'quality')) notes.push('quality: Design Arena head-to-head rank');
+      modelMenu.appendChild(el('div', 'mm-foot', notes.join(' · ')));
+    }
+  }
+
+  function chooseModel(id) {
+    modelChoice = id;
+    modelCustom.style.display = id === '__custom__' ? 'inline-block' : 'none';
+    modelMenu.classList.remove('open');
+    modelQuery = '';
+    modelFocus = -1;
+    renderModelButton();
+    renderModelMenu();
+    if (id === '__custom__') modelCustom.focus();
+    syncKnobs();
+    persist();
+  }
+
+  function onMenuKey(e) {
+    const rows = [...modelMenu.querySelectorAll('.mm-row')];
+    if (e.key === 'Escape') { modelMenu.classList.remove('open'); modelBtn.focus(); e.preventDefault(); return; }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!rows.length) return;
+      modelFocus = (modelFocus + (e.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+      rows.forEach((r, i) => r.classList.toggle('focus', i === modelFocus));
+      rows[modelFocus].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const target = rows[modelFocus] || rows.find((r) => !r.classList.contains('custom')) || rows[0];
+      if (target) target.click();
+    }
+  }
+
+  function openModelMenu() {
+    modelFocus = -1;
+    renderModelMenu();
+    modelMenu.classList.add('open');
+    const search = modelMenu.querySelector('.mm-search');
+    if (search) search.focus();
+    modelMenu.querySelector('.mm-row.on')?.scrollIntoView({ block: 'center' });
+  }
+
+  function fillModels() {
+    const want = (mode === 'video' ? prefs.videoModel : prefs.imageModel) || '';
+    const list = modelList();
+    if (want && list.some((m) => m.id === want)) modelChoice = want;
+    else if (want && mode === 'image') { modelChoice = '__custom__'; modelCustom.value = want; }
+    else modelChoice = list[0]?.id || '';
+    modelCustom.style.display = modelChoice === '__custom__' ? 'inline-block' : 'none';
+    modelQuery = '';
+    renderModelButton();
+    renderModelMenu();
+    syncKnobs();
+  }
+
+  // Chat-routed image models (Gemini and friends) take no size/quality params.
+  const isChatModel = (id) => {
+    const known = (currentApi()?.models || []).find((m) => m.id === id);
+    return known ? known.via === 'chat' : /gemini|flash-image|banana/i.test(id);
+  };
+
+  // Video controls are built from the picked model's own capability list, so
+  // the UI can only ask for a combination that model actually accepts.
+  function fillOptions(sel, values, { label = String, auto = 'Auto', remember } = {}) {
+    const prev = remember && prefs[remember];
+    sel.innerHTML = '';
+    const list = values && values.length ? values : [];
+    const add = (v, text) => { const o = document.createElement('option'); o.value = v; o.textContent = text; sel.appendChild(o); };
+    add('auto', auto);
+    for (const v of list) add(String(v), label(v));
+    sel.disabled = !list.length;
+    if (prev && [...sel.options].some((o) => o.value === String(prev))) sel.value = String(prev);
+  }
+
+  function syncKnobs() {
+    const video = mode === 'video';
+    for (const el of document.querySelectorAll('.imageOnly')) el.classList.toggle('hide', video);
+    for (const el of document.querySelectorAll('.videoOnly')) el.classList.toggle('hide', !video);
+    $('apiCtl').classList.toggle('hide', video);
+
+    if (!video) {
+      const chat = isChatModel(currentModel());
+      sizeSel.disabled = chat;
+      qualitySel.disabled = chat;
+      const tip = chat ? 'Not used by this model — describe it in the prompt' : '';
+      sizeSel.title = tip || 'Size';
+      qualitySel.title = tip || 'Quality';
+      if (prefs.size) sizeSel.value = prefs.size;
+      if (prefs.quality) qualitySel.value = prefs.quality;
+      $('go').classList.toggle('off', false);
+      return;
+    }
+
+    const spec = modelSpec();
+    fillOptions(durSel, spec?.durations, { label: (v) => v + 's', auto: 'Auto length', remember: 'duration' });
+    fillOptions(resSel, spec?.resolutions, { auto: 'Auto res', remember: 'resolution' });
+    fillOptions(aspSel, spec?.aspectRatios, { auto: 'Auto ratio', remember: 'aspect' });
+    $('audioCtl').classList.toggle('hide', !spec?.audio);
+    $('seed').parentElement.classList.toggle('hide', !spec?.seed);
+    // Frame conditioning only makes sense with a model that takes frames and a
+    // reference to use as one — two, for a closing frame.
+    const canFrame = !!spec?.frames?.includes('first_frame');
+    $('frameCtl').classList.toggle('hide', !canFrame || !attachments.length);
+    const canLast = !!spec?.frames?.includes('last_frame') && firstFrameEl.checked;
+    $('lastFrameCtl').classList.toggle('hide', !canLast || attachments.length < 2);
+    $('go').classList.toggle('off', !state.videoReady);
+    $('go').title = state.videoReady ? '' : 'Video needs an OpenRouter key — add keys.openrouter to ~/.bro/config.json';
+  }
+
+  function persist() {
+    prefs = {
+      ...prefs,
+      mode, count, api: apiSel.value,
+      [mode === 'video' ? 'videoModel' : 'imageModel']: currentModel(),
+      size: sizeSel.value, quality: qualitySel.value,
+      duration: durSel.value, resolution: resSel.value, aspect: aspSel.value,
+      cast: [...picked],
+      folder
+    };
+    save(prefs);
+  }
+
+  for (const b of document.querySelectorAll('.modes button')) {
+    b.onclick = () => {
+      mode = b.dataset.mode;
+      for (const x of document.querySelectorAll('.modes button')) x.classList.toggle('on', x === b);
+      promptEl.placeholder = mode === 'video'
+        ? 'Describe a shot… (Enter to generate · attach an image to animate it)'
+        : 'Describe an image… (Enter to generate · paste or drop images to use as reference)';
+      fillModels();
+      persist();
+    };
+    if (b.dataset.mode === mode) b.click();
+  }
+
+  apiSel.onchange = () => { fillModels(); persist(); };
+  modelBtn.onclick = (e) => { e.stopPropagation(); if (modelMenu.classList.contains('open')) modelMenu.classList.remove('open'); else openModelMenu(); };
+  modelBtn.onkeydown = (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); openModelMenu(); } };
+  document.addEventListener('click', (e) => { if (!modelMenu.contains(e.target)) modelMenu.classList.remove('open'); });
+  modelCustom.oninput = () => { renderModelButton(); syncKnobs(); persist(); };
+  for (const el of [sizeSel, qualitySel, durSel, resSel, aspSel]) el.onchange = persist;
+  $('countDown').onclick = () => { count = Math.max(1, count - 1); $('countVal').textContent = count; persist(); };
+  $('countUp').onclick = () => { count = Math.min(12, count + 1); $('countVal').textContent = count; persist(); };
+  fillModels();
+
+  // ================= reference images =================
+  const attachRow = $('attachRow'), ctxBar = $('ctxBar'), ctxRow = $('ctxRow'), fileInput = $('fileInput');
+  // MIN_DIM clears the strictest upstream floor we've hit (Seedance: 300px per
+  // side) with room to spare; MAX_DIM keeps a huge screenshot out of the body.
+  const MAX_ATTACH = 8, MAX_DIM = 2048, MIN_DIM = 512;
+  const ctxUrl = (f) => '/context/' + encodeURIComponent(f);
+
+  // Decoded bitmap memory — not DOM node count — is what blows up a long
+  // session, so images take their src on approach and drop it again once well
+  // out of view instead of every <img> ever created holding a decode.
+  const lazyObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const el = e.target;
+      // `keep` marks an element holding something the observer must not touch —
+      // a poster we generated in the page and would otherwise clobber with the
+      // (possibly still missing) cached thumbnail on the next scroll past.
+      if (el.dataset.keep) continue;
+      if (e.isIntersecting) {
+        if (el.dataset.src && el.getAttribute('src') !== el.dataset.src) el.src = el.dataset.src;
+      } else if (el.dataset.src) {
+        el.removeAttribute('src');
+        el.classList.remove('ready');
+      }
+    }
+  }, { rootMargin: '900px 0px' });
+  const lazy = (el, src) => { el.dataset.src = src; lazyObserver.observe(el); };
+
+  function renderRefs() {
+    attachRow.innerHTML = '';
+    attachRow.classList.toggle('has', attachments.length > 0);
+    // With frame conditioning on, the attachment order is meaningful: the first
+    // reference opens the clip and the second can close it. Label them so that
+    // is visible rather than something you have to remember.
+    const spec = modelSpec();
+    const framing = mode === 'video' && firstFrameEl.checked && spec?.frames?.includes('first_frame');
+    const closing = framing && lastFrameEl.checked && spec?.frames?.includes('last_frame');
+    attachments.forEach((f, i) => {
+      const chip = document.createElement('div');
+      chip.className = 'chip';
+      const img = document.createElement('img');
+      img.src = ctxUrl(f);
+      img.alt = f;
+      chip.appendChild(img);
+      const role = framing && i === 0 ? '1st frame' : closing && i === 1 ? 'last frame' : '';
+      if (role) {
+        const b = document.createElement('div');
+        b.className = 'badge';
+        b.textContent = role;
+        chip.appendChild(b);
+      }
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.textContent = '✕';
+      rm.title = 'Detach';
+      rm.onclick = () => detach(f);
+      chip.appendChild(rm);
+      attachRow.appendChild(chip);
+    });
+
+    ctxRow.querySelectorAll('img').forEach((img) => lazyObserver.unobserve(img));
+    ctxRow.innerHTML = '';
+    ctxBar.classList.toggle('has', ctxItems.length > 0);
+    const frag = document.createDocumentFragment();
+    for (const it of ctxItems) {
+      const sel = attachments.includes(it.file);
+      const d = document.createElement('div');
+      d.className = 'ctx-item' + (sel ? ' sel' : '');
+      d.title = sel ? 'Click to detach' : 'Click to attach';
+      const img = document.createElement('img');
+      lazy(img, ctxUrl(it.file));
+      img.alt = it.file;
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.textContent = '✕';
+      rm.title = 'Delete from library';
+      rm.onclick = async (e) => {
+        e.stopPropagation();
+        await api('/api/context/delete', { file: it.file });
+        ctxItems = ctxItems.filter((c) => c.file !== it.file);
+        const i = attachments.indexOf(it.file);
+        if (i >= 0) attachments.splice(i, 1);
+        renderRefs();
+      };
+      d.onclick = () => (attachments.includes(it.file) ? detach(it.file) : attach(it.file));
+      d.append(img, rm);
+      frag.appendChild(d);
+    }
+    ctxRow.appendChild(frag);
+    syncKnobs();
+  }
+
+  function attach(f) {
+    if (attachments.includes(f)) return;
+    if (attachments.length >= MAX_ATTACH) { toast('Max ' + MAX_ATTACH + ' reference images'); return; }
+    attachments.push(f);
+    renderRefs();
+  }
+  function detach(f) {
+    const i = attachments.indexOf(f);
+    if (i >= 0) attachments.splice(i, 1);
+    renderRefs();
+  }
+  firstFrameEl.onchange = renderRefs;
+  lastFrameEl.onchange = renderRefs;
+
+  // Bring a reference into the range every upstream accepts.
+  //
+  // Too big and the request body (and the API) chokes on a 40MP screenshot.
+  // Too small and the model refuses outright — Seedance wants at least 300px
+  // per side, and a rejected reference is a failed generation rather than a
+  // slightly worse one. Upscaling a small crop adds no detail, but it carries
+  // the same information past the check, which is what the user asked for by
+  // attaching it.
+  function fitForUpstream(width, height) {
+    let scale = 1;
+    if (Math.max(width, height) > MAX_DIM) scale = MAX_DIM / Math.max(width, height);
+    else if (Math.min(width, height) < MIN_DIM) scale = MIN_DIM / Math.min(width, height);
+    // A very wide sliver could blow past the ceiling on the way up to the floor.
+    if (Math.max(width, height) * scale > MAX_DIM) scale = MAX_DIM / Math.max(width, height);
+    if (scale === 1) return null;
+    return { w: Math.max(1, Math.round(width * scale)), h: Math.max(1, Math.round(height * scale)), scale };
+  }
+
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onerror = reject;
+      fr.onload = () => {
+        const img = new Image();
+        img.onerror = () => resolve(fr.result); // undecodable here — send as-is
+        img.onload = () => {
+          const fit = fitForUpstream(img.width, img.height);
+          if (!fit) return resolve(fr.result);
+          const c = document.createElement('canvas');
+          c.width = fit.w;
+          c.height = fit.h;
+          const g = c.getContext('2d');
+          g.imageSmoothingEnabled = true;
+          g.imageSmoothingQuality = 'high';
+          g.drawImage(img, 0, 0, c.width, c.height);
+          if (fit.scale > 1) toast(`Scaled ${img.width}×${img.height} up to ${fit.w}×${fit.h} — models reject references under ${MIN_DIM}px`);
+          // PNG for an upscale so the enlargement doesn't also pick up JPEG
+          // artefacts; otherwise match what came in.
+          resolve(c.toDataURL(fit.scale > 1 || file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.92));
+        };
+        img.src = fr.result;
+      };
+      fr.readAsDataURL(file);
+    });
+  }
+
+  async function addImageFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    try {
+      const body = await api('/api/context', { dataUrl: await fileToDataUrl(file) });
+      if (!ctxItems.some((c) => c.file === body.file)) ctxItems.unshift({ file: body.file, ts: Date.now() });
+      attach(body.file);
+    } catch (e) { toast('Upload failed: ' + e.message); }
+  }
+
+  $('attachBtn').onclick = () => fileInput.click();
+  fileInput.onchange = () => { [...fileInput.files].forEach(addImageFile); fileInput.value = ''; };
+  document.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.items || [])].filter((i) => i.kind === 'file' && i.type.startsWith('image/')).map((i) => i.getAsFile());
+    if (!files.length) return;
+    e.preventDefault();
+    files.forEach(addImageFile);
+    promptEl.focus();
+  });
+  const composerEl = document.querySelector('.composer');
+  document.addEventListener('dragover', (e) => {
+    if ([...(e.dataTransfer?.types || [])].includes('Files')) { e.preventDefault(); composerEl.classList.add('dragover'); }
+  });
+  document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) composerEl.classList.remove('dragover'); });
+  document.addEventListener('drop', (e) => {
+    if (![...(e.dataTransfer?.types || [])].includes('Files')) return;
+    e.preventDefault();
+    composerEl.classList.remove('dragover');
+    [...(e.dataTransfer?.files || [])].forEach(addImageFile);
+  });
+
+  // ================= folders =================
+  const tree = $('tree');
+  let folders = state.folders;
+  let openDirs = new Set(prefs.open || ['']);
+
+  const flatten = (node, out = []) => {
+    out.push(node);
+    for (const c of node.children) flatten(c, out);
+    return out;
+  };
+  const findFolder = (rel) => flatten(folders).find((f) => f.path === rel) || null;
+  const labelOf = (rel) => (rel === '' ? 'All generations' : rel.split('/').pop());
+
+  // Expand every ancestor of a folder, so a newly made or freshly selected one
+  // is never hidden inside a collapsed parent.
+  function openTo(rel) {
+    openDirs.add('');
+    const parts = String(rel || '').split('/').filter(Boolean);
+    for (let i = 0; i < parts.length; i++) openDirs.add(parts.slice(0, i + 1).join('/'));
+    save({ open: [...openDirs] });
+  }
+
+  function renderTree() {
+    tree.innerHTML = '';
+    tree.appendChild(nodeEl(folders, 0));
+    // Keep the move-to menu in step with the tree.
+    const keep = $('moveTo').value;
+    $('moveTo').innerHTML = '<option value="">Move to…</option>';
+    for (const f of flatten(folders)) {
+      if (f.path === folder) continue;
+      const o = document.createElement('option');
+      o.value = f.path;
+      o.textContent = f.path === '' ? 'All generations (top level)' : f.path;
+      $('moveTo').appendChild(o);
+    }
+    $('moveTo').value = keep;
+  }
+
+  function nodeEl(node, depth) {
+    const wrap = document.createElement('div');
+    const row = document.createElement('div');
+    row.className = 'row' + (node.path === folder ? ' active' : '');
+    row.dataset.path = node.path;
+
+    const tw = document.createElement('span');
+    tw.className = 'tw' + (node.children.length ? '' : ' leaf') + (openDirs.has(node.path) ? ' open' : '');
+    tw.textContent = '▶';
+    tw.onclick = (e) => {
+      e.stopPropagation();
+      openDirs.has(node.path) ? openDirs.delete(node.path) : openDirs.add(node.path);
+      save({ open: [...openDirs] });
+      renderTree();
+    };
+
+    const ico = document.createElement('span');
+    ico.className = 'ico';
+    ico.textContent = node.path === '' ? '✦' : openDirs.has(node.path) && node.children.length ? '📂' : '📁';
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = labelOf(node.path);
+
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = node.total || '';
+
+    const acts = document.createElement('span');
+    acts.className = 'acts';
+    const mk = (label, title, fn, cls) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.title = title;
+      if (cls) b.className = cls;
+      b.onclick = (e) => { e.stopPropagation(); fn(); };
+      acts.appendChild(b);
+      return b;
+    };
+    mk('＋', 'New folder inside', () => newFolder(node.path));
+    if (node.path !== '') {
+      mk('✎', 'Rename', () => startRename(row, name, node));
+      mk('✕', 'Delete this folder and everything in it', () => removeFolder(node), 'del');
+    }
+
+    row.append(tw, ico, name, n, acts);
+    row.onclick = () => selectFolder(node.path);
+
+    // Drop target: dragging cards here moves them (and their metadata) across.
+    row.addEventListener('dragover', (e) => {
+      if (!dragging.length || node.path === folder) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      row.classList.add('drop');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drop'));
+    row.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      row.classList.remove('drop');
+      if (!dragging.length) return;
+      await moveFiles(dragging.slice(), node.path);
+    });
+
+    wrap.appendChild(row);
+    if (node.children.length && openDirs.has(node.path)) {
+      const kids = document.createElement('div');
+      kids.className = 'kids';
+      for (const c of node.children) kids.appendChild(nodeEl(c, depth + 1));
+      wrap.appendChild(kids);
+    }
+    return wrap;
+  }
+
+  function startRename(row, nameEl, node) {
+    const input = document.createElement('input');
+    input.className = 'rename';
+    input.value = labelOf(node.path);
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (commit) => {
+      if (done) return;
+      done = true;
+      const value = input.value.trim();
+      input.replaceWith(nameEl);
+      if (!commit || !value || value === labelOf(node.path)) return;
+      try {
+        const r = await api('/api/folder/rename', { path: node.path, name: value });
+        folders = r.folders;
+        if (folder === node.path || folder.startsWith(node.path + '/')) folder = folder.replace(node.path, r.path);
+        openDirs = new Set([...openDirs].map((p) => (p === node.path || p.startsWith(node.path + '/') ? p.replace(node.path, r.path) : p)));
+        renderTree();
+        await loadItems();
+      } catch (e) { toast(e.message); }
+    };
+    input.onblur = () => finish(true);
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      e.stopPropagation();
+    };
+    input.onclick = (e) => e.stopPropagation();
+  }
+
+  async function newFolder(parent) {
+    const name = prompt('New folder name' + (parent ? ' inside ' + parent : '') + ':', '');
+    if (!name) return;
+    try {
+      const r = await api('/api/folder', { parent, name });
+      folders = r.folders;
+      selectFolder(r.path);
+    } catch (e) { toast(e.message); }
+  }
+  $('newFolder').onclick = () => newFolder(folder);
+
+  async function removeFolder(node) {
+    const inside = node.total;
+    const label = node.path || 'the top level';
+    if (!confirm(`Delete “${label}”` + (inside ? ` and all ${inside} generation${inside === 1 ? '' : 's'} inside it` : '') + '? This cannot be undone.')) return;
+    try {
+      const r = await api('/api/folder/delete', { path: node.path });
+      folders = r.folders;
+      if (folder === node.path || folder.startsWith(node.path + '/')) {
+        folder = node.path.includes('/') ? node.path.slice(0, node.path.lastIndexOf('/')) : '';
+      }
+      toast(`Deleted ${r.removed} generation${r.removed === 1 ? '' : 's'}`);
+      renderTree();
+      await loadItems();
+    } catch (e) { toast(e.message); }
+  }
+  $('deleteFolder').onclick = () => {
+    const node = findFolder(folder);
+    if (node) removeFolder(node);
+  };
+
+  function selectFolder(rel) {
+    folder = rel;
+    openTo(rel);
+    persist();
+    renderTree();
+    loadItems();
+  }
+
+  // Re-read the tree after anything that changes what a folder holds, so the
+  // per-folder counts in the sidebar and the gallery bar stay truthful.
+  async function refreshFolders() {
+    try {
+      folders = (await api('/api/folders')).folders;
+      renderTree();
+      syncBar();
+    } catch {
+      /* the event stream will show the connection is down */
+    }
+  }
+
+  async function moveFiles(files, to) {
+    try {
+      const r = await api('/api/move', { from: folder, to, files });
+      folders = r.folders;
+      clearSelection();
+      renderTree();
+      await loadItems();
+      toast(`Moved ${r.moved} to ${to || 'the top level'}`);
+    } catch (e) { toast(e.message); }
+  }
+
+  // ================= characters =================
+  // A saved character is a name, a description and a handful of reference
+  // images. Picking one sends its pictures with the prompt and names it in the
+  // text, which is what keeps the same face across shots.
+  const castList = $('castList'), castMenu = $('castMenu'), castBtn = $('castBtn');
+  const charRefUrl = (c, file) => '/charref/' + encodeURIComponent(file) + '?c=' + encodeURIComponent(c.id);
+  const initials = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
+
+  function faceEl(c) {
+    const face = document.createElement('div');
+    face.className = 'face';
+    if (c.cover) {
+      const img = document.createElement('img');
+      img.src = charRefUrl(c, c.cover);
+      img.alt = c.name;
+      face.appendChild(img);
+    } else {
+      face.textContent = initials(c.name) || '?';
+    }
+    return face;
+  }
+
+  function renderCast() {
+    // drop selections for characters that no longer exist
+    for (const id of [...picked]) if (!cast.some((c) => c.id === id)) picked.delete(id);
+
+    castList.innerHTML = '';
+    $('castEmpty').classList.toggle('hide', cast.length > 0);
+    for (const c of cast) {
+      const row = document.createElement('div');
+      row.className = 'cast-row' + (picked.has(c.id) ? ' on' : '');
+      row.title = picked.has(c.id) ? 'In the next generation — click to remove' : 'Click to put in the next generation';
+      const who = document.createElement('div');
+      who.className = 'who';
+      const b = document.createElement('b');
+      b.textContent = c.name;
+      const s = document.createElement('span');
+      s.textContent = c.refs.length ? `${c.refs.length} reference${c.refs.length === 1 ? '' : 's'}` : 'no references yet';
+      who.append(b, s);
+      const edit = document.createElement('button');
+      edit.className = 'edit';
+      edit.textContent = '✎';
+      edit.title = 'Edit';
+      edit.onclick = (e) => { e.stopPropagation(); openEditor(c); };
+      row.append(faceEl(c), who, edit);
+      row.onclick = () => togglePicked(c.id);
+      castList.appendChild(row);
+    }
+    renderCastPicker();
+  }
+
+  function togglePicked(id) {
+    picked.has(id) ? picked.delete(id) : picked.add(id);
+    persist();
+    renderCast();
+  }
+
+  function renderCastPicker() {
+    const chosen = cast.filter((c) => picked.has(c.id));
+    castBtn.classList.toggle('has', chosen.length > 0);
+    $('castLabel').textContent = chosen.length === 0 ? 'cast' : chosen.length === 1 ? chosen[0].name : `${chosen.length} characters`;
+    castBtn.title = chosen.length
+      ? `In this generation: ${chosen.map((c) => c.name).join(', ')}`
+      : 'Put saved characters in this generation';
+
+    castMenu.innerHTML = '';
+    if (!cast.length) {
+      const none = document.createElement('div');
+      none.className = 'none';
+      none.textContent = 'No characters yet — make one in the Cast tab.';
+      castMenu.appendChild(none);
+      return;
+    }
+    for (const c of cast) {
+      const row = document.createElement('div');
+      row.className = 'cast-row' + (picked.has(c.id) ? ' on' : '');
+      const who = document.createElement('div');
+      who.className = 'who';
+      const b = document.createElement('b');
+      b.textContent = c.name;
+      const s = document.createElement('span');
+      s.textContent = picked.has(c.id) ? 'in this generation' : `${c.refs.length} reference${c.refs.length === 1 ? '' : 's'}`;
+      who.append(b, s);
+      row.append(faceEl(c), who);
+      row.onclick = () => togglePicked(c.id);
+      castMenu.appendChild(row);
+    }
+  }
+
+  castBtn.onclick = (e) => { e.stopPropagation(); castMenu.classList.toggle('open'); };
+  document.addEventListener('click', (e) => { if (!castMenu.contains(e.target)) castMenu.classList.remove('open'); });
+
+  // sidebar tabs
+  for (const b of document.querySelectorAll('.sidetabs button')) {
+    b.onclick = () => {
+      for (const x of document.querySelectorAll('.sidetabs button')) x.classList.toggle('on', x === b);
+      $('sideFolders').classList.toggle('hide', b.dataset.side !== 'folders');
+      $('sideCast').classList.toggle('hide', b.dataset.side !== 'cast');
+      save({ side: b.dataset.side });
+    };
+  }
+  const showSide = (which) => document.querySelector(`.sidetabs button[data-side="${which}"]`)?.click();
+
+  async function reloadCast(select) {
+    try {
+      cast = (await api('/api/characters')).characters;
+      if (select) picked.add(select);
+      renderCast();
+    } catch (e) { toast(e.message); }
+  }
+
+  // ---- editor ----
+  let editing = null; // null = creating
+
+  function openEditor(character) {
+    editing = character;
+    $('edTitle').textContent = character ? 'Edit character' : 'New character';
+    $('edName').value = character?.name || '';
+    $('edDesc').value = character?.description || '';
+    edMagic.reset();
+    chosenCands.clear();
+    $('edDelete').classList.toggle('hide', !character);
+    renderEditorRefs();
+    renderCandidates();
+    $('editor').classList.add('open');
+    $('edName').focus();
+  }
+  function closeEditor() {
+    $('editor').classList.remove('open');
+    editing = null;
+  }
+
+  function renderEditorRefs() {
+    const box = $('edRefs');
+    box.innerHTML = '';
+    const refs = editing?.refs || [];
+    $('edRefCount').textContent = editing ? `· ${refs.length} of 8` : '· save first, then add images';
+    $('edDrop').classList.toggle('hide', !editing || refs.length >= 8);
+    syncDrawButton();
+    for (const file of refs) {
+      const d = document.createElement('div');
+      d.className = 'ed-ref' + (file === editing.cover ? ' cover' : '');
+      d.title = file === editing.cover ? 'This is the cover' : 'Click to make this the cover';
+      const img = document.createElement('img');
+      img.src = charRefUrl(editing, file);
+      img.alt = '';
+      d.appendChild(img);
+      if (file === editing.cover) {
+        const tag = document.createElement('div');
+        tag.className = 'tag';
+        tag.textContent = 'COVER';
+        d.appendChild(tag);
+      }
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.textContent = '✕';
+      rm.title = 'Remove this reference';
+      rm.onclick = async (e) => {
+        e.stopPropagation();
+        try {
+          const r = await api('/api/characters/refs/delete', { id: editing.id, file });
+          editing = r.character;
+          renderEditorRefs();
+          reloadCast();
+        } catch (err) { toast(err.message); }
+      };
+      d.onclick = async () => {
+        try {
+          editing = (await api('/api/characters/update', { id: editing.id, cover: file })).character;
+          renderEditorRefs();
+          reloadCast();
+        } catch (err) { toast(err.message); }
+      };
+      d.append(rm);
+      box.appendChild(d);
+    }
+    if (editing && refs.length < 8) {
+      const add = document.createElement('div');
+      add.className = 'ed-add';
+      add.textContent = '＋';
+      add.title = 'Add reference images';
+      add.onclick = () => $('edFile').click();
+      box.appendChild(add);
+    }
+  }
+
+  $('edFile').onchange = () => {
+    const files = [...$('edFile').files];
+    $('edFile').value = '';
+    addEditorRefs(files);
+  };
+
+  // ---- draw a reference sheet ----
+  // Five independent generations from one description give five different
+  // people, so the server seeds one portrait and draws the rest from it. They
+  // arrive as candidates and only become references once you pick them.
+  const chosenCands = new Set();
+
+  function renderCandidates() {
+    const cands = editing?.candidates || [];
+    $('edCandField').classList.toggle('hide', !cands.length);
+    for (const f of [...chosenCands]) if (!cands.includes(f)) chosenCands.delete(f);
+    $('edCandCount').textContent = cands.length ? `· ${chosenCands.size} of ${cands.length} picked` : '';
+    const box = $('edCands');
+    box.innerHTML = '';
+    for (const file of cands) {
+      const d = document.createElement('div');
+      d.className = 'ed-ref cand' + (chosenCands.has(file) ? ' on' : '');
+      d.title = chosenCands.has(file) ? 'Picked — click to unpick' : 'Click to keep this one';
+      const img = document.createElement('img');
+      img.src = charRefUrl(editing, file);
+      img.alt = '';
+      const tick = document.createElement('div');
+      tick.className = 'tick';
+      tick.textContent = chosenCands.has(file) ? '✓' : '';
+      d.append(img, tick);
+      d.onclick = () => {
+        chosenCands.has(file) ? chosenCands.delete(file) : chosenCands.add(file);
+        renderCandidates();
+      };
+      box.appendChild(d);
+    }
+    $('edKeep').classList.toggle('off', chosenCands.size === 0);
+    $('edKeep').textContent = chosenCands.size ? `Keep ${chosenCands.size}` : 'Keep selected';
+  }
+
+  function syncDrawButton() {
+    const btn = $('edDraw');
+    const can = !!editing && state.enhanceReady && (editing.description || editing.refs.length);
+    btn.classList.toggle('off', !can);
+    const room = editing ? 8 - editing.refs.length : 0;
+    btn.title = !editing
+      ? 'Save the character first'
+      : !state.enhanceReady
+        ? 'Drawing references needs an OpenRouter key'
+        : !editing.description && !editing.refs.length
+          ? 'Write a description first — there is nothing to draw from'
+          : editing.refs.length
+            ? 'Draw more angles of the reference this character already has'
+            : 'Draw a reference sheet from the description';
+    $('edDrawNote').textContent = !editing
+      ? ''
+      : editing.refs.length
+        ? `Nano Banana 2 · drawn from the reference above so it stays the same character · room for ${room} more`
+        : 'Nano Banana 2 · one portrait, then four more angles drawn from it · about 5¢ a shot';
+  }
+
+  let drawJob = null;
+  $('edDraw').onclick = async () => {
+    const btn = $('edDraw');
+    if (btn.classList.contains('off') || btn.classList.contains('working')) return;
+    btn.classList.add('working');
+    $('edDrawNote').textContent = 'Drawing…';
+    try {
+      const r = await api('/api/characters/refs/generate', { id: editing.id, count: 5 });
+      drawJob = { id: r.job, characterId: editing.id };
+    } catch (e) {
+      toast(e.message);
+      btn.classList.remove('working');
+      syncDrawButton();
+    }
+  };
+
+  // The job feed drives the rest: each shot that lands is written to disk, so
+  // re-reading the character is all it takes to show it.
+  async function onDrawProgress(job) {
+    if (!drawJob || job.id !== drawJob.id) return;
+    if (job.status === 'running' || job.status === 'queued') {
+      $('edDrawNote').textContent = job.phase && job.phase !== 'starting' ? `Drawing — ${job.phase}` : 'Drawing…';
+      if (editing?.id === job.characterId) await refreshEditing();
+      return;
+    }
+    drawJob = null;
+    $('edDraw').classList.remove('working');
+    if (job.status === 'error') toast(job.error);
+    else if (job.item?.failed) toast(`${job.item.files.length} of ${job.item.files.length + job.item.failed} shots came back — ${job.item.error}`);
+    if (editing?.id === job.characterId) await refreshEditing();
+    else reloadCast();
+    syncDrawButton();
+  }
+
+  // Re-read the character being edited, keeping the panel in step with disk.
+  async function refreshEditing() {
+    if (!editing) return;
+    const fresh = (await api('/api/characters')).characters.find((c) => c.id === editing.id);
+    if (!fresh) return;
+    editing = fresh;
+    cast = (await api('/api/characters')).characters;
+    renderEditorRefs();
+    renderCandidates();
+    renderCast();
+  }
+
+  $('edKeep').onclick = async () => {
+    if (!chosenCands.size) return;
+    try {
+      const r = await api('/api/characters/refs/keep', { id: editing.id, files: [...chosenCands] });
+      editing = r.character;
+      chosenCands.clear();
+      // Whatever was not picked has served its purpose.
+      editing = (await api('/api/characters/candidates/clear', { id: editing.id })).character;
+      renderEditorRefs();
+      renderCandidates();
+      syncDrawButton();
+      reloadCast();
+      toast(`Kept ${r.kept.length} — ${editing.name} now has ${editing.refs.length} reference${editing.refs.length === 1 ? '' : 's'}`);
+    } catch (e) {
+      toast(e.message);
+      await refreshEditing();
+    }
+  };
+
+  $('edDiscard').onclick = async () => {
+    try {
+      editing = (await api('/api/characters/candidates/clear', { id: editing.id })).character;
+      chosenCands.clear();
+      renderCandidates();
+    } catch (e) { toast(e.message); }
+  };
+
+  // ✨ on the description. A character description is reused in every prompt
+  // they appear in, so it gets its own instruction — the permanent look only,
+  // no scene, no pose.
+  const edMagic = wireMagic({
+    field: $('edDesc'),
+    button: $('edMagic'),
+    revert: $('edRevert'),
+    body: () => ({ kind: 'character' })
+  });
+
+  // Add references by paste or drag-and-drop, not just the file picker — a
+  // portrait is usually already on the clipboard when you're building a cast.
+  async function addEditorRefs(files) {
+    if (!editing) { toast('Save the character first, then add references'); return; }
+    let added = 0;
+    for (const f of files) {
+      if (!f || !f.type.startsWith('image/')) continue;
+      try {
+        const r = await api('/api/characters/refs', { id: editing.id, dataUrl: await fileToDataUrl(f) });
+        editing = r.character;
+        added += r.existed ? 0 : 1;
+        if (r.existed) toast(editing.name + ' already had that image');
+      } catch (e) {
+        toast(e.message);
+        break;
+      }
+    }
+    renderEditorRefs();
+    if (added) reloadCast();
+  }
+
+  const editorEl = $('editor');
+  const edPanel = editorEl.querySelector('.ed-panel');
+  // Scoped to the open editor, and captured before the page-wide paste handler
+  // so a copied portrait lands on the character rather than in the composer.
+  document.addEventListener('paste', (e) => {
+    if (!editorEl.classList.contains('open')) return;
+    const files = [...(e.clipboardData?.items || [])].filter((i) => i.kind === 'file' && i.type.startsWith('image/')).map((i) => i.getAsFile());
+    if (!files.length) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    addEditorRefs(files);
+  }, true);
+
+  editorEl.addEventListener('dragover', (e) => {
+    if (!editorEl.classList.contains('open') || ![...(e.dataTransfer?.types || [])].includes('Files')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    edPanel.classList.add('dragover');
+  });
+  editorEl.addEventListener('dragleave', (e) => { if (!editorEl.contains(e.relatedTarget)) edPanel.classList.remove('dragover'); });
+  editorEl.addEventListener('drop', (e) => {
+    if (!editorEl.classList.contains('open')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    edPanel.classList.remove('dragover');
+    addEditorRefs([...(e.dataTransfer?.files || [])]);
+  });
+
+  $('newCharacter').onclick = () => openEditor(null);
+  $('edCancel').onclick = closeEditor;
+  editorEl.addEventListener('click', (e) => { if (e.target === editorEl) closeEditor(); });
+
+  $('edSave').onclick = async () => {
+    const name = $('edName').value.trim();
+    const description = $('edDesc').value.trim();
+    if (!name) { $('edName').focus(); return; }
+    try {
+      if (editing) {
+        editing = (await api('/api/characters/update', { id: editing.id, name, description })).character;
+        await reloadCast();
+        // The id follows the name, so keep editing the character that came back
+        // rather than a stale one, and leave the panel open to add references.
+        renderEditorRefs();
+        toast('Saved ' + editing.name);
+        closeEditor();
+      } else {
+        editing = (await api('/api/characters', { name, description })).character;
+        await reloadCast(editing.id);
+        $('edTitle').textContent = 'Edit character';
+        $('edDelete').classList.remove('hide');
+        renderEditorRefs();
+        toast('Add a reference image or two so ' + editing.name + ' stays consistent');
+      }
+    } catch (e) { toast(e.message); }
+  };
+
+  $('edDelete').onclick = async () => {
+    if (!editing || !confirm(`Delete “${editing.name}”? This cannot be undone. Generations already made are untouched.`)) return;
+    try {
+      await api('/api/characters/delete', { id: editing.id });
+      picked.delete(editing.id);
+      closeEditor();
+      await reloadCast();
+    } catch (e) { toast(e.message); }
+  };
+
+  // Take a generation you liked and make it one of a character's references.
+  // With one character saved it just goes there; with several, the cast picker
+  // is where you say which — so the action never guesses wrong silently.
+  async function promoteToCharacter(item) {
+    if (!cast.length) {
+      showSide('cast');
+      toast('Make a character first, then add this shot to it');
+      return;
+    }
+    let target = cast.length === 1 ? cast[0] : cast.find((c) => picked.has(c.id) && picked.size === 1);
+    if (!target) {
+      const names = cast.map((c, i) => `${i + 1}. ${c.name}`).join('\n');
+      const answer = prompt(`Add this image to which character?\n\n${names}\n\nType a number or a name:`, '');
+      if (!answer) return;
+      const byIndex = cast[Number(answer) - 1];
+      target = byIndex || cast.find((c) => c.name.toLowerCase() === answer.trim().toLowerCase());
+      if (!target) { toast(`No character called “${answer}”`); return; }
+    }
+    try {
+      const r = await api('/api/characters/refs', { id: target.id, folder: item.folder ?? folder, file: item.file });
+      await reloadCast();
+      toast(r.existed ? `${target.name} already had that reference` : `Added to ${target.name} — ${r.character.refs.length} reference${r.character.refs.length === 1 ? '' : 's'}`);
+    } catch (e) { toast(e.message); }
+  }
+
+  // ================= gallery =================
+  const fmtSec = (ms) => (ms / 1000).toFixed(1) + 's';
+  const fmtDur = (s) => (s >= 60 ? Math.floor(s / 60) + ':' + String(Math.round(s % 60)).padStart(2, '0') : Math.round(s) + 's');
+  const mediaUrl = (it, dl) => '/media/' + encodeURIComponent(it.file) + '?f=' + encodeURIComponent(it.folder ?? folder) + (dl ? '&dl=1' : '');
+  const thumbUrl = (it) => '/thumb/' + encodeURIComponent(it.file) + '?f=' + encodeURIComponent(it.folder ?? folder);
+
+  let items = [];
+  const selection = new Set();
+  let dragging = [];
+
+  function removeCard(card) {
+    card.querySelectorAll('img, video').forEach((el) => lazyObserver.unobserve(el));
+    card.remove();
+  }
+
+  function syncBar() {
+    const node = findFolder(folder);
+    $('whereName').textContent = labelOf(folder);
+    $('whereCount').textContent = node ? `· ${node.items} here${node.total !== node.items ? `, ${node.total} with subfolders` : ''}` : '';
+    $('galleryBar').classList.add('has');
+    $('deleteFolder').textContent = folder ? 'Delete folder' : 'Empty top level';
+    empty.style.display = gallery.querySelector('.card') ? 'none' : '';
+  }
+
+  function clearSelection() {
+    selection.clear();
+    for (const c of gallery.querySelectorAll('.card.sel')) c.classList.remove('sel');
+    syncSelBar();
+  }
+  function syncSelBar() {
+    $('selBar').classList.toggle('on', selection.size > 0);
+    $('selCount').textContent = selection.size + ' selected';
+  }
+  $('selClear').onclick = clearSelection;
+  $('moveTo').onchange = async () => {
+    const to = $('moveTo').value;
+    if (!to && to !== '') return;
+    const files = [...selection];
+    $('moveTo').value = '';
+    if (files.length) await moveFiles(files, to);
+  };
+  $('selDelete').onclick = async () => {
+    const files = [...selection];
+    if (!files.length || !confirm(`Delete ${files.length} generation${files.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
+    for (const f of files) await api('/api/delete', { folder, file: f }).catch(() => {});
+    clearSelection();
+    await refreshFolders();
+    await loadItems();
+  };
+
+  // Thumbnails come from the browser: it has already decoded the media, so a
+  // downscaled JPEG costs one canvas draw and saves every later visitor from
+  // pulling a multi-megabyte original into a 232px grid cell.
+  const THUMB = 512;
+  const pendingThumbs = new Set();
+  function makeThumb(el, item, w, h) {
+    const key = (item.folder ?? folder) + '/' + item.file;
+    if (pendingThumbs.has(key) || !w || !h) return;
+    pendingThumbs.add(key);
+    try {
+      const s = Math.min(1, THUMB / Math.max(w, h));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w * s));
+      c.height = Math.max(1, Math.round(h * s));
+      c.getContext('2d').drawImage(el, 0, 0, c.width, c.height);
+      const dataUrl = c.toDataURL('image/jpeg', 0.78);
+      api('/api/thumb', { folder: item.folder ?? folder, file: item.file, dataUrl }).catch(() => {});
+    } catch {
+      /* a tainted canvas or a codec the browser won't draw — skip silently */
+    }
+  }
+
+  function baseCard() {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML =
+      '<div class="frame"></div>' +
+      '<div class="meta"><div class="prompt-line"></div>' +
+      '<div class="sub"><span class="model"></span><span class="time"></span>' +
+      '<span class="refs"></span><span class="actions"></span></div></div>';
+    return card;
+  }
+
+  function fillDone(card, item) {
+    card.classList.remove('generating', 'error');
+    card._item = item;
+    card.dataset.file = item.file;
+    const frame = card.querySelector('.frame');
+    frame.className = 'frame'; // a job card being filled in may have been styled for the other kind
+    frame.innerHTML = '';
+
+    const pick = document.createElement('div');
+    pick.className = 'pick';
+    pick.textContent = '✓';
+    pick.onclick = (e) => {
+      e.stopPropagation();
+      selection.has(item.file) ? selection.delete(item.file) : selection.add(item.file);
+      card.classList.toggle('sel', selection.has(item.file));
+      syncSelBar();
+    };
+
+    if (item.kind === 'video') {
+      // The grid never loads video bytes: it shows the poster we cached, and
+      // only a click (into the lightbox) fetches the clip itself.
+      frame.classList.add('video');
+      const img = document.createElement('img');
+      img.alt = item.prompt || item.file;
+      img.decoding = 'async';
+      img.onload = () => img.classList.add('ready');
+      img.onerror = () => posterFromVideo(img, item);
+      lazy(img, thumbUrl(item));
+      img.onclick = () => openLightbox(item);
+      const play = document.createElement('div');
+      play.className = 'play';
+      play.innerHTML = '<i>▶</i>';
+      frame.append(img, play, pick);
+      if (item.duration) {
+        const d = document.createElement('span');
+        d.className = 'dur';
+        d.textContent = fmtDur(item.duration);
+        frame.appendChild(d);
+      }
+    } else {
+      const img = document.createElement('img');
+      img.alt = item.prompt || item.file;
+      img.decoding = 'async';
+      img.onload = () => {
+        img.classList.add('ready');
+        // Only the full-size original is worth thumbnailing; a cached thumb is
+        // already small.
+        if (img.currentSrc && img.currentSrc.includes('/media/')) makeThumb(img, item, img.naturalWidth, img.naturalHeight);
+      };
+      img.onerror = () => { if (img.dataset.src !== mediaUrl(item)) { img.dataset.src = mediaUrl(item); img.src = mediaUrl(item); } };
+      lazy(img, thumbUrl(item));
+      img.onclick = () => openLightbox(item);
+      frame.append(img, pick);
+    }
+
+    card.draggable = true;
+    card.addEventListener('dragstart', (e) => {
+      dragging = selection.size && selection.has(item.file) ? [...selection] : [item.file];
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', dragging.join('\n'));
+    });
+    card.addEventListener('dragend', () => { dragging = []; for (const r of tree.querySelectorAll('.row.drop')) r.classList.remove('drop'); });
+
+    const line = card.querySelector('.prompt-line');
+    line.textContent = item.prompt || item.file;
+    line.title = item.prompt || item.file;
+    card.querySelector('.model').textContent = item.model || '';
+    card.querySelector('.model').title = item.model || '';
+    card.querySelector('.time').textContent = item.ms ? fmtSec(item.ms) : '';
+    card.querySelector('.refs').textContent = item.refs ? '⧉ ' + item.refs : '';
+
+    const actions = card.querySelector('.actions');
+    actions.innerHTML = '';
+    const mk = (label, title, fn, cls) => {
+      const b = document.createElement('button');
+      b.className = 'iconbtn' + (cls ? ' ' + cls : '');
+      b.textContent = label;
+      b.title = title;
+      b.onclick = fn;
+      actions.appendChild(b);
+    };
+    mk('↻', 'Reuse this prompt', () => { promptEl.value = item.prompt || ''; promptEl.focus(); autosize(); });
+    // The loop that makes a character converge: a shot you liked becomes one of
+    // the references the next shot is built from.
+    if (item.kind === 'image') mk('👤', 'Add to a character', () => promoteToCharacter(item));
+    mk('⤓', 'Download', () => { const a = document.createElement('a'); a.href = mediaUrl(item, true); a.download = item.file; a.click(); });
+    mk('✕', 'Delete', async () => {
+      await api('/api/delete', { folder: item.folder ?? folder, file: item.file }).catch((e) => toast(e.message));
+      selection.delete(item.file);
+      removeCard(card);
+      loaded = Math.max(0, loaded - 1);
+      total = Math.max(0, total - 1);
+      syncSelBar();
+      refreshFolders();
+    }, 'del');
+    return card;
+  }
+
+  // Browsers refuse to decode media in a hidden tab, so a poster grabbed there
+  // would stall forever. Wait for the tab to actually be on screen.
+  function whenVisible(fn) {
+    if (!document.hidden) return fn();
+    const once = () => {
+      if (document.hidden) return;
+      document.removeEventListener('visibilitychange', once);
+      fn();
+    };
+    document.addEventListener('visibilitychange', once);
+  }
+
+  // No cached poster yet: pull just enough of the clip to grab a frame, cache
+  // it for every later load, then throw the <video> away.
+  function posterFromVideo(img, item) {
+    if (img.dataset.poster) return;
+    img.dataset.poster = '1';
+    whenVisible(() => {
+      const v = document.createElement('video');
+      v.muted = true;
+      v.playsInline = true;
+      v.preload = 'metadata';
+      v.src = mediaUrl(item);
+      const drop = () => { v.removeAttribute('src'); v.load(); };
+      v.onloadeddata = () => { try { v.currentTime = Math.min(0.6, (v.duration || 1) / 3); } catch { drop(); } };
+      v.onseeked = () => {
+        makeThumb(v, item, v.videoWidth, v.videoHeight);
+        try {
+          const c = document.createElement('canvas');
+          c.width = v.videoWidth;
+          c.height = v.videoHeight;
+          c.getContext('2d').drawImage(v, 0, 0);
+          img.dataset.keep = '1';
+          img.src = c.toDataURL('image/jpeg', 0.8);
+          img.classList.add('ready');
+        } catch {
+          /* undrawable codec — the play placeholder stays */
+        }
+        drop();
+      };
+      // A clip the browser cannot decode keeps the ▶ placeholder rather than
+      // blanking the tile.
+      v.onerror = drop;
+    });
+  }
+
+  // A folder is rendered a page at a time: the sentinel below the grid pulls the
+  // next page as it comes into view, so opening a folder of ten thousand
+  // generations costs the same as opening one with fifty.
+  const PAGE = 200;
+  const NEAR_BOTTOM = 1200; // start the next page this far before the end
+  let loaded = 0;
+  let total = 0;
+  let loading = false;
+
+  const nearBottom = () => window.scrollY + window.innerHeight > document.documentElement.scrollHeight - NEAR_BOTTOM;
+
+  async function loadPage() {
+    if (loading || (loaded && loaded >= total)) return;
+    loading = true;
+    const want = folder;
+    try {
+      const data = await api(`/api/items?folder=${encodeURIComponent(folder)}&offset=${loaded}&limit=${PAGE}`);
+      if (want !== folder) return; // the user moved on while we were fetching
+      total = data.total;
+      loaded += data.items.length;
+      items.push(...data.items);
+      const frag = document.createDocumentFragment();
+      for (const it of data.items) frag.appendChild(fillDone(baseCard(), it));
+      gallery.appendChild(frag);
+      syncBar();
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      loading = false;
+    }
+    // A page that didn't reach past the fold would otherwise wait for a scroll
+    // that can never come — keep going until the viewport is covered.
+    if (loaded < total && nearBottom()) loadPage();
+  }
+
+  window.addEventListener('scroll', () => { if (nearBottom()) loadPage(); }, { passive: true });
+  window.addEventListener('resize', () => { if (nearBottom()) loadPage(); }, { passive: true });
+
+  async function loadItems() {
+    for (const c of [...gallery.querySelectorAll('.card')]) if (!c.classList.contains('generating')) removeCard(c);
+    selection.clear();
+    syncSelBar();
+    items = [];
+    loaded = 0;
+    total = 0;
+    await loadPage();
+  }
+
+  $('refresh').onclick = async () => { await refreshFolders(); await loadItems(); };
+
+  // ================= generation (server-side jobs + SSE) =================
+  const jobCards = new Map();
+  let active = 0;
+  function setActive(n) {
+    active = n;
+    badge.classList.toggle('on', active > 0);
+    activeText.textContent = active === 1 ? '1 generating' : active + ' generating';
+  }
+
+  function jobCard(job) {
+    let card = jobCards.get(job.id);
+    if (!card) {
+      card = baseCard();
+      card.classList.add('generating');
+      card._job = job;
+      card._started = Date.now();
+      card.querySelector('.frame').innerHTML = '<div class="gen-center"><div class="ring"></div><div class="phase"></div><div class="elapsed">0.0s</div></div>';
+      card.querySelector('.prompt-line').textContent = job.prompt;
+      card.querySelector('.model').textContent = job.model || '';
+      card.querySelector('.refs').textContent = job.refs ? '⧉ ' + job.refs : '';
+      const actions = card.querySelector('.actions');
+      const b = document.createElement('button');
+      b.className = 'iconbtn del';
+      b.textContent = '✕';
+      b.title = 'Cancel';
+      b.onclick = () => api('/api/cancel', { id: job.id }).catch(() => {});
+      actions.appendChild(b);
+      gallery.prepend(card);
+      jobCards.set(job.id, card);
+      empty.style.display = 'none';
+      // Video runs for minutes, so the elapsed clock ticks slowly enough not to
+      // wake the compositor every frame.
+      card._timer = setInterval(() => {
+        card.querySelector('.elapsed').textContent = fmtSec(Date.now() - card._started);
+      }, job.kind === 'video' ? 500 : 100);
+    }
+    const phaseEl = card.querySelector('.phase');
+    if (phaseEl) phaseEl.textContent = job.phase === 'queued' ? 'queued' : job.phase || '';
+    return card;
+  }
+
+  function endJob(job) {
+    const card = jobCards.get(job.id);
+    if (!card) return;
+    clearInterval(card._timer);
+    jobCards.delete(job.id);
+    if (job.status === 'cancelled') { removeCard(card); syncBar(); return; }
+    if (job.status === 'done' && job.item) {
+      // A finished job belongs to the folder it was fired into; if the user has
+      // since navigated elsewhere, drop the card rather than showing it here.
+      if ((job.folder || '') !== folder) { removeCard(card); refreshFolders(); return; }
+      fillDone(card, job.item);
+      // The new item sorts to the front, so every later page shifts down one.
+      // Counting it keeps the paging window from repeating or skipping a row.
+      loaded++;
+      total++;
+      refreshFolders();
+      return;
+    }
+    card.classList.remove('generating');
+    card.classList.add('error');
+    const frame = card.querySelector('.frame');
+    frame.innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 'err-center';
+    const msg = document.createElement('div');
+    msg.className = 'msg';
+    msg.textContent = job.error || 'Generation failed';
+    const retry = document.createElement('button');
+    retry.textContent = 'Retry';
+    retry.onclick = () => { removeCard(card); fire(card._req); };
+    div.append(msg, retry);
+    if (card._req) frame.appendChild(div);
+    else { msg.style.padding = '14px'; frame.appendChild(msg); }
+    card.querySelector('.time').textContent = fmtSec(Date.now() - card._started);
+    card.querySelector('.actions').innerHTML = '';
+  }
+
+  async function fire(req) {
+    try {
+      const { jobs, warning } = await api('/api/generate', req);
+      if (warning) toast(warning);
+      // The job feed fills in the cards; remember the request so Retry can
+      // replay exactly what was asked for.
+      for (const id of jobs) pendingReq.set(id, req);
+    } catch (e) { toast(e.message); }
+  }
+  const pendingReq = new Map();
+
+  function generate() {
+    const text = promptEl.value.trim();
+    if (!text) { promptEl.focus(); return; }
+    const model = currentModel();
+    if (!model) { toast('Pick or type a model first'); openModelMenu(); return; }
+    if (mode === 'video' && !state.videoReady) { toast('Video needs an OpenRouter key — add keys.openrouter to ~/.bro/config.json'); return; }
+    persist();
+    const images = [...attachments];
+    const req = mode === 'video'
+      ? {
+          kind: 'video', folder, prompt: text, model, images, characters: [...picked], count: Math.min(count, 4),
+          duration: durSel.value === 'auto' ? undefined : Number(durSel.value),
+          resolution: resSel.value, aspectRatio: aspSel.value,
+          audio: $('audioCtl').classList.contains('hide') ? undefined : audioEl.checked,
+          seed: seedEl.value.trim() || undefined,
+          firstFrame: firstFrameEl.checked,
+          lastFrame: !$('lastFrameCtl').classList.contains('hide') && lastFrameEl.checked
+        }
+      : {
+          kind: 'image', folder, prompt: text, model, images, characters: [...picked], count,
+          api: apiSel.value, size: sizeSel.value, quality: qualitySel.value
+        };
+    fire(req);
+  }
+
+  $('go').onclick = generate;
+  promptEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); generate(); }
+  });
+  function autosize() {
+    promptEl.style.height = 'auto';
+    promptEl.style.height = Math.min(promptEl.scrollHeight, 180) + 'px';
+  }
+  promptEl.addEventListener('input', autosize);
+
+  // ---- ✨ improve this prompt ----
+  // The rewrite happens server-side on the OpenRouter key, so no model choice
+  // or second key is needed here. What you wrote is kept until you touch the
+  // box again, so the button is never a one-way door.
+  // One wiring, used by the composer and by the character editor's description.
+  // `body()` supplies whatever context that field has — the composer knows the
+  // model and cast; the editor asks for a character description instead.
+  function wireMagic({ field, button, revert, body, resize, after }) {
+    let original = null;
+
+    const showRevert = (value) => {
+      original = value;
+      revert.classList.toggle('hide', value === null);
+    };
+    // Editing by hand means the old text is no longer what you'd want back.
+    field.addEventListener('input', () => { if (original !== null && field.value !== original) showRevert(null); });
+    revert.onclick = () => {
+      if (original === null) return;
+      field.value = original;
+      showRevert(null);
+      resize?.();
+      field.focus();
+    };
+
+    async function run() {
+      if (button.classList.contains('working')) return;
+      const text = field.value.trim();
+      if (!text) { toast('Write something first — even a few words is enough'); field.focus(); return; }
+      if (!state.enhanceReady) { toast('Improving text needs an OpenRouter key — add keys.openrouter to ~/.bro/config.json'); return; }
+      const was = field.value;
+      button.classList.add('working');
+      try {
+        const r = await api('/api/enhance', { prompt: text, ...body() });
+        // Don't clobber text the user kept typing while we were away.
+        if (field.value !== was) { toast('You kept typing, so the rewrite was dropped'); return; }
+        field.value = r.prompt;
+        showRevert(was);
+        resize?.();
+        field.focus();
+        field.setSelectionRange(r.prompt.length, r.prompt.length);
+        after?.(r);
+      } catch (e) {
+        toast(e.message);
+      } finally {
+        button.classList.remove('working');
+      }
+    }
+
+    button.onclick = run;
+    field.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+    });
+    return { run, reset: () => showRevert(null) };
+  }
+
+  const magicBtn = $('magic');
+  wireMagic({
+    field: promptEl,
+    button: magicBtn,
+    revert: $('revert'),
+    resize: autosize,
+    body: () => ({ kind: mode, model: currentModel(), characters: [...picked], images: [...attachments] })
+  });
+
+  // ---- live job feed ----
+  // One EventSource for the tab. It replays a snapshot on connect, so a reload
+  // in the middle of a five-minute video picks the job straight back up.
+  function connect() {
+    const es = new EventSource('/api/events');
+    es.onopen = () => $('offline').classList.remove('on');
+    es.onerror = () => $('offline').classList.add('on');
+    es.onmessage = (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      const list = msg.type === 'snapshot' ? msg.jobs : msg.type === 'job' ? [msg.job] : [];
+      for (const job of list) {
+        // A reference sheet belongs to the character editor, not the gallery —
+        // its output never lands in a folder.
+        if (job.characterId) {
+          onDrawProgress(job);
+          continue;
+        }
+        const req = pendingReq.get(job.id);
+        if (job.status === 'queued' || job.status === 'running') {
+          const card = jobCard(job);
+          if (req) card._req = req;
+          if ((job.folder || '') !== folder) card.classList.add('hidden');
+        } else {
+          const card = jobCards.get(job.id);
+          if (card && req) card._req = req;
+          endJob(job);
+          pendingReq.delete(job.id);
+        }
+      }
+      setActive(jobCards.size);
+    };
+  }
+  connect();
+
+  // ================= lightbox =================
+  const lightbox = $('lightbox'), lbImg = $('lbImg'), lbVid = $('lbVid');
+  const lbPrev = $('lbPrev'), lbNext = $('lbNext'), lbCount = $('lbCount');
+  let lbFile = null;
+
+  const doneItems = () => [...gallery.querySelectorAll('.card:not(.hidden)')].map((c) => c._item).filter(Boolean);
+
+  function syncLbNav() {
+    const list = doneItems();
+    const i = list.findIndex((it) => it.file === lbFile);
+    lbPrev.classList.toggle('hidden', i <= 0);
+    lbNext.classList.toggle('hidden', i < 0 || i >= list.length - 1);
+    lbCount.textContent = i >= 0 ? `${i + 1} / ${list.length}` : '';
+  }
+  function lbStep(d) {
+    const list = doneItems();
+    const i = list.findIndex((it) => it.file === lbFile);
+    const next = list[i + d];
+    if (next) openLightbox(next);
+  }
+  lbPrev.onclick = () => lbStep(-1);
+  lbNext.onclick = () => lbStep(1);
+
+  function openLightbox(item) {
+    lbFile = item.file;
+    const url = mediaUrl(item);
+    const video = item.kind === 'video';
+    lbImg.classList.toggle('hide', video);
+    lbVid.classList.toggle('hide', !video);
+    if (video) {
+      lbImg.removeAttribute('src');
+      lbVid.src = url;
+      lbVid.poster = thumbUrl(item);
+      lbVid.play().catch(() => {});
+    } else {
+      lbVid.pause();
+      lbVid.removeAttribute('src');
+      lbImg.src = url;
+    }
+    $('lbPrompt').textContent = item.revisedPrompt || item.prompt || item.file;
+    $('lbDownload').href = mediaUrl(item, true);
+    $('lbDownload').download = item.file;
+    $('lbReuse').onclick = () => { promptEl.value = item.prompt || ''; closeLightbox(); promptEl.focus(); autosize(); };
+    lightbox.classList.add('open');
+    syncLbNav();
+  }
+  function closeLightbox() {
+    lightbox.classList.remove('open');
+    lbVid.pause();
+    lbVid.removeAttribute('src');
+    lbImg.removeAttribute('src');
+  }
+  lightbox.addEventListener('click', (e) => { if (e.target === lightbox) closeLightbox(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (lightbox.classList.contains('open')) closeLightbox();
+      else clearSelection();
+      return;
+    }
+    if (!lightbox.classList.contains('open')) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); lbStep(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); lbStep(1); }
+    else if (e.key === ' ' && !lbVid.classList.contains('hide')) { e.preventDefault(); lbVid.paused ? lbVid.play() : lbVid.pause(); }
+  });
+
+  // ================= boot =================
+  // A folder remembered from last time may be nested several levels down —
+  // expand its ancestors so it is actually on screen when the page opens.
+  if (!findFolder(folder)) folder = '';
+  openTo(folder);
+  renderTree();
+  renderCast();
+  magicBtn.classList.toggle('off', !state.enhanceReady);
+  magicBtn.title = state.enhanceReady
+    ? `Improve this prompt (${state.enhanceModel}) · Ctrl+Enter`
+    : 'Improving prompts needs an OpenRouter key';
+  if (prefs.side === 'cast') showSide('cast');
+  renderRefs();
+  await loadItems();
+  for (const job of state.jobs || []) jobCard(job);
+  setActive(jobCards.size);
+  promptEl.focus();
+})();
+</script>
+</body>
+</html>

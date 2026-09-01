@@ -1,163 +1,252 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { ccusageDaily, listUsageProfiles, resolveCcusageRunner } from './profile-report.js';
+import { bar, table } from './table.js';
 
-const CLAUDE_POOL_DIR = () => process.env.CLAUDE_POOL_DIR || path.join(os.homedir(), '.claude-max-pool');
-const CODEX_HOME = () => process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+// Claude's stats cache carries two independent counters. `modelUsage` is the
+// all-time per-model tally and never rolls off; `dailyModelTokens` is a short
+// retention window that the /stats screen slices to fill its date ranges. For
+// every model whose whole history still fits inside the retained days the two
+// agree exactly, which is what makes these four fields the right lifetime sum.
+// Adding up the daily rows is neither figure — not lifetime, and not the range
+// /stats shows — so read each counter for what it actually is.
+const LIFETIME_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'];
+const WINDOW_DAYS = 30;
+const DAY = 24 * 60 * 60 * 1000;
 
-export function claudeCliStats(profileDir) {
+// Codex keeps no lifetime counter of its own, so its numbers are reconstructed
+// from retained session logs. That is a floor, not a ledger, and the report
+// labels it as such rather than quietly mixing it in with Claude's counters.
+const SOURCES = {
+  counter: { key: 'counter', label: 'CLI counter' },
+  logs: { key: 'logs', label: 'session logs' }
+};
+
+const finite = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+
+// Claude and ccusage both bucket their day rows by local date, so the window
+// bounds have to be local dates too — a UTC cutoff moves the boundary by a day.
+function localDate(ms) {
+  const at = new Date(ms);
+  return new Date(at.getTime() - at.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+function windowBounds(now, days) {
+  return { from: localDate(now - (days - 1) * DAY), to: localDate(now) };
+}
+
+const inWindow = (date, { from, to }) => typeof date === 'string' && date >= from && date <= to;
+
+function lifetimeTokens(modelUsage) {
+  return Object.values(modelUsage || {}).reduce((total, usage) =>
+    total + LIFETIME_FIELDS.reduce((sum, field) => sum + finite(usage?.[field]), 0), 0);
+}
+
+function claudeDailyTokens(dailyModelTokens, bounds) {
+  return (Array.isArray(dailyModelTokens) ? dailyModelTokens : [])
+    .filter((day) => inWindow(day?.date, bounds))
+    .reduce((total, day) =>
+      total + Object.values(day.tokensByModel || {}).reduce((sum, value) => sum + finite(value), 0), 0);
+}
+
+function ccusageTokens(daily, bounds) {
+  return (Array.isArray(daily) ? daily : [])
+    .filter((day) => (bounds ? inWindow(day?.date, bounds) : typeof day?.date === 'string'))
+    .reduce((total, day) => total + (finite(day.totalTokens)
+      || finite(day.inputTokens) + finite(day.outputTokens)
+        + finite(day.cacheReadTokens) + finite(day.cacheCreationTokens)), 0);
+}
+
+const unavailable = (extra) => ({
+  available: false,
+  lifetimeTokens: null,
+  windowTokens: null,
+  sessions: null,
+  through: null,
+  ...extra
+});
+
+export function claudeCliStats(profileDir, { now = Date.now(), days = WINDOW_DAYS } = {}) {
+  const bounds = windowBounds(now, days);
+  let stats;
   try {
-    const stats = JSON.parse(fs.readFileSync(path.join(profileDir, 'stats-cache.json'), 'utf8'));
-    const totalTokens = (stats.dailyModelTokens || []).reduce((total, day) =>
-      total + Object.values(day?.tokensByModel || {}).reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0), 0);
-    return {
-      available: true,
-      totalTokens,
-      sessions: Number.isFinite(stats.totalSessions) ? stats.totalSessions : null,
-      through: stats.lastComputedDate || null
-    };
+    stats = JSON.parse(fs.readFileSync(path.join(profileDir, 'stats-cache.json'), 'utf8'));
   } catch {
-    return { available: false, outputTokens: null, sessions: null, through: null };
+    return unavailable({ source: SOURCES.counter.key, reason: 'no CLI stats cache yet' });
   }
+  return {
+    available: true,
+    source: SOURCES.counter.key,
+    lifetimeTokens: lifetimeTokens(stats.modelUsage),
+    windowTokens: claudeDailyTokens(stats.dailyModelTokens, bounds),
+    sessions: Number.isFinite(stats.totalSessions) ? stats.totalSessions : null,
+    through: stats.lastComputedDate || null
+  };
 }
 
-export function parseClaudeStatsTotal(text) {
-  const matches = [...String(text).matchAll(/Total tokens:\s*([\d,.]+)\s*([kmb])?/gi)];
-  const match = matches.at(-1);
-  if (!match) return null;
-  const base = Number(match[1].replace(/,/g, ''));
-  const multiplier = { k: 1e3, m: 1e6, b: 1e9 }[match[2]?.toLowerCase()] || 1;
-  return Number.isFinite(base) ? Math.round(base * multiplier) : null;
+export function codexLogStats(daily, { now = Date.now(), days = WINDOW_DAYS } = {}) {
+  const bounds = windowBounds(now, days);
+  const dates = (Array.isArray(daily) ? daily : [])
+    .map((day) => day?.date)
+    .filter((date) => typeof date === 'string')
+    .sort();
+  return {
+    available: true,
+    source: SOURCES.logs.key,
+    lifetimeTokens: ccusageTokens(daily, null),
+    windowTokens: ccusageTokens(daily, bounds),
+    sessions: null,
+    through: dates.at(-1) || null
+  };
 }
 
-function findWinpty() {
-  const candidates = [
-    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'usr', 'bin', 'winpty.exe'),
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Git', 'usr', 'bin', 'winpty.exe')
-  ];
-  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
-}
-
-export function refreshClaudeCliStats(profile, { timeoutMs = 90000 } = {}) {
-  const winpty = process.platform === 'win32' ? findWinpty() : null;
-  if (!winpty) return Promise.resolve({ available: false, reason: 'automatic /stats refresh requires Git for Windows (winpty)' });
-
-  return new Promise((resolve) => {
-    let output = '';
-    let sentTrust = false;
-    let sentStats = false;
-    let cursorQueriesAnswered = 0;
-    const rangeTotals = [];
-    let cyclingRanges = false;
-    let settled = false;
-    const env = { ...process.env };
-    if (profile.name === 'default') delete env.CLAUDE_CONFIG_DIR;
-    else env.CLAUDE_CONFIG_DIR = profile.dir;
-    const child = spawn(winpty, ['-Xallow-non-tty', 'claude', '--dangerously-skip-permissions', '--ax-screen-reader'], {
-      cwd: profile.dir,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true
-    });
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.kill();
-      resolve(result);
-    };
-    const inspect = (chunk) => {
-      output = (output + chunk.toString()).slice(-100000);
-      const cursorQueries = (output.match(/\x1b\[6n/g) || []).length;
-      while (cursorQueriesAnswered < cursorQueries) {
-        cursorQueriesAnswered++;
-        child.stdin.write('\x1b[1;1R');
-      }
-      if (!sentTrust && /Enter y\/n:/.test(output)) {
-        sentTrust = true;
-        child.stdin.write('y\r');
-      }
-      if (!sentStats && (/effort:|Tips for getting started|What's new/.test(output))) {
-        sentStats = true;
-        setTimeout(() => { if (!settled) child.stdin.write('/stats\r'); }, 300);
-      }
-      const totalTokens = parseClaudeStatsTotal(output);
-      if (totalTokens !== null && rangeTotals.at(-1) !== totalTokens) rangeTotals.push(totalTokens);
-      if (totalTokens !== null && !cyclingRanges) {
-        cyclingRanges = true;
-        // Ink only emits changed lines. A date range with the same total may
-        // therefore produce no second "Total tokens" line, so cycle on fixed
-        // beats and collect every total that is actually redrawn.
-        setTimeout(() => { if (!settled) child.stdin.write('r'); }, 400);
-        setTimeout(() => { if (!settled) child.stdin.write('r'); }, 1000);
-        setTimeout(() => {
-          if (!settled) finish({ available: true, totalTokens: Math.max(...rangeTotals) });
-        }, 2200);
-      }
-    };
-    child.stdout.on('data', inspect);
-    child.stderr.on('data', inspect);
-    child.on('error', (error) => finish({ available: false, reason: error.message }));
-    child.on('exit', () => finish({ available: false, reason: 'Claude /stats exited before returning a total' }));
-    const timer = setTimeout(() => finish({ available: false, reason: 'Claude /stats timed out' }), timeoutMs);
+export async function buildTokenReport({
+  poolDir,
+  claudeHome,
+  codexHome,
+  codexProfilesDir,
+  now = Date.now(),
+  windowDays = WINDOW_DAYS,
+  analyzeCodex
+} = {}) {
+  const discovered = listUsageProfiles({ poolDir, claudeHome, codexHome, codexProfilesDir });
+  // Resolve the analyzer once, and only if a Codex profile actually exists, so
+  // a machine without Codex never has to have ccusage installed at all.
+  let runner;
+  const analyze = analyzeCodex || ((profile) => {
+    runner ||= resolveCcusageRunner();
+    return ccusageDaily({ provider: 'Codex', dir: profile.dir, runner });
   });
-}
 
-function claudeProfiles(poolDir = CLAUDE_POOL_DIR()) {
-  const accountsDir = path.join(poolDir, 'accounts');
-  try {
-    return fs.readdirSync(accountsDir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => ({ name: entry.name, dir: path.join(accountsDir, entry.name) }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  } catch { return []; }
+  const profiles = [];
+  for (const profile of discovered) {
+    if (profile.provider === 'Claude') {
+      profiles.push({ provider: 'Claude', name: profile.name, ...claudeCliStats(profile.dir, { now, days: windowDays }) });
+      continue;
+    }
+    try {
+      profiles.push({
+        provider: 'Codex',
+        name: profile.name,
+        ...codexLogStats(await analyze(profile), { now, days: windowDays })
+      });
+    } catch (error) {
+      profiles.push({
+        provider: 'Codex',
+        name: profile.name,
+        ...unavailable({ source: SOURCES.logs.key, reason: error instanceof Error ? error.message : String(error) })
+      });
+    }
+  }
+
+  const sum = (rows, field) => rows.reduce((total, row) => total + row[field], 0);
+  const available = profiles.filter((profile) => profile.available);
+  const providers = [...new Set(profiles.map((profile) => profile.provider))].map((provider) => {
+    const rows = available.filter((profile) => profile.provider === provider);
+    return {
+      provider,
+      source: profiles.find((profile) => profile.provider === provider).source,
+      count: profiles.filter((profile) => profile.provider === provider).length,
+      lifetimeTokens: sum(rows, 'lifetimeTokens'),
+      windowTokens: sum(rows, 'windowTokens')
+    };
+  });
+
+  return {
+    profiles,
+    providers,
+    windowDays,
+    window: windowBounds(now, windowDays),
+    lifetimeTotal: sum(available, 'lifetimeTokens'),
+    windowTotal: sum(available, 'windowTokens'),
+    complete: available.length === profiles.length
+  };
 }
 
 const number = (value) => new Intl.NumberFormat('en-US').format(value);
 
-export async function buildTokenReport({ poolDir = CLAUDE_POOL_DIR(), claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), codexHome = CODEX_HOME(), refresh = true } = {}) {
-  const found = claudeProfiles(poolDir);
-  if (fs.existsSync(claudeHome)) found.unshift({ name: 'default', dir: claudeHome });
-  const profiles = [];
-  // Keep concurrent CLI scans bounded: each /stats invocation reads that
-  // profile's history and six simultaneous scans can thrash slower disks.
-  for (let i = 0; i < found.length; i += 2) {
-    const batch = found.slice(i, i + 2);
-    const results = await Promise.all(batch.map(async (profile) => {
-      if (refresh) {
-        const live = await refreshClaudeCliStats(profile, { timeoutMs: profile.name === 'default' ? 5 * 60 * 1000 : 90000 });
-        if (live.available) return { provider: 'Claude', name: profile.name, available: true, totalTokens: live.totalTokens, source: 'live /stats' };
+function share(value, total) {
+  if (!total) return '';
+  return `${bar(value / total)} ${String(Math.round((value / total) * 100)).padStart(3)}%`;
+}
+
+function alignedNotes(notes) {
+  const width = Math.max(...notes.map(([label]) => label.length));
+  return notes.map(([label, detail]) => `  ${label.padEnd(width)}   ${detail}`);
+}
+
+export function formatTokenReport(report) {
+  if (!report.profiles.length) return 'Token totals\n\n  No Claude or Codex profiles found.';
+
+  const rows = [];
+  const rules = [];
+  const notes = [];
+
+  for (const [index, group] of report.providers.entries()) {
+    if (index > 0) rules.push(rows.length);
+    const members = report.profiles.filter((profile) => profile.provider === group.provider);
+
+    for (const [position, profile] of members.entries()) {
+      if (!profile.available) {
+        notes.push([`${profile.provider} / ${profile.name}`, profile.reason]);
+      } else if (profile.through && profile.through < report.window.from) {
+        notes.push([`${profile.provider} / ${profile.name}`, `no activity recorded since ${profile.through}`]);
       }
-      const cached = claudeCliStats(profile.dir);
-      return { provider: 'Claude', name: profile.name, ...cached, source: cached.available ? 'CLI stats cache' : null };
-    }));
-    profiles.push(...results);
+
+      rows.push([
+        position === 0 ? profile.provider : '',
+        profile.name,
+        profile.available ? number(profile.lifetimeTokens) : '—',
+        profile.available ? number(profile.windowTokens) : '—',
+        profile.available ? share(profile.windowTokens, report.windowTotal) : ''
+      ]);
+    }
+
+    // A single-profile provider is already its own subtotal; repeating it is noise.
+    if (members.length > 1) {
+      rules.push(rows.length);
+      rows.push([
+        group.provider,
+        'subtotal',
+        number(group.lifetimeTokens),
+        number(group.windowTokens),
+        share(group.windowTokens, report.windowTotal)
+      ]);
+    }
   }
-  const codexInstalled = fs.existsSync(codexHome);
-  // Codex 0.144.1 exposes neither a status subcommand nor a persisted lifetime
-  // counter. Do not present a sum of retained session logs as actual lifetime.
-  const codex = { installed: codexInstalled, available: false, outputTokens: null };
-  const available = profiles.filter((profile) => profile.available);
-  return { profiles, codex, total: available.reduce((sum, p) => sum + p.totalTokens, 0), complete: available.length === profiles.length && codex.available };
+
+  rules.push(rows.length);
+  rows.push([
+    'All',
+    'TOTAL',
+    number(report.lifetimeTotal),
+    number(report.windowTotal),
+    share(report.windowTotal, report.windowTotal)
+  ]);
+
+  const sourceNote = {
+    counter: "Claude's own all-time per-model counters",
+    logs: 'retained session logs, read by ccusage — a floor, not a ledger'
+  };
+
+  return [
+    `Token totals · lifetime and the last ${report.windowDays} days`,
+    '',
+    table({
+      headers: ['Provider', 'Profile', 'Lifetime', `Last ${report.windowDays}d`, `${report.windowDays}d share`],
+      rows,
+      numeric: [2, 3],
+      rules
+    }),
+    '',
+    ...report.providers.map((provider) => `${provider.provider}: ${sourceNote[provider.source]}.`),
+    `Window ${report.window.from} → ${report.window.to} — the default range on Claude's /stats screen.`,
+    'Totals include input, output, and cache tokens.',
+    ...(notes.length ? ['', 'Notes', ...alignedNotes(notes)] : [])
+  ].join('\n');
 }
 
 export async function runTokenReport(options) {
-  console.log('Loading CLI lifetime token stats…');
-  const report = await buildTokenReport(options);
-  console.log('\nLifetime tokens');
-  if (!report.profiles.length) console.log('  Claude profiles  none found');
-  for (const profile of report.profiles) {
-    const detail = profile.available
-      ? `${number(profile.totalTokens)}  (${profile.source}${profile.through ? ` through ${profile.through}` : ''})`
-      : 'unavailable — Claude /stats did not return a total';
-    console.log(`  Claude / ${profile.name}  ${detail}`);
-  }
-  console.log(report.codex.installed
-    ? '  Codex             unavailable — installed CLI exposes no lifetime total'
-    : '  Codex             not installed');
-  if (report.complete) console.log(`  Total             ${number(report.total)}`);
-  else if (report.total > 0) console.log(`  Known subtotal    ${number(report.total)}`);
-  console.log('\nOnly CLI-owned lifetime counters are reported; retained session logs are not used as a substitute.');
+  console.log(await buildTokenReport(options).then(formatTokenReport));
   return 0;
 }

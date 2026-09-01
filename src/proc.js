@@ -2,6 +2,7 @@ import { spawn, spawnSync, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { withTerminalAgent } from './terminal-agent.js';
 
 const isWin = process.platform === 'win32';
 
@@ -42,16 +43,23 @@ function winQuote(a) {
   return /[\s"]/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a;
 }
 
+// cmd.exe /s /c strips the first and last quote from its command string. When
+// the executable itself is quoted (for example C:\Program Files\nodejs\npm.cmd),
+// the whole command therefore needs one additional outer quote pair.
+export function windowsCmdLine(file, args) {
+  return `"${[file, ...args].map(winQuote).join(' ')}"`;
+}
+
 // Spawn inheriting stdio. Handles Windows .cmd/.bat shims (npm), which can't be
 // spawned directly. `cwd` runs the child in another directory (resuming a
 // session from a different project) without moving bro's own process.
 // Resolves with the child's exit code.
-export function runInherit(file, args, env = process.env, { cwd } = {}) {
-  return new Promise((resolve) => {
+export function runInherit(file, args, env = process.env, { cwd, terminalAgent } = {}) {
+  return withTerminalAgent(terminalAgent, () => new Promise((resolve) => {
     const ext = path.extname(file).toLowerCase();
     let child;
     if (isWin && (ext === '.cmd' || ext === '.bat')) {
-      const line = [file, ...args].map(winQuote).join(' ');
+      const line = windowsCmdLine(file, args);
       child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], {
         stdio: 'inherit',
         env,
@@ -66,7 +74,53 @@ export function runInherit(file, args, env = process.env, { cwd } = {}) {
       console.error(err.message);
       resolve(1);
     });
+  }));
+}
+
+// Spawn an interactive command while mirroring stdout through this process.
+// This is used by browser-backed harnesses whose stdout contains the exact URL
+// to open. Stdin and stderr remain inherited, so the child still behaves like
+// a normal foreground CLI.
+export function runInheritObserved(file, args, env = process.env, { cwd, onStdout } = {}) {
+  return new Promise((resolve) => {
+    const ext = path.extname(file).toLowerCase();
+    let child;
+    const options = { stdio: ['inherit', 'pipe', 'inherit'], env, cwd };
+    if (isWin && (ext === '.cmd' || ext === '.bat')) {
+      const line = windowsCmdLine(file, args);
+      child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], {
+        ...options,
+        windowsVerbatimArguments: true
+      });
+    } else {
+      child = spawn(file, args, options);
+    }
+    child.stdout?.on('data', (chunk) => {
+      process.stdout.write(chunk);
+      onStdout?.(chunk.toString());
+    });
+    child.on('exit', (code) => resolve(code ?? 0));
+    child.on('error', (err) => {
+      console.error(err.message);
+      resolve(1);
+    });
   });
+}
+
+// Open an HTTP(S) URL with the operating system's default browser without
+// holding the parent process open.
+export function openExternalUrl(url) {
+  let child;
+  if (isWin) {
+    child = spawn('rundll32', ['url.dll,FileProtocolHandler', url], { detached: true, stdio: 'ignore' });
+  } else {
+    child = spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], {
+      detached: true,
+      stdio: 'ignore'
+    });
+  }
+  child.on('error', () => {});
+  child.unref();
 }
 
 // Make sure the Anthropic<->OpenAI proxy (claude-code-router / `ccr`) is present,
@@ -79,13 +133,13 @@ export function ensureProxy() {
   const pm = which('bun') ? 'bun' : which('npm') ? 'npm' : null;
   if (!pm) throw new Error('Need bun or npm on PATH to install the proxy (claude-code-router).');
 
-  process.stdout.write(`\nInstalling the proxy (claude-code-router) with ${pm} — one time only…\n`);
+  process.stderr.write(`\nInstalling the proxy (claude-code-router) with ${pm} — one time only…\n`);
   const pmPath = which(pm);
   const ext = path.extname(pmPath).toLowerCase();
   const installArgs = ['install', '-g', '@musistudio/claude-code-router'];
   let r;
   if (isWin && (ext === '.cmd' || ext === '.bat')) {
-    const line = [pmPath, ...installArgs].map(winQuote).join(' ');
+    const line = windowsCmdLine(pmPath, installArgs);
     r = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], {
       stdio: 'inherit',
       windowsVerbatimArguments: true
@@ -104,7 +158,7 @@ export function ensureProxy() {
 function runSyncInherit(file, args) {
   const ext = path.extname(file).toLowerCase();
   if (isWin && (ext === '.cmd' || ext === '.bat')) {
-    const line = [file, ...args].map(winQuote).join(' ');
+    const line = windowsCmdLine(file, args);
     return spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], {
       stdio: 'inherit',
       windowsVerbatimArguments: true
@@ -142,11 +196,32 @@ export const HARNESS_INSTALLS = Object.freeze({
     command: 'codex',
     packageName: '@openai/codex',
     managers: ['npm', 'bun']
+  }),
+  dsh: Object.freeze({
+    label: 'DeepSeek Harness',
+    command: 'dsh',
+    packageName: '@deepseek-ai/dsh',
+    installTarget: '@deepseek-ai/dsh@latest',
+    managers: ['npm', 'bun']
   })
 });
 
 export function globalInstallArgs(spec) {
-  return ['install', '-g', ...(spec.installOptions || []), spec.packageName];
+  return ['install', '-g', ...(spec.installOptions || []), spec.installTarget || spec.packageName];
+}
+
+export function supportsDshNode(version = process.versions.node) {
+  const [major = 0, minor = 0] = String(version).replace(/^v/, '').split('.').map(Number);
+  return major >= 24 || (major === 22 && minor >= 19);
+}
+
+function assertHarnessRuntime(name) {
+  if (name === 'dsh' && !supportsDshNode()) {
+    throw new Error(
+      `DeepSeek Harness requires Node.js 22.19.x or 24+ (current: ${process.version}). ` +
+        'Update Node.js, then retry.'
+    );
+  }
 }
 
 // The small dependency-injection surface makes the install behavior testable
@@ -155,7 +230,7 @@ export function ensureGlobalPackage(spec, {
   binDirs = globalBinDirs,
   find = which,
   run = runSyncInherit,
-  announce = (message) => process.stdout.write(message)
+  announce = (message) => process.stderr.write(message)
 } = {}) {
   let dirs = binDirs();
   let executable = find(spec.command, dirs);
@@ -192,9 +267,49 @@ export function ensureGlobalPackage(spec, {
 }
 
 export function ensureHarnessTool(name, options) {
+  assertHarnessRuntime(name);
   const spec = HARNESS_INSTALLS[name];
   if (!spec) throw new Error(`Unknown harness installer: ${name}`);
   return ensureGlobalPackage(spec, options);
+}
+
+// Explicitly reinstall the current npm dist-tag. Unlike ensureHarnessTool,
+// this always invokes the package manager and therefore doubles as the update
+// path for fast-moving preview harnesses such as dsh.
+export function updateHarnessTool(name, {
+  binDirs = globalBinDirs,
+  find = which,
+  run = runSyncInherit,
+  announce = (message) => process.stderr.write(message)
+} = {}) {
+  assertHarnessRuntime(name);
+  const spec = HARNESS_INSTALLS[name];
+  if (!spec) throw new Error(`Unknown harness installer: ${name}`);
+  const dirs = binDirs();
+  let manager = '';
+  let managerPath = '';
+  for (const candidate of spec.managers) {
+    const found = find(candidate, dirs);
+    if (found) {
+      manager = candidate;
+      managerPath = found;
+      break;
+    }
+  }
+  if (!managerPath) {
+    throw new Error(`Need ${spec.managers.join(' or ')} on PATH to update ${spec.label} (${spec.packageName}).`);
+  }
+  announce(`\nUpdating ${spec.label} with ${manager}…\n`);
+  const result = run(managerPath, globalInstallArgs(spec));
+  if (result.status !== 0) throw new Error(`${spec.label} update failed.`);
+  const refreshedDirs = binDirs();
+  const executable = find(spec.command, refreshedDirs);
+  if (!executable) {
+    throw new Error(
+      `Updated ${spec.label} but could not locate the \`${spec.command}\` binary. Add your global bin directory to PATH and retry.`
+    );
+  }
+  return { executable, dirs: refreshedDirs };
 }
 
 export function ensureClaude(options) {
@@ -210,6 +325,11 @@ export function ensureCodex(options) {
 export function ensurePi(options) {
   const { executable, dirs } = ensureHarnessTool('pi', options);
   return { pi: executable, dirs };
+}
+
+export function ensureDsh(options) {
+  const { executable, dirs } = ensureHarnessTool('dsh', options);
+  return { dsh: executable, dirs };
 }
 
 export function ensureBun(options) {
@@ -237,14 +357,14 @@ export function ensureOmp() {
   } else if (isWin) {
     const ps = which('powershell') || which('pwsh');
     if (!ps) throw new Error('Need Bun or PowerShell on PATH to install omp. See https://omp.sh/');
-    process.stdout.write('\nInstalling omp with the official PowerShell installer — one time only…\n');
+    process.stderr.write('\nInstalling omp with the official PowerShell installer — one time only…\n');
     const r = runSyncInherit(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://omp.sh/install.ps1 | iex']);
     if (r.status !== 0) throw new Error('omp install failed.');
   } else {
     const sh = which('sh');
     const curl = which('curl');
     if (!sh || !curl) throw new Error('Need Bun, or sh + curl, on PATH to install omp. See https://omp.sh/');
-    process.stdout.write('\nInstalling omp with the official shell installer — one time only…\n');
+    process.stderr.write('\nInstalling omp with the official shell installer — one time only…\n');
     const r = runSyncInherit(sh, ['-c', 'curl -fsSL https://omp.sh/install | sh']);
     if (r.status !== 0) throw new Error('omp install failed.');
   }

@@ -579,10 +579,12 @@ export function startCodexBridge({ port = DEFAULT_PORT, defaultModel = '', model
         }
       });
       server.listen(p, '127.0.0.1', () => {
+        const address = server.address();
+        const actualPort = typeof address === 'object' && address ? address.port : p;
         resolve({
           server,
-          port: p,
-          baseUrl: `http://127.0.0.1:${p}`,
+          port: actualPort,
+          baseUrl: `http://127.0.0.1:${actualPort}`,
           close: () =>
             new Promise((r) => {
               server.close(() => r());

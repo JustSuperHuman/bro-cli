@@ -1,13 +1,46 @@
 import { readFileSync } from 'node:fs';
 import { loadConfig, ensureDefaultConfig, setKey, CONFIG_PATH } from './config.js';
-import { loadModels, loadOpenRouterModels, mergeProviders, updateModels, REMOTE_URL } from './models.js';
+import {
+  loadModels,
+  loadOpenRouterModels,
+  readOpenRouterCache,
+  attachStats,
+  refreshOpenRouterStats,
+  mergeProviders,
+  updateModels,
+  REMOTE_URL
+} from './models.js';
+import { modelRow, modelHeader, topQuality, anySpeed, catalogueIndex, enrichFromCatalogue } from './model-info.js';
 import { select, selectColumns, promptHidden, isInteractive } from './ui.js';
 import { launch } from './launch.js';
 import { runPool, runPoolAccounts, runAccountProfile, accountProfileChoices, POOL_PROVIDER, ACCOUNT_PROVIDER } from './pool.js';
-import { runImageGen, imageHelp, mergeImageApis, IMAGE_PROVIDER } from './imagegen.js';
+import {
+  runJustImagine,
+  runImagineCommand,
+  runServiceCommand,
+  imagineHelp,
+  mergeImageApis,
+  parseImagineArgs,
+  IMAGINE_PROVIDER
+} from './justimagine.js';
 import { runCodex, runCodexCommand, codexProfileChoices, CODEX_PROVIDER } from './codex.js';
 import { runTokenReport } from './token-report.js';
+import { runProfilesReport } from './profile-report.js';
+import { ensureHarnessTool, HARNESS_INSTALLS, updateHarnessTool } from './proc.js';
+import { ensureDshProfilesPlugin } from './dsh-profile-plugin.js';
 import { rememberSelection, rememberHarness, lastProvider, lastModelFor, lastProfileFor, lastHarness } from './state.js';
+import { note } from './out.js';
+import {
+  browsersWithClaudeExtension,
+  browsersWithMcpChromeExtension,
+  browserBackend,
+  claudeBrowserEnabled,
+  preferredBrowser,
+  resolveBrowser,
+  runClaudeBrowserCommand,
+  setClaudeBrowserEnabled,
+  setPreferredBrowser
+} from './claude-browser.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
@@ -24,10 +57,38 @@ Usage:
                          Add/log in a Claude account for the pool
   bro accounts import <name>
                          Copy this machine's current Claude login into the pool
-  bro image              Image generation — pick an API, then a self-hosted
-                         web UI opens (images save to ./.bro/image-gen)
-  bro image -p <api>     Skip the image API menu (e.g. bro image -p yunwu)
-  bro image help         Image-generation help (APIs, models, file paths)
+  bro browser setup [browser]
+                         Give every model bro launches — Claude, GLM, the
+                         account pool — your own browser, shared by all of
+                         them at once (default: Edge)
+  bro browser setup edge --mcp-chrome
+                         Use the local mcp-chrome extension bridge at
+                         http://127.0.0.1:12306/mcp (the default)
+  bro browser setup --dedicated
+                         Use a separate persistent Edge window instead
+  bro browser use <edge|chrome|brave|vivaldi|chromium|opera|auto>
+                         Pin which browser sessions drive, and remember it
+  bro browser owner <login|auto>
+                         Which Claude login the extension is signed in as —
+                         every other login shares its browser through it
+  bro browser open       Open the shared Claude browser
+  bro browser test       Name every connected browser and say which one wins
+  bro browser reconnect  Put the extension back on the bridge when sessions
+                         report no browser (sessions do this themselves too)
+  bro browser verify     Check every Claude login reaches the browser, each
+                         through the route its own sessions use
+  bro browser status     Show browser backend and live connection readiness
+  bro browser clean      Delete unused bro browser data from earlier setups
+  bro browser disable    Stop connecting sessions to the browser
+  bro imagine            JustImagine — generate images and video in a
+                         self-hosted gallery (folders live in ./.bro/justimagine)
+  bro imagine -p <api>   Skip the API menu (e.g. bro imagine -p openrouter)
+  bro imagine service install
+                         Keep JustImagine running in the background and
+                         start it at every login (no admin needed)
+  bro imagine service status | start | stop | logs | uninstall
+  bro imagine open       Open the running JustImagine service
+  bro imagine help       JustImagine help (APIs, models, folders, paths)
   bro -p codex           Run Claude Code on your ChatGPT subscription — logs
                          in, fetches the live model list, and bridges through a
                          local Anthropic-compatible server (no codex CLI needed)
@@ -45,12 +106,19 @@ Usage:
                          Show login status for a profile / this machine
   bro codex logout [name]
                          Remove stored ChatGPT credentials
-  bro tokens             Lifetime tokens for all Claude profiles + Codex
+  bro profiles           24h / 7d / 30d usage for all Claude + Codex profiles
+  bro tokens             Lifetime + last-30d tokens for all Claude + Codex
+                         profiles
+  bro --print "<prompt>" Headless: answer once on stdout and exit. The model's
+                         answer is all that reaches stdout, so it pipes.
+                         Omit the prompt to read it from stdin. Add Claude
+                         Code's own flags after it, e.g.
+                           bro -p zai -m glm-5.3 --print "hi" --output-format json
   bro -p <provider>      Skip the provider menu (id or name)
   bro --account <name>   Launch with a logged-in profile (Claude, or the Codex
                          profile of that name with -p codex)
   bro -m <model>         Skip the model menu (use with -p)
-  bro --harness <name>   Choose harness: claude (default), omp, pi or codex
+  bro --harness <name>   Choose harness: claude (default), omp, pi, codex or dsh
   bro --omp              Launch with omp instead of Claude Code; bro sets up
                          the provider and omp picks the model (-m overrides)
   bro --pi               Launch with Pi; bro sets up the provider/model and
@@ -58,11 +126,18 @@ Usage:
   bro --codex            Launch the codex CLI instead of Claude Code (your
                          ChatGPT login, or a provider serving OpenAI's
                          Responses API)
+  bro --dsh              Launch DeepSeek Harness Web; bro syncs every model
+                         provider and autoloads the Claude/Codex profile switcher
+  bro harness install dsh
+                         Install a harness explicitly (first launch also does)
+  bro harness update dsh Update DeepSeek Harness to the current npm latest tag
   bro -l, --list         List every provider and model
-  bro update             Refresh the model list from GitHub and cache it
+  bro update             Refresh the model list from GitHub, the OpenRouter
+                         catalogue (ages, prices, benchmark scores) and every
+                         model's speed measurement
   bro --dry-run          Show what would run; launch nothing
   bro --safe             Don't pass --dangerously-skip-permissions
-  bro help, -h, --help   Show this help (bro help image for image help)
+  bro help, -h, --help   Show this help (bro help imagine for JustImagine)
   bro -v, --version      Show version
   bro --resume <id>      Pick provider/model, then pass args to the harness
   bro -- <args...>       Force everything after -- straight to the harness
@@ -71,16 +146,30 @@ Put bro flags first. The first unrecognized arg, and everything after it,
 is passed verbatim to the selected harness after provider/model selection.
 Missing harnesses are installed automatically on first use.
 
+bro's own progress goes to stderr, so stdout is always just the harness's
+output. A headless run never opens a menu, never asks for a key, and leaves
+your remembered provider/model/harness alone.
+
 Config:  ${CONFIG_PATH}
 Models:  ${REMOTE_URL}
 Docs:    https://justgains.com`;
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const a = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     if (t === '--') { a._.push(...argv.slice(i + 1)); break; }
     if (t === '--provider' || t === '-p') a.provider = argv[++i];
+    // bro's -p was taken by --provider long before Claude Code's -p/--print
+    // meant "answer once and exit". --print is bro's spelling of the latter,
+    // so a headless run needs no `--` fencing. The prompt is optional: with
+    // none, the harness reads it from stdin the way it always has.
+    else if (t === '--print') {
+      a.print = argv[i + 1] != null && !argv[i + 1].startsWith('-') ? argv[++i] : '';
+    }
+    // --print=… so a prompt may itself begin with a dash, which the bare form
+    // would otherwise read as the next flag.
+    else if (t.startsWith('--print=')) a.print = t.slice('--print='.length);
     // --account names a login profile. On its own that means the Claude
     // account switcher; alongside -p it just names the profile (Codex has
     // them too), so an explicit provider is never overridden.
@@ -91,9 +180,10 @@ function parseArgs(argv) {
     else if (t === '--pi') a.harness = 'pi';
     else if (t === '--claude') a.harness = 'claude';
     else if (t === '--codex') a.harness = 'codex';
+    else if (t === '--dsh' || t === '--deepseek') a.harness = 'dsh';
     else if (t === '--list' || t === '-l') a.list = true;
     else if (t === 'update' || t === '--update') a.update = true;
-    else if (t === 'image' || t === 'image-gen' || t === '--image') a.image = true;
+    else if (isImagineWord(t)) a.imagine = true;
     else if (t === '--dry-run') a.dryRun = true;
     else if (t === '--safe') a.safe = true;
     else if (t === '--help' || t === '-h') a.help = true;
@@ -128,20 +218,58 @@ const tagOf = (p) =>
       ? 'pick login'
     : p.mode === 'codex'
       ? 'chatgpt login'
-    : p.mode === 'image'
-      ? 'web ui'
+    : p.mode === 'imagine'
+      ? 'images + video'
       : p.mode === 'native'
         ? 'native'
         : p.mode === 'anthropic'
           ? 'anthropic-api'
           : 'via proxy';
-const modelLabel = (m) => (m.name ? `${m.name}  ${m.id ? `\x1b[2m(${m.id})\x1b[0m` : ''}` : m.id || '(default)');
+// A provider's models as picker rows: a column-heading row, then one row per
+// model laid out for whatever width the column gets (age · cost · speed ·
+// quality, see model-info.js). Cost is hidden where the price is not what the
+// user pays — a subscription login or a local model. The speed column only
+// appears once some row has a measurement.
+const showCostFor = (p) => !(p.mode === 'native' || p.noKey);
+function modelRows(models, provider) {
+  const list = models || [];
+  const now = Date.now();
+  const top = topQuality(list);
+  const opts = { now, top, showCost: showCostFor(provider), showSpeed: anySpeed(list) };
+  return [
+    { divider: true, header: true, label: (width) => modelHeader({ width, ...opts }) },
+    ...list.map((m) => ({
+      label: (width) => modelRow(m, { width, ...opts }),
+      value: m.id ?? '',
+      filterText: `${m.name || ''} ${m.id || ''}`
+    }))
+  ];
+}
+const modelHeaderFor = (models, provider) => (width) =>
+  modelHeader({ width, showCost: showCostFor(provider), showSpeed: anySpeed(models) });
+
+// The OpenRouter key also unlocks per-model speed stats (OpenRouter reports
+// throughput only to authenticated callers).
+const openRouterKey = (config) => config.keys?.openrouter || process.env.OPENROUTER_API_KEY || '';
+
+// A catalogue copy up to this old is shown as-is; the picker refreshes it in
+// the background rather than making the user wait.
+const CATALOGUE_FRESH_MS = 6 * 60 * 60 * 1000;
+
+// Other providers' models are looked up in the OpenRouter catalogue by model
+// id, so "glm-5.3" at Z.ai still shows its age and benchmark score.
+const enrichModels = (models, catalogue) => {
+  if (!catalogue?.length) return attachStats(models || []);
+  const index = catalogueIndex(catalogue);
+  return attachStats((models || []).map((m) => enrichFromCatalogue(m, index)));
+};
 const normalizeHarness = (value) => {
   const h = String(value || 'claude').toLowerCase();
   if (h === 'claude' || h === 'claude-code') return 'claude';
   if (h === 'omp' || h === 'oh-my-pi') return 'omp';
   if (h === 'pi' || h === 'pi-coding-agent') return 'pi';
   if (h === 'codex' || h === 'codex-cli') return 'codex';
+  if (h === 'dsh' || h === 'deepseek' || h === 'deepseek-harness') return 'dsh';
   return null;
 };
 
@@ -156,23 +284,111 @@ const HARNESS_TOGGLE = (harness) => ({
     { label: 'CLAUDE', value: 'claude' },
     { label: 'OMP', value: 'omp' },
     { label: 'PI', value: 'pi' },
-    { label: 'CODEX', value: 'codex' }
+    { label: 'CODEX', value: 'codex' },
+    { label: 'DEEPSEEK', value: 'dsh' }
   ],
   shortLabel: 'harness'
 });
 
+// The [b] switch picks which browser the session's browser tools drive, and
+// doubles as the on/off for them: OFF → AUTO → each browser carrying the
+// Claude extension. AUTO is right whenever only one browser has it, which is
+// why it sits first — naming one only matters when several are connected and
+// the bridge would otherwise have to ask.
+export function browserToggle({
+  installed = browserBackend() === 'mcp-chrome' ? browsersWithMcpChromeExtension() : browsersWithClaudeExtension(),
+  enabled = claudeBrowserEnabled(),
+  chosen = preferredBrowser()
+} = {}) {
+  if (process.platform !== 'win32' || !installed.length) return null;
+  const shortLabelFor = (name) => (resolveBrowser(name)?.id || name).toUpperCase();
+  const options = [
+    { label: 'OFF', value: 'off' },
+    { label: 'AUTO', value: 'auto' },
+    ...installed.map((name) => ({ label: shortLabelFor(name), value: name }))
+  ];
+  const value = !enabled ? 'off' : (chosen && installed.includes(chosen) ? chosen : 'auto');
+  return { key: 'b', name: 'browser', label: 'Browser', value, options, shortLabel: 'browser' };
+}
+
+export function applyBrowserToggle(value) {
+  if (value == null) return;
+  if (value === 'off') {
+    setClaudeBrowserEnabled(false);
+    return;
+  }
+  setClaudeBrowserEnabled(true);
+  setPreferredBrowser(value === 'auto' ? '' : value);
+}
+
+// A run is headless when nothing is going to be typed at it: the harness was
+// asked to print one answer and exit, or bro has no terminal on both ends
+// (piped, redirected, cron, CI). Headless runs must never stop to ask a
+// question they cannot show, and must not put a browser window on screen.
+const PRINT_FLAGS = new Set(['-p', '--print']);
+export const isHeadlessRun = ({ print, harnessArgs = [], interactive = isInteractive }) =>
+  print !== undefined || harnessArgs.some((arg) => PRINT_FLAGS.has(arg)) || !interactive;
+
+// The one thing a headless run cannot do is open a menu. Say what to name
+// instead, rather than reporting a cancellation nobody made.
+function explainNoMenu(what) {
+  console.error(`bro needs ${what} up front here — there is no terminal to show its menu on.`);
+  console.error('  Name them on the command line:');
+  console.error('    bro -p zai -m glm-5.3 --print "your prompt"');
+  console.error('  bro --list prints every provider id and model id.');
+}
+
 // `help` as a bare word (not just -h/--help), plus topic help, so a lost user
-// typing `bro help`, `bro help image`, or `bro image help` lands somewhere
+// typing `bro help`, `bro help imagine`, or `bro imagine help` lands somewhere
 // useful instead of having the word passed through to the harness.
 const isHelpWord = (a) => a === 'help' || a === '-h' || a === '--help';
-const isImageWord = (a) => a === 'image' || a === 'image-gen' || a === '--image';
+const isImagineWord = (a) => ['imagine', 'justimagine', 'image', 'image-gen', '--image', '--imagine'].includes(a);
+
+async function runHarnessCommand(args) {
+  const action = args[0];
+  const rawName = args[1];
+  const harness = normalizeHarness(rawName);
+  if (!['install', 'update'].includes(action) || !rawName || !harness) {
+    console.error('Usage: bro harness <install|update> <claude|omp|pi|codex|dsh>');
+    return 1;
+  }
+  try {
+    const result = action === 'update' ? updateHarnessTool(harness) : ensureHarnessTool(harness);
+    if (harness === 'dsh') ensureDshProfilesPlugin();
+    console.log(`${HARNESS_INSTALLS[harness].label} is ready: ${result.executable}`);
+    return 0;
+  } catch (error) {
+    console.error(`${HARNESS_INSTALLS[harness]?.label || rawName} ${action} failed: ${error.message}`);
+    return 1;
+  }
+}
+
+function configuredProviderKeys(providers, config) {
+  return Object.fromEntries(providers.flatMap((provider) => {
+    const key = config.keys?.[provider.id]
+      || (provider.keyEnv ? process.env[provider.keyEnv] : '')
+      || (provider.mode === 'native' && provider.id === 'anthropic' ? process.env.ANTHROPIC_API_KEY : '')
+      || '';
+    return key ? [[provider.id, key]] : [];
+  }));
+}
 
 export async function main(argv) {
+  if (argv[0] === 'harness') return runHarnessCommand(argv.slice(1));
+  if (argv[0] === 'update' && argv[1] && normalizeHarness(argv[1])) {
+    return runHarnessCommand(['update', argv[1]]);
+  }
   if (['tokens', 'token-report'].includes(argv[0])) {
     return runTokenReport();
   }
+  if (['profiles', 'profiles-report'].includes(argv[0])) {
+    return runProfilesReport();
+  }
   if (argv[0] === 'accounts') {
     return runPoolAccounts(argv.slice(1));
+  }
+  if (argv[0] === 'browser') {
+    return runClaudeBrowserCommand(argv.slice(1));
   }
   // `bro codex` on its own opens the Codex switcher, the way `bro account`
   // does for Claude; with a sub-command it manages logins and sessions, and
@@ -186,11 +402,26 @@ export async function main(argv) {
     });
   }
 
-  // Help dispatch: `bro help [topic]` and `bro image help|-h|--help`.
-  if (argv[0] === 'help' || (isImageWord(argv[0]) && isHelpWord(argv[1]))) {
-    if (isImageWord(argv[0]) || isImageWord(argv[1])) {
+  // `bro service …` is shorthand for the JustImagine background service — it
+  // is the only thing bro runs as one.
+  if (argv[0] === 'service' || argv[0] === 'daemon') {
+    ensureDefaultConfig();
+    return runServiceCommand(argv.slice(1));
+  }
+
+  // `bro imagine <sub-command>`: service control, `open`, and its own help.
+  // Anything else falls through to opening the gallery below.
+  if (isImagineWord(argv[0]) && argv[1]) {
+    ensureDefaultConfig();
+    const handled = await runImagineCommand(argv.slice(1), { config: loadConfig() });
+    if (handled !== null) return handled;
+  }
+
+  // Help dispatch: `bro help [topic]` and `bro imagine help|-h|--help`.
+  if (argv[0] === 'help' || (isImagineWord(argv[0]) && isHelpWord(argv[1]))) {
+    if (isImagineWord(argv[0]) || isImagineWord(argv[1])) {
       ensureDefaultConfig();
-      console.log(imageHelp(loadConfig()));
+      console.log(imagineHelp(loadConfig()));
     } else {
       console.log(HELP);
     }
@@ -202,17 +433,43 @@ export async function main(argv) {
   if (args.version) { console.log(pkg.version); return 0; }
 
   if (args.update) {
+    let code = 0;
     try {
       const r = await updateModels();
       console.log(`Updated models from ${r.source}`);
       console.log(`  ${r.providers} providers · ${r.models} models`);
       console.log(`  stored at ${r.cache}`);
-      return 0;
     } catch (e) {
       console.error(`Update failed: ${e.message}`);
       console.error('Kept the existing local copy.');
-      return 1;
+      code = 1;
     }
+    // The OpenRouter catalogue (ages, prices, benchmark scores) and the
+    // per-model speed measurements have their own caches; refresh both here so
+    // the picker never has to wait for them.
+    const live = await loadOpenRouterModels();
+    if (!live) {
+      console.error('OpenRouter catalogue: could not be fetched.');
+      return code || 1;
+    }
+    console.log(`  OpenRouter catalogue: ${live.length} models`);
+    const apiKey = openRouterKey(loadConfig());
+    if (!apiKey) {
+      console.log('  \x1b[2mSpeed ratings need an OpenRouter key (OPENROUTER_API_KEY, or pick OpenRouter once and save one).\x1b[0m');
+      return code;
+    }
+    const ids = live.map((m) => m.id);
+    const start = Date.now();
+    const progress = (stats) => {
+      if (!isInteractive) return;
+      const n = ids.filter((id) => (stats[id]?.at || 0) >= start).length;
+      process.stderr.write(`\r\x1b[2K  \x1b[2mmeasuring speed: ${n}/${ids.length}\x1b[0m`);
+    };
+    const stats = await refreshOpenRouterStats({ ids, apiKey, concurrency: 6, maxAge: 0, onUpdate: progress });
+    if (isInteractive) process.stderr.write('\r\x1b[2K');
+    const measured = ids.filter((id) => stats[id]?.tps != null).length;
+    console.log(`  speed measured for ${measured}/${ids.length} models`);
+    return code;
   }
 
   ensureDefaultConfig();
@@ -221,22 +478,56 @@ export async function main(argv) {
   // then the configured default.
   let harness = normalizeHarness(args.harness || lastHarness() || config.defaultHarness || 'claude');
   if (!harness) {
-    console.error(`Unknown harness: ${args.harness || config.defaultHarness}  (use: claude, omp, pi or codex)`);
+    console.error(`Unknown harness: ${args.harness || config.defaultHarness}  (use: claude, omp, pi, codex or dsh)`);
     return 1;
   }
 
-  // A command-line harness is already a completed selection. Persist it now,
-  // even when setup or provider authentication later fails. Dry runs stay pure.
-  if (!args.dryRun && !args.image && args.harness) rememberHarness(harness);
+  // --print is Claude Code's print mode under bro's own name, so it turns into
+  // the harness's own flag and everything else the user passed still follows.
+  // Checked before the harness is remembered: a combination bro is about to
+  // refuse must not become the default for every later run.
+  if (args.print !== undefined) {
+    if (harness !== 'claude') {
+      console.error(`--print runs Claude Code headless; the ${harness} harness has its own way of doing that.`);
+      console.error('  Drop --harness, or pass that harness\'s flags after --.');
+      return 1;
+    }
+    // Claude Code takes the prompt as a positional, and its own parser reads a
+    // leading dash as a flag however it is quoted. stdin has no such problem.
+    if (args.print.startsWith('-')) {
+      console.error('A prompt starting with "-" cannot be passed as an argument — Claude Code reads it as a flag.');
+      console.error('  Pipe it in instead:');
+      console.error(`    echo ${JSON.stringify(args.print)} | bro ${args.provider ? `-p ${args.provider} ` : ''}--print`);
+      return 1;
+    }
+    args._ = ['-p', ...(args.print ? [args.print] : []), ...args._];
+  }
+  const headless = isHeadlessRun({ print: args.print, harnessArgs: args._ });
+  // What the picker reopens on next time is a record of what you chose, so
+  // only a choice writes it. A dry run chose nothing, and a headless run is a
+  // script doing a job — neither should quietly redecide your default.
+  const persistChoice = !args.dryRun && !headless;
 
-  // `bro image` goes straight to the image-gen web UI (no claude involved).
-  if (args.image) {
-    return runImageGen({ config, apiId: args.provider, dryRun: args.dryRun });
+  // A command-line harness is already a completed selection. Persist it now,
+  // even when setup or provider authentication later fails.
+  if (persistChoice && !args.imagine && args.harness) rememberHarness(harness);
+
+  // `bro imagine` goes straight to the JustImagine gallery (no harness involved).
+  if (args.imagine) {
+    const flags = parseImagineArgs(argv.slice(1));
+    return runJustImagine({
+      config,
+      apiId: flags.api || args.provider,
+      dryRun: args.dryRun,
+      root: flags.root,
+      port: flags.port,
+      open: flags.open !== false
+    });
   }
 
   const data = await loadModels();
-  // The account pool and image gen are always pinned on top — no models.json entry needed.
-  const providers = [IMAGE_PROVIDER, POOL_PROVIDER, ACCOUNT_PROVIDER, CODEX_PROVIDER, ...mergeProviders(data, config.providers)];
+  // The account pool and JustImagine are always pinned on top — no models.json entry needed.
+  const providers = [IMAGINE_PROVIDER, POOL_PROVIDER, ACCOUNT_PROVIDER, CODEX_PROVIDER, ...mergeProviders(data, config.providers)];
 
   if (!providers.length) {
     console.error('No providers available. Check your network or ~/.bro/config.json.');
@@ -265,15 +556,39 @@ export async function main(argv) {
     );
     if (!provider) { console.error(`Unknown provider: ${args.provider}  (try: bro --list)`); return 1; }
   } else {
-    const modelChildren = (models) => (models || []).map((m) => ({ label: modelLabel(m), value: m.id ?? '' }));
+    const apiKey = args.dryRun ? '' : openRouterKey(config);
+    // Rows for a model list, and — with an OpenRouter key — a background pass
+    // that measures the models' speed and repaints the rows as numbers arrive.
+    // Newest models are queued first because that is what the column shows
+    // first; the pass stops when the picker closes.
+    const liveRows = (models, p, { update, signal }, { measure = true } = {}) => {
+      // Only ids OpenRouter knows can be measured: its own catalogue's, or the
+      // catalogue id a match from another provider carries.
+      const ids = models.map((m) => (p.id === 'openrouter' ? m.id : m.catalogueId)).filter(Boolean);
+      if (measure && apiKey && ids.length) {
+        refreshOpenRouterStats({
+          ids,
+          apiKey,
+          signal,
+          limit: 160,
+          onUpdate: (stats) => update(modelRows(attachStats(models, stats), p))
+        }).catch(() => {});
+      }
+      return modelRows(models, p);
+    };
     const childrenFor = (p) => {
-      if (p.mode === 'image') {
+      if (p.mode === 'imagine') {
         return mergeImageApis(config.imageApis).map((a) => ({
           label: `${a.name || a.id}  \x1b[2m${a.models?.[0]?.id || ''}\x1b[0m`,
           value: a.id
         }));
       }
-      if (p.id === 'openrouter') return async () => modelChildren((await loadOpenRouterModels()) || p.models);
+      // OpenRouter's live catalogue: a copy fetched in the last few hours is
+      // shown as-is, otherwise it is fetched now (falling back to the last
+      // copy, then to the static list).
+      if (p.id === 'openrouter') {
+        return async (ctx) => liveRows(attachStats((await loadOpenRouterModels({ maxAge: CATALOGUE_FRESH_MS })) || p.models || []), p, ctx);
+      }
       // Account profiles with live usage stats (5h/week/Fable) in the right
       // pane, followed by the sessions those profiles can resume.
       if (p.mode === 'account') return accountProfileChoices;
@@ -281,13 +596,26 @@ export async function main(argv) {
       // account pane. (Its models come from the subscription and are chosen
       // after the login, not here.)
       if (p.mode === 'codex') return codexProfileChoices;
-      return (p.models || []).length ? modelChildren(p.models) : null;
+      if (!(p.models || []).length) return null;
+      // Every other provider's models are annotated from the OpenRouter
+      // catalogue. The rows appear at once from whatever copy is on disk; a
+      // stale or missing copy is refreshed behind them.
+      return async (ctx) => {
+        const cached = readOpenRouterCache();
+        if (cached && cached.age <= CATALOGUE_FRESH_MS) return liveRows(enrichModels(p.models, cached.models), p, ctx);
+        loadOpenRouterModels()
+          .then((live) => {
+            if (live && !ctx.signal.aborted) ctx.update(liveRows(enrichModels(p.models, live), p, ctx));
+          })
+          .catch(() => {});
+        return liveRows(enrichModels(p.models, cached?.models), p, ctx, { measure: false });
+      };
     };
     // Providers that are ready to launch (key saved / env var / no key needed)
     // go on top in green, the rest below a divider.
     const hasKey = (id, keyEnv) => Boolean(config.keys?.[id] || (keyEnv && process.env[keyEnv]));
     const isConfigured = (p) => {
-      if (p.mode === 'image') return mergeImageApis(config.imageApis).some((a) => hasKey(a.id, a.keyEnv));
+      if (p.mode === 'imagine') return mergeImageApis(config.imageApis).some((a) => hasKey(a.id, a.keyEnv));
       if (p.mode === 'native' || p.noKey || ['pool', 'account', 'codex'].includes(p.mode)) return true;
       return hasKey(p.id, p.keyEnv);
     };
@@ -311,6 +639,7 @@ export async function main(argv) {
     ];
 
     const lastP = lastProvider();
+    const browser = browserToggle();
     const choice = await selectColumns({
       message: 'Choose a provider and model:',
       startIndex: Math.max(0, choices.findIndex((c) => c.value?.id === lastP)),
@@ -318,22 +647,41 @@ export async function main(argv) {
       clearScreen: true,
       banner: BANNER,
       toggle: { label: 'Skip permissions', value: skip },
-      toggles: [HARNESS_TOGGLE(harness)]
+      toggles: [HARNESS_TOGGLE(harness), ...(browser ? [browser] : [])]
     }).catch(() => null);
-    if (!choice) { console.log('Cancelled.'); return 0; }
+    if (!choice) {
+      if (headless) { explainNoMenu('a provider and model'); return 1; }
+      console.log('Cancelled.');
+      return 0;
+    }
     provider = choice.value;
     picked = choice;
     if (choice.toggleOn !== undefined) skip = choice.toggleOn;
     if (choice.toggles?.harness) harness = choice.toggles.harness;
-    if (!args.dryRun) rememberHarness(harness);
+    if (!args.dryRun) {
+      rememberHarness(harness);
+      applyBrowserToggle(choice.toggles?.browser);
+    }
   }
 
-  // Image gen: the picker's right column already chose the image API (falls
-  // back to imagegen's own menu when it didn't), then serve the local web UI.
+  // JustImagine: the picker's right column already chose the image API (falls
+  // back to its own menu when it didn't), then serve the local gallery.
   // Deliberately not remembered as the default provider — it's the exception.
-  if (provider.mode === 'image') {
-    return runImageGen({ config, apiId: picked?.child?.value, dryRun: args.dryRun });
+  if (provider.mode === 'imagine') {
+    return runJustImagine({ config, apiId: picked?.child?.value, dryRun: args.dryRun });
   }
+
+  // DSH has its own provider/model switcher, so give it the complete live
+  // OpenRouter catalog even when OpenRouter was not the row browsed in bro.
+  // Every other provider already carries its complete merged model list.
+  if (harness === 'dsh' && !args.dryRun) {
+    const openrouter = providers.find((entry) => entry.id === 'openrouter');
+    if (openrouter) {
+      const live = await loadOpenRouterModels();
+      if (live?.length) openrouter.models = live;
+    }
+  }
+  const providerKeys = configuredProviderKeys(providers, config);
 
   // Codex: with the claude/omp harness this ensures the ChatGPT subscription
   // login, fetches its live model list, picks one and bridges the harness to
@@ -355,7 +703,10 @@ export async function main(argv) {
       manage: child?.manage === true,
       extraArgs: args._,
       skipPermissions: !args.safe && config.dangerouslySkipPermissions !== false,
-      dryRun: args.dryRun
+      headless,
+      dryRun: args.dryRun,
+      providers,
+      providerKeys
     });
     if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
     return typeof result === 'number' ? result : 0;
@@ -375,10 +726,10 @@ export async function main(argv) {
   // to be chosen here (-p path) or omp needs the current model list. On fetch
   // failure the cached copy is used; failing that, the static list from
   // models.json stays.
-  if (provider.id === 'openrouter' && !args.dryRun && (model == null || harness === 'omp')) {
-    if (isInteractive) process.stdout.write('\x1b[2mFetching OpenRouter models…\x1b[0m\r');
+  if (provider.id === 'openrouter' && !args.dryRun && (model == null || harness === 'omp' || harness === 'dsh')) {
+    if (isInteractive) process.stderr.write('\x1b[2mFetching OpenRouter models…\x1b[0m\r');
     const live = await loadOpenRouterModels();
-    if (isInteractive) process.stdout.write('\x1b[2K');
+    if (isInteractive) process.stderr.write('\x1b[2K');
     if (live) provider.models = live;
   }
 
@@ -386,17 +737,32 @@ export async function main(argv) {
   if (model == null) {
     if (harness === 'omp' || !models.length) {
       model = '';
+    } else if (headless) {
+      // Nothing to pick with, so take what the menu offers first — the same
+      // row pressing Enter would have taken. For Claude's own provider that
+      // row is "your login's default", which carries no model id at all.
+      model = models[0].id ?? '';
+      if (models.length > 1) note(`\x1b[2mNo -m given; using ${model || 'the default model'}.\x1b[0m`);
     } else {
       const lastM = lastModelFor(provider.id);
+      // OpenRouter's rows already carry their facts; other providers' rows are
+      // annotated from the catalogue copy on disk.
+      const annotated = provider.id === 'openrouter' ? attachStats(models) : enrichModels(models, readOpenRouterCache()?.models);
       const choice = await select({
         message: `Choose a model for ${provider.name || provider.id}:`,
+        header: modelHeaderFor(annotated, provider),
         startIndex: lastM != null ? Math.max(0, models.findIndex((m) => (m.id ?? '') === lastM)) : 0,
-        choices: models.map((m) => ({ label: modelLabel(m), value: m.id ?? '' })),
+        // Drop the heading divider: the single-column list has its own header slot.
+        choices: modelRows(annotated, provider).slice(1),
         filterable: provider.id === 'openrouter',
         toggle: { label: 'Skip permissions', value: skip },
         toggles: [HARNESS_TOGGLE(harness)]
       }).catch(() => null);
-      if (choice == null) { console.log('Cancelled.'); return 0; }
+      if (choice == null) {
+        if (headless) { explainNoMenu(`a model for ${provider.name || provider.id}`); return 1; }
+        console.log('Cancelled.');
+        return 0;
+      }
       model = choice.value;
       if (choice.toggleOn !== undefined) skip = choice.toggleOn;
       if (choice.toggles?.harness) harness = choice.toggles.harness;
@@ -407,12 +773,15 @@ export async function main(argv) {
   // Account pool: its own setup → start proxy → launch the selected harness
   // against the local Anthropic-compatible pool endpoint.
   if (provider.mode === 'pool') {
-    if (!args.dryRun) rememberSelection(provider.id, model, harness);
+    if (persistChoice) rememberSelection(provider.id, model, harness);
     const result = await runPool({
       model,
       extraArgs: args._,
       skipPermissions: skip,
       harness,
+      providers,
+      providerKeys,
+      headless,
       dryRun: args.dryRun
     });
     // A dry run normally describes what would happen; a refused combination
@@ -432,14 +801,43 @@ export async function main(argv) {
     // A selected session deliberately leaves the destination account open:
     // runAccountProfile asks which login should resume it, preselecting owner.
     const accountName = args.account || (session ? '' : (typeof child === 'string' ? child : ''));
+    if (harness === 'dsh') {
+      if (session) {
+        console.error('A Claude Code transcript cannot be resumed inside DeepSeek Harness.');
+        console.error('  Choose a Claude profile instead; DSH keeps its own resumable sessions.');
+        return 1;
+      }
+      const fallback = providers.find((entry) => entry.id === 'anthropic' && entry.mode === 'native')
+        || providers.find((entry) => ['native', 'anthropic', 'openai'].includes(entry.mode));
+      if (!fallback) {
+        console.error('No DSH-compatible provider is configured.');
+        return 1;
+      }
+      if (persistChoice) rememberSelection(provider.id, accountName, harness);
+      const result = await launch({
+        provider: fallback,
+        model: '',
+        apiKey: providerKeys[fallback.id] || '',
+        providers,
+        providerKeys,
+        extraArgs: args._,
+        skipPermissions: skip,
+        harness,
+        dryRun: args.dryRun,
+        preferredProfile: { kind: 'claude', name: accountName || 'local' }
+      });
+      if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
+      return typeof result === 'number' ? result : 0;
+    }
     // Remember the account (not a model) so the picker preselects it next time.
-    if (!args.dryRun && !session) rememberSelection(provider.id, accountName);
+    if (persistChoice && !session) rememberSelection(provider.id, accountName);
     const result = await runAccountProfile({
       accountName,
       model,
       session,
       extraArgs: args._,
       skipPermissions: skip,
+      headless,
       dryRun: args.dryRun
     });
     if (args.dryRun) { console.log(JSON.stringify(result, null, 2)); return 0; }
@@ -454,23 +852,37 @@ export async function main(argv) {
       (provider.keyEnv && process.env[provider.keyEnv]) ||
       '';
     if (!apiKey && !args.dryRun) {
+      // A headless run has nowhere to type a key, and the two places it could
+      // have come from are worth naming rather than reporting an empty answer.
+      if (headless) {
+        console.error(`No API key for ${provider.name || provider.id}, and this run cannot prompt for one.`);
+        if (provider.keyEnv) console.error(`  Set ${provider.keyEnv}, or save it once with an interactive "bro -p ${provider.id}".`);
+        else console.error(`  Add it under "keys" in ${CONFIG_PATH}.`);
+        if (provider.keyUrl) console.error(`  Get one: ${provider.keyUrl}`);
+        return 1;
+      }
       const hint = provider.keyUrl ? `  \x1b[2m(get one: ${provider.keyUrl})\x1b[0m` : '';
       apiKey = await promptHidden(`Enter API key for ${provider.name || provider.id}${hint}\n> `).catch(() => '');
       if (!apiKey) { console.error('No key entered.'); return 1; }
       setKey(provider.id, apiKey);
-      console.log(`Saved to ${CONFIG_PATH}`);
+      note(`Saved to ${CONFIG_PATH}`);
     }
   }
 
-  if (!args.dryRun) rememberSelection(provider.id, model, harness);
+  if (persistChoice) rememberSelection(provider.id, model, harness);
+
+  if (apiKey) providerKeys[provider.id] = apiKey;
 
   const result = await launch({
     provider,
     model,
     apiKey,
+    providers,
+    providerKeys,
     extraArgs: args._,
     skipPermissions: skip,
     harness,
+    headless,
     dryRun: args.dryRun
   });
 

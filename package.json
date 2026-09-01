@@ -1,7 +1,7 @@
 {
   "name": "bro-claude",
-  "version": "0.4.2",
-  "description": "Run Claude Code, omp, Pi, or Codex against native, OpenAI-compatible, and Anthropic-compatible model providers.",
+  "version": "0.4.3",
+  "description": "Run Claude Code, omp, Pi, Codex, or DeepSeek Harness against native, OpenAI-compatible, and Anthropic-compatible model providers — plus JustImagine, a self-hosted image and video generation gallery.",
   "type": "module",
   "bin": {
     "bro": "bin/bro.js"
@@ -10,7 +10,9 @@
     "bin",
     "src",
     "pool",
+    "dsh-plugin-profiles",
     "models.json",
+    "video-models.json",
     "README.md",
     "LICENSE"
   ],
@@ -29,6 +31,8 @@
     "coding-agent",
     "pi",
     "codex",
+    "deepseek",
+    "dsh",
     "omp",
     "cli",
     "llm",
@@ -39,7 +43,14 @@
     "sakana",
     "fugu",
     "proxy",
-    "justgains"
+    "justgains",
+    "justimagine",
+    "image-generation",
+    "video-generation",
+    "text-to-video",
+    "veo",
+    "sora",
+    "seedance"
   ],
   "author": "JustGains (https://justgains.com)",
   "license": "MIT",
@@ -51,5 +62,7 @@
   "bugs": {
     "url": "https://github.com/JustSuperHuman/bro-cli/issues"
   },
-  "dependencies": {}
+  "dependencies": {
+    "ccusage": "20.0.19"
+  }
 }
