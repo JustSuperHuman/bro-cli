@@ -1,8 +1,10 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { loadConfig, setKey, CONFIG_PATH } from './config.js';
-import { loadOpenRouterImageModels, loadOpenRouterVideoModels } from './models.js';
+import { loadDesignArena, loadOpenRouterImageModels, loadOpenRouterVideoModels } from './models.js';
 import { select, promptHidden, isInteractive } from './ui.js';
 import { rememberModelFor, lastModelFor } from './state.js';
 import { mergeImageApis, IMAGE_APIS, VIDEO_KEY_API } from './justimagine-gen.js';
@@ -14,6 +16,8 @@ import {
   SERVICE_LOG,
   backendFor,
   defaultServiceRoot,
+  elevationHint,
+  isElevated,
   probe,
   readServiceConfig,
   serviceInstall,
@@ -141,9 +145,19 @@ ${apiLines}
 
 Background service:
   bro imagine service install [--root <dir>] [--port <n>]
-                           Start at login and keep running
+                           Serve this directory's gallery, from now on
   bro imagine service status | start | stop | uninstall | logs
+  Unelevated it runs while you are logged on; elevated (sudo / an
+  Administrator terminal) it starts with the machine and replaces an
+  unelevated install automatically.
   ${serviceMechanismLine()}
+
+For agents:
+  bro imagine skill        Install the generate-images-videos skill into
+                           ./.claude/skills (--global for ~/.claude/skills)
+  The gallery's own JSON API drives everything the page does — POST
+  /api/batch queues many images and clips at once, GET /api/jobs?wait=
+  blocks until they land. See docs/justimagine-api.md.
 
 Files:
   Gallery:  ./${LOCAL_ROOT.join('/')}   (per-folder history.jsonl beside the media)
@@ -158,7 +172,8 @@ Config:  ${CONFIG_PATH}`;
 
 function serviceMechanismLine() {
   const backend = backendFor();
-  return backend ? `\x1b[2mUses ${backend.name} on this machine — no admin needed.\x1b[0m` : `\x1b[2mNo service integration for ${process.platform}.\x1b[0m`;
+  if (!backend) return `\x1b[2mNo service integration for ${process.platform}.\x1b[0m`;
+  return `\x1b[2mUses ${backend.name} on this machine — no admin needed for a per-user install.\x1b[0m`;
 }
 
 // ---------- shared startup ----------
@@ -201,17 +216,35 @@ function keyResolver(config) {
 async function loadCatalogues(apis, { quiet = false } = {}) {
   const openrouter = apis.find((a) => a.id === 'openrouter');
   if (!quiet && isInteractive) process.stdout.write('\x1b[2mFetching model catalogues…\x1b[0m\r');
-  const [images, videos] = await Promise.all([
+  const [images, videos, arena] = await Promise.all([
     openrouter ? loadOpenRouterImageModels() : Promise.resolve(null),
-    loadOpenRouterVideoModels()
+    loadOpenRouterVideoModels(),
+    // The quality ranking for both media, taken from the board itself rather
+    // than OpenRouter's partial snapshot of it. Never blocks the gallery: it
+    // falls back to its cache, and then to no ranking at all.
+    loadDesignArena()
   ]);
   if (!quiet && isInteractive) process.stdout.write('\x1b[2K');
   if (openrouter && images) openrouter.models = images;
-  return videos || [];
+  return { videoModels: videos || [], designArena: arena || null };
 }
 
-async function startServer({ root, apis, videoModels, resolveKey, defaultApi, port, fixedPort }) {
-  const server = createServer({ root, apis, videoModels, resolveKey, defaultApi });
+async function startServer({ root, apis, videoModels, designArena, resolveKey, defaultApi, port, fixedPort }) {
+  // The gallery's settings panel writes keys straight into ~/.bro/config.json,
+  // the same file and the same helper the CLI's key prompt uses, so a key added
+  // in either place shows up in both. keyResolver re-reads every few seconds,
+  // so a saved key takes effect without a restart.
+  const server = createServer({
+    root,
+    apis,
+    videoModels,
+    designArena,
+    resolveKey,
+    defaultApi,
+    saveKey: setKey,
+    configPath: CONFIG_PATH,
+    statsRefresh: true
+  });
   const listenPort = fixedPort ? await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => resolve(port));
@@ -279,7 +312,7 @@ export async function runJustImagine({ config, apiId, dryRun = false, root: root
   const [legacyOut, legacyCtx] = legacyRoots(process.cwd());
   const migrated = rootArg ? { images: 0, context: 0 } : migrateLegacy(root, legacyOut, legacyCtx);
 
-  const videoModels = await loadCatalogues(apis);
+  const { videoModels, designArena } = await loadCatalogues(apis);
 
   // Only the chosen API is worth interrupting for. Video prompts separately,
   // in the UI, if OpenRouter has no key yet.
@@ -303,6 +336,7 @@ export async function runJustImagine({ config, apiId, dryRun = false, root: root
     root,
     apis,
     videoModels,
+    designArena,
     resolveKey,
     defaultApi: api.id,
     port: Number(portArg) || 8790,
@@ -337,6 +371,18 @@ const SERVICE_HELP = `bro imagine service — keep JustImagine running in the ba
   run                                   Run the server in the foreground
                                         (this is what the OS starts)
 
+Where it installs:
+  The gallery of the directory you run it in — ./${LOCAL_ROOT.join('/')} — the same
+  one 'bro imagine' serves here, unless you pass --root. Install again
+  somewhere else and it moves; the old folder is left alone.
+
+Elevated or not:
+  Unelevated it starts when you log on and stops when you log out.
+  Elevated (sudo / an Administrator terminal) it starts with the machine,
+  before anyone logs on, still running as you. An elevated install takes
+  priority and replaces an unelevated one automatically; an unelevated
+  install leaves a system-wide one alone and says so.
+
 ${serviceMechanismLine()}`;
 
 function parseServiceArgs(args) {
@@ -347,15 +393,21 @@ function parseServiceArgs(args) {
     else if (a === '--port') out.port = Number(args[++i]);
     else if (a === '-n' || a === '--lines') out.lines = Number(args[++i]);
     else if (a === '--no-open') out.open = false;
+    else if (a === '-g' || a === '--global') out.global = true;
+    else if (a === '--dir') out.dir = args[++i];
     else out._.push(a);
   }
   return out;
 }
 
-function serviceSettings(flags = {}) {
+// `fresh` is an install: it takes the gallery of the directory you are standing
+// in, the same one `bro imagine` serves here. Every other command follows what
+// the installed service recorded, so `status` and `logs` work from anywhere.
+function serviceSettings(flags = {}, { fresh = false } = {}) {
   const saved = readServiceConfig() || {};
+  const root = flags.root || process.env.JUSTIMAGINE_ROOT || (fresh ? '' : saved.root) || defaultServiceRoot();
   return {
-    root: path.resolve(flags.root || process.env.JUSTIMAGINE_ROOT || saved.root || defaultServiceRoot()),
+    root: path.resolve(root),
     port: Number(flags.port || process.env.JUSTIMAGINE_PORT || saved.port || DEFAULT_PORT)
   };
 }
@@ -364,9 +416,19 @@ function serviceSettings(flags = {}) {
 // systemd, and by `bro imagine service run` when you want to watch it.
 async function runService(flags) {
   const cfg = serviceSettings(flags);
+
+  // The scheduled task retries every few minutes, which is the keepalive for a
+  // crash. An attempt that finds the gallery already answering is a no-op, not
+  // an error worth writing to the log.
+  const already = await probe(cfg.port);
+  if (already) {
+    console.log(`JustImagine is already running at http://127.0.0.1:${cfg.port}  (${already.root})`);
+    return 0;
+  }
+
   const config = loadConfig();
   const apis = mergeImageApis(config.imageApis);
-  const videoModels = await loadCatalogues(apis, { quiet: true });
+  const { videoModels, designArena } = await loadCatalogues(apis, { quiet: true });
   const resolveKey = keyResolver(config);
 
   // Windows launches this through wscript, which discards stdout — so the
@@ -386,6 +448,7 @@ async function runService(flags) {
     root: cfg.root,
     apis,
     videoModels,
+    designArena,
     resolveKey,
     defaultApi: apis.find((a) => resolveKey(a.id))?.id || apis[0]?.id,
     port: cfg.port,
@@ -397,7 +460,9 @@ async function runService(flags) {
     throw e;
   });
 
-  writeServiceConfig({ ...cfg, url, pid: process.pid, startedAt: new Date().toISOString() });
+  // Merge rather than replace: the install recorded which scope this is and who
+  // it runs as, and a restart must not erase that.
+  writeServiceConfig({ ...(readServiceConfig() || {}), ...cfg, url, pid: process.pid, startedAt: new Date().toISOString() });
   log(`JustImagine service listening on ${url} — gallery ${cfg.root} (${videoModels.length} video models)`);
 
   // A background service must not die on a stray upstream rejection.
@@ -419,9 +484,15 @@ async function reportStatus(flags) {
   console.log(logo());
   console.log(`   ${mark(status.installed)} installed   \x1b[2m${status.detail}\x1b[0m`);
   console.log(`   ${mark(!!live)} reachable   \x1b[2m${live ? `http://127.0.0.1:${cfg.port}` : `nothing answering on port ${cfg.port}`}\x1b[0m`);
+  if (status.installed) {
+    console.log(
+      `   Scope:    ${status.scope === 'system' ? 'system — starts with the machine' : 'this user — starts when you log on'}`
+    );
+  }
   console.log(`   Gallery:  ${live?.root || cfg.root}`);
   console.log(`   Logs:     ${SERVICE_LOG}`);
   if (!status.installed) console.log(`\n   \x1b[2mbro imagine service install\x1b[0m  to start it at every login.`);
+  else if (status.scope !== 'system') console.log(`\n   \x1b[2m${elevationHint()}\x1b[0m`);
   return live || status.installed ? 0 : 1;
 }
 
@@ -456,7 +527,8 @@ export async function runServiceCommand(argv) {
   if (cmd === 'logs' || cmd === 'log') return tailLog(flags.lines || 40);
 
   if (cmd === 'install') {
-    const cfg = serviceSettings(flags);
+    const previous = readServiceConfig();
+    const cfg = serviceSettings(flags, { fresh: true });
     fs.mkdirSync(cfg.root, { recursive: true });
     const r = serviceInstall(cfg);
     if (!r.ok) {
@@ -464,25 +536,55 @@ export async function runServiceCommand(argv) {
       return 1;
     }
     console.log(logo());
+
+    // Unelevated, over an install that already starts at boot: the better one
+    // stays, and saying so beats silently installing a second server that could
+    // never get the port.
+    if (r.skipped) {
+      console.log(`   \x1b[33m○ nothing changed\x1b[0m  ${r.message}`);
+      console.log(`   URL:        \x1b[36mhttp://127.0.0.1:${cfg.port}\x1b[0m`);
+      console.log(`\n   \x1b[2m${elevationHint()}\x1b[0m\n`);
+      return 0;
+    }
+
+    const moved = previous?.root && path.resolve(previous.root) !== cfg.root;
     console.log(`   Installed:  ${r.mechanism}`);
-    console.log(`   Gallery:    ${cfg.root}`);
+    console.log(`   Starts:     ${r.boot ? 'with the machine, before anyone logs on' : 'when you log on'}`);
+    console.log(`   Gallery:    ${cfg.root}${moved ? `  \x1b[2m(was ${previous.root})\x1b[0m` : ''}`);
     console.log(`   URL:        \x1b[36mhttp://127.0.0.1:${cfg.port}\x1b[0m`);
+    if (r.replaced) console.log(`   \x1b[2mReplaced the per-user install — an elevated one takes priority.\x1b[0m`);
     const started = serviceStart();
     if (!started.ok) console.log(`   \x1b[2mCould not start it right now: ${started.message}\x1b[0m`);
-    // Task Scheduler and launchd both return before the process has bound the
-    // port, so confirm by asking the server itself.
+    // Task Scheduler, launchd and systemd all return before the process has
+    // bound the port, so confirm by asking the server itself.
     const live = await waitForPort(cfg.port, 15000);
     console.log(`   ${live ? '\x1b[32m● running\x1b[0m' : '\x1b[33m○ not answering yet — check `bro imagine service logs`\x1b[0m'}`);
-    console.log(`\n   \x1b[2mIt starts again at every login. 'bro imagine service uninstall' removes it.\x1b[0m\n`);
+    if (!r.elevated) {
+      console.log(`\n   \x1b[33m⚠ Not elevated, so this runs only while you are logged on.\x1b[0m`);
+      console.log(`     \x1b[2m${elevationHint()} Re-installing elevated replaces this one automatically.\x1b[0m`);
+    }
+    console.log(`\n   \x1b[2m'bro imagine service uninstall' removes it; your gallery is untouched.\x1b[0m\n`);
     if (live && flags.open !== false) openBrowser(`http://127.0.0.1:${cfg.port}`);
     return live ? 0 : 1;
   }
 
   if (cmd === 'uninstall' || cmd === 'remove') {
+    const before = serviceStatus();
     serviceStop();
     const r = serviceUninstall();
-    console.log(r.ok ? 'JustImagine service removed. Your gallery folder is untouched.' : `Uninstall failed: ${r.message}`);
-    return r.ok ? 0 : 1;
+    if (r.ok) {
+      console.log('JustImagine service removed. Your gallery folder is untouched.');
+      return 0;
+    }
+    console.error(`Uninstall failed: ${r.message}`);
+    if (before.scope === 'system' && !isElevated()) {
+      console.error(
+        process.platform === 'win32'
+          ? 'That one was installed for the whole machine — re-run this in an Administrator terminal.'
+          : 'That one was installed for the whole machine — re-run it with sudo.'
+      );
+    }
+    return 1;
   }
 
   if (cmd === 'start' || cmd === 'restart') {
@@ -519,6 +621,40 @@ async function waitForPort(port, timeoutMs) {
   }
 }
 
+// ---------- `bro imagine skill` ----------
+
+// The agent-facing half of JustImagine: the HTTP API is the capability, and this
+// skill is the instruction sheet for it. Shipped inside the package, copied into
+// a project (or a home directory) so Claude Code and friends can find it.
+export const SKILL_ID = 'generate-images-videos';
+export const skillSource = () =>
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', SKILL_ID);
+
+export function skillTarget({ global: g = false, dir = '' } = {}) {
+  if (dir) return path.resolve(dir);
+  return path.join(g ? os.homedir() : process.cwd(), '.claude', 'skills', SKILL_ID);
+}
+
+function installSkill(flags = {}) {
+  const src = skillSource();
+  if (!fs.existsSync(src)) {
+    console.error(`The ${SKILL_ID} skill is missing from this install (expected ${src}).`);
+    return 1;
+  }
+  const target = skillTarget(flags);
+  const existed = fs.existsSync(target);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  // Overwrite rather than merge: the skill is ours, and a half-updated one is
+  // worse than either version.
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.cpSync(src, target, { recursive: true });
+  console.log(`${existed ? 'Updated' : 'Installed'} the ${SKILL_ID} skill:`);
+  console.log(`  ${path.join(target, 'SKILL.md')}`);
+  console.log(`\nIt teaches an agent to batch-generate images and video through the`);
+  console.log(`gallery's API. ${flags.global ? 'Available in every project.' : 'Available in this project; --global installs it for every project.'}`);
+  return 0;
+}
+
 // ---------- `bro imagine open` ----------
 
 async function openRunning(flags) {
@@ -545,6 +681,7 @@ export async function runImagineCommand(argv, { config } = {}) {
   const [cmd, ...rest] = argv;
   if (cmd === 'service' || cmd === 'daemon') return runServiceCommand(rest);
   if (cmd === 'open') return openRunning(parseServiceArgs(rest));
+  if (cmd === 'skill' || cmd === 'skills') return installSkill(parseServiceArgs(rest));
   if (cmd === 'help' || cmd === '-h' || cmd === '--help') {
     console.log(imagineHelp(config || loadConfig()));
     return 0;

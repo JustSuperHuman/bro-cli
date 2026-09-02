@@ -8,13 +8,25 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;900&display=swap">
+<script>
+  // Runs before the first paint so a dark-mode user never sees a white flash.
+  // It reads the same preferences blob the app writes, and stays deliberately
+  // tiny and defensive — a private window with storage blocked must still boot.
+  try {
+    var saved = JSON.parse(localStorage.getItem('justimagine:v1') || '{}').theme;
+    if (saved === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+  } catch (e) { /* no storage; light is the default anyway */ }
+</script>
 <style>
   /* JustGains brand register: warm paper neutrals, racing-yellow accent, ink
      pills for emphasis, Montserrat throughout with weight doing the hierarchy.
      House rules come with it — never #000/#fff, no gradients on brand
      surfaces, elevation from surface steps rather than shadow. */
+  /* Light is the default, not the system's preference — the brand is paper, and
+     dark is something you opt into. The choice lives on <html data-theme>, set
+     before first paint by the bootstrap in <head>, so there is no flash. */
   :root {
-    color-scheme: light dark;
+    color-scheme: light;
     --bg: #f4f1ea;
     --surface: #f8f5ee;
     --surface-2: #ebe7de;
@@ -42,8 +54,8 @@
     --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
     --ease: cubic-bezier(.16, 1, .3, 1);
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
+  :root[data-theme='dark'] {
+      color-scheme: dark;
       --bg: #090909;
       --surface: #151515;
       --surface-2: #1f1d19;
@@ -66,7 +78,6 @@
       --danger-soft: #38100f;
       --shadow: 0 1px 2px rgba(0, 0, 0, .3);
       --shadow-lg: 0 2px 6px rgba(0, 0, 0, .4), 0 12px 34px rgba(0, 0, 0, .55);
-    }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; }
@@ -97,6 +108,26 @@
   @keyframes pulse { 50% { opacity: .3; transform: scale(.75); } }
   #offline { display: none; margin-left: auto; font-size: 12.5px; font-weight: 700; color: var(--danger); background: var(--danger-soft); border: 1px solid currentColor; padding: 5px 13px; border-radius: 999px; }
   #offline.on { display: inline-block; }
+
+  /* One group holds the whole right-hand side, so the auto margin belongs to it
+     rather than to whichever badge happens to be visible. */
+  .head-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .head-right #activeBadge, .head-right #offline { margin-left: 0; }
+
+  #theme {
+    all: unset; cursor: pointer; flex: none;
+    width: 34px; height: 34px; border-radius: 999px;
+    display: grid; place-items: center; color: var(--text-2);
+    border: 1px solid var(--border); background: var(--surface);
+    transition: color .15s var(--ease), background .15s var(--ease), border-color .15s var(--ease);
+  }
+  #theme:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-2); }
+  #theme:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Show only the theme you would switch *to*, so the button reads as an action
+     rather than a status light. */
+  #theme .sun, #theme .moon { display: none; }
+  :root:not([data-theme='dark']) #theme .moon { display: block; }
+  :root[data-theme='dark'] #theme .sun { display: block; }
 
   /* ---------- layout ---------- */
   .main { display: flex; align-items: flex-start; gap: 22px; margin-top: 6px; }
@@ -219,6 +250,60 @@
   .ed-actions button.danger { color: var(--danger); }
   .ed-actions button.danger:hover { background: var(--danger-soft); }
 
+  /* ---------- settings ---------- */
+  #settings { position: fixed; inset: 0; background: rgba(15, 14, 12, .62); backdrop-filter: blur(6px); display: none; align-items: flex-start; justify-content: center; z-index: 130; padding: 24px; overflow-y: auto; }
+  #settings.open { display: flex; }
+  .set-panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 24px; box-shadow: var(--shadow-lg);
+    width: min(620px, 96vw); margin: auto; padding: 24px 26px 26px;
+  }
+  .set-head { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 22px; }
+  .set-head h2 { font: 900 26px/1.05 var(--sans); letter-spacing: -.03em; margin: 0 0 6px; }
+  .set-head .hint { font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+  #setClose { all: unset; cursor: pointer; margin-left: auto; flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: var(--text-3); font-size: 13px; }
+  #setClose:hover { background: var(--surface-2); color: var(--text); }
+
+  .set-section { margin-bottom: 24px; }
+  .set-section:last-child { margin-bottom: 0; }
+  .set-label { font-size: 10px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; color: var(--text-3); margin-bottom: 9px; }
+  .set-note { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin-bottom: 11px; }
+
+  /* one provider */
+  .prov { border: 1px solid var(--border); border-radius: 16px; padding: 13px 15px; margin-bottom: 9px; background: var(--surface-2); }
+  .prov.ready { border-color: var(--accent-line); }
+  .prov-top { display: flex; align-items: center; gap: 9px; }
+  .prov-top b { font-size: 13.5px; font-weight: 700; }
+  .prov-pip { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--border-strong); }
+  .prov.ready .prov-pip { background: var(--accent); }
+  .prov-meta { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-3); }
+  .prov-tag { font-size: 9.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--accent-ink); background: var(--accent); padding: 2px 7px; border-radius: 999px; }
+  .prov-key { display: flex; align-items: center; gap: 7px; margin-top: 11px; }
+  .prov-key input {
+    flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 11px; font-size: 12px; font-family: var(--mono); outline: none;
+  }
+  .prov-key input:focus { border-color: var(--accent); }
+  .prov-key button { all: unset; cursor: pointer; flex: none; padding: 8px 15px; border-radius: 999px; font-size: 12px; font-weight: 700; background: var(--ink); color: var(--ink-text); }
+  .prov-key button:hover { background: var(--accent); color: var(--accent-ink); }
+  .prov-key button.ghost { background: transparent; color: var(--text-3); font-weight: 600; padding: 8px 11px; }
+  .prov-key button.ghost:hover { background: var(--surface-3); color: var(--danger); }
+  .prov-key button.busy { opacity: .5; cursor: progress; }
+  .prov-saved { display: flex; align-items: center; gap: 9px; margin-top: 11px; font-size: 12px; color: var(--text-2); }
+  .prov-saved code { font-family: var(--mono); font-size: 11.5px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 3px 8px; }
+  .prov-saved .spacer { flex: 1; }
+  .prov-saved button { all: unset; cursor: pointer; font-size: 11.5px; font-weight: 700; color: var(--text-3); padding: 4px 11px; border-radius: 999px; }
+  .prov-saved button:hover { background: var(--surface-3); color: var(--text); }
+  .prov-saved button.rm:hover { color: var(--danger); background: var(--danger-soft); }
+  .prov-hint { font-size: 11px; color: var(--text-3); margin-top: 8px; line-height: 1.5; }
+  .prov-hint a { color: var(--accent-hover); font-weight: 700; }
+
+  /* paths */
+  .path-row { display: flex; align-items: baseline; gap: 11px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .path-row:last-child { border-bottom: 0; }
+  .path-row b { flex: none; width: 74px; font-size: 10.5px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: var(--text-3); }
+  .path-row span { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); word-break: break-all; cursor: pointer; border-bottom: 1px dotted var(--border-strong); }
+  .path-row span:hover { color: var(--text); }
+
   /* the composer's cast picker */
   #castPick { position: relative; }
   #castBtn { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); border-radius: 999px; padding: 6px 13px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
@@ -298,44 +383,161 @@
   #modelBtn .tag { font-size: 11px; font-weight: 600; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
   #modelBtn .tag:empty { display: none; }
   #modelBtn .caret { color: var(--text-3); font-size: 10px; }
+  #modelBtn .rank { font-size: 10px; font-weight: 800; color: var(--accent-ink); background: var(--accent); padding: 2px 6px; border-radius: 999px; }
   /* Opens downward: the composer is pinned to the top of the page, so an
-     upward menu would run off the screen. Sized to what is left below it. */
+     upward menu would run off the screen. Two panes — the list of models, and
+     a detail column for whichever one is under the cursor or the keyboard —
+     because a price alone doesn't tell you what a model is *for*. */
   #modelMenu {
     display: none; position: absolute; top: calc(100% + 6px); left: 0; z-index: 60;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
-    box-shadow: var(--shadow-lg); padding: 6px; width: min(680px, calc(100vw - 40px)); max-height: min(460px, calc(100vh - 240px)); overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 20px;
+    box-shadow: var(--shadow-lg); width: min(860px, calc(100vw - 32px));
+    max-height: min(70vh, calc(100vh - 190px));
+    grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden;
   }
-  @media (max-width: 760px) { #modelMenu { left: auto; right: 0; } }
-  #modelMenu.open { display: block; }
+  /* Width and horizontal placement are set by placeModelMenu() once the menu is
+     open and the button's real position is known — a media query cannot see
+     where along a wrapping toolbar the button ended up. These are the values it
+     starts from. */
+  #modelMenu.open { display: grid; }
+  /* A dropdown anchored to a button is unusable on a phone: it opens off the
+     side of a 400px screen and the detail column has nowhere to go. Below the
+     breakpoint the same markup becomes a full-screen sheet instead — list on
+     top, details underneath, a real close button, and the body locked so the
+     gallery does not scroll behind it. */
+  .mm-close { display: none; }
+  @media (max-width: 720px) {
+    #modelMenu {
+      position: fixed; inset: 0; left: 0; right: 0; top: 0; bottom: 0;
+      width: auto; max-height: none; border-radius: 0; border: 0; z-index: 200;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .mm-close {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px 10px; border-bottom: 1px solid var(--border);
+    }
+    .mm-close b { font-size: 15px; font-weight: 800; letter-spacing: -.01em; }
+    .mm-close button {
+      all: unset; cursor: pointer; margin-left: auto; width: 34px; height: 34px;
+      border-radius: 999px; display: grid; place-items: center; font-size: 17px;
+      color: var(--text-2); background: var(--surface-2);
+    }
+    .mm-bar { flex-wrap: wrap; }
+    .mm-search { padding: 10px 14px; font-size: 16px; } /* 16px stops iOS zooming on focus */
+    .mm-sorts { width: 100%; overflow-x: auto; justify-content: flex-start; }
+    .mm-sorts button { padding: 7px 12px; font-size: 12px; }
+  }
+  body.sheet-open { overflow: hidden; }
+
+  /* toolbar: search + sort */
+  .mm-bar { display: flex; align-items: center; gap: 8px; padding: 10px 12px 8px; border-bottom: 1px solid var(--border); }
   .mm-search {
-    width: 100%; box-sizing: border-box; background: var(--surface-2); border: 1px solid transparent; border-radius: 12px;
-    padding: 7px 11px; font-size: 12.5px; outline: none; margin-bottom: 4px;
+    flex: 1; min-width: 0; background: var(--surface-2); border: 1px solid transparent; border-radius: 999px;
+    padding: 7px 13px; font-size: 12.5px; outline: none;
   }
   .mm-search:focus { border-color: var(--accent); }
-  .mm-head, .mm-row { display: grid; gap: 12px; align-items: center; padding: 6px 10px; }
-  .mm-head {
-    font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--text-3);
-    position: sticky; top: 0; background: var(--surface); z-index: 1; padding-top: 8px;
+  .mm-sorts { display: inline-flex; background: var(--surface-2); border-radius: 999px; padding: 3px; gap: 2px; flex: none; }
+  .mm-sorts button {
+    all: unset; cursor: pointer; padding: 4px 10px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; color: var(--text-2); white-space: nowrap;
   }
-  .mm-row { border-radius: 10px; cursor: pointer; border: 1px solid transparent; }
+  .mm-sorts button:hover { color: var(--text); }
+  .mm-sorts button.on { background: var(--ink); color: var(--ink-text); }
+
+  /* the two panes */
+  .mm-panes { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); min-height: 0; }
+  .mm-list { overflow-y: auto; padding: 6px; border-right: 1px solid var(--border); min-height: 0; }
+  .mm-detail { overflow-y: auto; padding: 16px 18px; min-height: 0; background: var(--surface-2); }
+  /* In the sheet the two columns stack: the list scrolls, and the details for
+     whatever you tapped sit under it with the commit button. Hiding the detail
+     pane entirely — as this used to — meant a phone could see prices but never
+     read what a model was actually for. */
+  @media (max-width: 720px) {
+    /* The floor matters in landscape, where 46vh of detail plus a tall blurb
+       would otherwise leave the list with no room to scroll in. */
+    .mm-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(110px, 1fr) auto; }
+    .mm-list { border-right: 0; border-bottom: 1px solid var(--border); }
+    .mm-detail {
+      max-height: 46vh; padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+      box-shadow: 0 -10px 24px rgba(0, 0, 0, .07);
+    }
+    .mm-d-use { padding: 13px 16px; font-size: 14px; }
+    .mm-row { padding: 11px 12px; }
+    .mm-row .who b { font-size: 14px; }
+    .mm-row .who span { font-size: 11px; }
+  }
+  /* A dropdown too narrow for two columns — a small laptop window, or a wide
+     phone in landscape — stacks them instead of squeezing both. Set from the
+     menu's own measured width, not the viewport's, because the two differ once
+     the menu has been clamped to fit. */
+  #modelMenu.mm-narrow .mm-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(110px, 1fr) auto; }
+  #modelMenu.mm-narrow .mm-list { border-right: 0; border-bottom: 1px solid var(--border); }
+  /* The detail row is `auto`, so without a definite cap its content eats the
+     whole menu and squeezes the list to nothing. A percentage cannot supply one
+     — the menu is sized by max-height, so its height is indefinite and the
+     percentage resolves to auto — so placeModelMenu() sets it in pixels. */
+
+  .mm-group {
+    font-size: 9.5px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; color: var(--text-3);
+    padding: 10px 10px 5px;
+  }
+  .mm-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center;
+    padding: 7px 10px; border-radius: 12px; cursor: pointer; border: 1px solid transparent;
+  }
   .mm-row:hover, .mm-row.focus { background: var(--surface-2); }
+  .mm-detail .mm-row:hover { background: var(--surface-3); }
   .mm-row.on { background: var(--surface-2); border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
   .mm-row .who { min-width: 0; }
   .mm-row .who b { display: block; font-size: 12.5px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mm-row .who span { display: block; font-size: 10.5px; color: var(--text-3); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mm-row .who .note { font-family: var(--sans); font-style: normal; color: var(--accent-hover); font-weight: 600; }
-  .mm-row .age { font-size: 11.5px; font-weight: 600; color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .mm-row .age.new { color: var(--accent-hover); }
+  /* right-hand summary: the two numbers you choose on, at a glance */
+  .mm-sum { display: flex; align-items: center; gap: 7px; flex: none; }
+  .mm-sum .price { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .mm-sum .price.none { color: var(--text-3); font-weight: 500; }
+  .mm-sum .rank { font-size: 10px; font-weight: 800; color: var(--accent-ink); background: var(--accent); padding: 2px 6px; border-radius: 999px; white-space: nowrap; }
+  .mm-sum .age { font-size: 10.5px; font-weight: 600; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .mm-sum .age.new { color: var(--accent-hover); }
+
+  /* detail pane */
+  .mm-d-name { font: 800 17px/1.2 var(--sans); letter-spacing: -.02em; margin: 0 0 3px; }
+  .mm-d-id { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); word-break: break-all; margin-bottom: 11px; }
+  .mm-d-blurb { font-size: 12.5px; line-height: 1.55; color: var(--text-2); margin-bottom: 13px; }
+  .mm-d-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 15px; }
+  .mm-d-chips i {
+    font-style: normal; font-size: 10.5px; font-weight: 700; color: var(--text-2);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px;
+  }
+  .mm-d-facts { display: grid; gap: 9px; margin-bottom: 14px; }
+  .mm-d-fact { display: grid; grid-template-columns: 58px auto minmax(0, 1fr); gap: 9px; align-items: center; }
+  .mm-d-fact > b { font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
+  .mm-d-fact > span { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .mm-d-fact.dim > span { color: var(--text-3); font-weight: 500; }
+  .mm-d-note { font-size: 11px; line-height: 1.5; color: var(--text-3); border-top: 1px solid var(--border); padding-top: 10px; }
+  .mm-d-note b { color: var(--text-2); }
+  .mm-d-use {
+    all: unset; cursor: pointer; display: block; text-align: center; width: 100%; box-sizing: border-box;
+    background: var(--ink); color: var(--ink-text); border-radius: 999px; padding: 9px 16px;
+    font-size: 12.5px; font-weight: 700; margin-bottom: 14px;
+  }
+  .mm-d-use:hover { background: var(--accent); color: var(--accent-ink); }
+  .mm-d-use.on { background: var(--accent); color: var(--accent-ink); }
+  .mm-d-empty { font-size: 12px; color: var(--text-3); line-height: 1.6; }
+
   .fact { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
   .fact small { font-size: 10.5px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meter { display: inline-flex; gap: 3px; }
   .meter i { display: block; width: 7px; height: 7px; border-radius: 50%; background: var(--surface-3); }
   .meter i.f { background: var(--ink); }
   .meter.q i.f { background: var(--accent); }
+  .meter.cost i.f { background: var(--text-2); }
   .mm-row.custom { display: flex; gap: 6px; color: var(--text-2); font-size: 12.5px; font-weight: 600; }
   .mm-row.custom:before { content: '＋'; color: var(--text-3); }
-  .mm-none { padding: 10px; font-size: 12px; color: var(--text-3); }
-  .mm-foot { padding: 6px 10px 4px; font-size: 10.5px; color: var(--text-3); line-height: 1.5; }
+  .mm-none { padding: 14px 10px; font-size: 12px; color: var(--text-3); }
+  .mm-foot { padding: 8px 14px; font-size: 10.5px; color: var(--text-3); line-height: 1.5; border-top: 1px solid var(--border); }
   #seed { width: 92px; font-family: var(--mono); }
   .hide { display: none !important; }
 
@@ -479,6 +681,71 @@
   .toast { background: var(--ink); color: var(--ink-text); box-shadow: var(--shadow-lg); border-radius: 16px; padding: 10px 15px; font-size: 12.5px; font-weight: 600; max-width: 340px; animation: rise .28s var(--ease); }
   @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
 
+  /* ---------- phones ----------
+     A 400px screen has room for one thing at a time. The gallery is what you
+     came for, so everything above it gets out of the way: the folder path goes
+     (it is a desktop affordance — you cannot paste it anywhere useful here),
+     the folder tree collapses to a short scroller, the composer's controls
+     become a comfortable two-column grid instead of a ragged wrap, and every
+     tap target grows to something a thumb can actually hit. */
+  @media (max-width: 720px) {
+    .wrap { padding: 0 12px 88px; }
+
+    header { padding: 14px 2px 8px; gap: 10px; }
+    .logo svg { width: 30px; height: 30px; }
+    .logo .word { font-size: 19px; }
+    /* The gallery path is unreadable and unusable at this width. */
+    .head-meta { display: none; }
+    .head-right { gap: 7px; }
+    #activeBadge { padding: 4px 9px; font-size: 11.5px; }
+    #activeBadge .who { display: none; }
+
+    /* The tree is a peek, not a panel — enough to switch folders and move on. */
+    #sidebar { max-height: 168px; margin-bottom: 10px; }
+    .sidetabs button { padding: 8px 0; font-size: 13px; }
+    .row { padding: 9px 8px; }
+    .row .name { font-size: 14px; }
+    .row .acts button { width: 30px; height: 30px; font-size: 13px; }
+    .row:hover .n { display: block; }  /* no hover on a phone; keep the count */
+    .row .acts { display: flex; }      /* and keep the actions reachable */
+
+    .composer { border-radius: 20px; padding: 12px 12px 10px; top: 8px; }
+    .composer textarea { font-size: 16px; }  /* 16px stops iOS zooming on focus */
+    .prompt-wrap textarea { min-height: 62px; }
+    .composer-row { gap: 7px; }
+    .composer select, .composer input[type='text'], .composer input[type='number'] {
+      padding: 9px 11px; font-size: 13px; max-width: none;
+    }
+    /* The knobs share the width evenly rather than wrapping into ragged rows. */
+    .composer-row .ctl:not(#modelPick):not(#castPick) { flex: 1 1 44%; }
+    .composer-row .ctl > select { width: 100%; }
+    #modelPick { flex: 1 1 100%; }
+    #modelBtn { width: 100%; box-sizing: border-box; padding: 10px 13px; }
+    #go { flex: 1 1 100%; justify-content: center; padding: 13px 18px; font-size: 15px; }
+    #go kbd { display: none; }
+    .spacer { display: none; }
+    #ctxRow { gap: 8px; }
+    .ctx-item { width: 46px; height: 46px; }
+
+    #galleryBar { flex-wrap: wrap; gap: 7px; padding: 12px 2px 4px; }
+    #galleryBar .where { flex: 1 1 100%; }
+    #galleryBar button { padding: 8px 13px; }
+
+    /* One clear column beats two cramped ones on a phone. */
+    #gallery { grid-template-columns: 1fr; gap: 12px; }
+    .card .actions { gap: 4px; }
+    .iconbtn { width: 32px; height: 32px; font-size: 14px; }
+    .card .pick { display: grid; width: 26px; height: 26px; }
+
+    #selBar { left: 12px; right: 12px; transform: translateY(140%); bottom: 12px; }
+    #selBar.on { transform: translateY(0); }
+
+    .ed-panel { width: 100%; max-height: 92vh; border-radius: 20px; padding: 16px; }
+    .ed-field input, .ed-field textarea { font-size: 16px; }
+    #lightbox { padding: 10px; }
+    .lb-nav { width: 40px; height: 56px; }
+  }
+
   /* House rule: transforms and opacity only, and always honour the setting. */
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
@@ -503,8 +770,25 @@
       <span class="dot">·</span>
       <span id="rootDir" title="Click to copy the gallery folder">…</span>
     </div>
+    <div class="head-right">
     <span id="activeBadge"><span class="pip"></span><span id="activeText"></span></span>
     <span id="offline">reconnecting…</span>
+    <button id="theme" type="button" aria-pressed="false" title="Switch to dark mode">
+      <svg class="sun" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.4v2.2M12 19.4v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.4 12h2.2M19.4 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/>
+      </svg>
+      <svg class="moon" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1Z"/>
+      </svg>
+    </button>
+    <button id="settingsBtn" type="button" title="Settings — API keys and where things are kept">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3.1"/>
+        <path d="M19.3 14.7a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9.3a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9.3a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.6 1.37Z"/>
+      </svg>
+    </button>
+    </div>
   </header>
 
   <div class="main">
@@ -565,8 +849,19 @@
         <select id="api" title="Image API"></select>
       </div>
       <div class="ctl" id="modelPick">
-        <button id="modelBtn" title="Model"><span class="name" id="modelName">model</span><span class="tag" id="modelTag"></span><span class="caret">▾</span></button>
-        <div id="modelMenu" role="listbox"></div>
+        <button id="modelBtn" title="Model"><span class="name" id="modelName">model</span><span class="rank hide" id="modelRank"></span><span class="tag" id="modelTag"></span><span class="caret">▾</span></button>
+        <div id="modelMenu">
+          <div class="mm-close"><b>Choose a model</b><button type="button" id="mmClose" aria-label="Close">✕</button></div>
+          <div class="mm-bar">
+            <input id="mmSearch" class="mm-search" type="search" placeholder="Search models…" spellcheck="false">
+            <div class="mm-sorts" id="mmSorts"></div>
+          </div>
+          <div class="mm-panes">
+            <div class="mm-list" id="mmList" role="listbox" aria-label="Models"></div>
+            <div class="mm-detail" id="mmDetail"></div>
+          </div>
+          <div class="mm-foot" id="mmFoot"></div>
+        </div>
         <input id="modelCustom" type="text" placeholder="model id…" spellcheck="false">
       </div>
 
@@ -701,6 +996,29 @@
   </div>
 </div>
 
+<div id="settings">
+  <div class="set-panel">
+    <div class="set-head">
+      <div>
+        <h2>Settings</h2>
+        <div class="hint">Keys are saved to your config file on this machine. Nothing is sent anywhere else.</div>
+      </div>
+      <button id="setClose" title="Close (Esc)">✕</button>
+    </div>
+
+    <div class="set-section">
+      <div class="set-label">Providers</div>
+      <div class="set-note" id="setProvidersNote"></div>
+      <div id="setProviders"></div>
+    </div>
+
+    <div class="set-section">
+      <div class="set-label">Where things are kept</div>
+      <div id="setPaths"></div>
+    </div>
+  </div>
+</div>
+
 <div id="toasts"></div>
 
 <script>
@@ -736,6 +1054,10 @@
   const picked = new Set(Array.isArray(prefs.cast) ? prefs.cast : []);
   let ctxItems = state.context || [];
   const attachments = []; // reference images attached to the next generation
+  // What the settings panel last read from /api/config. Declared up here with
+  // the rest of the top-level state so nothing reached during boot can run
+  // before it exists.
+  let config = null;
   $('countVal').textContent = count;
   $('rootDir').textContent = state.root;
   $('rootDir').onclick = async () => { try { await navigator.clipboard.writeText(state.root); toast('Gallery folder copied'); } catch {} };
@@ -750,8 +1072,16 @@
   }
 
   // ================= models =================
+  // Mutated in place rather than rebound, so every closure that captured these
+  // keeps working when the server pushes refreshed rows.
   const videoModels = state.videoModels || [];
   const imageApis = state.apis || [];
+  function refreshModelSources() {
+    videoModels.length = 0;
+    videoModels.push(...(state.videoModels || []));
+    imageApis.length = 0;
+    imageApis.push(...(state.apis || []));
+  }
 
   for (const a of imageApis) {
     const o = document.createElement('option');
@@ -770,14 +1100,29 @@
   const currentModel = () => (modelChoice === '__custom__' ? modelCustom.value.trim() : modelChoice);
   const modelSpec = () => modelList().find((m) => m.id === currentModel());
 
-  // ---- the picker: one row per model with age · cost · speed · quality ----
-  // Facts arrive display-ready from the server (see model-info.js); a column
-  // nobody in the list has anything for is left out.
-  const FACT_COLS = [
-    { key: 'cost', head: 'cost', cls: '' },
+  // ---- the picker ----
+  // Two panes: a list you scan on price and rank, and a detail column that says
+  // what the model is actually for. Everything shown arrives display-ready from
+  // the server (see model-info.js) — facts (age/cost/speed/quality) and detail
+  // (the publisher's blurb, plus capabilities read off the catalogue).
+  const FACT_ROWS = [
+    { key: 'cost', head: 'cost', cls: 'cost' },
+    { key: 'quality', head: 'quality', cls: 'q' },
     { key: 'speed', head: 'speed', cls: '' },
-    { key: 'quality', head: 'quality', cls: 'q' }
+    { key: 'age', head: 'age', cls: '' }
   ];
+  // How the list is ordered. "Recommended" is the catalogue's own order, which
+  // puts the newest first — the useful default when you don't know the field.
+  const SORTS = [
+    { key: 'default', label: 'Recommended' },
+    { key: 'quality', label: 'Best' },
+    { key: 'cost', label: 'Cheapest' },
+    { key: 'new', label: 'Newest' }
+  ];
+  let modelSort = 'default';
+  // Which row the detail pane is describing. Follows the keyboard and the
+  // pointer; it is not the selection until you click or press Enter.
+  let modelPreview = '';
   const el = (tag, cls, text) => {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -804,82 +1149,242 @@
   // "Google: Gemini 3.1 Flash Image" → "Gemini 3.1 Flash Image"; the id row
   // underneath still says who publishes it.
   const shortName = (m) => (m.name || m.id).replace(/^[^:]+:\s+/, '');
+  const isPreview = (m) => /-preview$/.test(m.id || '');
 
   function renderModelButton() {
     const spec = modelSpec();
     const custom = modelChoice === '__custom__';
     $('modelName').textContent = custom ? (currentModel() || 'custom model') : spec ? shortName(spec) : currentModel() || 'model';
-    $('modelTag').textContent = spec?.facts?.cost?.label || '';
     const f = spec?.facts || {};
+    $('modelTag').textContent = f.cost?.label || '';
+    // The rank rides on the button too: the two things you'd re-open the menu
+    // to check are what it costs and how it places.
+    const rank = $('modelRank');
+    rank.textContent = f.quality?.label || '';
+    rank.classList.toggle('hide', !f.quality?.label);
     modelBtn.title = spec
-      ? [spec.id, f.age?.title, f.cost?.title, f.speed && `Typically ${f.speed.label} here`, f.quality?.title].filter(Boolean).join('\n')
+      ? [spec.id, spec.detail?.blurb, f.age?.title, f.cost?.title, f.speed && `Typically ${f.speed.label} here`, f.quality?.title]
+          .filter(Boolean)
+          .join('\n')
       : 'Model';
   }
 
+  // Sorting keys. A model with nothing known sorts last rather than first —
+  // an unknown price is not a cheap one.
+  // Higher sorts first (except cost, which is flipped below). Quality goes by
+  // the leaderboard rank the row actually shows — sorting on the five-step
+  // rating instead put #13 above #12, which reads as a broken sort when both
+  // numbers are on screen. Negated, because rank 1 is the best one.
+  const sortValue = (m, key) => {
+    if (key === 'quality') {
+      if (m.quality?.rank) return -m.quality.rank;
+      // Scored but unplaced: below anything with a rank, above the unrated.
+      const rating = m.facts?.quality?.rating;
+      return rating != null ? -1000 + rating : -Infinity;
+    }
+    if (key === 'cost') return m.pricing?.perImage ?? m.pricing?.perSecond ?? Infinity;
+    if (key === 'new') return m.created ?? -1;
+    return 0;
+  };
+  function sortedModels(list) {
+    // Recommended is the catalogue's own order — newest first — except that a
+    // row we know nothing about (no price, no rank) drops below the ones we do,
+    // so the top of the list is always the part you can actually compare.
+    if (modelSort === 'default') {
+      const known = (m) => (m.facts?.cost || m.facts?.quality ? 0 : 1);
+      return [...list].sort((a, b) => known(a) - known(b));
+    }
+    const dir = modelSort === 'cost' ? 1 : -1;
+    return [...list].sort((a, b) => {
+      const d = (sortValue(a, modelSort) - sortValue(b, modelSort)) * dir;
+      // Ties go to the newer release, so a "-preview" never outranks the
+      // general-availability model it was benchmarked for.
+      return d || (b.created ?? 0) - (a.created ?? 0) || shortName(a).localeCompare(shortName(b));
+    });
+  }
+
+  // Design Arena ranks image models only, so for video the quality row would
+  // read "not known" against all 27 — drop it instead. Cost, speed and age
+  // always stay: an empty speed row is meaningful, and the note underneath
+  // explains that it fills in once you have generated here.
+  // Which facts anything in this list actually has, so a column nobody can
+  // fill is left out rather than shown as a row of dashes.
+  const availableFacts = (list) => {
+    const have = new Set();
+    for (const m of list || []) for (const key of ['age', 'cost', 'speed', 'quality']) if (m.facts?.[key]) have.add(key);
+    return have;
+  };
+
+  // The right-hand pane: what this model is, what it's for, and every number
+  // behind the meters spelled out.
+  function renderModelDetail(m, avail = null) {
+    const pane = $('mmDetail');
+    pane.innerHTML = '';
+    if (!m) {
+      pane.appendChild(
+        el('div', 'mm-d-empty', 'Hover or arrow through the list to see what each model is good at, what a picture costs and how it places.')
+      );
+      return;
+    }
+    const f = m.facts || {};
+    const d = m.detail || {};
+
+    pane.appendChild(el('div', 'mm-d-name', shortName(m)));
+    pane.appendChild(el('div', 'mm-d-id', m.id));
+
+    const use = el('button', 'mm-d-use' + (m.id === modelChoice ? ' on' : ''), m.id === modelChoice ? '✓ In use' : 'Use this model');
+    use.onclick = () => chooseModel(m.id);
+    pane.appendChild(use);
+
+    if (d.blurb) pane.appendChild(el('div', 'mm-d-blurb', d.blurb));
+
+    if (d.chips?.length) {
+      const chips = el('div', 'mm-d-chips');
+      for (const c of d.chips) {
+        const chip = el('i', '', c.label);
+        chip.title = c.title || '';
+        chips.appendChild(chip);
+      }
+      pane.appendChild(chips);
+    }
+
+    const facts = el('div', 'mm-d-facts');
+    const rows = avail ? FACT_ROWS.filter((c) => c.key !== 'quality' || avail.has('quality')) : FACT_ROWS;
+    for (const c of rows) {
+      const fact = f[c.key];
+      const row = el('div', 'mm-d-fact' + (fact ? '' : ' dim'));
+      // A missing fact says why it is missing where we know, rather than
+      // leaving "not known" to look like a lookup that failed.
+      const why = fact ? '' : c.key === 'cost' ? d.costNote : c.key === 'quality' ? d.qualityNote : '';
+      row.title = fact?.title || why || '';
+      row.appendChild(el('b', '', c.head));
+      // Age has no rating — it is a date, not a score — so it gets a blank
+      // meter slot and keeps the rows aligned.
+      row.appendChild(fact && fact.rating != null ? meterEl(fact.rating, c.cls) : el('span', 'meter'));
+      row.appendChild(el('span', '', fact?.label || (why ? 'not published' : 'not known')));
+      facts.appendChild(row);
+    }
+    pane.appendChild(facts);
+
+    const notes = [];
+    if (m.upscale) notes.push('This is an upscaler: give it a source video, not a prompt.');
+    if (isPreview(m)) notes.push('A preview release. The model of the same name without the “-preview” suffix is the general-availability one.');
+    if (d.borrowedFrom) notes.push(`Price and rank are OpenRouter's for ${d.borrowedFrom} — the same model. This provider may charge differently.`);
+    if (!f.cost && d.costNote) notes.push(d.costNote);
+    if (!f.quality && d.qualityNote) notes.push(d.qualityNote);
+    if (!f.speed) notes.push('Speed fills in once you have generated with this model here.');
+    if (notes.length) {
+      const note = el('div', 'mm-d-note');
+      note.appendChild(el('b', '', 'Note  '));
+      note.appendChild(document.createTextNode(notes.join(' ')));
+      pane.appendChild(note);
+    }
+  }
+
+  // The menu's shell is in the markup; rendering only refills the list, the
+  // sort pills, the detail pane and the footnote. That leaves the search box
+  // untouched, so typing in it never loses focus or the caret position.
   function renderModelMenu() {
     const list = modelList();
-    const cols = FACT_COLS.filter((c) => list.some((m) => m.facts?.[c.key]));
-    const hasAge = list.some((m) => m.facts?.age);
-    const grid = ['minmax(0, 1fr)', hasAge ? '44px' : null, ...cols.map(() => '84px')].filter(Boolean).join(' ');
-    modelMenu.innerHTML = '';
+    const rows = sortedModels(list.filter(modelMatches));
+    const listPane = $('mmList');
+    const avail = availableFacts(list);
+    listPane.innerHTML = '';
 
-    const search = el('input', 'mm-search');
-    search.type = 'search';
-    search.placeholder = `Filter ${list.length} models…`;
-    search.value = modelQuery;
-    search.oninput = () => { modelQuery = search.value; modelFocus = -1; renderModelMenu(); modelMenu.querySelector('.mm-search').focus(); };
-    search.onkeydown = onMenuKey;
-    modelMenu.appendChild(search);
+    $('mmSearch').placeholder = `Search ${list.length} ${mode === 'video' ? 'video' : 'image'} model${list.length === 1 ? '' : 's'}…`;
 
-    const head = el('div', 'mm-head');
-    head.style.gridTemplateColumns = grid;
-    head.appendChild(el('span', '', 'model'));
-    if (hasAge) head.appendChild(el('span', '', 'age'));
-    for (const c of cols) head.appendChild(el('span', '', c.head));
-    modelMenu.appendChild(head);
+    const sorts = $('mmSorts');
+    sorts.innerHTML = '';
+    for (const s of SORTS) {
+      const b = el('button', modelSort === s.key ? 'on' : '', s.label);
+      b.title = `Sort by ${s.label.toLowerCase()}`;
+      b.onclick = () => { modelSort = s.key; modelFocus = -1; renderModelMenu(); };
+      sorts.appendChild(b);
+    }
 
-    const rows = list.filter(modelMatches);
-    if (!rows.length) modelMenu.appendChild(el('div', 'mm-none', `Nothing matches "${modelQuery}"`));
+    if (!rows.length) listPane.appendChild(el('div', 'mm-none', `Nothing matches “${modelQuery}”`));
     rows.forEach((m, i) => {
       const row = el('div', 'mm-row' + (m.id === modelChoice ? ' on' : '') + (i === modelFocus ? ' focus' : ''));
-      row.style.gridTemplateColumns = grid;
       row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', m.id === modelChoice ? 'true' : 'false');
+      row.dataset.id = m.id;
+      // Under 720px the detail pane is hidden, so the row itself has to carry
+      // what the model is for.
+      row.title = [m.id, m.detail?.blurb].filter(Boolean).join('\n');
       const who = el('div', 'who');
       who.appendChild(el('b', '', shortName(m)));
       const sub = el('span', '', m.id);
       // An upscaler transforms a clip it is given; there is nothing for a bare
       // prompt to upscale, so say so in the menu rather than in a failed job.
       if (m.upscale) sub.appendChild(el('em', 'note', ' · needs a source video'));
+      // A preview release shares its name with the model it previews, so
+      // without this the two read as duplicate rows.
+      else if (isPreview(m)) sub.appendChild(el('em', 'note', ' · preview'));
       who.appendChild(sub);
       row.appendChild(who);
-      if (hasAge) {
-        const age = el('span', 'age' + (m.facts?.age?.label === 'new' ? ' new' : ''), m.facts?.age?.label || '');
-        age.title = m.facts?.age?.title || '';
-        row.appendChild(age);
+
+      const sum = el('div', 'mm-sum');
+      const f = m.facts || {};
+      if (f.quality?.label) {
+        const rank = el('span', 'rank', f.quality.label);
+        rank.title = f.quality.title || '';
+        sum.appendChild(rank);
       }
-      for (const c of cols) row.appendChild(factEl(m.facts?.[c.key], c.cls));
-      row.onclick = () => chooseModel(m.id);
-      modelMenu.appendChild(row);
+      const price = el('span', 'price' + (f.cost ? '' : ' none'), f.cost?.label || '—');
+      price.title = f.cost?.title || m.detail?.costNote || 'No published price for this model';
+      sum.appendChild(price);
+      const age = el('span', 'age' + (f.age?.label === 'new' ? ' new' : ''), f.age?.label || '');
+      age.title = f.age?.title || '';
+      sum.appendChild(age);
+      row.appendChild(sum);
+
+      // On a phone a tap previews — the detail pane below carries the commit
+      // button — because there is no hover to read the details with first.
+      row.onclick = () => {
+        if (!sheetMode()) return chooseModel(m.id);
+        modelPreview = m.id;
+        renderModelMenu();
+        $('mmDetail').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      };
+      // Pointer and keyboard drive the same preview, so the detail pane always
+      // describes whatever the person is looking at.
+      row.onmouseenter = () => { modelPreview = m.id; renderModelDetail(m, avail); };
+      listPane.appendChild(row);
     });
 
     if (mode === 'image' || modelChoice === '__custom__') {
       const custom = el('div', 'mm-row custom' + (modelChoice === '__custom__' ? ' on' : ''), 'Custom model id…');
+      custom.title = 'Type any model id this API accepts';
       custom.onclick = () => chooseModel('__custom__');
-      modelMenu.appendChild(custom);
+      listPane.appendChild(custom);
     }
-    if (cols.length) {
-      const notes = [];
-      if (cols.some((c) => c.key === 'cost')) notes.push(mode === 'video' ? 'cost: OpenRouter list price per second of video' : 'cost: estimated per image from OpenRouter list prices');
-      if (cols.some((c) => c.key === 'speed')) notes.push('speed: how long the model has taken in this gallery');
-      if (cols.some((c) => c.key === 'quality')) notes.push('quality: Design Arena head-to-head rank');
-      modelMenu.appendChild(el('div', 'mm-foot', notes.join(' · ')));
-    }
+
+    // Preview whatever the keyboard is on, else the current pick, else the top
+    // of the list — so the pane is never blank when there is something to say.
+    const previewed =
+      rows[modelFocus] || rows.find((m) => m.id === modelPreview) || rows.find((m) => m.id === modelChoice) || rows[0];
+    modelPreview = previewed?.id || '';
+    renderModelDetail(previewed, avail);
+
+    // Speed comes from OpenRouter's own measurement across everyone's traffic,
+    // so say that — unless every row we have fell back to this gallery's record.
+    const measured = rows.some((m) => m.latency?.p50 > 0);
+    const foot = [
+      mode === 'video' ? 'cost: OpenRouter list price per second of video' : 'cost: estimated per image from OpenRouter list prices',
+      avail.has('quality') ? 'quality: Design Arena head-to-head rank' : null,
+      avail.has('speed')
+        ? measured
+          ? "speed: OpenRouter's median generation time, last 30 minutes"
+          : 'speed: median of your own generations here'
+        : null
+    ].filter(Boolean);
+    $('mmFoot').textContent = foot.join(' · ');
   }
 
   function chooseModel(id) {
     modelChoice = id;
     modelCustom.style.display = id === '__custom__' ? 'inline-block' : 'none';
-    modelMenu.classList.remove('open');
+    closeModelMenu();
     modelQuery = '';
     modelFocus = -1;
     renderModelButton();
@@ -890,14 +1395,21 @@
   }
 
   function onMenuKey(e) {
-    const rows = [...modelMenu.querySelectorAll('.mm-row')];
-    if (e.key === 'Escape') { modelMenu.classList.remove('open'); modelBtn.focus(); e.preventDefault(); return; }
+    // Only the list pane is navigable — the detail pane's button is reached by
+    // Enter on the row, not by arrowing into it.
+    const rows = [...modelMenu.querySelectorAll('.mm-list .mm-row')];
+    if (e.key === 'Escape') { closeModelMenu(); modelBtn.focus(); e.preventDefault(); return; }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
       if (!rows.length) return;
       modelFocus = (modelFocus + (e.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
       rows.forEach((r, i) => r.classList.toggle('focus', i === modelFocus));
       rows[modelFocus].scrollIntoView({ block: 'nearest' });
+      // Arrowing is reading: keep the detail pane on the focused row.
+      const id = rows[modelFocus].dataset.id;
+      const list = modelList();
+      modelPreview = id || '';
+      renderModelDetail(id ? list.find((m) => m.id === id) : null, availableFacts(list));
     } else if (e.key === 'Enter') {
       e.preventDefault();
       const target = rows[modelFocus] || rows.find((r) => !r.classList.contains('custom')) || rows[0];
@@ -905,13 +1417,123 @@
     }
   }
 
-  function openModelMenu() {
+  // The search box lives in the markup, so it is wired once rather than on
+  // every render.
+  $('mmSearch').oninput = () => {
+    modelQuery = $('mmSearch').value;
     modelFocus = -1;
     renderModelMenu();
+  };
+  $('mmSearch').onkeydown = onMenuKey;
+
+  // Below this width the menu is a full-screen sheet, and a tap is a different
+  // gesture from a hover: there is nothing to hover with, so tapping a row
+  // previews it and the sheet's own button commits.
+  const sheetMode = () => window.matchMedia('(max-width: 720px)').matches;
+
+  // Below this width the two columns have nothing to give each other and stack.
+  const MM_STACK_AT = 700;
+
+  // Where the menu goes, in the space actually available.
+  //
+  // Flipping between left:0 and right:0 — which is what this used to do — only
+  // works when the button is near one edge. A button in the middle of a wide
+  // toolbar has room on neither side, so one alignment overflowed right and the
+  // other overflowed left. Instead: take the width that fits, sit under the
+  // button, then slide back only as far as needed to get the whole menu on
+  // screen. Pure arithmetic on the numbers passed in, so it is unit-tested
+  // rather than eyeballed at a few window sizes.
+  function modelMenuBox({ pickLeft, viewportWidth, viewportHeight, pickTop, pickBottom, max = 880, edge = 12 }) {
+    const width = Math.max(280, Math.min(max, viewportWidth - edge * 2));
+    // Clamp the left edge into [edge, viewportWidth - edge - width]. When the
+    // viewport is narrower than the menu the upper bound goes below the lower
+    // one, so the max() keeps it pinned to the left rather than off-screen.
+    const left = Math.max(edge, Math.min(pickLeft, viewportWidth - edge - width));
+    const below = viewportHeight - pickBottom - edge;
+    const above = pickTop - edge;
+    // Downward by default — the composer is pinned near the top of the page.
+    // Upward only when below is genuinely too short and above is roomier, which
+    // is what a short window or a wrapped toolbar produces.
+    const up = below < 260 && above > below;
+    return { width, left, offset: Math.round(left - pickLeft), up, height: Math.max(200, Math.round(up ? above : below)) };
+  }
+
+  // Apply that to the element. In sheet mode the CSS owns every one of these
+  // properties, so they are cleared rather than fought with.
+  function placeModelMenu() {
+    const style = modelMenu.style;
+    if (sheetMode()) {
+      for (const p of ['width', 'left', 'right', 'top', 'bottom', 'maxHeight']) style[p] = '';
+      $('mmDetail').style.maxHeight = '';
+      modelMenu.classList.remove('mm-narrow');
+      return;
+    }
+    const pick = $('modelPick').getBoundingClientRect();
+    const box = modelMenuBox({
+      pickLeft: pick.left,
+      pickTop: pick.top,
+      pickBottom: pick.bottom,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight
+    });
+    style.width = `${box.width}px`;
+    style.left = `${box.offset}px`;
+    style.right = 'auto';
+    style.top = box.up ? 'auto' : '';
+    style.bottom = box.up ? 'calc(100% + 6px)' : '';
+    style.maxHeight = `${box.height}px`;
+    // The detail column needs real width to be worth having; below that the
+    // panes stack, the same way they do in the phone sheet.
+    const narrow = box.width < MM_STACK_AT;
+    modelMenu.classList.toggle('mm-narrow', narrow);
+    // Stacked, the detail pane gets a definite share of the height so the list
+    // above it keeps room to scroll in; side by side, its column already bounds
+    // it and CSS can have it back.
+    // A bit under two-fifths: the list is what you scan, so it keeps the larger
+    // half, and the detail pane scrolls within its share.
+    $('mmDetail').style.maxHeight = narrow ? `${Math.round(box.height * 0.38)}px` : '';
+  }
+
+  function openModelMenu() {
+    modelFocus = -1;
+    modelQuery = '';
+    $('mmSearch').value = '';
+    renderModelMenu();
     modelMenu.classList.add('open');
-    const search = modelMenu.querySelector('.mm-search');
-    if (search) search.focus();
+    placeModelMenu();
+    // Lock the page behind the sheet so the gallery does not scroll under it.
+    document.body.classList.toggle('sheet-open', sheetMode());
+    // Focusing the search box on a phone throws the keyboard up over the list
+    // before you have seen anything.
+    if (!sheetMode()) $('mmSearch').focus();
     modelMenu.querySelector('.mm-row.on')?.scrollIntoView({ block: 'center' });
+  }
+
+  // A window resize can change everything the placement depends on — the width
+  // that fits, which side has room, and whether this is a sheet at all — so an
+  // open menu is re-placed rather than left where it was.
+  window.addEventListener('resize', () => {
+    if (!modelMenu.classList.contains('open')) return;
+    placeModelMenu();
+    document.body.classList.toggle('sheet-open', sheetMode());
+  });
+
+  function closeModelMenu() {
+    modelMenu.classList.remove('open');
+    document.body.classList.remove('sheet-open');
+  }
+
+  // With nothing saved, start on the best-rated model rather than whatever the
+  // catalogue happens to list first — which is a router with no price and no
+  // rank, a strange thing to hand someone as their default.
+  function defaultModel(list) {
+    const usable = list.filter((m) => !isPreview(m) && !m.upscale);
+    const ranked = usable.filter((m) => m.quality?.rank);
+    if (ranked.length) return ranked.reduce((a, b) => (b.quality.rank < a.quality.rank ? b : a)).id;
+    const scored = usable.filter((m) => m.facts?.quality?.rating != null);
+    if (scored.length) return scored.reduce((a, b) => (b.facts.quality.rating > a.facts.quality.rating ? b : a)).id;
+    const priced = usable.find((m) => m.facts?.cost);
+    return (priced || list[0])?.id || '';
   }
 
   function fillModels() {
@@ -919,7 +1541,7 @@
     const list = modelList();
     if (want && list.some((m) => m.id === want)) modelChoice = want;
     else if (want && mode === 'image') { modelChoice = '__custom__'; modelCustom.value = want; }
-    else modelChoice = list[0]?.id || '';
+    else modelChoice = defaultModel(list);
     modelCustom.style.display = modelChoice === '__custom__' ? 'inline-block' : 'none';
     modelQuery = '';
     renderModelButton();
@@ -978,7 +1600,7 @@
     const canLast = !!spec?.frames?.includes('last_frame') && firstFrameEl.checked;
     $('lastFrameCtl').classList.toggle('hide', !canLast || attachments.length < 2);
     $('go').classList.toggle('off', !state.videoReady);
-    $('go').title = state.videoReady ? '' : 'Video needs an OpenRouter key — add keys.openrouter to ~/.bro/config.json';
+    $('go').title = state.videoReady ? '' : 'Video needs an OpenRouter key — add one in Settings';
   }
 
   function persist() {
@@ -1008,9 +1630,10 @@
   }
 
   apiSel.onchange = () => { fillModels(); persist(); };
-  modelBtn.onclick = (e) => { e.stopPropagation(); if (modelMenu.classList.contains('open')) modelMenu.classList.remove('open'); else openModelMenu(); };
+  modelBtn.onclick = (e) => { e.stopPropagation(); if (modelMenu.classList.contains('open')) closeModelMenu(); else openModelMenu(); };
   modelBtn.onkeydown = (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); openModelMenu(); } };
-  document.addEventListener('click', (e) => { if (!modelMenu.contains(e.target)) modelMenu.classList.remove('open'); });
+  $('mmClose').onclick = () => { closeModelMenu(); modelBtn.focus(); };
+  closeOnOutside(modelMenu, modelBtn);
   modelCustom.oninput = () => { renderModelButton(); syncKnobs(); persist(); };
   for (const el of [sizeSel, qualitySel, durSel, resSel, aspSel]) el.onchange = persist;
   $('countDown').onclick = () => { count = Math.max(1, count - 1); $('countVal').textContent = count; persist(); };
@@ -1493,7 +2116,7 @@
   }
 
   castBtn.onclick = (e) => { e.stopPropagation(); castMenu.classList.toggle('open'); };
-  document.addEventListener('click', (e) => { if (!castMenu.contains(e.target)) castMenu.classList.remove('open'); });
+  closeOnOutside(castMenu, castBtn);
 
   // sidebar tabs
   for (const b of document.querySelectorAll('.sidetabs button')) {
@@ -2216,7 +2839,7 @@
     if (!text) { promptEl.focus(); return; }
     const model = currentModel();
     if (!model) { toast('Pick or type a model first'); openModelMenu(); return; }
-    if (mode === 'video' && !state.videoReady) { toast('Video needs an OpenRouter key — add keys.openrouter to ~/.bro/config.json'); return; }
+    if (mode === 'video' && !state.videoReady) { toast('Video needs an OpenRouter key — add one in Settings'); return; }
     persist();
     const images = [...attachments];
     const req = mode === 'video'
@@ -2246,6 +2869,51 @@
   }
   promptEl.addEventListener('input', autosize);
 
+  // Close a popup when the press lands outside it.
+  //
+  // This listens on pointerdown, not click, for a reason: a control *inside*
+  // the popup — a sort pill, a character row — re-renders the popup's contents
+  // in its own click handler. By the time a document-level click listener runs,
+  // the element that was clicked has been replaced, so `menu.contains(target)`
+  // is false and the popup closes itself. Pointerdown fires before any of that,
+  // when the target is still attached and the answer is still true.
+  function closeOnOutside(menu, ...anchors) {
+    document.addEventListener('pointerdown', (e) => {
+      if (!menu.classList.contains('open')) return;
+      if (menu.contains(e.target) || anchors.some((a) => a?.contains(e.target))) return;
+      menu.classList.remove('open');
+      onMenuClosed(menu);
+    });
+  }
+  // Hook for popups that also own body state (the mobile sheet locks scroll).
+  function onMenuClosed(menu) {
+    if (menu === modelMenu) document.body.classList.remove('sheet-open');
+  }
+
+  // ---- light / dark ----
+  // Light is the default and the choice is remembered per browser. The <head>
+  // bootstrap has already applied it before first paint; this only keeps the
+  // button's label and state in step, and writes the change back.
+  const themeBtn = $('theme');
+  const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+
+  function paintThemeButton() {
+    const dark = isDark();
+    themeBtn.setAttribute('aria-pressed', String(dark));
+    themeBtn.title = dark ? 'Switch to light mode' : 'Switch to dark mode';
+    themeBtn.setAttribute('aria-label', themeBtn.title);
+  }
+
+  themeBtn.onclick = () => {
+    const dark = !isDark();
+    // Light is the absence of the attribute, matching what the bootstrap reads.
+    if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+    else document.documentElement.removeAttribute('data-theme');
+    save({ theme: dark ? 'dark' : 'light' });
+    paintThemeButton();
+  };
+  paintThemeButton();
+
   // ---- ✨ improve this prompt ----
   // The rewrite happens server-side on the OpenRouter key, so no model choice
   // or second key is needed here. What you wrote is kept until you touch the
@@ -2274,7 +2942,7 @@
       if (button.classList.contains('working')) return;
       const text = field.value.trim();
       if (!text) { toast('Write something first — even a few words is enough'); field.focus(); return; }
-      if (!state.enhanceReady) { toast('Improving text needs an OpenRouter key — add keys.openrouter to ~/.bro/config.json'); return; }
+      if (!state.enhanceReady) { toast('Improving text needs an OpenRouter key — add one in Settings'); return; }
       const was = field.value;
       button.classList.add('working');
       try {
@@ -2320,6 +2988,16 @@
     es.onmessage = (e) => {
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
+      // Speed measurements arrive a moment after boot, once OpenRouter has been
+      // asked about every model. Fold them in without disturbing the picker.
+      if (msg.type === 'models') {
+        state.apis = msg.apis;
+        state.videoModels = msg.videoModels;
+        refreshModelSources();
+        renderModelButton();
+        if (modelMenu.classList.contains('open')) renderModelMenu();
+        return;
+      }
       const list = msg.type === 'snapshot' ? msg.jobs : msg.type === 'job' ? [msg.job] : [];
       for (const job of list) {
         // A reference sheet belongs to the character editor, not the gallery —
@@ -2397,10 +3075,191 @@
     lbVid.removeAttribute('src');
     lbImg.removeAttribute('src');
   }
+  // ================= settings =================
+  // Keys used to mean quitting the gallery and hand-editing a JSON file, which
+  // is why three different toasts had to explain where that file was. This panel
+  // does the same job in place: what each provider is for, whether it is ready,
+  // and a field to paste a key into. The server never sends a key back — only a
+  // masked preview — so what is on screen cannot be harvested from the DOM.
+  const settingsEl = $('settings');
+
+  const copyable = (label, value) => {
+    const row = el('div', 'path-row');
+    row.appendChild(el('b', '', label));
+    const v = el('span', '', value || '—');
+    if (value) {
+      v.title = 'Click to copy';
+      v.onclick = async () => { try { await navigator.clipboard.writeText(value); toast(`${label} copied`); } catch {} };
+    }
+    row.appendChild(v);
+    return row;
+  };
+
+  function renderSettings() {
+    const wrap = $('setProviders');
+    wrap.innerHTML = '';
+    if (!config) {
+      wrap.appendChild(el('div', 'set-note', 'Loading…'));
+      return;
+    }
+
+    $('setProvidersNote').textContent = config.writable
+      ? 'A key is saved as soon as you press Save, and takes effect within a few seconds — no restart.'
+      : 'This gallery cannot write your config file, so keys are shown but not editable here.';
+
+    for (const p of config.apis) {
+      const card = el('div', 'prov' + (p.hasKey ? ' ready' : ''));
+
+      const top = el('div', 'prov-top');
+      top.appendChild(el('span', 'prov-pip'));
+      top.appendChild(el('b', '', p.name));
+      const meta = el('div', 'prov-meta');
+      // OpenRouter carries video and the ✨ rewriter as well as images, which is
+      // why it is worth having even if you already have another image key.
+      if (p.video) meta.appendChild(el('span', 'prov-tag', 'video + ✨'));
+      meta.appendChild(el('span', '', `${p.models} model${p.models === 1 ? '' : 's'}`));
+      top.appendChild(meta);
+      card.appendChild(top);
+
+      if (p.hasKey) {
+        const saved = el('div', 'prov-saved');
+        saved.appendChild(document.createTextNode(p.source === 'env' ? 'From your environment' : 'Key saved'));
+        saved.appendChild(el('code', '', p.keyPreview));
+        saved.appendChild(el('div', 'spacer'));
+        if (p.source === 'env') {
+          const note = el('span', '', p.keyEnv);
+          note.title = `Set by the ${p.keyEnv} environment variable — change it in your shell, not here`;
+          note.style.fontFamily = 'var(--mono)';
+          note.style.fontSize = '11px';
+          saved.appendChild(note);
+        } else if (config.writable) {
+          const replace = el('button', '', 'Replace');
+          replace.onclick = () => showKeyField(card, p, true);
+          saved.appendChild(replace);
+          const rm = el('button', 'rm', 'Remove');
+          rm.onclick = () => saveProviderKey(p, '', rm);
+          saved.appendChild(rm);
+        }
+        card.appendChild(saved);
+      } else if (config.writable) {
+        showKeyField(card, p, false);
+      }
+
+      if (!p.hasKey && p.keyUrl) {
+        const hint = el('div', 'prov-hint');
+        hint.appendChild(document.createTextNode('No key yet — '));
+        const a = el('a', '', 'get one');
+        a.href = p.keyUrl;
+        a.target = '_blank';
+        a.rel = 'noreferrer noopener';
+        hint.appendChild(a);
+        hint.appendChild(document.createTextNode(`, or set ${p.keyEnv} in your shell.`));
+        card.appendChild(hint);
+      }
+
+      wrap.appendChild(card);
+    }
+
+    const paths = $('setPaths');
+    paths.innerHTML = '';
+    paths.appendChild(copyable('Gallery', config.root));
+    paths.appendChild(copyable('Config', config.configPath));
+    paths.appendChild(copyable('Rewriter', config.enhanceModel));
+  }
+
+  // The paste field. Kept out of the DOM until it is wanted so a saved key has
+  // no editable copy of itself sitting on the page.
+  function showKeyField(card, p, replacing) {
+    card.querySelector('.prov-key')?.remove();
+    const row = el('div', 'prov-key');
+    const input = el('input');
+    input.type = 'password';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.placeholder = replacing ? 'Paste a new key…' : `Paste your ${p.name} key…`;
+    row.appendChild(input);
+    const save = el('button', '', 'Save');
+    save.onclick = () => saveProviderKey(p, input.value, save);
+    row.appendChild(save);
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); save.click(); }
+      if (e.key === 'Escape') { e.preventDefault(); if (replacing) renderSettings(); }
+    };
+    if (replacing) {
+      const cancel = el('button', 'ghost', 'Cancel');
+      cancel.onclick = () => renderSettings();
+      row.appendChild(cancel);
+    }
+    card.appendChild(row);
+    input.focus();
+  }
+
+  async function saveProviderKey(p, key, button) {
+    const clearing = !key.trim();
+    if (clearing && !confirm(`Remove the saved ${p.name} key?`)) return;
+    button.classList.add('busy');
+    try {
+      await api('/api/config/key', { id: p.id, key });
+      config = await api('/api/config');
+      renderSettings();
+      toast(clearing ? `${p.name} key removed` : `${p.name} key saved`);
+      // The composer's API list and the video/✨ buttons key off readiness, so
+      // pull fresh state rather than making the user reload.
+      await refreshReadiness();
+    } catch (e) {
+      toast(e.message || 'Could not save that key');
+    } finally {
+      button.classList.remove('busy');
+    }
+  }
+
+  // Re-read the parts of /api/state that a new key changes, and update the bits
+  // of the UI that were greyed out because a key was missing.
+  async function refreshReadiness() {
+    try {
+      const fresh = await api('/api/state');
+      state.videoReady = fresh.videoReady;
+      state.enhanceReady = fresh.enhanceReady;
+      for (const a of fresh.apis) {
+        const mine = imageApis.find((x) => x.id === a.id);
+        if (mine) { mine.hasKey = a.hasKey; mine.models = a.models; }
+      }
+      for (const o of apiSel.options) {
+        const a = imageApis.find((x) => x.id === o.value);
+        if (a) o.textContent = a.name + (a.hasKey ? '' : ' · no key');
+      }
+      magicBtn.classList.toggle('off', !state.enhanceReady);
+      magicBtn.title = state.enhanceReady
+        ? `Improve this prompt (${state.enhanceModel}) · Ctrl+Enter`
+        : 'Improving prompts needs an OpenRouter key';
+      fillModels();
+      syncKnobs();
+    } catch {
+      /* the panel already said the key was saved; readiness catches up on reload */
+    }
+  }
+
+  async function openSettings() {
+    settingsEl.classList.add('open');
+    renderSettings();
+    try {
+      config = await api('/api/config');
+    } catch (e) {
+      toast(e.message || 'Could not read the config');
+    }
+    renderSettings();
+  }
+  const closeSettings = () => settingsEl.classList.remove('open');
+
+  $('settingsBtn').onclick = openSettings;
+  $('setClose').onclick = closeSettings;
+  settingsEl.addEventListener('click', (e) => { if (e.target === settingsEl) closeSettings(); });
+
   lightbox.addEventListener('click', (e) => { if (e.target === lightbox) closeLightbox(); });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      if (lightbox.classList.contains('open')) closeLightbox();
+      if (settingsEl.classList.contains('open')) closeSettings();
+      else if (lightbox.classList.contains('open')) closeLightbox();
       else clearSelection();
       return;
     }

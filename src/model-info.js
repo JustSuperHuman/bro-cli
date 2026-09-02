@@ -122,6 +122,25 @@ export function modelKey(id) {
   return s.replace(/[^a-z0-9]/g, '');
 }
 
+// Design Arena names a model the way its makers say it aloud; a catalogue names
+// it the way you call it over HTTP. Normalise the differences that are purely
+// spelling, so the leaderboard can be matched to what we serve:
+//
+//   wan-v3.0-t2v  → wan3       a `v` before the version, and the modality suffix
+//   kling-v3-pro  → kling3pro
+//   seedance-2.0  → seedance2  a trailing .0 is the same release as no .0
+//
+// Deliberately conservative: `veo-3` and `veo-3.1` stay different models, and
+// so do `grok-imagine-video` and `grok-imagine-video-1.5`. A wrong match would
+// put another model's score on a row, which is worse than leaving it blank.
+export function mediaKey(id) {
+  let s = String(id || '').toLowerCase();
+  s = s.replace(/[-_](t2v|i2v|v2v)$/, ''); // text-to-video is a mode, not a model
+  s = s.replace(/(^|[-_/])v(\d)/g, '$1$2'); // -v3.0 → -3.0
+  s = s.replace(/(\d)\.0(?![0-9])/g, '$1'); // 3.0 → 3
+  return modelKey(s);
+}
+
 // Lookup table from normalised key to catalogue entry; the first (newest)
 // entry wins when several share a key.
 export function catalogueIndex(models) {
@@ -142,6 +161,71 @@ export function enrichFromCatalogue(model, index) {
   if (!hit) return model;
   const { id: catalogueId, name: _name, ...facts } = hit;
   return { ...facts, catalogueId, ...model };
+}
+
+// The same trick for the gallery's image and video models — but copying only
+// the four display facts and the blurb, never a routing field. A provider's
+// entry says how to *call* it (`via`, urls, capability lists); borrowing
+// `via: 'chat'` from OpenRouter's catalogue would quietly re-route a Yunwu or
+// OpenAI model through the wrong endpoint. `factsFrom` records that the numbers
+// describe the same model at a different vendor, so the UI can say so rather
+// than presenting another shop's price as this one's.
+const MEDIA_FACT_FIELDS = ['created', 'pricing', 'quality', 'description'];
+
+export function enrichMediaFacts(model, index) {
+  if (!model?.id || !index) return model;
+  const hit = index.get(modelKey(model.id));
+  if (!hit || hit.id === model.id) return model;
+  const out = { ...model };
+  let borrowed = false;
+  for (const f of MEDIA_FACT_FIELDS) {
+    if (out[f] == null && hit[f] != null) {
+      out[f] = hit[f];
+      borrowed = true;
+    }
+  }
+  if (borrowed) out.factsFrom = hit.id;
+  return out;
+}
+
+// ---------- Design Arena ----------
+
+// The leaderboard keyed for matching, per category, carrying how many models
+// the board holds so a rank can say what it is a rank *out of*.
+export function arenaIndex(board) {
+  const index = new Map();
+  for (const category of Object.keys(board || {})) {
+    const rows = Array.isArray(board[category]) ? board[category] : [];
+    rows.forEach((row, i) => {
+      // Takes either the mapped row or the leaderboard's own shape, and derives
+      // the rank from position when it is not already carried — the board comes
+      // back best-first either way.
+      const key = mediaKey(row?.id ?? row?.modelId);
+      // First wins: a preview and the release that shares its name resolve to
+      // the higher-placed of the two.
+      if (!key || index.has(`${category}:${key}`)) return;
+      index.set(`${category}:${key}`, { category, ...row, rank: row?.rank ?? i + 1, of: rows.length });
+    });
+  }
+  return index;
+}
+
+// A model's own standing on the board, in the shape `quality` takes elsewhere.
+// `own` marks it as measured on this very model rather than lent by a sibling,
+// so the facts do not misattribute it.
+export function arenaQuality(model, index, kind = 'image') {
+  if (!model?.id || !index) return null;
+  const hit = index.get(`${kind === 'video' ? 'video' : 'image'}:${mediaKey(model.id)}`);
+  if (!hit) return null;
+  return {
+    arena: hit.category,
+    winRate: hit.winRate,
+    rank: hit.rank,
+    elo: hit.elo,
+    of: hit.of,
+    battles: hit.battles,
+    own: true
+  };
 }
 
 // ---------- rows ----------
@@ -338,6 +422,13 @@ export function mediaModelFacts(model, { kind = 'image', now = Date.now(), timin
     const label = ageLabel(model.created, now);
     facts.age = { label, title: `Published ${new Date(model.created * 1000).toISOString().slice(0, 10)}` };
   }
+  // A fact borrowed from the same model on OpenRouter describes that listing,
+  // not this vendor's bill — say so rather than quoting another shop's price
+  // as if it were this one's.
+  const borrowedPrice = model?.factsFrom
+    ? ` — OpenRouter's list price for ${model.factsFrom}; this provider may charge differently`
+    : '';
+  const borrowedScore = model?.factsFrom ? ` — measured on ${model.factsFrom}, the same model at OpenRouter` : '';
   const p = model?.pricing || {};
   if (kind === 'video' && p.perSecond != null) {
     const rating = videoCostRating(p.perSecond);
@@ -345,17 +436,38 @@ export function mediaModelFacts(model, { kind = 'image', now = Date.now(), timin
     facts.cost = {
       rating,
       label: `${formatCents(p.perSecond)}/s`,
-      title: `About ${formatCents(p.perSecond * 5)} for a 5-second clip${basis} (OpenRouter list price)`
+      title: `About ${formatCents(p.perSecond * 5)} for a 5-second clip${basis} (OpenRouter list price)${borrowedPrice}`
     };
   } else if (kind !== 'video' && p.perImage != null) {
     const rating = imageCostRating(p.perImage);
+    // Two kinds of image price: one derived from a per-token rate in
+    // OpenRouter's catalogue, and one the vendor publishes per picture (the
+    // first-party Images API models, which no catalogue we read carries). Each
+    // explains itself, because "≈4¢" invites the question of 4¢ for what.
+    const how =
+      p.imageOutput != null
+        ? `estimated from ${formatPrice(p.imageOutput)}/M output tokens (OpenRouter list price)`
+        : `${p.basis ? `at ${p.basis} ` : ''}(${p.source || 'list price'})`;
     facts.cost = {
       rating,
       label: rating === 0 ? 'free' : `≈${formatCents(p.perImage)}`,
-      title: `About ${formatCents(p.perImage)} per image, estimated from ${formatPrice(p.imageOutput)}/M output tokens (OpenRouter list price)`
+      title: `About ${formatCents(p.perImage)} per image, ${how}${borrowedPrice}`
     };
   }
-  if (timing?.median > 0) {
+  // OpenRouter's own measurement first: it is there before you have generated
+  // anything, and it is a p50 over everyone's requests in the last half hour
+  // rather than a handful of your own. Your gallery's record is the fallback,
+  // which is all there is for a model OpenRouter has no traffic for.
+  const measured = model?.latency;
+  if (measured?.p50 > 0) {
+    facts.speed = {
+      rating: generationSpeedRating(measured.p50, kind),
+      label: formatDuration(measured.p50),
+      title:
+        `Typically ${formatDuration(measured.p50)} — OpenRouter's median over ` +
+        `${measured.n ? measured.n.toLocaleString() + ' request' + (measured.n === 1 ? '' : 's') : 'recent traffic'} in the last 30 minutes${borrowedScore}`
+    };
+  } else if (timing?.median > 0) {
     const n = timing.n || 1;
     facts.speed = {
       rating: generationSpeedRating(timing.median, kind),
@@ -366,11 +478,143 @@ export function mediaModelFacts(model, { kind = 'image', now = Date.now(), timin
   const q = model?.quality;
   if (q?.winRate != null) {
     const from = q.from ? ` (measured on ${q.from})` : '';
+    // A rank means little without the size of the field, and a win rate means
+    // little without the number of votes behind it.
+    const place = q.rank ? `rank ${q.rank}${q.of ? ` of ${q.of}` : ''}, ` : '';
+    const votes = q.battles ? ` over ${q.battles.toLocaleString()} head-to-head votes` : '';
     facts.quality = {
       rating: arenaRating(q.winRate),
       label: q.rank ? `#${q.rank}` : `${Math.round(q.winRate)}%`,
-      title: `Design Arena ${q.arena || 'image'} leaderboard: ${Math.round(q.winRate)}% win rate${q.rank ? `, rank ${q.rank}` : ''}${from}`
+      // Matched on this model's own name, so it is not another listing's score.
+      title: `Design Arena ${q.arena || 'image'} leaderboard: ${place}${Math.round(q.winRate)}% win rate${votes}${from}${q.own ? '' : borrowedScore}`
     };
   }
   return facts;
+}
+
+// ---------- descriptions ----------
+
+// OpenRouter ships a prose description with every image and video model. It is
+// the honest answer to "what is this good at" — better than anything we could
+// invent — but it is written for a docs page: markdown links, the odd code
+// span, and several paragraphs. Reduce it to plain sentences that fit a picker.
+export function cleanDescription(text, { sentences = 2, max = 260 } = {}) {
+  if (!text || typeof text !== 'string') return '';
+  let s = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    // "[Gemini 3 Pro](https://…)" → "Gemini 3 Pro"
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[`*_#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return '';
+
+  // Take whole sentences up to the budget. A decimal point ("Gemini 2.5") and
+  // an abbreviation ("a.k.a.") are not sentence ends, so only break on a stop
+  // that is followed by a space and a capital.
+  // Two ordinary word characters must precede the stop, so "a.k.a." and
+  // "Gemini 2.5" stay inside their sentence instead of ending it.
+  const parts = s.split(/(?<=[a-z0-9)”"][a-z0-9)”"][.!?])\s+(?=[A-Z“"(])/);
+  let out = '';
+  let taken = 0;
+  for (const part of parts) {
+    if (out && (taken >= sentences || (out + ' ' + part).length > max)) break;
+    out = out ? `${out} ${part}` : part;
+    taken++;
+  }
+  if (!out) out = s;
+  if (out.length > max) out = out.slice(0, max - 1).replace(/[\s,;:.]+\S*$/, '') + '…';
+  return out;
+}
+
+// ---------- capabilities ----------
+
+// The tallest resolution a video model offers, as a label people recognise.
+export function bestResolution(resolutions) {
+  if (!Array.isArray(resolutions) || !resolutions.length) return '';
+  const height = (r) => {
+    const s = String(r).toLowerCase();
+    if (/4k/.test(s)) return 2160;
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const best = resolutions.reduce((a, b) => (height(b) > height(a) ? b : a));
+  return height(best) >= 2160 ? '4K' : String(best);
+}
+
+// What a model can actually do, read off the fields the catalogue gives us
+// rather than guessed. Each chip is { label, title } so the row stays short and
+// the hover explains it. Nothing here is invented: a chip appears only when the
+// data says so.
+export function modelChips(model, kind = 'image') {
+  if (!model) return [];
+  const chips = [];
+  const add = (label, title) => chips.push({ label, title });
+
+  if (kind === 'video') {
+    if (model.upscale) add('upscaler', 'Enlarges a video you give it — it needs a source clip, not a prompt');
+    const durations = Array.isArray(model.durations) ? model.durations.filter((d) => Number.isFinite(d)) : [];
+    if (durations.length) {
+      const max = Math.max(...durations);
+      const min = Math.min(...durations);
+      add(`to ${max}s`, `Clip length ${min}–${max} seconds`);
+    }
+    const res = bestResolution(model.resolutions);
+    if (res) add(res, `Renders up to ${res} (${model.resolutions.join(', ')})`);
+    if (model.audio) add('audio', 'Generates a soundtrack with the picture');
+    const frames = Array.isArray(model.frames) ? model.frames : [];
+    if (frames.includes('first_frame')) add('1st frame', 'Animates a reference image as the opening frame');
+    if (frames.includes('last_frame')) add('last frame', 'Takes a closing frame as well, so you can direct where the shot ends');
+    if (model.seed) add('seed', 'Accepts a seed, so the same prompt can be reproduced');
+    if (Array.isArray(model.aspectRatios) && model.aspectRatios.length) {
+      add(`${model.aspectRatios.length} ratios`, `Aspect ratios: ${model.aspectRatios.join(', ')}`);
+    }
+  } else {
+    if (model.via === 'chat') {
+      add('reads refs', 'Chat-routed: it takes your reference images and edits as well as generates. Size and quality are described in the prompt, not set as knobs.');
+    } else {
+      add('size & quality', 'An /images/generations model: pick the size and quality with the knobs beside the prompt');
+    }
+    const res = bestResolution(model.resolutions);
+    if (res) add(res, `Renders up to ${res}`);
+  }
+  return chips;
+}
+
+// The rest of what the picker's detail pane shows, kept apart from
+// mediaModelFacts so the four-meter contract stays exactly four meters.
+// `blurb` is the publisher's own description; `chips` are capabilities read off
+// the catalogue; `borrowedFrom` names the listing any borrowed number came
+// from, so the pane can attribute it.
+export function mediaModelDetail(model, { kind = 'image' } = {}) {
+  return {
+    blurb: model?.description ? cleanDescription(model.description) : '',
+    chips: modelChips(model, kind),
+    borrowedFrom: model?.factsFrom || null,
+    costNote: costNote(model, kind),
+    qualityNote: qualityNote(model)
+  };
+}
+
+// Design Arena only ranks what people have actually voted on, so plenty of
+// models have no standing — including every brand-new release. Say that, rather
+// than leaving a dash that reads like a failed lookup.
+export function qualityNote(model) {
+  if (!model || model.quality?.winRate != null) return '';
+  return 'Design Arena has not ranked this model — nobody has voted on it head to head yet.';
+}
+
+// Some models have no price because none *can* be quoted, not because we failed
+// to look it up. Saying which is which turns a bare dash into an answer.
+export function costNote(model, kind = 'image') {
+  if (!model || model.pricing?.perImage != null || model.pricing?.perSecond != null) return '';
+  // A router charges whatever the model it picks charges.
+  if (/(^|\/)auto(-|$)/.test(String(model.id || ''))) return 'A router — it costs whatever the model it picks costs.';
+  // Upscalers are billed by the megapixel of the clip handed to them, so the
+  // figure depends on a source video we have not seen yet.
+  if (model.upscale) return 'Billed per megapixel of the clip you give it, so the cost depends on your source.';
+  return kind === 'video'
+    ? 'No published per-second price for this model.'
+    : 'No published per-image price for this model — the provider sets it.';
 }

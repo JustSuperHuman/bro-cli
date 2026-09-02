@@ -19,7 +19,17 @@ import {
   videoCostRating,
   generationSpeedRating,
   arenaRating,
-  mediaModelFacts
+  mediaModelFacts,
+  cleanDescription,
+  bestResolution,
+  modelChips,
+  enrichMediaFacts,
+  mediaModelDetail,
+  costNote,
+  qualityNote,
+  mediaKey,
+  arenaIndex,
+  arenaQuality
 } from './model-info.js';
 
 const DAY = 86400000;
@@ -231,4 +241,242 @@ test('a gallery model row gets display-ready facts, blank where nothing is known
   expect(v.quality).toBeNull();
 
   expect(mediaModelFacts({ id: 'gpt-image-1' }, { kind: 'image', now: NOW })).toEqual({ age: null, cost: null, speed: null, quality: null });
+});
+
+test('a catalogue description becomes a couple of plain sentences', () => {
+  // Markdown links keep their text and lose their target.
+  expect(cleanDescription('Wan 3.0 Prime is a variant of [Wan 3.0](https://openrouter.ai/x) from Alibaba. It does image-to-video.')).toBe(
+    'Wan 3.0 Prime is a variant of Wan 3.0 from Alibaba. It does image-to-video.'
+  );
+  // An abbreviation is not a sentence end, so the first sentence survives whole.
+  const nano = cleanDescription('Gemini 3.1 Flash Image, a.k.a. "Nano Banana 2," is Google\'s latest model. It is fast. And a third.');
+  expect(nano).toBe('Gemini 3.1 Flash Image, a.k.a. "Nano Banana 2," is Google\'s latest model. It is fast.');
+  // A decimal point does not end a sentence either.
+  expect(cleanDescription('Built on Gemini 2.5 Pro for speed.')).toBe('Built on Gemini 2.5 Pro for speed.');
+  // Code fences and images go entirely; emphasis markers go but their words stay.
+  expect(cleanDescription('A model. ```js\ncode\n``` ![pic](p.png)')).toBe('A model.');
+  expect(cleanDescription('A **fast** model.')).toBe('A fast model.');
+  expect(cleanDescription('')).toBe('');
+  expect(cleanDescription(null)).toBe('');
+  expect(cleanDescription(undefined)).toBe('');
+
+  // A single sentence longer than the budget is cut on a word boundary.
+  const long = cleanDescription('x'.repeat(400));
+  expect(long.length).toBeLessThanOrEqual(260);
+  expect(long.endsWith('…')).toBe(true);
+
+  // The sentence budget is respected.
+  expect(cleanDescription('One. Two. Three.', { sentences: 1 })).toBe('One.');
+});
+
+test('the tallest resolution a model offers is named the way people say it', () => {
+  expect(bestResolution(['480p', '720p', '1080p'])).toBe('1080p');
+  expect(bestResolution(['1080p', '4k'])).toBe('4K');
+  expect(bestResolution(['720p'])).toBe('720p');
+  expect(bestResolution([])).toBe('');
+  expect(bestResolution(null)).toBe('');
+});
+
+test('capability chips are read off the catalogue, never guessed', () => {
+  const video = {
+    durations: [2, 5, 10],
+    resolutions: ['480p', '1080p'],
+    aspectRatios: ['16:9', '9:16'],
+    audio: true,
+    frames: ['first_frame', 'last_frame'],
+    seed: true
+  };
+  expect(modelChips(video, 'video').map((c) => c.label)).toEqual(['to 10s', '1080p', 'audio', '1st frame', 'last frame', 'seed', '2 ratios']);
+  // The duration chip's hover carries the full range, not just the maximum.
+  expect(modelChips(video, 'video')[0].title).toContain('2–10 seconds');
+
+  // Nothing known means no chips invented.
+  expect(modelChips({}, 'video')).toEqual([]);
+  expect(modelChips(null, 'video')).toEqual([]);
+
+  // An upscaler leads with what it is, because a prompt alone cannot drive it.
+  expect(modelChips({ upscale: true }, 'video')[0].label).toBe('upscaler');
+
+  // Image models say whether the size/quality knobs apply to them.
+  expect(modelChips({ via: 'chat' }, 'image').map((c) => c.label)).toEqual(['reads refs']);
+  expect(modelChips({}, 'image').map((c) => c.label)).toEqual(['size & quality']);
+});
+
+test('a provider borrows display facts for the same model but never its routing', () => {
+  const index = catalogueIndex([
+    {
+      id: 'google/gemini-3.1-flash-image',
+      name: 'Google: Gemini 3.1 Flash Image',
+      via: 'chat',
+      kind: 'image',
+      created: 1770000000,
+      pricing: { perImage: 0.067 },
+      quality: { winRate: 65.1, rank: 2 },
+      description: 'Nano Banana 2.'
+    }
+  ]);
+
+  // An aggregator serving the same model under a shorter id gets the numbers.
+  const yunwu = enrichMediaFacts({ id: 'gemini-3.1-flash-image', name: 'Gemini 3.1 Flash Image' }, index);
+  expect(yunwu.pricing.perImage).toBe(0.067);
+  expect(yunwu.quality.rank).toBe(2);
+  expect(yunwu.description).toBe('Nano Banana 2.');
+  expect(yunwu.factsFrom).toBe('google/gemini-3.1-flash-image');
+  // Crucially not `via` — borrowing it would route this provider's call at the
+  // wrong endpoint.
+  expect(yunwu.via).toBeUndefined();
+  expect(yunwu.name).toBe('Gemini 3.1 Flash Image');
+
+  // The provider's own facts win over the catalogue's.
+  const own = enrichMediaFacts({ id: 'gemini-3.1-flash-image', description: 'Mine.' }, index);
+  expect(own.description).toBe('Mine.');
+
+  // Nothing matching, and the model whose facts these already are, are untouched.
+  expect(enrichMediaFacts({ id: 'dall-e-3' }, index).factsFrom).toBeUndefined();
+  expect(enrichMediaFacts({ id: 'google/gemini-3.1-flash-image' }, index).factsFrom).toBeUndefined();
+});
+
+test('a borrowed price says whose price it is', () => {
+  const borrowed = { id: 'gemini-3.1-flash-image', factsFrom: 'google/gemini-3.1-flash-image', pricing: { perImage: 0.067, imageOutput: 120 }, quality: { winRate: 65, rank: 2 } };
+  const f = mediaModelFacts(borrowed, { kind: 'image' });
+  expect(f.cost.title).toContain('this provider may charge differently');
+  expect(f.cost.title).toContain('google/gemini-3.1-flash-image');
+  // Quality is measured, not charged — the note reads accordingly.
+  expect(f.quality.title).toContain('measured on google/gemini-3.1-flash-image');
+  expect(f.quality.title).not.toContain('charge differently');
+
+  // A model's own numbers carry no such caveat.
+  const own = mediaModelFacts({ id: 'x', pricing: { perImage: 0.067, imageOutput: 120 } }, { kind: 'image' });
+  expect(own.cost.title).not.toContain('may charge differently');
+});
+
+test('the detail bundle carries the blurb, the chips and the attribution', () => {
+  const d = mediaModelDetail(
+    { id: 'x', via: 'chat', description: 'A model. It is good.', factsFrom: 'vendor/x' },
+    { kind: 'image' }
+  );
+  expect(d.blurb).toBe('A model. It is good.');
+  expect(d.chips.map((c) => c.label)).toEqual(['reads refs']);
+  expect(d.borrowedFrom).toBe('vendor/x');
+
+  // Nothing known is an empty bundle, not a fabricated one — but an unpriced
+  // model still says why it is unpriced.
+  expect(mediaModelDetail({ id: 'y' }, { kind: 'video' })).toEqual({
+    blurb: '',
+    chips: [],
+    borrowedFrom: null,
+    costNote: 'No published per-second price for this model.',
+    qualityNote: 'Design Arena has not ranked this model — nobody has voted on it head to head yet.'
+  });
+});
+
+test('a model with no price says why, when the reason is knowable', () => {
+  // A router's price is whatever it routes to.
+  expect(costNote({ id: 'openrouter/auto' })).toContain('router');
+  expect(costNote({ id: 'openrouter/auto-beta' })).toContain('router');
+  // An upscaler is billed against a source clip nobody has chosen yet.
+  expect(costNote({ id: 'black-forest-labs/flux-video-upscale', upscale: true }, 'video')).toContain('per megapixel');
+  // Otherwise: nothing published, said plainly and differently per kind.
+  expect(costNote({ id: 'gpt-image-2' }, 'image')).toContain('per-image');
+  expect(costNote({ id: 'x/y' }, 'video')).toContain('per-second');
+  // A model that does have a price has nothing to explain.
+  expect(costNote({ id: 'a', pricing: { perImage: 0.04 } }, 'image')).toBe('');
+  expect(costNote({ id: 'b', pricing: { perSecond: 0.2 } }, 'video')).toBe('');
+  // A router that somehow does carry a price is not second-guessed.
+  expect(costNote({ id: 'openrouter/auto', pricing: { perImage: 0.01 } }, 'image')).toBe('');
+});
+
+test('a published per-image price explains what it assumes', () => {
+  // Token-derived (OpenRouter): says so, and shows the rate behind it.
+  const derived = mediaModelFacts({ id: 'a', pricing: { perImage: 0.067, imageOutput: 120 } }, { kind: 'image' });
+  expect(derived.cost.title).toContain('estimated from $120/M output tokens');
+
+  // Vendor-published (the first-party Images API models): the size and quality
+  // the figure assumes, and whose figure it is. "≈4¢" alone invites "for what?".
+  const listed = mediaModelFacts(
+    { id: 'dall-e-3', pricing: { perImage: 0.04, basis: '1024×1024, standard quality', source: 'OpenAI list price' } },
+    { kind: 'image' }
+  );
+  expect(listed.cost.label).toBe('≈4¢');
+  expect(listed.cost.title).toBe('About 4¢ per image, at 1024×1024, standard quality (OpenAI list price)');
+  expect(listed.cost.title).not.toContain('output tokens');
+});
+
+test('a leaderboard name is matched to the id we call the model by', () => {
+  // The differences that are purely spelling.
+  expect(mediaKey('wan-v3.0-t2v')).toBe(mediaKey('alibaba/wan-3.0'));
+  expect(mediaKey('wan-v2.7-t2v')).toBe(mediaKey('alibaba/wan-2.7'));
+  expect(mediaKey('kling-v3-pro')).toBe(mediaKey('kwaivgi/kling-v3.0-pro'));
+  expect(mediaKey('happy-horse-1.1')).toBe(mediaKey('alibaba/happyhorse-1.1'));
+  expect(mediaKey('seedance-1.5-pro')).toBe(mediaKey('bytedance/seedance-1-5-pro'));
+  expect(mediaKey('dalle-3')).toBe(mediaKey('dall-e-3'));
+  expect(mediaKey('gemini-3.1-flash-image-preview')).toBe(mediaKey('google/gemini-3.1-flash-image'));
+
+  // And the differences that are not. Attributing another model's score is
+  // worse than showing none, so these must stay apart.
+  expect(mediaKey('veo-3')).not.toBe(mediaKey('google/veo-3.1'));
+  expect(mediaKey('grok-imagine-video')).not.toBe(mediaKey('x-ai/grok-imagine-video-1.5'));
+  expect(mediaKey('kling-v3-pro')).not.toBe(mediaKey('kwaivgi/kling-v3.0-std'));
+  expect(mediaKey('wan-v3.0-t2v')).not.toBe(mediaKey('alibaba/wan-3.0-prime'));
+  expect(mediaKey('seedance-2.0')).not.toBe(mediaKey('bytedance/seedance-2.0-fast'));
+  expect(mediaKey('hailuo-2.3-pro')).not.toBe(mediaKey('minimax/hailuo-2.3'));
+  expect(mediaKey('')).toBe('');
+});
+
+test('the leaderboard becomes ranks, keyed per category', () => {
+  const board = {
+    image: [
+      { modelId: 'gpt-image-2', winRate: 72.1, elo: 1381, battles: 55968 },
+      { modelId: 'dalle-3', winRate: 38.3, elo: 1086, battles: 134905 }
+    ],
+    video: [{ modelId: 'veo-3.1', winRate: 59.7, elo: 1186, battles: 18082 }]
+  };
+  const index = arenaIndex(board);
+
+  const gpt = arenaQuality({ id: 'gpt-image-2' }, index, 'image');
+  expect(gpt).toMatchObject({ arena: 'image', rank: 1, of: 2, winRate: 72.1, elo: 1381, battles: 55968, own: true });
+  expect(arenaQuality({ id: 'dall-e-3' }, index, 'image').rank).toBe(2);
+
+  // Categories do not leak into each other: a video model is ranked on the
+  // video board or not at all.
+  expect(arenaQuality({ id: 'google/veo-3.1' }, index, 'video').rank).toBe(1);
+  expect(arenaQuality({ id: 'google/veo-3.1' }, index, 'image')).toBeNull();
+  expect(arenaQuality({ id: 'gpt-image-2' }, index, 'video')).toBeNull();
+
+  // Nothing on the board, and nothing to look in.
+  expect(arenaQuality({ id: 'runway/gen-4.5' }, index, 'video')).toBeNull();
+  expect(arenaQuality({ id: 'x' }, arenaIndex(null), 'image')).toBeNull();
+  expect(arenaIndex(undefined).size).toBe(0);
+});
+
+test('a rank is reported with the size of the field behind it', () => {
+  const facts = mediaModelFacts(
+    { id: 'dall-e-3', quality: { arena: 'image', rank: 66, of: 76, winRate: 38.3, battles: 134905, own: true } },
+    { kind: 'image' }
+  );
+  expect(facts.quality.label).toBe('#66');
+  expect(facts.quality.rating).toBe(1);
+  expect(facts.quality.title).toContain('rank 66 of 76');
+  expect(facts.quality.title).toContain('134,905 head-to-head votes');
+
+  // A score measured on this very model is not captioned as another listing's,
+  // even when the row borrowed its price from one.
+  const own = mediaModelFacts(
+    { id: 'gemini-3.1-flash-image', factsFrom: 'google/gemini-3.1-flash-image', quality: { rank: 9, of: 76, winRate: 64.4, own: true } },
+    { kind: 'image' }
+  );
+  expect(own.quality.title).not.toContain('measured on google/gemini-3.1-flash-image');
+  // Whereas a score genuinely lent by the catalogue still says so.
+  const lent = mediaModelFacts(
+    { id: 'gemini-3.1-flash-image', factsFrom: 'google/gemini-3.1-flash-image', quality: { rank: 2, winRate: 65.1 } },
+    { kind: 'image' }
+  );
+  expect(lent.quality.title).toContain('measured on google/gemini-3.1-flash-image');
+});
+
+test('an unranked model says it is unranked rather than showing a bare dash', () => {
+  expect(qualityNote({ id: 'runway/gen-4.5' })).toContain('has not ranked');
+  expect(qualityNote({ id: 'x', quality: { winRate: 50 } })).toBe('');
+  // No model at all is not an unranked model — it says nothing, like costNote.
+  expect(qualityNote(null)).toBe('');
 });

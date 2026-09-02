@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRO_DIR } from './config.js';
 import { stripHash } from './strip.js';
-import { modelKey, imageTokensPerImage } from './model-info.js';
+import { modelKey, imageTokensPerImage, cleanDescription } from './model-info.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BUNDLED = path.join(__dirname, '..', 'models.json');
@@ -132,6 +132,92 @@ const median = (values) => {
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 };
+
+// ---- how long a picture or a clip actually takes ----
+// Tokens per second says nothing about an image model. OpenRouter measures
+// these separately, per workload, and publishes the real thing: the p50
+// wall-clock time of an image_generation or video_generation request over the
+// last 30 minutes, across every request everyone made. That is available the
+// moment you open the picker, which is the point — a speed rating should not
+// wait for you to have generated something yourself.
+export const OPENROUTER_MEDIA_STATS_CACHE = path.join(BRO_DIR, 'openrouter-media-stats.cache.json');
+
+export function readMediaStats() {
+  const cached = readJson(OPENROUTER_MEDIA_STATS_CACHE);
+  return cached && typeof cached === 'object' && !Array.isArray(cached) ? cached : {};
+}
+
+// The busiest endpoint is the one OpenRouter actually routes to, so its number
+// is the one you would experience — not an average across hosts nobody uses.
+export function mediaLatency(endpoints, kind = 'image') {
+  const workload = kind === 'video' ? 'video_generation' : 'image_generation';
+  let best = null;
+  for (const e of Array.isArray(endpoints) ? endpoints : []) {
+    const w = e?.perf_last_30m_by_workload?.[workload];
+    const p50 = w?.latency?.p50;
+    if (!(p50 > 0)) continue;
+    const n = Number(w.request_count) || 0;
+    if (!best || n > best.n) best = { p50, n };
+  }
+  return best;
+}
+
+// Fetch what is missing or stale, `concurrency` at a time. Resolves with the
+// whole map; `onUpdate` fires as entries land so a live picker can repaint.
+// Without a key this is a no-op — the stats endpoint requires one.
+export async function refreshMediaStats({ models, apiKey, concurrency = 5, maxAge = STATS_MAX_AGE, signal = null, onUpdate = null } = {}) {
+  let stats = readMediaStats();
+  if (!apiKey || !Array.isArray(models)) return stats;
+  const now = Date.now();
+  const queue = models.filter((m) => m?.id && !(stats[m.id] && now - (stats[m.id].at || 0) < maxAge));
+  if (!queue.length) return stats;
+
+  let dirty = false;
+  const flush = () => {
+    if (!dirty) return;
+    dirty = false;
+    try {
+      fs.mkdirSync(BRO_DIR, { recursive: true });
+      // Re-read first, so two bro processes do not clobber each other.
+      stats = { ...readMediaStats(), ...stats };
+      fs.writeFileSync(OPENROUTER_MEDIA_STATS_CACHE, JSON.stringify(stats));
+    } catch {
+      /* the cache is an optimisation, never a requirement */
+    }
+    onUpdate?.(stats);
+  };
+
+  const worker = async () => {
+    while (queue.length && !signal?.aborted) {
+      const { id, kind } = queue.shift();
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      const stop = () => ctrl.abort();
+      signal?.addEventListener('abort', stop, { once: true });
+      try {
+        const res = await fetch(`${OPENROUTER_URL}/${id}/endpoints`, {
+          signal: ctrl.signal,
+          headers: { accept: 'application/json', connection: 'close', authorization: `Bearer ${apiKey}` }
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const found = mediaLatency((await res.json())?.data?.endpoints, kind);
+        // Remember a miss too, so a model with no traffic is not retried on
+        // every single startup.
+        stats[id] = { ...(found || { p50: null, n: 0 }), at: Date.now() };
+        dirty = true;
+      } catch {
+        /* leave it unmeasured; the next refresh tries again */
+      } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', stop);
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker));
+  flush();
+  return stats;
+}
 
 // One model's endpoints → its typical output speed (tokens/s) and time to
 // first token (ms): the median of each endpoint's p50, so a single slow or
@@ -263,6 +349,9 @@ export function mapOpenRouterVideoModels(data) {
       name: m.name || m.id,
       kind: 'video',
       created: m.created || undefined,
+      // The publisher's own words on what the model is for — the picker shows
+      // them so choosing does not come down to guessing from the name.
+      description: cleanDescription(m.description) || undefined,
       pricing: videoPricing(m.pricing_skus),
       resolutions: m.supported_resolutions || null,
       aspectRatios: m.supported_aspect_ratios || null,
@@ -292,6 +381,79 @@ export async function loadOpenRouterVideoModels() {
     // Offline first run: the bundled snapshot still gives a usable menu.
     const bundled = readJson(BUNDLED_VIDEO);
     return Array.isArray(bundled?.models) && bundled.models.length ? bundled.models : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------- Design Arena leaderboard ----------
+
+// The head-to-head ranking behind the gallery picker's quality stars.
+// OpenRouter embeds a snapshot of the image categories in its own catalogue,
+// but only for models it serves and ranked among those — so two models could
+// each be "#2" on their own board, the first-party Images API models (DALL·E 3,
+// GPT Image 1/2) had no score at all because OpenRouter does not list them, and
+// video had none because OpenRouter carries no video benchmarks. Going to the
+// source fixes all three: one board, one rank scale, both media.
+export const ARENA_CACHE = path.join(BRO_DIR, 'design-arena.cache.json');
+const ARENA_URL = process.env.JUSTIMAGINE_ARENA_URL || 'https://www.designarena.ai/api/leaderboard';
+export const ARENA_CATEGORIES = ['image', 'video'];
+
+// The board arrives ordered best-first, so a row's position is its rank.
+export function mapArenaLeaderboard(data, category) {
+  if (!Array.isArray(data)) return [];
+  return data
+    .filter((e) => e?.modelId && Number.isFinite(Number(e?.winRate)))
+    .map((e, i) => ({
+      id: String(e.modelId),
+      category,
+      rank: i + 1,
+      winRate: Number(e.winRate),
+      elo: Number.isFinite(Number(e.elo)) ? Number(e.elo) : null,
+      battles: Number(e.battles) || 0
+    }));
+}
+
+async function fetchArenaCategory(category, signal) {
+  const res = await fetch(ARENA_URL, {
+    method: 'POST',
+    signal,
+    headers: { 'content-type': 'application/json', accept: 'application/json', connection: 'close' },
+    body: JSON.stringify({ arenaType: 'models', category })
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const json = await res.json();
+  if (!json?.success || !Array.isArray(json.data)) throw new Error(json?.message || 'no leaderboard data');
+  const rows = mapArenaLeaderboard(json.data, category);
+  if (!rows.length) throw new Error('empty leaderboard');
+  return rows;
+}
+
+// Both categories in parallel, each falling back to the cached copy on its own —
+// video being down is no reason to lose the image board.
+export async function loadDesignArena() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const settled = await Promise.allSettled(ARENA_CATEGORIES.map((c) => fetchArenaCategory(c, ctrl.signal)));
+    const cached = readJson(ARENA_CACHE) || {};
+    const out = {};
+    ARENA_CATEGORIES.forEach((category, i) => {
+      const r = settled[i];
+      if (r.status === 'fulfilled') out[category] = r.value;
+      else if (Array.isArray(cached[category]) && cached[category].length) out[category] = cached[category];
+    });
+    if (!Object.keys(out).length) return null;
+    // Only write when something was actually fetched, so a run that fell back
+    // to the cache cannot rewrite it as if it were fresh.
+    if (settled.some((r) => r.status === 'fulfilled')) {
+      fs.mkdirSync(BRO_DIR, { recursive: true });
+      fs.writeFileSync(ARENA_CACHE, JSON.stringify(out, null, 2));
+    }
+    return out;
+  } catch {
+    const cached = readJson(ARENA_CACHE);
+    return cached && typeof cached === 'object' && Object.keys(cached).length ? cached : null;
   } finally {
     clearTimeout(timer);
   }
@@ -344,6 +506,8 @@ export function mapOpenRouterImageModels(data) {
     .map((m) => {
       const row = { id: m.id, name: m.name || m.id, via: 'chat', kind: 'image' };
       if (m.created) row.created = m.created;
+      const description = cleanDescription(m.description);
+      if (description) row.description = description;
       const imageOutput = perMillion(m.pricing?.image_output);
       const prompt = perMillion(m.pricing?.prompt);
       if (imageOutput != null) {

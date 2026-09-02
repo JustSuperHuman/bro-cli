@@ -54,11 +54,14 @@ export function ensureDefaultConfig() {
   return true;
 }
 
-// Persist a key without disturbing the user's '#' notes/examples.
+// Persist a key without disturbing the user's '#' notes/examples. An empty key
+// removes the entry rather than storing a blank one, so "forget this key" in the
+// gallery's settings leaves the file as it was before the key was ever added.
 export function setKey(providerId, key) {
   const raw = loadRawConfig() ?? structuredClone(DEFAULT_CONFIG);
   raw.keys = raw.keys || {};
-  raw.keys[providerId] = key;
+  if (key) raw.keys[providerId] = key;
+  else delete raw.keys[providerId];
   fs.mkdirSync(BRO_DIR, { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(raw, null, 2));
 }

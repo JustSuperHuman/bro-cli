@@ -11,6 +11,7 @@
     "src",
     "pool",
     "dsh-plugin-profiles",
+    "skills",
     "models.json",
     "video-models.json",
     "README.md",
@@ -50,7 +51,9 @@
     "text-to-video",
     "veo",
     "sora",
-    "seedance"
+    "seedance",
+    "claude-skill",
+    "agent-skill"
   ],
   "author": "JustGains (https://justgains.com)",
   "license": "MIT",

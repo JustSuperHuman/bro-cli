@@ -9,7 +9,8 @@ The server binds to `127.0.0.1` and adds no API auth layer of its own. Keep it l
 ```sh
 bro imagine -p openrouter              # foreground, prints its URL, opens a browser
 bro imagine --root D:/Art --port 9000  # a different gallery, on a fixed port
-bro imagine service install            # background, at every login, on port 8791
+bro imagine service install            # background, this directory's gallery, port 8791
+sudo bro imagine service install       # …and starting with the machine, not just at login
 ```
 
 A foreground run prints the base URL and the gallery root:
@@ -20,6 +21,11 @@ Folder:   <cwd>/.bro/justimagine
 ```
 
 Use that URL as `BASE` below. The service defaults to `http://127.0.0.1:8791`; `bro imagine open --no-open` prints it without launching a browser.
+
+> Driving this from an agent? `bro imagine skill` installs a skill —
+> `generate-images-videos` — that carries everything below in the form an agent
+> needs it: which routes to call in what order, the caps, and what to do about
+> failures. It ships in the package under `skills/`.
 
 ## Layout on disk
 
@@ -41,6 +47,7 @@ Metadata is per-folder rather than one central index. That is what makes deletin
 | Route | Purpose |
 | --- | --- |
 | `GET /api/state` | Everything the UI needs to boot: gallery root, image APIs, live video-model catalogue, folder tree, reference library, in-flight jobs |
+| `GET /api/models` | The catalogue on its own — every knob a generation may set. `?kind=image\|video`, `?api=`, `?q=`, `?detail=1`, `?limit=` |
 | `GET /api/items?folder=<rel>` | The media in one folder, newest first |
 | `GET /api/folders` | Just the folder tree |
 | `POST /api/folder` | `{parent, name}` → create |
@@ -48,17 +55,19 @@ Metadata is per-folder rather than one central index. That is what makes deletin
 | `POST /api/folder/delete` | `{path}` → delete the folder and every generation inside it |
 | `POST /api/move` | `{from, to, files[]}` → move media between folders, metadata and thumbnails included |
 | `POST /api/delete` | `{folder, file}` → delete one generation |
-| `POST /api/generate` | Queue one or more generations; returns job ids |
-| `POST /api/cancel` | `{id}` → cancel a queued or in-flight job |
+| `POST /api/generate` | Queue one spec (`count` copies of it); returns job ids. `wait: <seconds>` blocks until they finish |
+| `POST /api/batch` | `{defaults, items[], wait}` → queue many different specs, images and video mixed, in one request |
+| `GET /api/jobs` | Poll jobs instead of subscribing. `?ids=a,b,c`, `?wait=<seconds>` to block until they finish, `?active=1` |
+| `POST /api/cancel` | `{id}`, `{ids[]}` or `{all: true}` → cancel queued or in-flight jobs |
 | `POST /api/enhance` | `{prompt, kind, model?, characters?, images?}` → rewrite the prompt |
 | `GET /api/events` | Server-sent events: a snapshot of live jobs on connect, then every state change |
-| `POST /api/context` | `{dataUrl}` → save a reference image (deduped by content hash) |
+| `POST /api/context` | `{dataUrl}` or `{path}` → save a reference image (deduped by content hash) |
 | `POST /api/context/delete` | `{file}` → remove one reference image |
 | `GET /api/characters` | The cast |
 | `POST /api/characters` | `{name, description}` → create |
 | `POST /api/characters/update` | `{id, name?, description?, cover?}` → edit (renaming changes the id) |
 | `POST /api/characters/delete` | `{id}` → delete the character and its references |
-| `POST /api/characters/refs` | `{id, dataUrl}` to upload, or `{id, folder, file}` to promote a generation |
+| `POST /api/characters/refs` | `{id, dataUrl}` or `{id, path}` to upload, or `{id, folder, file}` to promote a generation |
 | `POST /api/characters/refs/delete` | `{id, file}` → drop one reference |
 | `POST /api/characters/refs/generate` | `{id, count}` → draw a reference sheet; returns a job id |
 | `POST /api/characters/refs/keep` | `{id, files[]}` → promote generated shots into references |
@@ -68,8 +77,42 @@ Metadata is per-folder rather than one central index. That is what makes deletin
 | `GET /media/<file>?f=<folder>` | The media itself. Supports byte ranges, so `<video>` can seek. Add `&dl=1` for a download disposition |
 | `GET /thumb/<file>?f=<folder>` | The cached thumbnail, or 404 if none has been made yet |
 | `GET /context/<file>` | A reference image |
+| `GET /api/config` | Providers and whether each has a key, for the settings panel. Keys are masked (`sk-o…b185`), never returned in full |
+| `POST /api/config/key` | `{id, key}` → save that provider's key; an empty `key` removes it |
 
 Folder ids are `/`-joined relative paths; `""` is the top level. Anything that tries to escape the root is refused with `Invalid folder path`.
+
+Every mutating route must come from the gallery's own origin. The server binds
+loopback, but any page in the browser can still reach `127.0.0.1`, so a request
+carrying another site's `Origin` (or a cross-site `Sec-Fetch-Site`) is refused
+with `403 Cross-site request refused.` Reads are unaffected, and a non-browser
+client that sends no `Origin` at all — curl, a script — is allowed through as
+before.
+
+## Which model, and what it accepts
+
+`GET /api/state` carries the catalogue, but so does `GET /api/models`, without the
+folder tree, the cast and the reference library:
+
+```sh
+curl -s "$BASE/api/models?kind=video"          # every video model and its real options
+curl -s "$BASE/api/models?kind=image&api=yunwu"
+curl -s "$BASE/api/models?q=veo&detail=1"      # search; detail adds the blurb and the picker facts
+```
+
+```json
+{ "models": [ { "id": "google/veo-3.1", "name": "Google: Veo 3.1", "kind": "video",
+                "api": "openrouter", "ready": true, "created": 1774224000,
+                "pricing": { "perSecond": 0.2, "basis": "720p" },
+                "durations": [4, 6, 8], "resolutions": ["720p", "1080p"],
+                "aspectRatios": ["16:9", "9:16"], "frames": ["first_frame"],
+                "audio": true, "seed": true } ],
+  "total": 1, "defaultApi": "openrouter", "videoApi": "openrouter" }
+```
+
+`ready: false` means that provider has no key, so a generation on it will fail —
+check it before queueing fifty. `pricing` is what a batch will cost: multiply
+`perImage`, or `perSecond` by the duration and the count.
 
 ## Generate an image
 
@@ -132,6 +175,87 @@ Only send knobs the model supports; `GET /api/state` returns each model's real c
 
 `size` (`"1920x1080"`) is interchangeable with `resolution` + `aspectRatio`; sending `size` wins and the other two are dropped, so the upstream never receives a contradiction.
 
+## Many at once
+
+`/api/generate` takes one spec and makes `count` copies of it. `/api/batch` takes
+as many *different* specs as you like, in one request:
+
+```sh
+curl -s "$BASE/api/batch" -H "content-type: application/json" -d '{
+  "defaults": { "kind": "image", "folder": "Campaign/Boards",
+                "model": "google/gemini-3.1-flash-image", "size": "1024x1024" },
+  "items": [
+    "a cyclist at dawn on a wet city street, shot from behind",
+    { "prompt": "the same cyclist locking up outside a cafe", "count": 3 },
+    { "prompt": "a slow push-in on the cafe window, rain on the glass",
+      "kind": "video", "model": "google/veo-3.1", "duration": 8, "audio": true }
+  ]
+}'
+```
+
+```json
+{ "jobs": ["mtiy3mis-0-99d1", "…", "…", "…", "…"], "count": 5, "images": 4, "videos": 1 }
+```
+
+`defaults` is merged *under* every item, so the folder, the model and the knobs
+are stated once and an item overrides only what it needs. Images and video mix
+freely — each item's `kind` decides which queue it joins. A bare JSON array of
+prompt strings is a valid body too.
+
+The batch is planned in full before anything is queued, so a mistake costs a
+rejection rather than a part-spent batch:
+
+```json
+{ "error": "items[7]: Prompt is required." }
+```
+
+Caps: 50 items and 100 jobs per batch, 12 copies per image item, 4 per video
+item. Beyond that, send successive batches.
+
+## Wait for the results
+
+Both generate routes accept `wait: <seconds>`, which holds the response open
+until every job it queued has finished. For images — seconds each, eight at a
+time — that is usually all you need:
+
+```sh
+curl -s "$BASE/api/batch" -H "content-type: application/json" \
+  -d '{"items":["a red door","a blue door"],"defaults":{"folder":"Set"},"wait":120}'
+```
+
+```json
+{ "jobs": ["…", "…"], "count": 2, "settled": true,
+  "items":  [ { "file": "20260901-…-a-red-door-b62a.png", "folder": "Set", "bytes": 1512094, "ms": 4210 } ],
+  "failed": [ { "id": "…", "prompt": "a blue door", "model": "…", "error": "402 out of credit" } ],
+  "cancelled": [], "pending": [], "results": [ …the full job rows… ] }
+```
+
+A failed generation lands in `failed`, not in the HTTP status: the request
+succeeded, the generation did not. `settled: false` means the clock ran out, and
+`pending` names what is still running.
+
+For video — minutes each — poll instead. `GET /api/jobs` reports whatever ids you
+name, and `?wait=` makes each poll block until they are all done, so the loop
+costs one request per minute rather than one per second:
+
+```sh
+IDS=$(curl -s "$BASE/api/batch" -d @batch.json -H "content-type: application/json" | jq -r '.jobs|join(",")')
+
+until curl -s "$BASE/api/jobs?ids=$IDS&wait=60" | jq -e '.settled' >/dev/null; do
+  curl -s "$BASE/api/jobs?ids=$IDS" | jq -r '.results[] | "\(.status)\t\(.phase)"'
+done
+curl -s "$BASE/api/jobs?ids=$IDS" | jq '.items'
+```
+
+`wait` is capped at 600 seconds per request. Called with no `ids`, `/api/jobs`
+returns the whole registry — every job still retained, newest first — plus
+`active`, the queue `limits` and `retainMs`; `?active=1` narrows it to what is
+still queued or running. Ids the registry no longer holds come back in `missing`,
+which is how "not finished yet" stays distinguishable from "waited too long".
+
+Finished jobs are readable for **30 minutes** (up to 500 of them), so a poller
+can be minutes late and still collect everything.
+
 ## Reference images
 
 Upload once, then refer to the returned file name. The same picture is never stored twice.
@@ -140,6 +264,24 @@ Upload once, then refer to the returned file name. The same picture is never sto
 curl -s "$BASE/api/context" -H "content-type: application/json" \
   -d '{"dataUrl":"data:image/png;base64,iVBORw0KGgo…"}'
 # → {"file":"9f1c2b7a4e5d6081.png","existed":false}
+
+curl -s "$BASE/api/context" -H "content-type: application/json" \
+  -d '{"path":"/photos/bottle.png"}'
+# → {"file":"a930c2bb4e61c068.png","existed":false,"path":"/photos/bottle.png"}
+```
+
+`{path}` reads the file off the server's own disk, which is the same machine —
+base64-ing a PNG through a shell is nobody's idea of an API. Images only (png,
+jpg, webp, gif), 32 MB apiece. An output you just generated is a valid input:
+take `folder` and `file` from a finished job and register `<root>/<folder>/<file>`.
+
+You can also skip the round trip entirely and put paths straight into `images`.
+Anything with a path separator is registered as it goes by, so these are the same
+picture and the same stored bytes:
+
+```json
+{ "prompt": "on a canvas tote", "images": ["/photos/logo.png"] }
+{ "prompt": "on a canvas tote", "images": ["9f1c2b7a4e5d6081.png"] }
 ```
 
 Then pass those names as `images`:
@@ -266,9 +408,11 @@ An id that names no character is ignored rather than failing the generation. Ren
 
 > This is reference-driven consistency, not a trained identity. It is the same mechanism as Higgsfield's avatars, not its Soul Characters — good, and better the more references a character has, but not a guarantee.
 
-## Watch jobs
+## Watch jobs live
 
-Generation is asynchronous for both kinds, so a five-minute video survives a page reload and no client has to hold a socket open.
+Polling covers a script; the event stream is what the page uses, and it is there
+if you are building one. Generation is asynchronous for both kinds either way, so
+a five-minute video survives a page reload and no client has to hold a socket open.
 
 ```sh
 curl -sN "$BASE/api/events"
@@ -304,9 +448,20 @@ data: {"type":"job","job":{"id":"mtiy3mis-0-99d1","status":"done","phase":"","it
 }
 ```
 
-Jobs are held for a minute after they finish so a reconnecting page still sees the result, then dropped.
+Jobs are held for half an hour after they finish — 500 of them at most, oldest
+dropped first — so a reconnecting page sees the result and a script that polls
+every few minutes never misses one.
 
-At most 8 image and 3 video generations run at once; the rest wait in a queue and report `status: "queued"`.
+At most 8 image and 3 video generations run at once; the rest wait in a queue and report `status: "queued"`. That is the concurrency, so there is nothing to gain by fanning out requests yourself: send one batch and let the server pace it.
+
+Cancel one, some, or everything still in flight:
+
+```sh
+curl -s "$BASE/api/cancel" -H "content-type: application/json" -d '{"id":"mtiy3mis-0-99d1"}'
+curl -s "$BASE/api/cancel" -H "content-type: application/json" -d '{"ids":["…","…"]}'
+curl -s "$BASE/api/cancel" -H "content-type: application/json" -d '{"all":true,"kind":"video"}'
+# → {"ok":true,"cancelled":["…"]}
+```
 
 ## Fetch the media
 

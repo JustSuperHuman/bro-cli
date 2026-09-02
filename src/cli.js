@@ -84,10 +84,13 @@ Usage:
                          self-hosted gallery (folders live in ./.bro/justimagine)
   bro imagine -p <api>   Skip the API menu (e.g. bro imagine -p openrouter)
   bro imagine service install
-                         Keep JustImagine running in the background and
-                         start it at every login (no admin needed)
+                         Serve this directory's gallery in the background,
+                         from every login on (no admin needed) — run it
+                         elevated and it starts with the machine instead
   bro imagine service status | start | stop | logs | uninstall
   bro imagine open       Open the running JustImagine service
+  bro imagine skill      Install the generate-images-videos skill, which
+                         teaches an agent to batch-generate through its API
   bro imagine help       JustImagine help (APIs, models, folders, paths)
   bro -p codex           Run Claude Code on your ChatGPT subscription — logs
                          in, fetches the live model list, and bridges through a

@@ -507,23 +507,32 @@ bro imagine                    # pick an API, then the gallery opens
 bro imagine -p openrouter      # skip the API menu
 bro imagine --root D:/Art      # keep the gallery somewhere else
 bro imagine service install    # run it in the background, at every login
+bro imagine skill              # teach an agent to drive it (generate-images-videos)
 ```
 
 - **Images** — any OpenAI-shaped `/images/generations` API, plus the chat-routed image models (Gemini / Nano Banana, GPT-5 Image) that aggregators serve through `/chat/completions`. Size and quality knobs where the API supports them.
 - **Video** — OpenRouter's video API: Veo 3.1, Sora 2 Pro, Seedance 2.x, Wan 3.0, Kling v3, Hailuo 3, Runway Gen-4.5, Grok Imagine and the rest of the catalogue, refreshed live at startup (a bundled snapshot keeps it working offline). Each model's own duration, resolution, aspect-ratio, audio and seed options drive the controls, so you can only ask for a combination that model actually accepts. Attach a reference image and a model with first-frame conditioning animates it.
-- **Model picker** — the model menu rates every model so you can compare them at a glance, with columns that appear only when there is something to show:
+- **Model picker** — two panes: a list you scan on rank and price, and a detail column for whatever is under the cursor or the keyboard, so you can tell what a model is *for* before you spend anything on it. The detail side carries the publisher's own description of the model, the capabilities read straight off the catalogue (clip length, top resolution, audio, first/last-frame conditioning, seed, whether it takes your reference images), and every number behind the meters spelled out. Search to filter; sort by **Recommended**, **Best**, **Cheapest** or **Newest**; arrow keys and Enter to pick.
 
-  | Column | Image models | Video models |
+  | Fact | Image models | Video models |
   | --- | --- | --- |
   | **age** | time since the model was published (`new` in its first week) | same |
   | **cost** | estimated price per picture, from OpenRouter's output-token price and the family's tokens per image | OpenRouter's list price per second of video at 720p (or the plain rate), with a 5-second estimate on hover |
   | **speed** | how long that model has actually taken in this gallery (median of your own generations) | same |
-  | **quality** | Design Arena head-to-head rank in the image category; a GA model borrows the score measured on its preview release | not published yet, so left out |
+  | **quality** | Design Arena rank in the image category, out of every model on the board | Design Arena rank in the video category |
 
-  Everything refreshes from OpenRouter when the gallery starts; speed fills in as you generate. A blank cell means nothing is known, not a low score. Type in the menu to filter, use the arrow keys and Enter to pick.
+  Only OpenRouter publishes these facts, so a model served under a shorter id by an aggregator or a first-party API is **matched to the same model in the catalogue** and shown its figures — which is what turns a bare list of ids into something comparable. A borrowed price says whose price it is, because another shop may well charge differently. The first-party Images API models (DALL·E 3, GPT Image 1) are in no catalogue at all, so their published per-image prices are carried in `MODEL_PRICING` in `src/justimagine-gen.js`, each with the size and quality it assumes; a model entry in your own `imageApis` config can state its own `pricing` and override it.
+
+  Quality comes from [Design Arena](https://www.designarena.ai)'s public leaderboard directly, not from OpenRouter's embedded snapshot of it. The snapshot ranks a model only among the ones OpenRouter serves — so two different models could each show "#2" in the same list — and it covers neither video nor the first-party Images API models. Going to the board itself gives one rank scale across the whole picker, ranks video (which had no rating at all), and ranks DALL·E 3, GPT Image 1 and GPT Image 2. A rank is shown with the size of the field and the number of head-to-head votes behind it. Names are matched allowing for spelling (`wan-v3.0-t2v` is `alibaba/wan-3.0`) but never across versions or tiers — `veo-3` and `veo-3.1` stay separate, because putting another model's score on a row is worse than showing none.
+
+  Where a price is genuinely unquotable the picker says which — a router costs whatever it routes to, an upscaler is billed per megapixel of the clip you hand it — rather than leaving a dash to look like a failed lookup. Everything refreshes from OpenRouter when the gallery starts; speed fills in as you generate.
+
+  The menu sizes itself to the window: it takes the width available up to 880px, slides back from the edge only as far as it must (a button halfway along a wrapping toolbar has room on neither side, so aligning to either edge would push half the menu — and the price column with it — off screen), opens upward when the room below is too short, stacks its two columns when too narrow for both, and becomes a full-screen sheet on a phone.
+- **Settings** — the gear in the header: every provider, whether it is ready, and a field to paste a key into, saved straight to `~/.bro/config.json` and live within seconds without a restart. A key set through an environment variable is shown as the shell's to change rather than offered a Remove that wouldn't stick. Keys are never sent back to the page — only a masked preview like `sk-o…b185` — and a write is refused unless it came from the gallery's own origin, so no other site in your browser can reach the loopback port to spend your credits or overwrite a key.
 - **Folders, not batches** — the sidebar is the folder tree of your gallery root, and whatever you generate lands in the folder you have selected. Make folders, nest them, rename them inline, drag generations between them or move a selection with one menu. **Deleting a folder deletes every generation inside it**, including its metadata and cached thumbnails.
 - **✨ Improve the prompt** — the button beside the prompt box rewrites a one-line idea into something the picked model can work with, server-side on `gemini-3.7-flash` via the same OpenRouter key. It knows what it's writing for: an image model gets composition and light, a video model gets a named camera move and what changes across the shot (bounded by that model's real clip length), and a character's description gets the permanent look only. Picked characters keep their names and are never re-described. `↺` puts back exactly what you typed. Ctrl+Enter does the same from the keyboard.
 - **Repeatable characters** — a cast you define once and reuse everywhere. Give a character a name, a description and a few reference images; pick it in the composer and its pictures ride along with the prompt while it's named in the text, so the same face comes back shot after shot. Paste, drop or browse images straight into a character's reference area — or, with no photos to start from, **Draw 5 reference shots** builds the sheet for you on Nano Banana 2: one portrait from the description, then four more angles drawn *from that portrait*, so they are one character rather than five people matching the same sentence. Pick the ones worth keeping; the rest are discarded. A generation you liked can be promoted into one of its references (`👤` on the card), which is how a character sharpens as you work. The library is global — `~/.bro/justimagine/characters` — so it's there in every gallery and in the background service.
+- **Light or dark** — a toggle in the header, defaulting to light whatever your OS prefers, remembered per browser and applied before the first paint so there is no flash.
 - **Reference images** — paste, drag-drop or attach. They're saved under `.context/` named by content hash (the same picture is never stored twice) and appear in a strip for one-click reuse.
 - **Built to stay quick** — generation is asynchronous on the server and streamed to the page over server-sent events, so a five-minute video survives a reload and no request is held open. The grid loads cached thumbnails, not originals; posters are captured once in the browser and reused forever; a video tile downloads no video bytes until you open it, and then over byte ranges so it can seek. Images load on approach and drop their decode again once well out of view.
 
@@ -543,11 +552,11 @@ bro imagine service install    # run it in the background, at every login
 
 Metadata lives per folder rather than in one index, so a folder survives being moved by hand and deleting one leaves nothing dangling. A gallery from the old `bro image` (`./.bro/image-gen`) is folded into the new root the first time you run it.
 
-Keys are shared with the chat provider of the same id, so a saved Yunwu key just works; video always uses the `openrouter` key. Add your own APIs via `imageApis` in `~/.bro/config.json` (merged by `id`, same as providers).
+Keys are shared with the chat provider of the same id, so a saved Yunwu key just works; video always uses the `openrouter` key. Add or replace a key from the gallery's own Settings panel, or edit `keys` in `~/.bro/config.json` by hand — either way both surfaces see it. Add your own APIs via `imageApis` in `~/.bro/config.json` (merged by `id`, same as providers); a model entry there can carry a `description` of its own, which the picker shows.
 
 ### Run it as a background service
 
-One switch turns JustImagine into a service that starts at login and keeps running — **no admin or root required on any platform**:
+One switch turns JustImagine into a service that comes back on its own — **no admin or root required**:
 
 ```sh
 bro imagine service install [--root <dir>] [--port <n>]
@@ -555,27 +564,62 @@ bro imagine service status | start | stop | restart | logs | uninstall
 bro imagine open               # open whatever is running
 ```
 
-| Platform | Mechanism |
-| --- | --- |
-| Windows | Task Scheduler task with a logon trigger, registered from XML (`/SC ONLOGON` needs elevation; the same trigger as XML does not) and launched through a `wscript` shim so no console window ever appears |
-| macOS | launchd LaunchAgent in `~/Library/LaunchAgents` with `RunAtLoad` + `KeepAlive` |
-| Linux | systemd `--user` unit with `Restart=always`, or an XDG autostart entry where there is no systemd |
+It installs **the gallery of the directory you run it in** — `./.bro/justimagine`, the same one `bro imagine` serves there — on port 8791. So `cd` to the project you want served and install; pass `--root` to serve somewhere else. Install again in another directory and it moves, saying which folder it left behind.
 
-The service defaults to `~/JustImagine` on port 8791, logs to `~/.bro/justimagine/service.log`, and `uninstall` leaves your gallery completely untouched.
+**Elevation decides when it starts, not whether it works.**
 
-### JustImagine HTTP API
+| | Unelevated | Elevated (`sudo`, or an Administrator terminal) |
+| --- | --- | --- |
+| Starts | when you log on | with the machine, before anyone logs on |
+| Stops | when you log out | never — it is a real system service |
+| Runs as | you | still you, so it reads your keys and writes your gallery |
 
-The gallery is backed by local JSON routes, and scripts can call the same routes while it is running:
+Unelevated is the default and prints a plain warning that it **only runs while you are logged on**, with the command to fix it. Re-run the install elevated and the system-wide one **takes priority automatically**: the per-user install is stopped and removed first, because two servers cannot share a port. Going the other way is refused rather than silently downgrading — an unelevated install over a system one changes nothing and tells you so.
+
+| Platform | Per-user (at login) | System (at boot) |
+| --- | --- | --- |
+| Windows | Task Scheduler task `JustImagine`, logon trigger, registered from XML (`/SC ONLOGON` needs elevation; the same trigger as XML does not) | a second task, `JustImagine-System`, with a boot trigger and an **S4U** principal — which is how a task runs as you with no stored password |
+| macOS | launchd LaunchAgent in `~/Library/LaunchAgents` | launchd LaunchDaemon in `/Library/LaunchDaemons` with `UserName` and your `HOME` |
+| Linux | systemd `--user` unit (plus `enable-linger`), or an XDG autostart entry where there is no systemd | systemd system unit with `User=` and `HOME=`, `WantedBy=multi-user.target` |
+
+Both Windows scopes launch through a `wscript` shim, so no console window ever appears and the service can be handed the environment Task Scheduler's XML has nowhere to put. Because that shim detaches, the trigger repeats every five minutes as a keepalive: an attempt that finds the port already answering exits quietly, and one that finds it dead brings the gallery back. launchd and systemd supervise their own with `KeepAlive` and `Restart=always`.
+
+Logs land in `~/.bro/justimagine/service.log`, `uninstall` removes whichever scope is installed and leaves your gallery completely untouched.
+
+### JustImagine HTTP API — and a skill for agents
+
+The gallery has no private browser-only path: the page calls JSON routes, and anything else can call the same ones. The routes an agent needs are built for volume — one request queues a whole set, another blocks until it lands:
 
 ```sh
-curl -s http://127.0.0.1:8791/api/generate \
-  -H "content-type: application/json" \
-  -d '{"kind":"video","folder":"Campaign","model":"google/veo-3.1",
-       "prompt":"a slow dolly across a rain-streaked window at night",
-       "duration":8,"resolution":"1080p","audio":true}'
+BASE=http://127.0.0.1:8791
+
+# 1. what can this machine actually run, and what does it cost?
+curl -s "$BASE/api/models?kind=video" | jq '.models[] | {id, ready, pricing, durations}'
+
+# 2. queue a mixed set — different prompts, images and clips together
+curl -s "$BASE/api/batch" -H "content-type: application/json" -d '{
+  "defaults": { "folder": "Campaign", "model": "google/gemini-3.1-flash-image" },
+  "items": [
+    "a cyclist at dawn on a wet city street",
+    { "prompt": "the same cyclist outside a cafe", "count": 3 },
+    { "prompt": "a slow push-in on the cafe window", "kind": "video",
+      "model": "google/veo-3.1", "duration": 8, "audio": true }
+  ]
+}'                                        # → {"jobs":[…5 ids…],"images":4,"videos":1}
+
+# 3. wait for them (or pass "wait": 120 in step 2 and skip this)
+curl -s "$BASE/api/jobs?ids=$IDS&wait=60" | jq '{settled, items, failed, pending}'
 ```
 
-That returns job ids immediately; watch `/api/events` for progress and the finished item. See [docs/justimagine-api.md](./docs/justimagine-api.md) for the complete route list, the folder model, and reference-image handling.
+Eight images and three clips run at once, so a batch of fifty paces itself; finished jobs stay readable for half an hour, so a poller that is minutes late still collects everything; a generation that fails upstream comes back in `failed` with its reason rather than as an HTTP error. Reference images can be registered from a path on disk (`{"path":"/photos/bottle.png"}`) instead of base64, and an output you just made is a valid input for the next call. `POST /api/cancel {"all":true}` stops a batch you regret. Full route list, the folder model, characters and reference handling: **[docs/justimagine-api.md](./docs/justimagine-api.md)**.
+
+```sh
+bro imagine skill              # → ./.claude/skills/generate-images-videos/SKILL.md
+bro imagine skill --global     # → ~/.claude/skills/… (every project)
+bro imagine skill --dir <path> # anywhere else
+```
+
+`bro imagine skill` installs **`generate-images-videos`**, a skill that hands an agent the whole workflow rather than a route list: find or start the server, read `/api/models` before spending anything, batch instead of looping, poll with `wait=` rather than sleeping, attach references and characters, collect the files off disk — plus the caps (50 items and 100 jobs per batch, 12 images or 4 clips per item), and the etiquette that matters when each call costs real money: price a batch before queueing it, say what failed, and never delete a folder to tidy up. It ships in the package at [`skills/generate-images-videos/`](./skills/generate-images-videos/SKILL.md), so it is also the file to read yourself if you are writing your own client.
 
 ## Providers
 

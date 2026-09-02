@@ -1,4 +1,5 @@
 import { EXT_BY_TYPE } from './justimagine-store.js';
+import { modelKey } from './model-info.js';
 
 // Upstream calls for both media kinds.
 //
@@ -58,8 +59,48 @@ export const IMAGE_APIS = [
   }
 ];
 
+// A one-line note for the models OpenRouter's catalogue cannot describe for us
+// — the first-party Images API models that aggregators also serve. Keyed by
+// normalised id so every provider offering the same model gets the same note,
+// and only used when neither the model entry nor the catalogue has anything:
+// a custom API in config.json can give its models a `description` of its own.
+export const MODEL_NOTES = {
+  gptimage2: "OpenAI's second-generation Images API model, succeeding GPT Image 1. Takes the size and quality knobs.",
+  gptimage1: "OpenAI's Images API model: close prompt following and legible text in the picture. Supports edits and takes the size and quality knobs.",
+  dalle3: "OpenAI's DALL·E 3. It expands a short prompt into a more detailed one before drawing, which suits illustration and stylised work. Takes the size and quality knobs."
+};
+
+// Published per-image prices for the same models. OpenRouter's catalogue is
+// where every other price in the picker comes from, but it does not list the
+// first-party Images API models at all — so without this, choosing between
+// DALL·E 3 and GPT Image 1 means comparing two blank cells. A price per
+// picture only means something alongside the size and quality it assumes, so
+// each carries the basis it was quoted at and who quoted it.
+//
+// These are list prices and they do move: check them against
+// https://openai.com/api/pricing/ when they look wrong. Anything not listed
+// here stays blank rather than guessed — the picker says so plainly.
+export const MODEL_PRICING = {
+  gptimage1: { perImage: 0.04, basis: '1024×1024, medium quality', source: 'OpenAI list price' },
+  dalle3: { perImage: 0.04, basis: '1024×1024, standard quality', source: 'OpenAI list price' }
+};
+
+// A model entry filled out with whatever we know about it that the live
+// catalogue cannot supply. The entry's own fields always win, so a custom API in
+// config.json can state its real price and override ours.
+function withKnown(model) {
+  if (!model?.id) return model;
+  const key = modelKey(model.id);
+  const note = MODEL_NOTES[key];
+  const pricing = MODEL_PRICING[key];
+  const out = { ...model };
+  if (note && !out.description) out.description = note;
+  if (pricing && !out.pricing) out.pricing = { ...pricing };
+  return out;
+}
+
 export function mergeImageApis(configApis = []) {
-  const apis = IMAGE_APIS.map((a) => ({ ...a, models: [...a.models] }));
+  const apis = IMAGE_APIS.map((a) => ({ ...a, models: a.models.map(withKnown) }));
   const byId = new Map(apis.map((a) => [a.id, a]));
   for (const c of configApis) {
     if (!c || !c.id) continue;
@@ -68,9 +109,9 @@ export function mergeImageApis(configApis = []) {
       for (const f of ['imagesUrl', 'chatUrl', 'chatBody', 'editsUrl', 'keyEnv', 'keyUrl', 'name', 'video']) {
         if (c[f] != null) existing[f] = c[f];
       }
-      for (const m of c.models || []) existing.models.push(m);
+      for (const m of c.models || []) existing.models.push(withKnown(m));
     } else {
-      const np = { ...c, models: [...(c.models || [])] };
+      const np = { ...c, models: (c.models || []).map(withKnown) };
       apis.push(np);
       byId.set(np.id, np);
     }

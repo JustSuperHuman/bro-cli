@@ -1,6 +1,15 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { mapOpenRouterModels, mapOpenRouterVideoModels, mapOpenRouterImageModels, videoPricing, summarizeEndpointStats, attachStats } from './models.js';
+import {
+  mapOpenRouterModels,
+  mapOpenRouterVideoModels,
+  mapOpenRouterImageModels,
+  mapArenaLeaderboard,
+  mediaLatency,
+  videoPricing,
+  summarizeEndpointStats,
+  attachStats
+} from './models.js';
 
 test('OpenRouter mapping keeps models from every publisher and orders newest first', () => {
   const models = mapOpenRouterModels([
@@ -199,4 +208,82 @@ test('the bundled video catalogue is a usable offline fallback', () => {
   for (const id of ['google/veo-3.1', 'openai/sora-2-pro', 'bytedance/seedance-2.0', 'alibaba/wan-3.0']) {
     expect(ids).toContain(id);
   }
+});
+
+test('the catalogue mappers carry the publisher description through, tidied', () => {
+  // Video: the markdown link keeps its text and drops its target.
+  const video = mapOpenRouterVideoModels([
+    {
+      id: 'alibaba/wan-3.0-prime',
+      created: 1,
+      description: 'Wan 3.0 Prime is a fast-mode variant of [Wan 3.0](https://openrouter.ai/alibaba/wan-3.0) from Alibaba. It supports image-to-video. A third sentence.'
+    },
+    { id: 'x/no-description', created: 2 }
+  ]);
+  const wan = video.find((m) => m.id === 'alibaba/wan-3.0-prime');
+  expect(wan.description).toBe('Wan 3.0 Prime is a fast-mode variant of Wan 3.0 from Alibaba. It supports image-to-video.');
+  // Nothing to say means the field is absent, not an empty string.
+  expect(video.find((m) => m.id === 'x/no-description').description).toBeUndefined();
+
+  // Images: same treatment.
+  const images = mapOpenRouterImageModels([
+    {
+      id: 'openai/gpt-5.4-image-2',
+      created: 3,
+      architecture: { output_modalities: ['image'] },
+      description: '[GPT-5.4](https://openrouter.ai/openai/gpt-5.4) Image 2 combines OpenAI models with image generation.'
+    },
+    { id: 'openai/bare', created: 4, architecture: { output_modalities: ['image'] } }
+  ]);
+  expect(images.find((m) => m.id === 'openai/gpt-5.4-image-2').description).toBe(
+    'GPT-5.4 Image 2 combines OpenAI models with image generation.'
+  );
+  expect(images.find((m) => m.id === 'openai/bare').description).toBeUndefined();
+});
+
+// Tokens per second says nothing about an image model. OpenRouter measures the
+// wall-clock time of an image_generation / video_generation request instead,
+// which is what a picker should show — and it is there before you have
+// generated anything yourself.
+test('media latency comes from the workload the model actually serves', () => {
+  const endpoints = [
+    { perf_last_30m_by_workload: { image_generation: { latency: { p50: 30000 }, request_count: 5 } } },
+    // the busiest endpoint is the one OpenRouter routes to, so its number wins
+    { perf_last_30m_by_workload: { image_generation: { latency: { p50: 19898 }, request_count: 3617 } } },
+    { perf_last_30m_by_workload: { video_generation: { latency: { p50: 96955 }, request_count: 6 } } }
+  ];
+  expect(mediaLatency(endpoints, 'image')).toEqual({ p50: 19898, n: 3617 });
+  expect(mediaLatency(endpoints, 'video')).toEqual({ p50: 96955, n: 6 });
+});
+
+test('a model with no measured traffic reports nothing rather than zero', () => {
+  expect(mediaLatency([], 'image')).toBe(null);
+  expect(mediaLatency(undefined, 'image')).toBe(null);
+  // throughput-only stats are not a generation time
+  expect(mediaLatency([{ throughput_last_30m: { p50: 107 } }], 'image')).toBe(null);
+  // the wrong workload is not borrowed for the other kind
+  expect(mediaLatency([{ perf_last_30m_by_workload: { video_generation: { latency: { p50: 9 }, request_count: 2 } } }], 'image')).toBe(null);
+  expect(mediaLatency([{ perf_last_30m_by_workload: { image_generation: { latency: { p50: 0 }, request_count: 9 } } }], 'image')).toBe(null);
+});
+
+test('the leaderboard is mapped to ranked rows, best first', () => {
+  const rows = mapArenaLeaderboard(
+    [
+      { modelId: 'gpt-image-2', wins: 40360, losses: 15608, battles: 55968, winRate: 72.1, elo: 1381 },
+      { modelId: 'dalle-3', battles: 134905, winRate: 38.3, elo: 1086 },
+      { modelId: 'no-win-rate', elo: 900 },
+      { winRate: 50 }
+    ],
+    'image'
+  );
+  // Position on the board is the rank; rows with nothing to rate are dropped.
+  expect(rows.map((r) => [r.id, r.rank])).toEqual([
+    ['gpt-image-2', 1],
+    ['dalle-3', 2]
+  ]);
+  expect(rows[0]).toEqual({ id: 'gpt-image-2', category: 'image', rank: 1, winRate: 72.1, elo: 1381, battles: 55968 });
+  // A missing elo is null rather than NaN, and missing battles are zero.
+  expect(mapArenaLeaderboard([{ modelId: 'x', winRate: 10 }], 'video')[0]).toMatchObject({ elo: null, battles: 0, category: 'video' });
+  expect(mapArenaLeaderboard(null, 'image')).toEqual([]);
+  expect(mapArenaLeaderboard(undefined, 'image')).toEqual([]);
 });

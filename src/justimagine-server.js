@@ -5,7 +5,8 @@ import path from 'node:path';
 import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { ENHANCE_MODEL, enhancePrompt, generateImage, generateVideo, VIDEO_KEY_API } from './justimagine-gen.js';
-import { mediaModelFacts } from './model-info.js';
+import { arenaIndex, arenaQuality, catalogueIndex, enrichMediaFacts, mediaModelDetail, mediaModelFacts } from './model-info.js';
+import { readMediaStats, refreshMediaStats } from './models.js';
 import {
   CHARACTERS_DIR,
   addCandidate,
@@ -57,6 +58,23 @@ export const UI_HTML = path.join(__dirname, 'justimagine.html');
 // and fast so the browser can fan out; video is minutes-long and metered, so a
 // tighter gate keeps a stray "×8" from becoming eight concurrent paid jobs.
 const LIMITS = { image: 8, video: 3 };
+
+// How long a finished job stays readable, and how many are kept. The browser
+// only needs the last few seconds — it is watching the event stream — but a
+// script that submits fifty generations and polls for them must be able to
+// collect every result, including ones that landed while it was asleep.
+export const JOB_RETAIN_MS = 30 * 60 * 1000;
+export const JOB_RETAIN_MAX = 500;
+
+// One `POST /api/batch` may not become an unbounded queue: a typo in a loop
+// should cost a rejection, not a hundred paid generations.
+export const BATCH_MAX_ITEMS = 50;
+export const BATCH_MAX_JOBS = 100;
+// Longest a long-poll may hold a request open. Beyond this the caller gets what
+// has finished so far and polls again, which survives proxies and Ctrl-C alike.
+export const WAIT_MAX_SEC = 600;
+
+export const isTerminal = (job) => job.status === 'done' || job.status === 'error' || job.status === 'cancelled';
 
 // Nano Banana 2 — the strongest reference-driven image model on OpenRouter, and
 // the reason a generated cast holds its likeness across angles.
@@ -164,6 +182,31 @@ function readBody(req, max = 1024 * 1024) {
 
 const readJsonBody = async (req, max) => JSON.parse((await readBody(req, max)) || '{}');
 
+// Enough of a key to tell which one is saved, and never enough to use. Short
+// strings give up nothing at all rather than most of themselves.
+export function maskKey(key) {
+  if (!key) return '';
+  const s = String(key);
+  if (s.length < 12) return '•'.repeat(8);
+  return `${s.slice(0, 4)}…${s.slice(-4)}`;
+}
+
+// This server listens on the loopback interface, but any page in the browser can
+// still POST to 127.0.0.1. A write must therefore come from this gallery's own
+// origin: browsers set `Origin` on cross-origin writes and `Sec-Fetch-Site` on
+// every modern request, and neither can be forged by page script. A same-origin
+// fetch from our own HTML sends `Origin: http://127.0.0.1:<port>`; a form post
+// from evil.example.com sends its own origin and is refused.
+export function sameOrigin(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site) return site === 'same-origin' || site === 'none';
+  const origin = req.headers.origin;
+  // No Origin at all is a non-browser client (curl, a script) — the loopback
+  // bind is the only guard there, and it is the one the CLI itself relies on.
+  if (!origin) return true;
+  return origin === `http://${req.headers.host}` || origin === `https://${req.headers.host}`;
+}
+
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -260,9 +303,10 @@ function readRange(full, start, end) {
 // Generations outlive the request that started them: the browser posts a job
 // and then watches an event stream. That is what lets a five-minute video
 // survive a page reload, and what keeps the UI from holding open sockets.
-export function createJobs({ limits = LIMITS } = {}) {
+export function createJobs({ limits = LIMITS, retainMs = JOB_RETAIN_MS, retainMax = JOB_RETAIN_MAX } = {}) {
   const jobs = new Map();
   const clients = new Set();
+  const waiters = new Set();
   const queues = { image: [], video: [] };
   const running = { image: 0, video: 0 };
   let seq = 0;
@@ -282,9 +326,20 @@ export function createJobs({ limits = LIMITS } = {}) {
     refs: j.refs,
     startedAt: j.startedAt,
     queuedAt: j.queuedAt,
+    finishedAt: j.finishedAt,
     error: j.error,
     item: j.item
   });
+
+  // Finished jobs are kept so a poller can still collect them, but not forever
+  // and not without a ceiling: oldest terminal jobs go first, and anything
+  // still queued or running is never dropped.
+  function prune(now = Date.now()) {
+    const finished = [...jobs.values()].filter(isTerminal);
+    for (const j of finished) if (now - (j.finishedAt || 0) > retainMs) jobs.delete(j.id);
+    const left = [...jobs.values()].filter(isTerminal).sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0));
+    for (let i = 0; i < left.length - retainMax; i++) jobs.delete(left[i].id);
+  }
 
   function emit(type, payload) {
     const frame = `data: ${JSON.stringify({ type, ...payload })}\n\n`;
@@ -299,7 +354,11 @@ export function createJobs({ limits = LIMITS } = {}) {
 
   const update = (job, patch) => {
     Object.assign(job, patch);
+    if (isTerminal(job) && !job.finishedAt) job.finishedAt = Date.now();
     emit('job', { job: publicJob(job) });
+    // A long-poll is settled by the same transition that feeds the event
+    // stream, so `wait` returns the instant the last job lands.
+    for (const w of [...waiters]) w();
   };
 
   function pump(kind) {
@@ -319,12 +378,18 @@ export function createJobs({ limits = LIMITS } = {}) {
         })
         .finally(() => {
           running[kind]--;
-          // Finished jobs stay briefly so a reloading page still sees the
-          // result, then drop out so the registry cannot grow unbounded.
-          setTimeout(() => jobs.delete(job.id), 60_000).unref?.();
+          prune();
           pump(kind);
         });
     }
+  }
+
+  function cancelOne(id) {
+    const job = jobs.get(id);
+    if (!job || isTerminal(job)) return false;
+    job.ctrl.abort();
+    update(job, { status: 'cancelled', phase: '' });
+    return true;
   }
 
   return {
@@ -346,6 +411,7 @@ export function createJobs({ limits = LIMITS } = {}) {
         ctrl: new AbortController()
       };
       jobs.set(id, job);
+      prune();
       queues[kind].push(job);
       emit('job', { job: publicJob(job) });
       pump(kind);
@@ -356,15 +422,52 @@ export function createJobs({ limits = LIMITS } = {}) {
       if (job && job.status === 'running') update(job, { phase });
     },
     signal: (id) => jobs.get(id)?.ctrl.signal,
-    cancel(id) {
-      const job = jobs.get(id);
-      if (!job || job.status === 'done' || job.status === 'error') return false;
-      job.ctrl.abort();
-      update(job, { status: 'cancelled', phase: '' });
-      return true;
-    },
+    cancel: cancelOne,
+    // Stop everything still in flight — the "abort the batch I just queued"
+    // button, and the same thing over HTTP.
+    cancelAll: (kind) =>
+      [...jobs.values()]
+        .filter((j) => !isTerminal(j) && (!kind || j.kind === kind))
+        .map((j) => j.id)
+        .filter(cancelOne),
     active: () => [...jobs.values()].filter((j) => j.status === 'queued' || j.status === 'running').map(publicJob),
     snapshot: () => [...jobs.values()].map(publicJob),
+    // Read specific jobs back by id. Ids the registry no longer holds come back
+    // in `missing` rather than as a silent gap in the list, so a poller can tell
+    // "not finished yet" apart from "waited too long and it has aged out".
+    read(ids) {
+      prune();
+      const found = [];
+      const missing = [];
+      for (const id of ids) {
+        const job = jobs.get(id);
+        if (job) found.push(publicJob(job));
+        else missing.push(id);
+      }
+      return { jobs: found, missing };
+    },
+    pendingIds: (kind) => [...jobs.values()].filter((j) => !isTerminal(j) && (!kind || j.kind === kind)).map((j) => j.id),
+    // Long-poll until every named job has finished, or until the caller's
+    // patience runs out. This is what lets a script submit a batch and collect
+    // it with one more request instead of parsing an event stream.
+    wait(ids, timeoutMs = 0) {
+      const unfinished = () => ids.filter((id) => jobs.has(id) && !isTerminal(jobs.get(id)));
+      if (!timeoutMs || !unfinished().length) return Promise.resolve(!unfinished().length);
+      return new Promise((resolve) => {
+        const settle = (ok) => {
+          clearTimeout(timer);
+          waiters.delete(check);
+          resolve(ok);
+        };
+        const check = () => {
+          if (!unfinished().length) settle(true);
+        };
+        const timer = setTimeout(() => settle(false), timeoutMs);
+        timer.unref?.();
+        waiters.add(check);
+      });
+    },
+    prune,
     subscribe(res) {
       clients.add(res);
       return () => clients.delete(res);
@@ -392,6 +495,9 @@ export function createServer({
   root,
   apis,
   videoModels = [],
+  // Design Arena's leaderboard, both categories. The one quality scale the
+  // picker rates on; absent, models simply have no rank.
+  designArena = null,
   resolveKey,
   defaultApi,
   jobs = createJobs(),
@@ -401,7 +507,17 @@ export function createServer({
   enhanceModel = ENHANCE_MODEL,
   // The cast is global rather than per-gallery, so it is addressed separately
   // from the gallery root and every gallery sees the same characters.
-  charactersRoot = CHARACTERS_DIR
+  charactersRoot = CHARACTERS_DIR,
+  // Writing a key back to the config file. Injected rather than imported so the
+  // server stays testable without touching the real ~/.bro/config.json; when it
+  // is absent the settings panel goes read-only rather than failing on save.
+  saveKey = null,
+  // Shown in the settings panel so the file is findable, and named in the error
+  // when there is nothing to write to.
+  configPath = '',
+  // Collect OpenRouter's speed measurements in the background. Only the real
+  // entry point turns this on, so tests never reach the network.
+  statsRefresh = false
 }) {
   ensureRoot(root);
   ensureLibrary(charactersRoot);
@@ -553,26 +669,234 @@ export function createServer({
     };
   }
 
+  // Every model row, with display-ready facts. Built in one place because the
+  // boot payload and the live refresh below have to agree exactly.
+  function modelsPayload() {
+    const timings = modelTimings(root);
+    const now = Date.now();
+    // Only OpenRouter's catalogue carries prices, publish dates, Design Arena
+    // standings and the publisher's blurb. Aggregators and first-party APIs
+    // serve the same models under shorter ids, so match them by normalised key
+    // and lend them those facts — otherwise picking a Yunwu or OpenAI model
+    // means choosing from a bare list of ids.
+    const catalogue = catalogueIndex([...(apis.find((a) => a.id === 'openrouter')?.models || []), ...videoModels]);
+    // How long a picture or a clip actually takes, measured by OpenRouter over
+    // everyone's traffic — so a fresh gallery shows real speeds rather than
+    // waiting for you to have generated something yourself.
+    const latencies = readMediaStats();
+    // One quality scale for the whole picker, from the board itself. OpenRouter
+    // embeds a snapshot ranked among only the models it serves, which put two
+    // different models at "#2" in the same list, left the first-party Images API
+    // models unranked, and gave video no rating at all.
+    const arena = arenaIndex(designArena);
+    const withFacts = (raw, kind) => {
+      const enriched = enrichMediaFacts(raw, catalogue);
+      const ranked = arenaQuality(enriched, arena, kind);
+      const m = ranked ? { ...enriched, quality: ranked } : enriched;
+      const timing = timings[m.id] || (m.factsFrom ? timings[m.factsFrom] : null);
+      const latency = latencies[m.id] || (m.factsFrom ? latencies[m.factsFrom] : null);
+      const withLatency = latency?.p50 > 0 ? { ...m, latency } : m;
+      return {
+        ...withLatency,
+        facts: mediaModelFacts(withLatency, { kind, now, timing }),
+        detail: mediaModelDetail(withLatency, { kind })
+      };
+    };
+    return {
+      apis: apis.map((a) => ({
+        id: a.id,
+        name: a.name || a.id,
+        video: !!a.video,
+        models: (a.models || []).map((m) => withFacts(m, 'image')),
+        hasKey: !!keyOf(a.id)
+      })),
+      videoModels: videoModels.map((m) => withFacts(m, 'video'))
+    };
+  }
+
+  // Collect the speed numbers in the background and push the refreshed rows to
+  // every open page, so the picker fills in without anyone reloading. Off by
+  // default: only the real entry point turns it on, so tests never reach out.
+  async function refreshModelStats() {
+    const apiKey = keyOf('openrouter');
+    if (!apiKey) return null;
+    const wanted = [
+      ...(apis.find((a) => a.id === 'openrouter')?.models || []).map((m) => ({ id: m.id, kind: 'image' })),
+      ...videoModels.map((m) => ({ id: m.id, kind: 'video' }))
+    ];
+    try {
+      await refreshMediaStats({ models: wanted, apiKey });
+      if (jobs.clientCount()) jobs.emit('models', modelsPayload());
+      return true;
+    } catch {
+      return false; // speeds stay blank; nothing else depends on them
+    }
+  }
+  if (statsRefresh) setTimeout(refreshModelStats, 200).unref?.();
+
+  // ---------- generation ----------
+
+  // A reference is normally a name in the gallery's own `.context`, but a script
+  // has files. Anything that looks like a path is registered on the way past and
+  // swapped for its content-hash name, so `images: ["/photos/bottle.png"]` works
+  // without a separate upload call. Registering is idempotent — the same bytes
+  // keep the same name — so passing the same path to fifty items costs one write.
+  const looksLikePath = (s) => /[\\/]/.test(s) || /^[a-zA-Z]:/.test(s);
+
+  function registerRefPaths(images) {
+    if (!Array.isArray(images)) return images;
+    return images.map((entry) => {
+      const name = String(entry || '');
+      if (!name || !looksLikePath(name)) return name;
+      const full = path.resolve(name);
+      if (kindOf(full) !== 'image') throw Object.assign(new Error(`Not an image file: ${name}`), { status: 400 });
+      let buf;
+      try {
+        buf = fs.readFileSync(full);
+      } catch (e) {
+        throw Object.assign(new Error(`Cannot read reference ${full}: ${e.code || e.message}`), { status: 400 });
+      }
+      return saveContext(root, `data:${mediaTypeOf(full)};base64,${buf.toString('base64')}`).file;
+    });
+  }
+
+  // One generation spec, fully resolved but not yet queued. Splitting "can this
+  // run?" from "run it" is what lets a batch reject its fortieth item before its
+  // first has cost anything.
+  function planGeneration(spec = {}) {
+    const kind = spec.kind === 'video' ? 'video' : 'image';
+    const prompt = String(spec.prompt || '').trim();
+    if (!prompt) throw Object.assign(new Error('Prompt is required.'), { status: 400 });
+    const { full: folderFull, rel: folderRel } = resolveFolder(root, spec.folder);
+    const count = Math.min(Math.max(Number(spec.count) || 1, 1), kind === 'video' ? 4 : 12);
+    const refs = resolveRefs(root, registerRefPaths(spec.images));
+
+    // Picked characters bring their own reference images and are named in the
+    // prompt, so "@Nora at a market stall" reaches the model as a described
+    // person backed by pictures of her.
+    const cast = resolveCharacters(charactersRoot, spec.characters);
+    const characterRefs = cast.flatMap((c) => c.resolved);
+    const common = {
+      kind,
+      count,
+      prompt,
+      composed: composePrompt(prompt, cast),
+      castNames: cast.map((c) => c.name),
+      folderFull,
+      folderRel
+    };
+
+    if (kind === 'video') {
+      const model = String(spec.model || videoModels[0]?.id || '').trim();
+      if (!model) throw Object.assign(new Error('Pick a video model.'), { status: 400 });
+      const modelSpec = videoModels.find((m) => m.id === model);
+      const params = {
+        duration: spec.duration ? Number(spec.duration) : undefined,
+        resolution: spec.resolution,
+        aspectRatio: spec.aspectRatio,
+        size: spec.size,
+        generateAudio: typeof spec.audio === 'boolean' ? spec.audio : undefined,
+        seed: spec.seed,
+        ...frameSelection({
+          refs,
+          characterRefs,
+          spec: modelSpec,
+          firstFrame: spec.firstFrame !== false,
+          lastFrame: spec.lastFrame === true
+        })
+      };
+      return { ...common, model, params, refs };
+    }
+
+    const api = apiById.get(spec.api) || apiById.get(defaultApi) || apis[0];
+    if (!api) throw Object.assign(new Error('No image API configured.'), { status: 400 });
+    const model = String(spec.model || api.models?.[0]?.id || '').trim();
+    if (!model) throw Object.assign(new Error('Pick or type a model.'), { status: 400 });
+    // A character's pictures ride alongside whatever was attached by hand,
+    // capped the same way a manual attachment set is.
+    return { ...common, api, model, size: spec.size, quality: spec.quality, refs: [...refs, ...characterRefs].slice(0, 8) };
+  }
+
+  function queueFromPlan(plan) {
+    const { kind, count, prompt, composed, castNames, folderFull, folderRel, model, refs } = plan;
+    const ids = [];
+    for (let i = 0; i < count; i++) {
+      ids.push(
+        jobs.add({
+          kind,
+          folder: folderRel,
+          prompt,
+          model,
+          characters: castNames,
+          refs:
+            kind === 'video'
+              ? plan.params.refs.length + (plan.params.firstFrame ? 1 : 0) + (plan.params.lastFrame ? 1 : 0)
+              : refs.length,
+          run: (job) =>
+            kind === 'video'
+              ? runVideoJob(job, { prompt, composed, model, params: plan.params, refs, castNames, folderFull, folderRel })
+              : runImageJob(job, {
+                  prompt,
+                  composed,
+                  api: plan.api,
+                  model,
+                  size: plan.size,
+                  quality: plan.quality,
+                  refs,
+                  castNames,
+                  folderFull,
+                  folderRel
+                })
+        })
+      );
+    }
+    return {
+      jobs: ids,
+      kind,
+      model,
+      folder: folderRel,
+      warning:
+        kind === 'video' && plan.params.droppedCharacters
+          ? 'Your attached frame takes precedence, so the character references were not sent.'
+          : undefined
+    };
+  }
+
+  const queueGeneration = (spec) => queueFromPlan(planGeneration(spec));
+
+  // ---------- polling ----------
+
+  const waitSeconds = (v) => Math.min(Math.max(Number(v) || 0, 0), WAIT_MAX_SEC);
+
+  // Hold the request until every named job has finished (or the clock runs out),
+  // then report them grouped the way a caller actually consumes them: what
+  // landed, what failed, what is still going.
+  async function collect(ids, seconds) {
+    const settled = await jobs.wait(ids, seconds * 1000);
+    const { jobs: rows, missing } = jobs.read(ids);
+    return {
+      settled,
+      results: rows,
+      items: rows.filter((j) => j.status === 'done' && j.item).map((j) => j.item),
+      failed: rows
+        .filter((j) => j.status === 'error')
+        .map((j) => ({ id: j.id, prompt: j.prompt, model: j.model, error: j.error })),
+      cancelled: rows.filter((j) => j.status === 'cancelled').map((j) => j.id),
+      pending: rows.filter((j) => !isTerminal(j)).map((j) => j.id),
+      missing: missing.length ? missing : undefined
+    };
+  }
+
   const routes = {
     async 'GET /api/state'() {
       // Every model row carries display-ready facts (age, cost, speed,
       // quality); speed is this gallery's own record of how long the model
       // has taken.
-      const timings = modelTimings(root);
-      const now = Date.now();
-      const withFacts = (m, kind) => ({ ...m, facts: mediaModelFacts(m, { kind, now, timing: m.id ? timings[m.id] : null }) });
       return {
         title,
         root,
         defaultApi,
-        apis: apis.map((a) => ({
-          id: a.id,
-          name: a.name || a.id,
-          video: !!a.video,
-          models: (a.models || []).map((m) => withFacts(m, 'image')),
-          hasKey: !!keyOf(a.id)
-        })),
-        videoModels: videoModels.map((m) => withFacts(m, 'video')),
+        ...modelsPayload(),
         videoReady: !!keyOf(VIDEO_KEY_API),
         // The ✨ button rides on the same OpenRouter key as video.
         enhanceReady: !!keyOf(VIDEO_KEY_API),
@@ -582,6 +906,51 @@ export function createServer({
         characters: listCharacters(charactersRoot),
         jobs: jobs.active()
       };
+    },
+
+    // What the settings panel shows: every provider, whether it has a key and
+    // where that key came from. Never the key itself — only enough of it to
+    // recognise which one is saved.
+    'GET /api/config'() {
+      return {
+        configPath,
+        root,
+        writable: !!saveKey,
+        videoApi: VIDEO_KEY_API,
+        enhanceModel,
+        apis: apis.map((a) => {
+          const key = keyOf(a.id);
+          const fromEnv = !!(!key ? false : a.keyEnv && process.env[a.keyEnv] === key);
+          return {
+            id: a.id,
+            name: a.name || a.id,
+            video: !!a.video,
+            keyUrl: a.keyUrl || '',
+            keyEnv: a.keyEnv || '',
+            models: (a.models || []).length,
+            hasKey: !!key,
+            // An env var is the shell's to change, not ours — the panel says so
+            // instead of offering a Remove that would not stick.
+            source: key ? (fromEnv ? 'env' : 'config') : '',
+            keyPreview: maskKey(key)
+          };
+        })
+      };
+    },
+
+    // Save or clear one provider's key. An empty key removes it, which is how
+    // the panel's Remove button works.
+    async 'POST /api/config/key'(req) {
+      if (!saveKey) throw Object.assign(new Error('This gallery cannot write the config file.'), { status: 400 });
+      const { id, key } = await readJsonBody(req);
+      if (!id || !apiById.has(id)) throw Object.assign(new Error(`Unknown API "${id}"`), { status: 400 });
+      const trimmed = typeof key === 'string' ? key.trim() : '';
+      // A pasted key with a stray newline or quote is a support ticket waiting
+      // to happen; strip the obvious wrappers before it is written.
+      const cleaned = trimmed.replace(/^["'`]|["'`]$/g, '').trim();
+      if (cleaned.length > 500) throw Object.assign(new Error('That does not look like an API key.'), { status: 400 });
+      saveKey(id, cleaned);
+      return { ok: true, id, hasKey: !!cleaned, keyPreview: maskKey(cleaned) };
     },
 
     // Paged: a folder with thousands of generations must not turn into one
@@ -625,9 +994,27 @@ export function createServer({
       return { ok: deleteItem(root, folder, file) };
     },
 
+    // A reference image arrives either as a data URL from the browser or as a
+    // path on disk: a script has files, and base64-ing a PNG through a shell is
+    // nobody's idea of an API. Both dedupe to the same content-hash name, so
+    // uploading the same picture twice costs nothing.
     async 'POST /api/context'(req) {
-      const { dataUrl } = await readJsonBody(req, 64 * 1024 * 1024);
-      return saveContext(root, dataUrl);
+      const body = await readJsonBody(req, 64 * 1024 * 1024);
+      if (body.dataUrl) return saveContext(root, body.dataUrl);
+      const given = String(body.path || '').trim();
+      if (!given) throw Object.assign(new Error('Send { dataUrl } or { path } — a local image file.'), { status: 400 });
+      const full = path.resolve(given);
+      if (kindOf(full) !== 'image') {
+        throw Object.assign(new Error(`Not an image file: ${given} (png, jpg, webp or gif).`), { status: 400 });
+      }
+      let buf;
+      try {
+        buf = fs.readFileSync(full);
+      } catch (e) {
+        throw Object.assign(new Error(`Cannot read ${full}: ${e.code || e.message}`), { status: 400 });
+      }
+      if (buf.length > 32 * 1024 * 1024) throw Object.assign(new Error(`${given} is over 32 MB.`), { status: 400 });
+      return { ...saveContext(root, `data:${mediaTypeOf(full)};base64,${buf.toString('base64')}`), path: full };
     },
 
     async 'POST /api/context/delete'(req) {
@@ -640,9 +1027,82 @@ export function createServer({
       return saveThumb(root, folder, file, dataUrl);
     },
 
+    // One id, a list of them, or everything still in flight — which is the
+    // "stop the batch I just queued" escape hatch.
     async 'POST /api/cancel'(req) {
-      const { id } = await readJsonBody(req);
-      return { ok: jobs.cancel(String(id || '')) };
+      const body = await readJsonBody(req);
+      const cancelled = body.all
+        ? jobs.cancelAll(body.kind === 'video' || body.kind === 'image' ? body.kind : '')
+        : (Array.isArray(body.ids) ? body.ids : [body.id]).map((id) => String(id || '')).filter((id) => jobs.cancel(id));
+      return { ok: cancelled.length > 0, cancelled };
+    },
+
+    // Poll instead of subscribe. `?ids=a,b,c` reports exactly those jobs and
+    // `?wait=<seconds>` holds the request open until they have all finished, so
+    // a script can submit and collect in two calls without parsing an event
+    // stream. With no ids it reports the whole registry — finished jobs
+    // included, for as long as they are retained — which is how you find a job
+    // whose id you lost.
+    async 'GET /api/jobs'(req, res, url) {
+      const ids = (url.searchParams.get('ids') || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const wait = waitSeconds(url.searchParams.get('wait'));
+      const report = await collect(ids.length ? ids : jobs.pendingIds(), wait);
+      if (ids.length) return report;
+      const all = url.searchParams.get('active') === '1' ? jobs.active() : jobs.snapshot();
+      return {
+        ...report,
+        results: all.sort((a, b) => (b.queuedAt || 0) - (a.queuedAt || 0)),
+        active: jobs.pendingIds().length,
+        limits: LIMITS,
+        retainMs: JOB_RETAIN_MS
+      };
+    },
+
+    // The catalogue on its own: every knob a generation may set, without the
+    // folder tree, the cast and the reference library that `/api/state` carries.
+    // `?kind=video`, `?api=openrouter`, `?q=veo`, `?detail=1`, `?limit=n`.
+    'GET /api/models'(req, res, url) {
+      const kind = url.searchParams.get('kind');
+      const wantApi = url.searchParams.get('api');
+      const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+      const detail = url.searchParams.get('detail') === '1';
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 500, 1), 2000);
+      const payload = modelsPayload();
+      const row = (m, k, api, ready) => ({
+        id: m.id,
+        name: m.name || m.id,
+        kind: k,
+        api,
+        ready,
+        created: m.created || undefined,
+        pricing: m.pricing || undefined,
+        durations: m.durations || undefined,
+        resolutions: m.resolutions || undefined,
+        aspectRatios: m.aspectRatios || undefined,
+        sizes: m.sizes || undefined,
+        frames: m.frames || undefined,
+        audio: m.audio || undefined,
+        seed: m.seed || undefined,
+        pricedAs: m.factsFrom || undefined,
+        description: detail ? m.description || undefined : undefined,
+        facts: detail ? m.facts : undefined
+      });
+      const rows = [];
+      if (kind !== 'video') {
+        for (const a of payload.apis) {
+          if (wantApi && a.id !== wantApi) continue;
+          for (const m of a.models) rows.push(row(m, 'image', a.id, a.hasKey));
+        }
+      }
+      if (kind !== 'image' && (!wantApi || wantApi === VIDEO_KEY_API)) {
+        const ready = !!keyOf(VIDEO_KEY_API);
+        for (const m of payload.videoModels) rows.push(row(m, 'video', VIDEO_KEY_API, ready));
+      }
+      const matched = q ? rows.filter((m) => `${m.id} ${m.name}`.toLowerCase().includes(q)) : rows;
+      return { models: matched.slice(0, limit), total: matched.length, defaultApi, videoApi: VIDEO_KEY_API };
     },
 
     // Rewrite the composer's prompt into something the picked model can work
@@ -682,88 +1142,65 @@ export function createServer({
       }
     },
 
+    // Queue one spec (`count` copies of it). `wait: <seconds>` turns it into a
+    // blocking call that comes back with the finished items, which is all a
+    // script wants for a single picture.
     async 'POST /api/generate'(req) {
       const body = await readJsonBody(req);
-      const kind = body.kind === 'video' ? 'video' : 'image';
-      const prompt = String(body.prompt || '').trim();
-      if (!prompt) throw Object.assign(new Error('Prompt is required.'), { status: 400 });
-      const { full: folderFull, rel: folderRel } = resolveFolder(root, body.folder);
-      const count = Math.min(Math.max(Number(body.count) || 1, 1), kind === 'video' ? 4 : 12);
-      const refs = resolveRefs(root, body.images);
+      const queued = queueGeneration(body);
+      const wait = waitSeconds(body.wait);
+      return wait ? { ...queued, ...(await collect(queued.jobs, wait)) } : queued;
+    },
 
-      // Picked characters bring their own reference images and are named in
-      // the prompt, so "@Nora at a market stall" reaches the model as a
-      // described person backed by pictures of her.
-      const cast = resolveCharacters(charactersRoot, body.characters);
-      const characterRefs = cast.flatMap((c) => c.resolved);
-      const composed = composePrompt(prompt, cast);
-      const castNames = cast.map((c) => c.name);
-
-      if (kind === 'video') {
-        const model = String(body.model || videoModels[0]?.id || '').trim();
-        if (!model) throw Object.assign(new Error('Pick a video model.'), { status: 400 });
-        const spec = videoModels.find((m) => m.id === model);
-        const params = {
-          duration: body.duration ? Number(body.duration) : undefined,
-          resolution: body.resolution,
-          aspectRatio: body.aspectRatio,
-          size: body.size,
-          generateAudio: typeof body.audio === 'boolean' ? body.audio : undefined,
-          seed: body.seed,
-          ...frameSelection({ refs, characterRefs, spec, firstFrame: body.firstFrame !== false, lastFrame: body.lastFrame === true })
-        };
-        const ids = [];
-        for (let i = 0; i < count; i++) {
-          ids.push(
-            jobs.add({
-              kind,
-              folder: folderRel,
-              prompt,
-              model,
-              characters: castNames,
-              refs: params.refs.length + (params.firstFrame ? 1 : 0) + (params.lastFrame ? 1 : 0),
-              run: (job) =>
-                runVideoJob(job, { prompt, composed, model, params, refs, castNames, folderFull, folderRel })
-            })
-          );
-        }
-        return { jobs: ids, warning: params.droppedCharacters ? 'Your attached frame takes precedence, so the character references were not sent.' : undefined };
+    // Many prompts, one request. The gallery's composer only ever sends one
+    // spec, but a script writing a storyboard has fifty — and doing that as
+    // fifty round trips means fifty chances to lose track of a job id.
+    //
+    //   { defaults: {…}, items: [{…}|"a prompt", …], wait: <seconds> }
+    //
+    // `defaults` is merged under every item, so the folder, model and knobs are
+    // stated once. Images and video may be mixed freely; each item's `kind`
+    // decides which queue it joins.
+    async 'POST /api/batch'(req) {
+      const body = await readJsonBody(req, 4 * 1024 * 1024);
+      const list = Array.isArray(body) ? body : Array.isArray(body.items) ? body.items : null;
+      if (!list?.length) throw Object.assign(new Error('Send { items: [ … ] } — one entry per generation.'), { status: 400 });
+      if (list.length > BATCH_MAX_ITEMS) {
+        throw Object.assign(new Error(`At most ${BATCH_MAX_ITEMS} items per batch (got ${list.length}).`), { status: 400 });
       }
+      const defaults = (!Array.isArray(body) && body.defaults) || {};
 
-      const api = apiById.get(body.api) || apiById.get(defaultApi) || apis[0];
-      if (!api) throw Object.assign(new Error('No image API configured.'), { status: 400 });
-      const model = String(body.model || api.models?.[0]?.id || '').trim();
-      if (!model) throw Object.assign(new Error('Pick or type a model.'), { status: 400 });
-      // A character's pictures ride alongside whatever was attached by hand,
-      // capped the same way a manual attachment set is.
-      const allRefs = [...refs, ...characterRefs].slice(0, 8);
-      const ids = [];
-      for (let i = 0; i < count; i++) {
-        ids.push(
-          jobs.add({
-            kind,
-            folder: folderRel,
-            prompt,
-            model,
-            characters: castNames,
-            refs: allRefs.length,
-            run: (job) =>
-              runImageJob(job, {
-                prompt,
-                composed,
-                api,
-                model,
-                size: body.size,
-                quality: body.quality,
-                refs: allRefs,
-                castNames,
-                folderFull,
-                folderRel
-              })
-          })
+      // Validate and count the whole batch before queueing any of it, so a typo
+      // in item 40 doesn't leave 39 paid generations already running.
+      const specs = list.map((raw, i) => {
+        const spec = { ...defaults, ...(typeof raw === 'string' ? { prompt: raw } : raw || {}) };
+        try {
+          return { spec, plan: planGeneration(spec) };
+        } catch (e) {
+          throw Object.assign(new Error(`items[${i}]: ${e.message}`), { status: e.status || 400 });
+        }
+      });
+      const total = specs.reduce((n, s) => n + s.plan.count, 0);
+      if (total > BATCH_MAX_JOBS) {
+        throw Object.assign(
+          new Error(`That batch is ${total} generations; the limit is ${BATCH_MAX_JOBS}. Split it or lower "count".`),
+          { status: 400 }
         );
       }
-      return { jobs: ids };
+
+      const queued = specs.map(({ plan }) => queueFromPlan(plan));
+      const ids = queued.flatMap((q) => q.jobs);
+      const warnings = queued.map((q, i) => (q.warning ? `items[${i}]: ${q.warning}` : null)).filter(Boolean);
+      const submitted = {
+        jobs: ids,
+        count: ids.length,
+        images: queued.filter((q) => q.kind === 'image').reduce((n, q) => n + q.jobs.length, 0),
+        videos: queued.filter((q) => q.kind === 'video').reduce((n, q) => n + q.jobs.length, 0),
+        warnings: warnings.length ? warnings : undefined
+      };
+      const wait = waitSeconds(!Array.isArray(body) ? body.wait : 0);
+      if (!wait) return submitted;
+      return { ...submitted, ...(await collect(ids, wait)) };
     },
 
     // ---------- characters ----------
@@ -790,8 +1227,21 @@ export function createServer({
     // A reference arrives either as an upload or as "make this generation one
     // of Nora's references", which is the loop that sharpens a character.
     async 'POST /api/characters/refs'(req) {
-      const { id, dataUrl, folder, file } = await readJsonBody(req, 64 * 1024 * 1024);
+      const { id, dataUrl, folder, file, path: given } = await readJsonBody(req, 64 * 1024 * 1024);
       if (dataUrl) return addRefFromDataUrl(charactersRoot, id, dataUrl);
+      // A photo on disk — the third way in, for the same reason /api/context
+      // takes one: a script has files, not data URLs.
+      if (given) {
+        const full = path.resolve(String(given));
+        if (kindOf(full) !== 'image') throw Object.assign(new Error(`Not an image file: ${given}`), { status: 400 });
+        let buf;
+        try {
+          buf = fs.readFileSync(full);
+        } catch (e) {
+          throw Object.assign(new Error(`Cannot read ${full}: ${e.code || e.message}`), { status: 400 });
+        }
+        return addRefFromDataUrl(charactersRoot, id, `data:${mediaTypeOf(full)};base64,${buf.toString('base64')}`);
+      }
       const src = resolveFile(root, folder, file);
       if (kindOf(src.name) !== 'image') throw Object.assign(new Error('Only images can be character references.'), { status: 400 });
       return addRefFromDataUrl(
@@ -914,6 +1364,12 @@ export function createServer({
 
       const handler = routes[`${method} ${url.pathname}`];
       if (handler) {
+        // Reads are harmless; a write from another site is not — it could spend
+        // the user's credits or overwrite a saved key.
+        if (method !== 'GET' && !sameOrigin(req)) {
+          sendJson(res, 403, { error: 'Cross-site request refused.' });
+          return;
+        }
         sendJson(res, 200, (await handler(req, res, url)) ?? { ok: true });
         return;
       }

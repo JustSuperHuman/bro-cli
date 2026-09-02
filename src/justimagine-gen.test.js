@@ -393,3 +393,26 @@ test('a job that never finishes gives up instead of polling forever', async () =
 test('generateVideo is exported from the module surface', () => {
   expect(typeof generateVideo).toBe('function');
 });
+
+test('models the catalogue cannot describe still get a one-line note', () => {
+  const apis = mergeImageApis([
+    { id: 'mine', name: 'Mine', models: [{ id: 'dall-e-3' }, { id: 'house-model', description: 'Our own thing.' }, { id: 'unknown-model' }] }
+  ]);
+  const byId = (apiId, modelId) => apis.find((a) => a.id === apiId).models.find((m) => m.id === modelId);
+
+  // The same note reaches every provider serving that model, keyed by
+  // normalised id rather than by which shop it came from.
+  expect(byId('yunwu', 'dall-e-3').description).toContain('DALL·E 3');
+  expect(byId('openai', 'dall-e-3').description).toBe(byId('yunwu', 'dall-e-3').description);
+  expect(byId('mine', 'dall-e-3').description).toBe(byId('openai', 'dall-e-3').description);
+  expect(byId('yunwu', 'gpt-image-1').description).toContain('Images API');
+
+  // A model that says something for itself keeps its own words.
+  expect(byId('mine', 'house-model').description).toBe('Our own thing.');
+  // And one nobody has anything for stays silent rather than being invented for.
+  expect(byId('mine', 'unknown-model').description).toBeUndefined();
+
+  // Models the live catalogue describes are left alone, so the richer blurb
+  // from OpenRouter wins rather than being pre-empted by a note.
+  expect(byId('yunwu', 'gemini-3.1-flash-image').description).toBeUndefined();
+});

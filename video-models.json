@@ -7,6 +7,7 @@
       "name": "Alibaba: Wan 3.0 Prime",
       "kind": "video",
       "created": 1787863800,
+      "description": "Wan 3.0 Prime is a fast-mode variant of Wan 3.0 from Alibaba. It supports text-to-video and first-frame image-to-video generation.",
       "pricing": {
         "perSecond": 0.14,
         "basis": "720p"
@@ -67,6 +68,7 @@
       "name": "Alibaba: Wan 3.0",
       "kind": "video",
       "created": 1787603856,
+      "description": "Wan 3.0 is a video generation model from Alibaba for text-to-video, image-to-video, and reference-guided video generation. It produces 480p, 720p, or 1080p video with durations from 2 to 30 seconds.",
       "pricing": {
         "perSecond": 0.1,
         "basis": "720p"
@@ -127,6 +129,7 @@
       "name": "HeyGen: Avatar IV",
       "kind": "video",
       "created": 1787595728,
+      "description": "HeyGen: Avatar IV is an image-to-video model that animates a single photo into an expressive, lip-synced talking-head video. Rather than only matching mouth shapes to words, it interprets the vocal...",
       "pricing": {
         "perSecond": 0.05
       },
@@ -151,6 +154,7 @@
       "name": "Black Forest Labs: FLUX Video Upscale",
       "kind": "video",
       "created": 1787173919,
+      "description": "FLUX Video Upscale is a video upscaling model from Black Forest Labs. It enlarges a single source video by 1.5× to 3× while preserving its duration, with an optional prompt...",
       "resolutions": null,
       "aspectRatios": null,
       "sizes": null,
@@ -165,6 +169,7 @@
       "name": "ByteDance: Seedance 2.0 Mini",
       "kind": "video",
       "created": 1786552600,
+      "description": "Seedance 2.0 Mini is a video generation model from ByteDance. It supports text-to-video, image-to-video with first and last frame control, and multimodal reference-to-video with image, video, and audio inputs.",
       "pricing": {
         "perSecond": 0.0756
       },
@@ -223,6 +228,7 @@
       "name": "ByteDance: Seedance 2.5",
       "kind": "video",
       "created": 1786141253,
+      "description": "Seedance 2.5 is a video generation model from ByteDance. It is suited for long-form storytelling, multimodal reference-based generation, video editing, and video extension.",
       "pricing": {
         "perSecond": 0.2311
       },
@@ -294,6 +300,7 @@
       "name": "Black Forest Labs: FLUX.3 Video",
       "kind": "video",
       "created": 1785858831,
+      "description": "FLUX.3 Video is a video generation model from Black Forest Labs. It supports text-to-video, image-guided generation with opening and closing keyframes, and video continuation workflows, making it suited for controlled...",
       "pricing": {
         "perSecond": 0.17,
         "basis": "720p"
@@ -342,6 +349,7 @@
       "name": "MiniMax: H3",
       "kind": "video",
       "created": 1785366648,
+      "description": "MiniMax H3 is a lightweight, open-weights video generation model from MiniMax. It is designed for precise multimodal editing and controlled content generation, including instruction-guided edits, text and brand rendering, and...",
       "pricing": {
         "perSecond": 0.13
       },
@@ -383,6 +391,7 @@
       "name": "Runway: Aleph 2.0",
       "kind": "video",
       "created": 1785339484,
+      "description": "Runway Aleph 2.0 is an in-context video editing model from Runway. It applies text instructions and keyframe-guided edits across existing footage while preserving details that are not meant to change....",
       "pricing": {
         "perSecond": 0.28
       },
@@ -409,6 +418,7 @@
       "name": "Runway: Gen-4.5",
       "kind": "video",
       "created": 1785339483,
+      "description": "Runway Gen-4.5 is a video generation model from Runway for text-to-video and image-to-video workflows. It is designed for cinematic scene creation with strong motion quality, visual fidelity, and prompt adherence....",
       "pricing": {
         "perSecond": 0.12
       },
@@ -446,6 +456,7 @@
       "name": "SpaceXAI: Grok Imagine Video 1.5",
       "kind": "video",
       "created": 1784548100,
+      "description": "Grok Imagine Video 1.5 is a video generation model from SpaceXAI. It creates videos from text prompts, with an optional starting image to guide the scene. It can direct subject...",
       "pricing": {
         "perSecond": 0.14,
         "basis": "720p"
@@ -494,6 +505,7 @@
       "name": "Alibaba: HappyHorse 1.1",
       "kind": "video",
       "created": 1782269643,
+      "description": "HappyHorse 1.1 is a video generation model from Alibaba. It generates short videos from a text prompt, a single starting image, or a set of reference images, with output up...",
       "pricing": {
         "perSecond": 0.0988,
         "basis": "720p"
@@ -554,6 +566,7 @@
       "name": "Alibaba: HappyHorse 1.0",
       "kind": "video",
       "created": 1782260324,
+      "description": "HappyHorse 1.0 is a video generation model from Alibaba. It generates short videos from a text prompt, a single starting image, or a set of reference images, with output up...",
       "pricing": {
         "perSecond": 0.0988,
         "basis": "720p"
@@ -614,6 +627,7 @@
       "name": "SpaceXAI: Grok Imagine Video",
       "kind": "video",
       "created": 1779117586,
+      "description": "Grok Imagine Video is SpaceXAI's fast, text-, image-, and reference-conditioned video generation model. It produces short videos (1–15 seconds, 24 fps) at 480p or 720p across seven aspect ratios -...",
       "pricing": {
         "perSecond": 0.07,
         "basis": "720p"
@@ -676,6 +690,7 @@
       "name": "Kling: Video v3.0 Pro",
       "kind": "video",
       "created": 1777496206,
+      "description": "Kling v3.0 Pro is Kuaishou's premium video generation model, offering higher visual quality than the Standard tier. It supports text-to-video and image-to-video workflows, with first-frame and last-frame control for precise...",
       "pricing": {
         "perSecond": 0.112,
         "basis": "720p"
@@ -721,6 +736,7 @@
       "name": "Kling: Video v3.0 Standard",
       "kind": "video",
       "created": 1777496205,
+      "description": "Kling v3.0 Standard is a video generation model from Kuaishou. It supports text-to-video and image-to-video workflows, with first-frame and last-frame control for guided scene composition.",
       "pricing": {
         "perSecond": 0.084,
         "basis": "720p"
@@ -766,6 +782,7 @@
       "name": "Google: Veo 3.1 Fast",
       "kind": "video",
       "created": 1776994666,
+      "description": "Google's mid-tier video generation model balancing speed and quality. Veo 3.1 Fast generates high-quality video from text or image prompts with native synchronized audio, offering faster turnaround than Veo 3.1...",
       "pricing": {
         "perSecond": 0.08,
         "basis": "720p"
@@ -805,6 +822,7 @@
       "name": "Google: Veo 3.1 Lite",
       "kind": "video",
       "created": 1776978818,
+      "description": "Google's most cost-effective video generation model, designed for high-volume applications and rapid iteration. Veo 3.1 Lite generates 720p and 1080p video from text or image prompts with native synchronized audio...",
       "pricing": {
         "perSecond": 0.03,
         "basis": "720p"
@@ -841,6 +859,7 @@
       "name": "Kling: Video O1",
       "kind": "video",
       "created": 1776704777,
+      "description": "Kling Video O1 is a video generation model from Kuaishou. It supports text and image inputs with video output, enabling text-to-video and image-to-video workflows.",
       "pricing": {
         "perSecond": 0.112
       },
@@ -874,6 +893,7 @@
       "name": "MiniMax: Hailuo 2.3",
       "kind": "video",
       "created": 1776702740,
+      "description": "Hailuo 2.3 is a video generation model from MiniMax. It accepts text prompts and reference images as input and generates video output, supporting both text-to-video and image-to-video workflows.",
       "pricing": {
         "perSecond": 0.0817
       },
@@ -902,6 +922,7 @@
       "name": "Alibaba: Wan 2.7",
       "kind": "video",
       "created": 1776211362,
+      "description": "Wan 2.7 is a video generation model from Alibaba. It supports text-to-video, image-to-video with first and last frame control, and reference-to-video, where multiple reference images guide the style and content...",
       "pricing": {
         "perSecond": 0.1
       },
@@ -952,6 +973,7 @@
       "name": "ByteDance: Seedance 2.0",
       "kind": "video",
       "created": 1776211362,
+      "description": "Seedance 2.0 is a video generation model from ByteDance. It supports text-to-video, image-to-video with first and last frame control, and multimodal reference-to-video.",
       "pricing": {
         "perSecond": 0.1512
       },
@@ -1024,6 +1046,7 @@
       "name": "ByteDance: Seedance 2.0 Fast",
       "kind": "video",
       "created": 1776211362,
+      "description": "Seedance 2.0 Fast is a video generation model from ByteDance. It supports text-to-video, image-to-video with first and last frame control, and multimodal reference-to-video.",
       "pricing": {
         "perSecond": 0.0907
       },
@@ -1082,6 +1105,7 @@
       "name": "Alibaba: Wan 2.6",
       "kind": "video",
       "created": 1774659190,
+      "description": "Alibaba's most advanced video generation model, supporting over 10 visual creation capabilities in a unified system. Wan 2.6 generates 1080p video at 24fps from text, images, reference videos, or audio,...",
       "pricing": {
         "perSecond": 0.08,
         "basis": "720p"
@@ -1116,6 +1140,7 @@
       "name": "ByteDance: Seedance 1.5 Pro",
       "kind": "video",
       "created": 1774277608,
+      "description": "ByteDance's next-generation audio-visual generation model with a 4.5B parameter Dual-Branch Diffusion Transformer architecture. Seedance 1.5 Pro generates video and audio simultaneously in a single unified pass — eliminating the timing...",
       "pricing": {
         "perSecond": 0.0259
       },
@@ -1180,6 +1205,7 @@
       "name": "OpenAI: Sora 2 Pro",
       "kind": "video",
       "created": 1774277521,
+      "description": "OpenAI's flagship video generation model, delivering production-quality video with physics-accurate motion, synchronized audio, and world-state persistence across shots.",
       "pricing": {
         "perSecond": 0.3,
         "basis": "720p"
@@ -1215,6 +1241,7 @@
       "name": "Google: Veo 3.1",
       "kind": "video",
       "created": 1774277148,
+      "description": "Google's state-of-the-art video generation model, built for maximum visual fidelity in final production cuts. Veo 3.1 generates high-quality 1080p video from text or image prompts with native synchronized audio —...",
       "pricing": {
         "perSecond": 0.2
       },

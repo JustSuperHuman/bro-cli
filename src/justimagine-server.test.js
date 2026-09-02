@@ -858,3 +858,558 @@ test('output names are timestamped, slugged and collision-resistant', () => {
 test('an unknown route is a plain 404', async () => {
   expect((await get('/nope')).status).toBe(404);
 });
+
+// ---------- settings / config ----------
+
+// A server of its own, so the key-writing spy and the fixture's shared state
+// never interfere. Returns the base URL and a log of what was written.
+async function withConfigServer(run, { saveKey = true } = {}) {
+  const written = [];
+  const s = createServer({
+    root,
+    apis: [
+      {
+        id: 'fake',
+        name: 'Fake',
+        imagesUrl: 'http://127.0.0.1:1/x',
+        keyEnv: 'JI_TEST_FAKE_KEY',
+        keyUrl: 'https://example.com/keys',
+        models: [{ id: 'gpt-image-1' }]
+      },
+      { id: 'openrouter', name: 'OpenRouter', chatUrl: 'http://127.0.0.1:1/x', video: true, models: [{ id: 'a' }, { id: 'b' }] }
+    ],
+    videoModels: [],
+    // Mirrors the real keyResolver: the config first, then the provider's
+    // environment variable — which is what makes `source: 'env'` reachable.
+    resolveKey: (id) => keys[id] || (id === 'fake' ? process.env.JI_TEST_FAKE_KEY || '' : ''),
+    defaultApi: 'fake',
+    charactersRoot: charRoot,
+    configPath: '/tmp/ji-test-config.json',
+    saveKey: saveKey
+      ? (id, key) => {
+          written.push([id, key]);
+          keys[id] = key;
+        }
+      : null
+  });
+  const port = await listenOnFreePort(s, 0);
+  try {
+    await run({ url: `http://127.0.0.1:${port}`, written });
+  } finally {
+    s.jobs.closeAll();
+    await shutdown(s);
+  }
+}
+
+test('the settings panel is told which providers are ready, and never the keys', async () => {
+  keys = { fake: 'sk-fake-abcdefghijklmnop' };
+  await withConfigServer(async ({ url }) => {
+    const cfg = await (await fetch(url + '/api/config')).json();
+    expect(cfg.configPath).toBe('/tmp/ji-test-config.json');
+    expect(cfg.writable).toBe(true);
+
+    const fake = cfg.apis.find((a) => a.id === 'fake');
+    expect(fake.hasKey).toBe(true);
+    expect(fake.source).toBe('config');
+    expect(fake.keyUrl).toBe('https://example.com/keys');
+    expect(fake.models).toBe(1);
+    // Masked: enough to recognise which key is saved, never enough to use it.
+    expect(fake.keyPreview).toBe('sk-f…mnop');
+    expect(JSON.stringify(cfg)).not.toContain('abcdefghijklmnop');
+
+    const or = cfg.apis.find((a) => a.id === 'openrouter');
+    expect(or.hasKey).toBe(false);
+    expect(or.keyPreview).toBe('');
+    expect(or.video).toBe(true);
+  });
+});
+
+test('a key set in the environment is reported as the shell to change, not ours', async () => {
+  process.env.JI_TEST_FAKE_KEY = 'sk-from-the-environment';
+  keys = {};
+  try {
+    await withConfigServer(async ({ url }) => {
+      const cfg = await (await fetch(url + '/api/config')).json();
+      const fake = cfg.apis.find((a) => a.id === 'fake');
+      expect(fake.hasKey).toBe(true);
+      expect(fake.source).toBe('env');
+      expect(fake.keyEnv).toBe('JI_TEST_FAKE_KEY');
+    });
+  } finally {
+    delete process.env.JI_TEST_FAKE_KEY;
+  }
+});
+
+test('saving a key writes it, and an empty one clears it', async () => {
+  keys = {};
+  await withConfigServer(async ({ url, written }) => {
+    const save = async (body) =>
+      (
+        await fetch(url + '/api/config/key', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body)
+        })
+      ).json();
+
+    const ok = await save({ id: 'fake', key: 'sk-brand-new-key-1234' });
+    expect(ok.hasKey).toBe(true);
+    expect(ok.keyPreview).toBe('sk-b…1234');
+    expect(written[0]).toEqual(['fake', 'sk-brand-new-key-1234']);
+
+    // A key pasted with quotes or whitespace around it still lands clean.
+    await save({ id: 'fake', key: '  "sk-quoted-key-98765"  ' });
+    expect(written[1]).toEqual(['fake', 'sk-quoted-key-98765']);
+
+    // Empty means remove.
+    const cleared = await save({ id: 'fake', key: '' });
+    expect(cleared.hasKey).toBe(false);
+    expect(written[2]).toEqual(['fake', '']);
+
+    // An unknown provider and an absurd key are both refused.
+    const bad = await fetch(url + '/api/config/key', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'nope', key: 'x' })
+    });
+    expect(bad.status).toBe(400);
+    const huge = await fetch(url + '/api/config/key', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'fake', key: 'x'.repeat(600) })
+    });
+    expect(huge.status).toBe(400);
+    expect(written.length).toBe(3);
+  });
+});
+
+test('a gallery that cannot write the config says so instead of failing on save', async () => {
+  keys = {};
+  await withConfigServer(
+    async ({ url }) => {
+      const cfg = await (await fetch(url + '/api/config')).json();
+      expect(cfg.writable).toBe(false);
+      const r = await fetch(url + '/api/config/key', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: 'fake', key: 'sk-nope' })
+      });
+      expect(r.status).toBe(400);
+    },
+    { saveKey: false }
+  );
+});
+
+// The server listens on loopback, but any page in any tab can still POST to
+// 127.0.0.1. Without this guard a visited website could spend the user's
+// credits or overwrite a saved key.
+test('a write from another website is refused; reads and our own writes are not', async () => {
+  keys = { fake: 'sk-fake-abcdefghijklmnop' };
+  await withConfigServer(async ({ url, written }) => {
+    const attempt = (headers) =>
+      fetch(url + '/api/config/key', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ id: 'fake', key: 'sk-attacker-key-0000' })
+      });
+
+    expect((await attempt({ origin: 'https://evil.example.com' })).status).toBe(403);
+    expect((await attempt({ 'sec-fetch-site': 'cross-site' })).status).toBe(403);
+    expect((await attempt({ 'sec-fetch-site': 'same-site' })).status).toBe(403);
+    expect(written.length).toBe(0);
+
+    // Reading is harmless and stays allowed.
+    expect((await fetch(url + '/api/config', { headers: { origin: 'https://evil.example.com' } })).status).toBe(200);
+
+    // The gallery's own fetch carries same-origin and goes through.
+    expect((await attempt({ 'sec-fetch-site': 'same-origin' })).status).toBe(200);
+    expect(written.length).toBe(1);
+  });
+});
+
+test('a provider model borrows the catalogue facts and blurb for the same model', async () => {
+  const s = createServer({
+    root,
+    apis: [
+      {
+        id: 'openrouter',
+        name: 'OpenRouter',
+        video: true,
+        models: [
+          {
+            id: 'google/gemini-3.1-flash-image',
+            name: 'Google: Gemini 3.1 Flash Image',
+            via: 'chat',
+            created: 1770000000,
+            pricing: { perImage: 0.067, imageOutput: 120 },
+            quality: { winRate: 65.1, rank: 2, arena: 'image' },
+            description: 'Nano Banana 2 is fast. It edits too.'
+          }
+        ]
+      },
+      // The same model under an aggregator's shorter id, with nothing known.
+      { id: 'yunwu', name: 'Yunwu', models: [{ id: 'gemini-3.1-flash-image', name: 'Gemini 3.1 Flash Image' }] }
+    ],
+    videoModels: [
+      {
+        id: 'google/veo-3.1',
+        name: 'Veo 3.1',
+        durations: [4, 8],
+        audio: true,
+        created: 1774224000,
+        pricing: { perSecond: 0.2 },
+        description: 'Veo 3.1 makes clips with sound.'
+      }
+    ],
+    resolveKey: () => 'k',
+    defaultApi: 'openrouter',
+    charactersRoot: charRoot
+  });
+  const port = await listenOnFreePort(s, 0);
+  try {
+    const state = await (await fetch(`http://127.0.0.1:${port}/api/state`)).json();
+
+    const yunwu = state.apis.find((a) => a.id === 'yunwu').models[0];
+    expect(yunwu.facts.cost.label).toBe('≈6.7¢');
+    expect(yunwu.facts.quality.label).toBe('#2');
+    expect(yunwu.detail.blurb).toBe('Nano Banana 2 is fast. It edits too.');
+    expect(yunwu.detail.borrowedFrom).toBe('google/gemini-3.1-flash-image');
+    // The borrowed price is attributed, not passed off as this vendor's own.
+    expect(yunwu.facts.cost.title).toContain('may charge differently');
+    // Routing is the provider's own — `via` must not have come across.
+    expect(yunwu.via).toBeUndefined();
+
+    // Video models carry the publisher's blurb and capability chips.
+    const veo = state.videoModels[0];
+    expect(veo.detail.blurb).toBe('Veo 3.1 makes clips with sound.');
+    expect(veo.detail.chips.map((c) => c.label)).toEqual(['to 8s', 'audio']);
+    expect(veo.facts.cost.label).toBe('20¢/s');
+  } finally {
+    s.jobs.closeAll();
+    await shutdown(s);
+  }
+});
+
+// ---------- batch generation, polling, waiting ----------
+//
+// The routes a script drives: submit many specs at once, then block until they
+// have landed. Everything here runs against the fake upstream, so a whole batch
+// is a handful of milliseconds.
+
+test('one batch queues many specs, with defaults merged under each', async () => {
+  const r = await post('/api/batch', {
+    defaults: { kind: 'image', folder: 'Set', api: 'fake', model: 'gpt-image-1' },
+    items: [
+      'a cat on a wall',
+      { prompt: 'a dog in a field', count: 2 },
+      { prompt: 'a slow pan over rooftops', kind: 'video', model: 'google/veo-3.1' }
+    ]
+  });
+  expect(r.status).toBe(200);
+  expect(r.body).toMatchObject({ count: 4, images: 3, videos: 1 });
+  expect(r.body.jobs).toHaveLength(4);
+
+  const listed = await getJson(`/api/jobs?ids=${r.body.jobs.join(',')}`);
+  expect(listed.results.map((j) => j.prompt)).toEqual([
+    'a cat on a wall',
+    'a dog in a field',
+    'a dog in a field',
+    'a slow pan over rooftops'
+  ]);
+  // The default folder reached every item; the video item kept its own kind.
+  expect(new Set(listed.results.map((j) => j.folder))).toEqual(new Set(['Set']));
+  expect(listed.results[3].kind).toBe('video');
+});
+
+test('a batch with `wait` comes back with the finished items', async () => {
+  const r = await post('/api/batch', {
+    defaults: { folder: 'Wait', api: 'fake', model: 'gpt-image-1' },
+    items: ['first picture', 'second picture'],
+    wait: 20
+  });
+  expect(r.body.settled).toBe(true);
+  expect(r.body.items).toHaveLength(2);
+  expect(r.body.failed).toEqual([]);
+  expect(r.body.pending).toEqual([]);
+  expect(r.body.items.every((i) => i.folder === 'Wait' && i.file.endsWith('.png'))).toBe(true);
+  expect(listItems(root, 'Wait')).toHaveLength(2);
+});
+
+test('a failing generation is reported per item rather than failing the batch', async () => {
+  upstreamFail = true;
+  const r = await post('/api/batch', {
+    defaults: { api: 'fake', model: 'gpt-image-1' },
+    items: ['doomed one', 'doomed two'],
+    wait: 20
+  });
+  expect(r.body.items).toEqual([]);
+  expect(r.body.failed).toHaveLength(2);
+  expect(r.body.failed[0].error).toMatch(/out of credit/);
+  expect(r.body.failed[0].prompt).toBe('doomed one');
+});
+
+test('a batch is validated whole, before anything is queued', async () => {
+  const empty = await post('/api/batch', { items: [] });
+  expect(empty.status).toBe(400);
+  expect(empty.body.error).toMatch(/one entry per generation/);
+
+  const bad = await post('/api/batch', { items: [{ prompt: 'fine' }, { prompt: '  ' }] });
+  expect(bad.status).toBe(400);
+  expect(bad.body.error).toBe('items[1]: Prompt is required.');
+  // Nothing from that batch ran — the first item was never queued.
+  expect((await getJson('/api/jobs')).results).toEqual([]);
+
+  const tooMany = await post('/api/batch', { items: Array.from({ length: 51 }, () => 'x') });
+  expect(tooMany.status).toBe(400);
+  expect(tooMany.body.error).toMatch(/At most 50 items/);
+
+  const tooBig = await post('/api/batch', { items: Array.from({ length: 10 }, () => ({ prompt: 'x', count: 12 })) });
+  expect(tooBig.status).toBe(400);
+  expect(tooBig.body.error).toMatch(/120 generations; the limit is 100/);
+});
+
+test('a bare array of prompts is a batch too', async () => {
+  expect((await post('/api/batch', ['one', 'two'])).body.count).toBe(2);
+});
+
+test('generate can block on its own jobs and hand back the item', async () => {
+  const r = await post('/api/generate', {
+    folder: 'Solo',
+    api: 'fake',
+    model: 'gpt-image-1',
+    prompt: 'one good picture',
+    wait: 20
+  });
+  expect(r.body.jobs).toHaveLength(1);
+  expect(r.body.settled).toBe(true);
+  expect(r.body.items[0]).toMatchObject({ folder: 'Solo', kind: 'image', prompt: 'one good picture' });
+});
+
+test('polling reports finished jobs long after the event stream has moved on', async () => {
+  const r = await post('/api/generate', { api: 'fake', model: 'gpt-image-1', prompt: 'kept around', wait: 20 });
+  const id = r.body.jobs[0];
+
+  const one = await getJson(`/api/jobs?ids=${id}`);
+  expect(one.results[0]).toMatchObject({ id, status: 'done' });
+  expect(one.results[0].finishedAt).toBeGreaterThan(0);
+  expect(one.missing).toBeUndefined();
+
+  // With no ids the whole retained registry comes back, plus the queue limits.
+  const all = await getJson('/api/jobs');
+  expect(all.results.map((j) => j.id)).toContain(id);
+  expect(all.active).toBe(0);
+  expect(all.limits).toEqual({ image: 8, video: 3 });
+  expect(all.retainMs).toBeGreaterThan(60_000);
+
+  // An id the registry no longer holds is named rather than silently dropped.
+  const gone = await getJson('/api/jobs?ids=nope-nope');
+  expect(gone.missing).toEqual(['nope-nope']);
+  expect(gone.results).toEqual([]);
+  expect(gone.settled).toBe(true);
+});
+
+test('a wait that runs out reports what is still pending instead of hanging', async () => {
+  // The upstream never answers this prompt, so the job cannot finish.
+  const r = await post('/api/generate', { api: 'fake', model: 'gpt-image-1', prompt: HANG, wait: 1 });
+  expect(r.body.settled).toBe(false);
+  expect(r.body.pending).toEqual(r.body.jobs);
+  expect(r.body.items).toEqual([]);
+  await post('/api/cancel', { all: true });
+});
+
+test('cancel takes one id, a list, or everything in flight', async () => {
+  const queued = await post('/api/batch', {
+    defaults: { api: 'fake', model: 'gpt-image-1' },
+    items: [{ prompt: HANG }, { prompt: `${HANG} two` }, { prompt: `${HANG} three` }]
+  });
+  const [a, b, c] = queued.body.jobs;
+
+  expect((await post('/api/cancel', { id: a })).body).toMatchObject({ ok: true, cancelled: [a] });
+  expect((await post('/api/cancel', { ids: [b, 'not-a-job'] })).body.cancelled).toEqual([b]);
+
+  expect((await post('/api/cancel', { all: true })).body.cancelled).toEqual([c]);
+  expect((await getJson('/api/jobs?active=1')).results).toEqual([]);
+  // Cancelling nothing is not an error; it just cancels nothing.
+  expect((await post('/api/cancel', { all: true })).body).toMatchObject({ ok: false, cancelled: [] });
+});
+
+test('the model catalogue is served on its own, filterable', async () => {
+  const all = await getJson('/api/models');
+  expect(all.videoApi).toBe('openrouter');
+  expect(all.defaultApi).toBe('fake');
+  expect(all.models.map((m) => m.id)).toEqual(['gpt-image-1', 'google/veo-3.1']);
+  expect(all.models[0]).toMatchObject({ kind: 'image', api: 'fake', ready: true });
+  // No openrouter key in this fixture, so video is listed but not ready.
+  expect(all.models[1]).toMatchObject({ kind: 'video', api: 'openrouter', ready: false, audio: true });
+  expect(all.models[1].durations).toEqual([4, 6, 8]);
+  // The heavy fields stay out until they are asked for.
+  expect(all.models[1].facts).toBeUndefined();
+
+  expect((await getJson('/api/models?kind=video')).models.map((m) => m.id)).toEqual(['google/veo-3.1']);
+  expect((await getJson('/api/models?kind=image&api=fake')).models).toHaveLength(1);
+  expect((await getJson('/api/models?q=veo')).models.map((m) => m.id)).toEqual(['google/veo-3.1']);
+  expect((await getJson('/api/models?q=nothing-matches')).total).toBe(0);
+  expect((await getJson('/api/models?kind=video&detail=1')).models[0].facts.cost.label).toBe('20¢/s');
+});
+
+test('a reference image can be attached from a path on disk', async () => {
+  const src = path.join(root, 'from-disk.png');
+  fs.writeFileSync(src, Buffer.concat([PNG, Buffer.from('#disk')]));
+
+  const saved = await post('/api/context', { path: src });
+  expect(saved.status).toBe(200);
+  expect(saved.body.file).toMatch(/^[0-9a-f]{16}\.png$/);
+  expect(saved.body.existed).toBe(false);
+  expect(saved.body.path).toBe(src);
+  expect(fs.existsSync(path.join(root, '.context', saved.body.file))).toBe(true);
+
+  // The same bytes are stored once, whichever way they arrive.
+  expect((await post('/api/context', { path: src })).body).toMatchObject({ file: saved.body.file, existed: true });
+
+  // And it is usable as a reference straight away.
+  const used = await post('/api/generate', {
+    api: 'fake',
+    model: 'gpt-image-1',
+    prompt: 'in this style',
+    images: [saved.body.file],
+    wait: 20
+  });
+  expect(used.body.items[0].images).toEqual([saved.body.file]);
+});
+
+test('a path that is not a readable image is refused, and says which path', async () => {
+  const missing = await post('/api/context', { path: path.join(root, 'nope.png') });
+  expect(missing.status).toBe(400);
+  expect(missing.body.error).toMatch(/Cannot read .*nope\.png/);
+
+  fs.writeFileSync(path.join(root, 'notes.txt'), 'hello');
+  const wrong = await post('/api/context', { path: path.join(root, 'notes.txt') });
+  expect(wrong.status).toBe(400);
+  expect(wrong.body.error).toMatch(/Not an image file/);
+
+  const neither = await post('/api/context', {});
+  expect(neither.status).toBe(400);
+  expect(neither.body.error).toMatch(/dataUrl.*path/);
+});
+
+test('a generation can name reference images by path, registering them on the way', async () => {
+  const a = path.join(root, 'ref-a.png');
+  fs.writeFileSync(a, Buffer.concat([PNG, Buffer.from('#a')]));
+
+  const r = await post('/api/generate', {
+    api: 'fake',
+    model: 'gpt-image-1',
+    prompt: 'like this one',
+    images: [a],
+    wait: 20
+  });
+  // The path became a content-hash name in the gallery's own reference library.
+  const saved = r.body.items[0].images[0];
+  expect(saved).toMatch(/^[0-9a-f]{16}\.png$/);
+  expect(fs.existsSync(path.join(root, '.context', saved))).toBe(true);
+
+  // A plain name still means a reference that is already registered, and both
+  // forms can be mixed in one call.
+  const mixed = await post('/api/generate', {
+    api: 'fake',
+    model: 'gpt-image-1',
+    prompt: 'and both of these',
+    images: [saved, a],
+    wait: 20
+  });
+  // The same bytes twice are the same reference, so the pair collapses to one.
+  expect(mixed.body.items[0].images).toEqual([saved, saved]);
+
+  const missing = await post('/api/generate', { api: 'fake', model: 'gpt-image-1', prompt: 'x', images: ['/nope/gone.png'] });
+  expect(missing.status).toBe(400);
+  expect(missing.body.error).toMatch(/Cannot read reference/);
+});
+
+test('a character reference can come from a path on disk too', async () => {
+  const photo = path.join(root, 'nora.png');
+  fs.writeFileSync(photo, Buffer.concat([PNG, Buffer.from('#nora')]));
+  await post('/api/characters', { name: 'Nora', description: 'freckles' });
+
+  const added = await post('/api/characters/refs', { id: 'nora', path: photo });
+  expect(added.status).toBe(200);
+  expect(added.body.character.refs).toHaveLength(1);
+
+  const wrong = await post('/api/characters/refs', { id: 'nora', path: path.join(root, 'no-such.png') });
+  expect(wrong.status).toBe(400);
+  expect(wrong.body.error).toMatch(/Cannot read/);
+});
+
+test('the leaderboard ranks both media on one scale, and says when it cannot', async () => {
+  const s = createServer({
+    root,
+    apis: [
+      {
+        id: 'yunwu',
+        name: 'Yunwu',
+        models: [{ id: 'dall-e-3', name: 'DALL·E 3' }, { id: 'nothing-ranks-this', name: 'Obscure' }]
+      }
+    ],
+    videoModels: [
+      { id: 'google/veo-3.1', name: 'Veo 3.1', created: 1774224000, pricing: { perSecond: 0.2 } },
+      { id: 'runway/gen-4.5', name: 'Gen-4.5', created: 1774224000, pricing: { perSecond: 0.12 } }
+    ],
+    // The board as loadDesignArena returns it: best-first, per category.
+    designArena: {
+      image: [
+        { id: 'gpt-image-2', category: 'image', rank: 1, winRate: 72.1, elo: 1381, battles: 55968 },
+        { id: 'dalle-3', category: 'image', rank: 2, winRate: 38.3, elo: 1086, battles: 134905 }
+      ],
+      video: [{ id: 'veo-3.1', category: 'video', rank: 1, winRate: 59.7, elo: 1186, battles: 18082 }]
+    },
+    resolveKey: () => 'k',
+    defaultApi: 'yunwu',
+    charactersRoot: charRoot
+  });
+  const port = await listenOnFreePort(s, 0);
+  try {
+    const state = await (await fetch(`http://127.0.0.1:${port}/api/state`)).json();
+
+    // An image model OpenRouter does not list at all is ranked from the board.
+    const dalle = state.apis[0].models.find((m) => m.id === 'dall-e-3');
+    expect(dalle.facts.quality).toMatchObject({ label: '#2', rating: 1 });
+    expect(dalle.facts.quality.title).toContain('rank 2 of 2');
+    expect(dalle.facts.quality.title).toContain('134,905 head-to-head votes');
+
+    // Video used to have no quality at all; now it is on the same scale.
+    const veo = state.videoModels.find((m) => m.id === 'google/veo-3.1');
+    expect(veo.facts.quality).toMatchObject({ label: '#1', rating: 4 });
+    expect(veo.facts.quality.title).toContain('video leaderboard');
+
+    // And a model nobody has voted on says so rather than showing a bare dash.
+    const gen45 = state.videoModels.find((m) => m.id === 'runway/gen-4.5');
+    expect(gen45.facts.quality).toBeNull();
+    expect(gen45.detail.qualityNote).toContain('has not ranked');
+    expect(state.apis[0].models.find((m) => m.id === 'nothing-ranks-this').facts.quality).toBeNull();
+  } finally {
+    s.jobs.closeAll();
+    await shutdown(s);
+  }
+});
+
+test('with no leaderboard the gallery still serves models, just unranked', async () => {
+  const s = createServer({
+    root,
+    apis: [{ id: 'yunwu', name: 'Yunwu', models: [{ id: 'dall-e-3' }] }],
+    videoModels: [{ id: 'google/veo-3.1', pricing: { perSecond: 0.2 } }],
+    designArena: null,
+    resolveKey: () => 'k',
+    defaultApi: 'yunwu',
+    charactersRoot: charRoot
+  });
+  const port = await listenOnFreePort(s, 0);
+  try {
+    const state = await (await fetch(`http://127.0.0.1:${port}/api/state`)).json();
+    expect(state.apis[0].models[0].facts.quality).toBeNull();
+    expect(state.videoModels[0].facts.quality).toBeNull();
+    // The rest of the row is unaffected — the ranking is additive.
+    expect(state.videoModels[0].facts.cost.label).toBe('20¢/s');
+  } finally {
+    s.jobs.closeAll();
+    await shutdown(s);
+  }
+});
