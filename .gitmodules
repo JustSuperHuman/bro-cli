@@ -1,0 +1,3 @@
+[submodule "vendor/justimagine"]
+	path = vendor/justimagine
+	url = https://github.com/JustSuperHuman/justimagine.git

@@ -229,7 +229,7 @@ async function loadCatalogues(apis, { quiet = false } = {}) {
   return { videoModels: videos || [], designArena: arena || null };
 }
 
-async function startServer({ root, apis, videoModels, designArena, resolveKey, defaultApi, port, fixedPort }) {
+async function startServer({ root, apis, videoModels, designArena, resolveKey, defaultApi, port, fixedPort, auth = false }) {
   // The gallery's settings panel writes keys straight into ~/.bro/config.json,
   // the same file and the same helper the CLI's key prompt uses, so a key added
   // in either place shows up in both. keyResolver re-reads every few seconds,
@@ -243,7 +243,8 @@ async function startServer({ root, apis, videoModels, designArena, resolveKey, d
     defaultApi,
     saveKey: setKey,
     configPath: CONFIG_PATH,
-    statsRefresh: true
+    statsRefresh: true,
+    auth
   });
   const listenPort = fixedPort ? await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -340,7 +341,8 @@ export async function runJustImagine({ config, apiId, dryRun = false, root: root
     resolveKey,
     defaultApi: api.id,
     port: Number(portArg) || 8790,
-    fixedPort: !!portArg
+    fixedPort: !!portArg,
+    auth: false
   });
 
   console.log(logo());
@@ -454,7 +456,8 @@ async function runService(flags) {
     port: cfg.port,
     // A service must be findable at the port it advertises; if something else
     // has it, say so rather than drifting to a port nobody knows about.
-    fixedPort: true
+    fixedPort: true,
+    auth: false
   }).catch((e) => {
     log(`Failed to listen on ${cfg.port}: ${e.message}`);
     throw e;
