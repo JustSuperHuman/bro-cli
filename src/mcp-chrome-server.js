@@ -103,6 +103,25 @@ export function nativeHostManifestCandidates() {
   ].filter(Boolean);
 }
 
+// Every extension id the registered native host answers to. The store build
+// is always one of them; a locally built copy of the extension (the
+// JustBrowseMCP fork under F:/chromemcp, say) is loaded unpacked and gets its
+// own id, which the registered manifest lists as an allowed origin.
+export function mcpChromeExtensionIds({ manifestPaths = nativeHostManifestCandidates() } = {}) {
+  const ids = new Set([MCP_CHROME_EXTENSION_ID]);
+  for (const manifestPath of manifestPaths) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (manifest.name !== MCP_CHROME_NATIVE_HOST) continue;
+      for (const origin of manifest.allowed_origins || []) {
+        const match = /^chrome-extension:[/][/]([a-p]{32})[/]?$/.exec(String(origin));
+        if (match) ids.add(match[1]);
+      }
+    } catch { /* not registered there */ }
+  }
+  return [...ids];
+}
+
 export function validateNativeHostManifest(manifestPath) {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   const expectedOrigin = `chrome-extension://${MCP_CHROME_EXTENSION_ID}/`;

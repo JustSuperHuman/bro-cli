@@ -266,9 +266,16 @@ trusting a port check.
 The browser is also the `[b]` switch in the main menu — `OFF · AUTO · EDGE ·
 CHROME …`, listing browsers where mcp-chrome is installed. It persists, so it is
 a decision you make once. Pass `--no-chrome` to bypass browser tools for one
-session. If Edge is closed, `bro` starts it on the next interactive launch.
+session.
+
+The bridge is the extension's native host, so it only exists while the browser
+is running. Every interactive launch and every `bro browser` command therefore
+makes sure it is: when the loopback endpoint is down, bro starts the chosen
+browser with `--no-startup-window` (no window appears; the extension connects
+the bridge by itself within a few seconds) and quietly proceeds either way.
 Use `bro browser status` for the quick loopback check and `bro browser test` for
-the complete MCP handshake, tool listing, and safe tab-list call.
+the complete MCP handshake, tool listing, and safe tab-list call. The native
+host's own log lives in `%LOCALAPPDATA%\mcp-chrome-bridge\logs`.
 
 **Why another Claude account gets it too.** mcp-chrome is local and tied to the
 signed-in browser profile, not a Claude account. Bro writes the same endpoint

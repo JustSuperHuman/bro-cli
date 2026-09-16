@@ -7,6 +7,7 @@ import {
   MCP_CHROME_SERVER_NAME,
   MCP_CHROME_URL,
   mcpChromeConfig,
+  mcpChromeExtensionIds,
   validateNativeHostManifest,
   writeMcpChromeProfile
 } from './mcp-chrome-server.js';
@@ -57,6 +58,29 @@ test('native host validation requires the reviewed host, wrapper, and extension 
       allowed_origins: [`chrome-extension://${MCP_CHROME_EXTENSION_ID}/`]
     }));
     expect(validateNativeHostManifest(manifestPath).manifest.path).toBe(wrapper);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the native host manifest widens the recognised extension ids to every allowed origin', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bro-mcp-chrome-ids-'));
+  try {
+    const ours = path.join(root, 'com.chromemcp.nativehost.json');
+    const other = path.join(root, 'other.json');
+    fs.writeFileSync(ours, JSON.stringify({
+      name: 'com.chromemcp.nativehost',
+      allowed_origins: [
+        'chrome-extension://pafdmkonlckfdodnpmdbpjmnjnjglihe/',
+        `chrome-extension://${MCP_CHROME_EXTENSION_ID}/`,
+        'https://not-an-extension.example/',
+        'chrome-extension://tooshort/'
+      ]
+    }));
+    fs.writeFileSync(other, JSON.stringify({ name: 'com.example.other', allowed_origins: ['chrome-extension://abcdefghijklmnopabcdefghijklmnop/'] }));
+    const ids = mcpChromeExtensionIds({ manifestPaths: [path.join(root, 'missing.json'), other, ours] });
+    expect(ids).toEqual([MCP_CHROME_EXTENSION_ID, 'pafdmkonlckfdodnpmdbpjmnjnjglihe']);
+    expect(mcpChromeExtensionIds({ manifestPaths: [] })).toEqual([MCP_CHROME_EXTENSION_ID]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

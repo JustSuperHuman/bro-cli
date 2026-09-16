@@ -17,6 +17,7 @@ import {
   claudeBrowserMode,
   EXTENSION_RECONNECT_URL,
   ensureBrowserConnected,
+  ensureMcpChromeRunning,
   ensurePatchedExtension,
   findBrowserExecutable,
   listClaudeLogins,
@@ -236,9 +237,9 @@ test('a claude.ai login keeps Claude Code’s own --chrome wiring', async () => 
   }
 });
 
-// A scripted run still gets the browser tools, and still joins a browser that
-// is already up — it just must not raise a window on anyone's screen.
-test('a headless run joins a running browser but never starts one', async () => {
+// A launch gets the browser tools and joins a browser that is already up; it
+// never raises a window on anyone's screen (that is `bro browser open`).
+test('a launch joins a running browser but never starts one', async () => {
   const root = tempRoot('bro-browser-autostart-');
   try {
     setClaudeBrowserEnabled(true, root);
@@ -253,20 +254,20 @@ test('a headless run joins a running browser but never starts one', async () => 
       ...options
     });
 
-    // Nothing is serving the bridge, so an interactive launch opens a browser.
+    // Nothing is serving the bridge: the tools are wired, no window opens.
     const interactive = await prepare({ pipeNames: [] });
     expect(interactive.args).toEqual(['--chrome']);
-    expect(started).toHaveLength(1);
+    expect(started).toHaveLength(0);
 
-    // Same situation, headless: the tools are wired, the window is not opened.
+    // Same situation, headless.
     const headless = await prepare({ pipeNames: [], autoStart: false });
     expect(headless.args).toEqual(['--chrome']);
-    expect(started).toHaveLength(1);
+    expect(started).toHaveLength(0);
 
-    // And with a browser already up, headless attaches like anything else.
+    // And with a browser already up, the session attaches to it.
     const joined = await prepare({ pipeNames: ['claude-mcp-browser-bridge-tester'], autoStart: false });
     expect(joined.args).toEqual(['--chrome']);
-    expect(started).toHaveLength(1);
+    expect(started).toHaveLength(0);
   } finally {
     removeTemp(root);
   }
@@ -653,7 +654,7 @@ test('main mode attaches sessions to the stock pipe without starting a browser w
   }
 });
 
-test.skipIf(process.platform !== 'win32')('main mode starts the main browser when no bridge is up', async () => {
+test.skipIf(process.platform !== 'win32')('main mode never starts the main browser when no bridge is up', async () => {
   const root = tempRoot('bro-browser-main-start-');
   try {
     fs.writeFileSync(path.join(root, 'state.json'), JSON.stringify({ enabled: true, mode: 'main' }));
@@ -667,8 +668,7 @@ test.skipIf(process.platform !== 'win32')('main mode starts the main browser whe
       spawnBrowser: (command, args) => { calls.push({ command, args }); return { on() {}, unref() {} }; }
     });
     expect(prepared.mode).toBe('main');
-    expect(calls).toHaveLength(1);
-    expect(calls[0].args).toEqual([]);
+    expect(calls).toHaveLength(0);
   } finally {
     removeTemp(root);
   }
@@ -902,6 +902,89 @@ test('a normal launch skips the slow connection check and reconnect tab', async 
     });
     expect(checks).toBe(0);
     expect(prepared.connection).toBeUndefined();
+  } finally {
+    removeTemp(root);
+  }
+});
+
+test('a locally built mcp-chrome extension counts when the native host allows its id', () => {
+  const local = tempRoot('bro-browser-mcp-fork-scan-');
+  try {
+    const profile = path.join(local, 'Google', 'Chrome', 'User Data', 'Profile 1');
+    fs.mkdirSync(profile, { recursive: true });
+    fs.writeFileSync(path.join(profile, 'Secure Preferences'), JSON.stringify({
+      extensions: { settings: { pafdmkonlckfdodnpmdbpjmnjnjglihe: { state: 1, path: 'F:\ChromeMCP\ext' } } }
+    }));
+    const env = { LOCALAPPDATA: local };
+    expect(browsersWithMcpChromeExtension(env, { extensionIds: ['hbdgbgagpkpjffpklnamcljpakneikee'] })).toEqual([]);
+    expect(browsersWithMcpChromeExtension(env, {
+      extensionIds: ['hbdgbgagpkpjffpklnamcljpakneikee', 'pafdmkonlckfdodnpmdbpjmnjnjglihe']
+    })).toEqual(['Google Chrome']);
+  } finally {
+    removeTemp(local);
+  }
+});
+
+const down = { connected: false, status: 0, detail: 'not listening' };
+const up = { connected: true, status: 200, detail: 'pong' };
+const recorder = (started) => (command, args, options) => {
+  started.push({ command, args, options });
+  return { on() {}, unref() {} };
+};
+
+test('a down mcp-chrome bridge is brought up by starting the browser without a window', async () => {
+  const started = [];
+  const result = await ensureMcpChromeRunning({
+    spawnBrowser: recorder(started),
+    status: answering(down, down, up),
+    browserPath: 'C:\msedge.exe',
+    timeoutMs: 2000,
+    pollMs: 1
+  });
+  expect(result).toEqual({ ...up, started: true });
+  expect(started).toEqual([{ command: 'C:\msedge.exe', args: ['--no-startup-window'], options: { detached: true, stdio: 'ignore' } }]);
+});
+
+test('ensuring the mcp-chrome bridge never throws and never starts what it does not need', async () => {
+  const started = [];
+  // Already up: nothing to start.
+  expect(await ensureMcpChromeRunning({ spawnBrowser: recorder(started), status: answering(up), browserPath: 'C:\msedge.exe' }))
+    .toEqual({ ...up, started: false });
+  // No browser executable: nothing to start, no error.
+  expect(await ensureMcpChromeRunning({ spawnBrowser: recorder(started), status: answering(down), browserPath: null }))
+    .toEqual({ ...down, started: false });
+  expect(started).toHaveLength(0);
+  // A spawn failure is swallowed.
+  expect(await ensureMcpChromeRunning({
+    spawnBrowser: () => { throw new Error('boom'); }, status: answering(down), browserPath: 'C:\msedge.exe'
+  })).toEqual({ ...down, started: false });
+  // A bridge that never answers gives up after the timeout, quietly.
+  const slow = await ensureMcpChromeRunning({
+    spawnBrowser: recorder(started), status: answering(down), browserPath: 'C:\msedge.exe', timeoutMs: 30, pollMs: 5
+  });
+  expect(slow).toEqual({ ...down, started: true });
+  expect(started).toHaveLength(1);
+});
+
+test('an mcp-chrome launch brings the bridge up quietly; scripted runs only attach', async () => {
+  const root = tempRoot('bro-browser-mcp-chrome-ensure-');
+  const profile = path.join(root, 'profile');
+  try {
+    fs.mkdirSync(profile);
+    fs.writeFileSync(path.join(root, 'state.json'), JSON.stringify({ enabled: true, mode: 'main', backend: 'mcp-chrome' }));
+    const calls = [];
+    const ensureMcpChrome = async (options) => { calls.push(options); return { ...up, started: true }; };
+    const prepare = (options) => prepareClaudeBrowser({
+      root, baseEnv: { CLAUDE_CONFIG_DIR: profile }, claudePath: 'claude.exe', ensureMcpChrome, ...options
+    });
+    const interactive = await prepare({});
+    expect(interactive.connection).toEqual({ ...up, started: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].root).toBe(root);
+    expect(calls[0].timeoutMs).toBe(8000);
+    const headless = await prepare({ autoStart: false });
+    expect(headless.args).toContain('--no-chrome');
+    expect(calls).toHaveLength(1);
   } finally {
     removeTemp(root);
   }

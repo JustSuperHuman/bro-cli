@@ -41,10 +41,10 @@ import {
 import {
   MCP_CHROME_SERVER_NAME,
   MCP_CHROME_URL,
-  MCP_CHROME_EXTENSION_ID,
   ensureMcpChromeMultiClientFix,
   ensureMcpChromeNativeHost,
   mcpChromeEndpointStatus,
+  mcpChromeExtensionIds,
   probeMcpChrome,
   restartMcpChromeNativeHost,
   writeMcpChromeProfile
@@ -335,14 +335,15 @@ export function browsersWithClaudeExtension(env = process.env) {
   return browsersWithExtension(CLAUDE_EXTENSION_ID, env);
 }
 
-function browsersWithExtension(extensionId, env = process.env) {
+function browsersWithExtension(extensionIds, env = process.env) {
+  const ids = [extensionIds].flat();
   const local = env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
   return CHROMIUM_BROWSERS.filter((browser) => {
     try {
       return fs.readdirSync(path.join(local, ...browser.data), { withFileTypes: true }).some((entry) =>
         entry.isDirectory()
         && (entry.name === 'Default' || entry.name.startsWith('Profile '))
-        && profileHasExtension(path.join(local, ...browser.data, entry.name), extensionId));
+        && ids.some((id) => profileHasExtension(path.join(local, ...browser.data, entry.name), id)));
     } catch {
       return false; // that browser is not installed
     }
@@ -362,8 +363,8 @@ function profileHasExtension(profileDir, extensionId) {
   }
 }
 
-export function browsersWithMcpChromeExtension(env = process.env) {
-  return browsersWithExtension(MCP_CHROME_EXTENSION_ID, env);
+export function browsersWithMcpChromeExtension(env = process.env, { extensionIds = mcpChromeExtensionIds() } = {}) {
+  return browsersWithExtension(extensionIds, env);
 }
 
 // Only worth saying when the choice is still open: once a browser is pinned,
@@ -618,6 +619,41 @@ export function openMainBrowser({
   child.unref?.();
 }
 
+// The mcp-chrome bridge is the extension's native host: it exists only while
+// a browser carrying the extension is up, and the extension connects it by
+// itself when that browser starts. So "make sure the bridge is running" means
+// "make sure that browser process is running" — started with
+// --no-startup-window so nothing appears on anyone's screen (a launch, a cron
+// job, a status check may all do this), after which sessions attach to the
+// bridge like always. When the browser is already up the extra start is a
+// no-op handed to the running instance. Strictly best effort: every failure
+// leaves the caller with the plain endpoint status and no noise.
+export async function ensureMcpChromeRunning({
+  root = claudeBrowserRoot(),
+  spawnBrowser = spawn,
+  status = mcpChromeEndpointStatus,
+  browser = preferredBrowser(root) || 'Microsoft Edge',
+  browserPath = findBrowserExecutable(resolveBrowser(browser)?.id || 'edge'),
+  timeoutMs = 8000,
+  pollMs = 250
+} = {}) {
+  let connection = await status({ timeoutMs: 1000 });
+  if (connection.connected || !browserPath) return { ...connection, started: false };
+  try {
+    const child = spawnBrowser(browserPath, ['--no-startup-window'], { detached: true, stdio: 'ignore' });
+    child.on?.('error', () => {});
+    child.unref?.();
+  } catch {
+    return { ...connection, started: false };
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (!connection.connected && Date.now() < deadline) {
+    await wait(pollMs);
+    connection = await status({ timeoutMs: 1000 });
+  }
+  return { ...connection, started: true };
+}
+
 // The extension's own recovery hook, and the only one that needs no clicking.
 // Navigating any tab to it makes the service worker drop its native port,
 // reset, re-run both connection attempts — the native host *and* the
@@ -801,9 +837,9 @@ export async function prepareClaudeBrowser({
   spawnBrowser = spawn,
   skipPermissions = false,
   bridged,
-  // A headless run still gets the browser tools and still attaches to a
-  // browser that is already up — it just will not raise a window on someone's
-  // screen to get one. A cron job that pops open Edge is a bug.
+  // Launches never open a browser window. With the mcp-chrome backend,
+  // autoStart lets a launch bring the bridge up windowless (dry runs and
+  // scripted --print runs pass false and simply attach to what is there).
   autoStart = true,
   // Keep the normal launch path cheap and quiet. A live native-host pipe is
   // enough to wire the tools; actively probing the account-scoped bridge can
@@ -812,6 +848,7 @@ export async function prepareClaudeBrowser({
   // session can safely start with temporarily unavailable browser tools.
   verifyConnection = false,
   ensureConnected = ensureBrowserConnected,
+  ensureMcpChrome = ensureMcpChromeRunning,
   pipeNames,
   settleMs,
   ownerConfigDir
@@ -820,20 +857,12 @@ export async function prepareClaudeBrowser({
   const sessionDir = baseEnv.CLAUDE_CONFIG_DIR || LOCAL_CLAUDE_DIR;
   if (browserBackend(root) === 'mcp-chrome') {
     const { configPath, promptPath, skillPath } = writeMcpChromeProfile({ configDir: sessionDir });
-    let connection = await mcpChromeEndpointStatus();
-    if (!connection.connected && autoStart) {
-      try {
-        openMainBrowser({ spawnBrowser, browser: preferredBrowser(root) || 'Microsoft Edge' });
-        const deadline = Date.now() + (settleMs ?? 5000);
-        while (Date.now() < deadline && !connection.connected) {
-          await wait(250);
-          connection = await mcpChromeEndpointStatus();
-        }
-      } catch { /* keep launch non-blocking */ }
-    }
-    if (!connection.connected && autoStart) {
-      console.error(`  ⚠ mcp-chrome is not answering at ${MCP_CHROME_URL}; the session will still launch with mcp__${MCP_CHROME_SERVER_NAME}__* configured.`);
-    }
+    // Bring the bridge up without a window when it is down, quietly: a
+    // session that still finds no bridge launches with the tools configured
+    // and reports its own connection state; `bro browser status` diagnoses.
+    const connection = autoStart
+      ? await ensureMcpChrome({ root, spawnBrowser, timeoutMs: settleMs ?? 8000 })
+      : await mcpChromeEndpointStatus();
     return {
       mode: 'main',
       backend: 'mcp-chrome',
@@ -880,17 +909,8 @@ export async function prepareClaudeBrowser({
     const wired = wiring();
     if (!wired) return null;
     const env = { ...scrubBridgeEnv(baseEnv), ...sessionEnvPatch };
-    if (autoStart && !stockBridgePipeLive({ pipeNames })) {
-      // Best effort only: with no bridge up, the most likely cause is that
-      // the browser is closed. If it cannot be started the session still
-      // launches, and Claude reports its own connection state.
-      try {
-        openMainBrowser({ spawnBrowser });
-        await wait(settleMs ?? 1500);
-      } catch {
-        /* the session proceeds without a browser */
-      }
-    }
+    // A launch never starts the browser; it joins a live bridge or proceeds
+    // without one and Claude reports its own connection state.
     // Explicit callers may request the slower end-to-end check. Normal Claude
     // launches skip it so they never open a reconnect tab just to start.
     let connection;
@@ -904,7 +924,7 @@ export async function prepareClaudeBrowser({
   try {
     const wired = wiring();
     if (!wired) return null;
-    const opened = await openClaudeBrowser({ claudePath, root, spawnBrowser, settleMs, startIfDown: autoStart });
+    const opened = await openClaudeBrowser({ claudePath, root, spawnBrowser, settleMs, startIfDown: false });
     return {
       mode: 'dedicated',
       bridged: viaMcp,
@@ -1264,20 +1284,15 @@ export async function runClaudeBrowserCommand(args = []) {
   const backend = browserBackend(root);
 
   if (backend === 'mcp-chrome' && ['status', 'test', 'verify', 'reconnect'].includes(action)) {
-    let state = await mcpChromeEndpointStatus();
-    if (!state.connected && action !== 'status' && claudeBrowserEnabled(root)) {
-      try { openMainBrowser({ browser: preferredBrowser(root) || 'Microsoft Edge' }); } catch { /* report below */ }
-      const deadline = Date.now() + 10000;
-      while (Date.now() < deadline && !state.connected) {
-        await wait(500);
-        state = await mcpChromeEndpointStatus();
-      }
-    }
+    const state = await ensureMcpChromeRunning({ root, timeoutMs: 10000 });
     console.log(`Browser tools: ${claudeBrowserEnabled(root) ? 'enabled' : 'disabled'} — mcp-chrome extension bridge`);
     console.log(`Browser: ${preferredBrowser(root) || 'Microsoft Edge'}`);
     console.log(`Browsers with mcp-chrome: ${browsersWithMcpChromeExtension().join(', ') || 'none found'}`);
     console.log(`MCP endpoint: ${state.connected ? 'connected' : 'not connected'}  \x1b[2m(${MCP_CHROME_URL})\x1b[0m`);
-    if (!state.connected) console.log('  Open Edge and click Connect once in the mcp-chrome extension popup.');
+    if (!state.connected) {
+      console.log(`  ${state.started ? 'The browser was started windowless but' : 'The browser could not be started and'} the bridge did not answer.`);
+      console.log(`  Open ${preferredBrowser(root) || 'Microsoft Edge'} and click Connect once in the mcp-chrome extension popup; %LOCALAPPDATA%/mcp-chrome-bridge/logs has the native host's own log.`);
+    }
     if (state.connected && ['test', 'verify', 'reconnect'].includes(action)) {
       process.stderr.write('Testing the mcp-chrome tools…');
       try {
@@ -1435,7 +1450,7 @@ export async function runClaudeBrowserCommand(args = []) {
     }
     const installedIn = browsersWithMcpChromeExtension();
     if (!installedIn.includes(browser.name)) {
-      console.error(`The official mcp-chrome extension (${MCP_CHROME_EXTENSION_ID}) was not found in ${browser.name}.`);
+      console.error(`No mcp-chrome extension was found in ${browser.name} (looked for ${mcpChromeExtensionIds().join(', ')}).`);
       console.error('  Load the unpacked GitHub release in that browser, click Connect once, then rerun setup.');
       return 1;
     }
