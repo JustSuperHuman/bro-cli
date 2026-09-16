@@ -275,7 +275,7 @@ function waitForSignals(server, onStop) {
 
 // ---------- `bro imagine` ----------
 
-export async function runJustImagine({ config, apiId, dryRun = false, root: rootArg, port: portArg, open = true } = {}) {
+export async function runJustImagine({ config, apiId, dryRun = false, root: rootArg, port: portArg, open = true, authRequired = false, loadConfigFn = loadConfig, setKeyFn = setKey, configPathValue = CONFIG_PATH } = {}) {
   const apis = mergeImageApis(config.imageApis);
 
   let api;
@@ -327,9 +327,9 @@ export async function runJustImagine({ config, apiId, dryRun = false, root: root
       console.error('No key entered.');
       return 1;
     }
-    setKey(api.id, apiKey);
-    config = loadConfig();
-    console.log(`Saved to ${CONFIG_PATH}`);
+    setKeyFn(api.id, apiKey);
+    config = loadConfigFn();
+    console.log(`Saved to ${configPathValue}`);
   }
 
   rememberModelFor(IMAGINE_PROVIDER.id, api.id);
@@ -344,7 +344,9 @@ export async function runJustImagine({ config, apiId, dryRun = false, root: root
     defaultApi: api.id,
     port: Number(portArg) || 8790,
     fixedPort: !!portArg,
-    auth: false
+    auth: authRequired ? undefined : false,
+    saveKey: setKeyFn,
+    configPathValue
   });
 
   console.log(logo());
