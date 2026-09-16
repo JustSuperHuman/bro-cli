@@ -14,7 +14,7 @@ test('the generate-images-videos skill ships inside the package', () => {
   // Claude Code reads the frontmatter to decide whether the skill applies, so
   // the name has to match the directory and the description has to say enough
   // to be matched against a request.
-  const front = text.match(/^---\n([\s\S]*?)\n---/);
+  const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   expect(front).not.toBe(null);
   expect(front[1]).toContain(`name: ${SKILL_ID}`);
   expect(front[1]).toMatch(/description: .{120,}/);

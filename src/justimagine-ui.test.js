@@ -293,7 +293,7 @@ test('the lightbox can show a video, not just an image', () => {
 
 test('the page talks to the routes the server actually serves', () => {
   const called = new Set([...app.matchAll(/['"`](\/api\/[a-z/-]+)/g)].map((m) => m[1]));
-  const server = fs.readFileSync(new URL('./justimagine-server.js', import.meta.url), 'utf8');
+  const server = fs.readFileSync(new URL('../vendor/justimagine/src/justimagine-server.js', import.meta.url), 'utf8');
   const served = new Set([
     ...[...server.matchAll(/'(?:GET|POST) (\/api\/[a-z/-]+)'/g)].map((m) => m[1]),
     '/api/events'

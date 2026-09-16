@@ -9,6 +9,12 @@
   "files": [
     "bin",
     "src",
+    "vendor/justimagine/src",
+    "vendor/justimagine/skills",
+    "vendor/justimagine/models.json",
+    "vendor/justimagine/video-models.json",
+    "vendor/justimagine/package.json",
+    "vendor/justimagine/LICENSE",
     "pool",
     "dsh-plugin-profiles",
     "skills",
