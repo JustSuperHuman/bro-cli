@@ -553,7 +553,11 @@ export async function main(argv) {
       dryRun: args.dryRun,
       root: flags.root,
       port: flags.port,
-      open: flags.open !== false
+      open: flags.open !== false,
+      authRequired: false,
+      loadConfigFn: loadConfig,
+      setKeyFn: setKey,
+      configPathValue: CONFIG_PATH
     });
   }
 
@@ -745,7 +749,7 @@ export async function main(argv) {
   // back to its own menu when it didn't), then serve the local gallery.
   // Deliberately not remembered as the default provider — it's the exception.
   if (provider.mode === 'imagine') {
-    return runJustImagine({ config, apiId: picked?.child?.value, dryRun: args.dryRun });
+    return runJustImagine({ config, apiId: picked?.child?.value, dryRun: args.dryRun, authRequired: false, loadConfigFn: loadConfig, setKeyFn: setKey, configPathValue: CONFIG_PATH });
   }
 
   // DSH has its own provider/model switcher, so give it the complete live
