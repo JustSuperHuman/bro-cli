@@ -22,6 +22,7 @@
 // read it back.
 
 import fs from 'node:fs';
+import { permissionArgs } from './launch.js';
 import path from 'node:path';
 import { ensureClaude, runInherit } from './proc.js';
 import { select, selectColumns, prompt } from './ui.js';
@@ -379,7 +380,8 @@ export async function runCodex({
   manage = false,
   chooseProfile = false,
   extraArgs = [],
-  skipPermissions = true,
+  permissionMode,
+  skipPermissions = permissionMode ? permissionMode === 'bypass' : true,
   providers = [],
   providerKeys = {},
   headless = false,
@@ -632,8 +634,7 @@ export async function runCodex({
       : await prepareClaudeBrowser({ claudePath: claude, baseEnv: env, skipPermissions: skip, autoStart: !headless });
     if (browser) Object.assign(env, browser.env);
 
-    const claudeArgs = [];
-    if (skip) claudeArgs.push('--dangerously-skip-permissions');
+    const claudeArgs = permissionArgs(skip ? 'bypass' : permissionMode === 'auto' ? 'auto' : 'manual');
     claudeArgs.push(...(browser?.args || []));
     if (activeModel) claudeArgs.push('--model', activeModel);
     claudeArgs.push(...extraArgs);

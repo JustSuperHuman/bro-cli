@@ -24,6 +24,13 @@ const describeBrowserWiring = (env, bridged = usesThirdPartyAuth(env)) =>
     ? `mcp__${MCP_CHROME_SERVER_NAME}__* (--mcp-config, mcp-chrome extension)`
     : bridged ? `mcp__${CHROME_MCP_SERVER_NAME}__* (--mcp-config)` : '--chrome';
 
+export function permissionArgs(mode = 'auto') {
+  if (mode === 'bypass') return ['--dangerously-skip-permissions'];
+  if (mode === 'manual') return [];
+  if (mode !== 'auto') throw new Error('Unknown permission mode: ' + mode);
+  return ['--permission-mode', 'auto'];
+}
+
 const CCR_CONFIG = path.join(os.homedir(), '.claude-code-router', 'config.json');
 const OMP_MODELS = path.join(os.homedir(), '.omp', 'agent', 'models.yml');
 export const PI_MODELS = path.join(os.homedir(), '.pi', 'agent', 'models.json');
@@ -419,6 +426,7 @@ export async function launch({
   providerKeys = {},
   extraArgs = [],
   skipPermissions = true,
+  permissionMode = skipPermissions ? 'bypass' : 'manual',
   harness = 'claude',
   // No terminal is watching, so the browser is joined but never raised.
   headless = false,
@@ -448,8 +456,8 @@ export async function launch({
     return launchCodex({ provider, model, apiKey, extraArgs, skipPermissions, dryRun });
   }
 
-  const claudeArgs = [];
-  if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
+  skipPermissions = permissionMode === 'bypass';
+  const claudeArgs = permissionArgs(permissionMode);
   const browserEnabled = claudeBrowserEnabled()
     && !extraArgs.includes('--no-chrome')
     && !extraArgs.includes('--chrome');

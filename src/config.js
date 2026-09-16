@@ -12,7 +12,7 @@ const DEFAULT_CONFIG = {
   '#': 'bro config. Anything whose key/id/name starts with # is ignored.',
   '#docs': 'https://justgains.com',
   defaultHarness: 'claude',
-  dangerouslySkipPermissions: true,
+  permissionMode: 'auto',
   keys: {
     '#sakana': 'fish_xxx   (remove the # and rename the key to "sakana" to use it)',
     '#openrouter': 'sk-or-xxx',
@@ -33,6 +33,13 @@ const DEFAULT_CONFIG = {
     }
   ]
 };
+
+export function configPermissionMode(config = {}) {
+  if (['auto', 'manual', 'bypass'].includes(config.permissionMode)) return config.permissionMode;
+  if (config.dangerouslySkipPermissions === true) return 'bypass';
+  if (config.dangerouslySkipPermissions === false) return 'manual';
+  return 'auto';
+}
 
 export function loadRawConfig() {
   try {

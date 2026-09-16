@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { which, globalBinDirs, runInherit, ensureBun, ensureClaude } from './proc.js';
 import { select, selectColumns, prompt, holdOrContinue } from './ui.js';
-import { launchOmp, launchPi } from './launch.js';
+import { launchOmp, launchPi, permissionArgs } from './launch.js';
 import { launchDsh } from './deepseek.js';
 import { note } from './out.js';
 import { fetchClaudeUsage, usageSummary } from './claude-usage.js';
@@ -514,7 +514,8 @@ export async function runAccountProfile({
   accountName = '',
   model = '',
   extraArgs = [],
-  skipPermissions = true,
+  permissionMode,
+  skipPermissions = permissionMode ? permissionMode === 'bypass' : true,
   session = null,
   resumeWithLocal = false,
   headless = false,
@@ -556,7 +557,7 @@ export async function runAccountProfile({
       } : {}),
       claude: {
         cmd: claudePath,
-        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(browser?.args || []), ...(model ? ['--model', model] : []), ...resumeArgs, ...extraArgs],
+        args: [...permissionArgs(permissionMode || (skipPermissions ? 'bypass' : 'manual')), ...(browser?.args || []), ...(model ? ['--model', model] : []), ...resumeArgs, ...extraArgs],
         env: {
           ...(local
             ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR || '(unset — this machine\'s login)' }
@@ -639,8 +640,7 @@ export async function runAccountProfile({
     : await prepareClaudeBrowser({ claudePath: claude, baseEnv: env, skipPermissions, autoStart: !headless });
   if (browser) Object.assign(env, browser.env);
 
-  const claudeArgs = [];
-  if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
+  const claudeArgs = permissionArgs(permissionMode || (skipPermissions ? 'bypass' : 'manual'));
   claudeArgs.push(...(browser?.args || []));
   if (model) claudeArgs.push('--model', model);
   claudeArgs.push(...resumeArgs, ...extraArgs);
@@ -668,7 +668,8 @@ export async function runAccountProfile({
 export async function runPool({
   model = '',
   extraArgs = [],
-  skipPermissions = true,
+  permissionMode,
+  skipPermissions = permissionMode ? permissionMode === 'bypass' : true,
   harness = 'claude',
   providers = [],
   providerKeys = {},
@@ -729,7 +730,7 @@ export async function runPool({
     } else {
       out.claude = {
         cmd: which('claude', globalBinDirs()) || 'claude',
-        args: [...(skipPermissions ? ['--dangerously-skip-permissions'] : []), ...(model ? ['--model', model] : []), ...extraArgs],
+        args: [...permissionArgs(permissionMode || (skipPermissions ? 'bypass' : 'manual')), ...(model ? ['--model', model] : []), ...extraArgs],
         env: { ANTHROPIC_BASE_URL: baseUrl }
       };
     }
@@ -892,8 +893,7 @@ export async function runPool({
     : await prepareClaudeBrowser({ claudePath: claude, baseEnv: env, skipPermissions, autoStart: !headless });
   if (browser) Object.assign(env, browser.env);
 
-  const claudeArgs = [];
-  if (skipPermissions) claudeArgs.push('--dangerously-skip-permissions');
+  const claudeArgs = permissionArgs(permissionMode || (skipPermissions ? 'bypass' : 'manual'));
   claudeArgs.push(...(browser?.args || []));
   if (model) claudeArgs.push('--model', model);
   claudeArgs.push(...extraArgs);

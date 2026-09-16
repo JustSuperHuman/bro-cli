@@ -4,6 +4,15 @@ Run your preferred coding harness against **any** model — [Claude Code](https:
 
 Pick a provider, pick a model, go.
 
+## Permission mode
+
+New configurations start Claude Code with `--permission-mode auto`. Set
+`permissionMode` in `~/.bro/config.json` to `auto`, `manual`, or `bypass`.
+`--safe` selects manual mode; the Skip permissions toggle explicitly enables
+`--dangerously-skip-permissions`. Existing `dangerouslySkipPermissions`
+booleans remain supported when `permissionMode` is unset. Non-Claude harnesses
+retain their own permission flags; Claude auto mode is not passed to them.
+
 ## Install
 
 ```sh

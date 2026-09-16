@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { loadConfig, ensureDefaultConfig, setKey, CONFIG_PATH } from './config.js';
+import { loadConfig, ensureDefaultConfig, setKey, configPermissionMode, CONFIG_PATH } from './config.js';
 import {
   loadModels,
   loadOpenRouterModels,
@@ -430,7 +430,7 @@ export async function main(argv) {
     ensureDefaultConfig();
     const config = loadConfig();
     return runCodexCommand(argv.slice(1), {
-      skipPermissions: !argv.includes('--safe') && config.dangerouslySkipPermissions !== false
+      skipPermissions: !argv.includes('--safe') && configPermissionMode(config) === 'bypass'
     });
   }
 
@@ -598,7 +598,9 @@ export async function main(argv) {
   // between the columns.
   let provider;
   let picked = null; // combined-picker result (null when -p skipped the menu)
-  let skip = !args.safe && config.dangerouslySkipPermissions !== false;
+  const configuredMode = args.safe ? 'manual' : configPermissionMode(config);
+  let skip = configuredMode === 'bypass';
+  const selectedPermissionMode = () => skip ? 'bypass' : configuredMode === 'bypass' ? 'manual' : configuredMode;
   if (args.provider) {
     provider = providers.find(
       (p) => p.id === args.provider || (p.name || '').toLowerCase() === args.provider.toLowerCase()
@@ -783,7 +785,8 @@ export async function main(argv) {
       chooseProfile: Boolean(session),
       manage: child?.manage === true,
       extraArgs: args._,
-      skipPermissions: !args.safe && config.dangerouslySkipPermissions !== false,
+      skipPermissions: skip,
+      permissionMode: selectedPermissionMode(),
       headless,
       dryRun: args.dryRun,
       providers,
@@ -947,6 +950,7 @@ export async function main(argv) {
       model,
       extraArgs: args._,
       skipPermissions: skip,
+      permissionMode: selectedPermissionMode(),
       harness,
       providers,
       providerKeys,
@@ -991,6 +995,7 @@ export async function main(argv) {
         providerKeys,
         extraArgs: args._,
         skipPermissions: skip,
+        permissionMode: selectedPermissionMode(),
         harness,
         dryRun: args.dryRun,
         preferredProfile: { kind: 'claude', name: accountName || 'local' }
@@ -1006,6 +1011,7 @@ export async function main(argv) {
       session,
       extraArgs: args._,
       skipPermissions: skip,
+      permissionMode: selectedPermissionMode(),
       headless,
       dryRun: args.dryRun
     });
@@ -1066,6 +1072,7 @@ export async function main(argv) {
     providerKeys,
     extraArgs: args._,
     skipPermissions: skip,
+    permissionMode: selectedPermissionMode(),
     harness,
     headless,
     dryRun: args.dryRun
