@@ -438,14 +438,14 @@ export async function main(argv) {
   // is the only thing bro runs as one.
   if (argv[0] === 'service' || argv[0] === 'daemon') {
     ensureDefaultConfig();
-    return runServiceCommand(argv.slice(1));
+    return runServiceCommand(argv.slice(1), { authRequired: false });
   }
 
   // `bro imagine <sub-command>`: service control, `open`, and its own help.
   // Anything else falls through to opening the gallery below.
   if (isImagineWord(argv[0]) && argv[1]) {
     ensureDefaultConfig();
-    const handled = await runImagineCommand(argv.slice(1), { config: loadConfig() });
+    const handled = await runImagineCommand(argv.slice(1), { config: loadConfig(), authRequired: false });
     if (handled !== null) return handled;
   }
 
