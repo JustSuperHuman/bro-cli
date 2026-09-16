@@ -10,6 +10,7 @@ import { rememberModelFor, lastModelFor } from './state.js';
 import { mergeImageApis, IMAGE_APIS, VIDEO_KEY_API } from './justimagine-gen.js';
 import { createServer, listenOnFreePort } from './justimagine-server.js';
 import { migrateLegacy } from './justimagine-store.js';
+import { CHARACTERS_DIR } from './justimagine-characters.js';
 import {
   DEFAULT_PORT,
   SERVICE_ERR,
@@ -229,7 +230,7 @@ async function loadCatalogues(apis, { quiet = false } = {}) {
   return { videoModels: videos || [], designArena: arena || null };
 }
 
-async function startServer({ root, apis, videoModels, designArena, resolveKey, defaultApi, port, fixedPort, auth = false }) {
+async function startServer({ root, apis, videoModels, designArena, resolveKey, defaultApi, port, fixedPort, auth = false, charactersRoot = CHARACTERS_DIR }) {
   // The gallery's settings panel writes keys straight into ~/.bro/config.json,
   // the same file and the same helper the CLI's key prompt uses, so a key added
   // in either place shows up in both. keyResolver re-reads every few seconds,
@@ -241,6 +242,7 @@ async function startServer({ root, apis, videoModels, designArena, resolveKey, d
     designArena,
     resolveKey,
     defaultApi,
+    charactersRoot,
     saveKey: setKey,
     configPath: CONFIG_PATH,
     statsRefresh: true,
