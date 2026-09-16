@@ -1,4 +1,5 @@
 import readline from 'node:readline';
+import os from 'node:os';
 
 const stdin = process.stdin;
 const stdout = process.stdout;
@@ -19,6 +20,26 @@ process.on('exit', () => {
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const stripAnsi = (s) => String(s ?? '').replace(ANSI_RE, '');
+
+// A quiet bit of location context beneath every picker title. The parent path
+// recedes while the directory the user is actually working in stays bright,
+// and long paths lose their least-useful head so the project name survives on
+// narrow terminals. Control characters are replaced before reaching the TTY.
+export function workingDirectoryLine(cwd = process.cwd(), width = 80) {
+  const prefix = '  ◆  working directory  ';
+  let shown = String(cwd || '(unknown)').replace(/[\x00-\x1f\x7f-\x9f]/g, '?');
+  const home = os.homedir();
+  if (home && shown.toLocaleLowerCase().startsWith(home.toLocaleLowerCase())) {
+    shown = '~' + shown.slice(home.length);
+  }
+  const pathWidth = Math.max(8, width - prefix.length);
+  if (shown.length > pathWidth) shown = '…' + shown.slice(shown.length - pathWidth + 1);
+
+  const slash = Math.max(shown.lastIndexOf('\\'), shown.lastIndexOf('/'));
+  const parent = slash >= 0 && slash < shown.length - 1 ? shown.slice(0, slash + 1) : '';
+  const leaf = parent ? shown.slice(slash + 1) : shown;
+  return `  \x1b[36m◆\x1b[0m  \x1b[2mworking directory  ${parent}\x1b[0m\x1b[1;96m${leaf}\x1b[0m`;
+}
 
 // Match every whitespace-separated search term against both the visible label
 // and the underlying value. This lets "claude sonnet" and a precise provider
@@ -206,11 +227,11 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
     let visible, lines, rowW;
     const headerRows = header ? 1 : 0;
     const layout = () => {
-      const overhead = 2 + headerRows + (toggle ? 1 : 0) + keyed.length; // message + hint (+ header, toggle rows)
+      const overhead = 3 + headerRows + (toggle ? 1 : 0) + keyed.length; // message + cwd + hint (+ header, toggle rows)
       // Reserve one result row for the "no matches" state. Otherwise never
       // paint more rows than the filtered list contains.
       visible = Math.min(Math.max(1, items.length), Math.max(3, (stdout.rows || 30) - overhead - 1));
-      lines = visible + 1 + headerRows + (toggle ? 1 : 0) + keyed.length; // message + visible choices (+ header, toggle rows)
+      lines = visible + 2 + headerRows + (toggle ? 1 : 0) + keyed.length; // message + cwd + visible choices (+ header, toggle rows)
       // Rows are indented three columns and may carry a scroll marker.
       rowW = Math.max(20, (stdout.columns || 80) - 6);
     };
@@ -264,6 +285,7 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
       else if (mode === 'fresh') out += '\x1b[2J\x1b[H';
       out += '\x1b[0J';
       out += `\x1b[1m${message}\x1b[0m\n`;
+      out += workingDirectoryLine(process.cwd(), stdout.columns || 80) + '\n';
       if (header) out += `\x1b[2m   ${typeof header === 'function' ? header(rowW) : header}\x1b[0m\n`;
       for (let i = offset; i < offset + visible; i++) {
         const c = items[i];
@@ -515,12 +537,12 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     const layout = () => {
       cols = stdout.columns || 80;
       const bannerRows = banner ? banner.split('\n').length : 0;
-      const overhead = 2 + bannerRows + (toggle ? 1 : 0) + keyed.length; // banner + message + hint (+ toggle rows)
+      const overhead = 3 + bannerRows + (toggle ? 1 : 0) + keyed.length; // banner + message + cwd + hint (+ toggle rows)
       const tallest = Math.max(choices.length, ...kids.map((k) => k.items.length));
       // At least 3 rows even on a tiny terminal, but never taller than the
       // tallest column — extra rows would just paint blank.
       visible = Math.min(tallest, Math.max(3, (stdout.rows || 30) - overhead - 1));
-      lines = visible + 1 + (toggle ? 1 : 0) + keyed.length;
+      lines = visible + 2 + (toggle ? 1 : 0) + keyed.length;
       // Left column hugs its widest label; the right column takes the rest.
       leftW = Math.min(Math.max(...choices.map((c) => visWidth(labelOf(c, cols))), 10) + 2, Math.floor((cols - 4) / 2));
       rightW = Math.max(10, cols - leftW - 4);
@@ -605,6 +627,7 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
       }
       out += '\x1b[0J';
       out += `\x1b[1m${message}\x1b[0m\n`;
+      out += workingDirectoryLine(process.cwd(), cols) + '\n';
       const k = kids[index];
       leftOffset = clampOffset(leftOffset, index, choices.length);
       if (k.status === 'ready') k.offset = clampOffset(k.offset, k.index, k.items.length);

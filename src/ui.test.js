@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
-import { cycleKeyed, filterChoices, keyedValues, normalizeKeyed, renderLabel, selectableIndex } from './ui.js';
+import { cycleKeyed, filterChoices, keyedValues, normalizeKeyed, renderLabel, selectableIndex, workingDirectoryLine } from './ui.js';
+
+const plain = (value) => value.replace(/\x1b\[[0-9;]*m/g, '');
 
 const choices = [
   { label: '\x1b[1mClaude Sonnet 5\x1b[0m', value: 'anthropic/claude-sonnet-5' },
@@ -80,4 +82,18 @@ test('the cursor lands past a divider, from either direction', () => {
   expect(selectableIndex(rows, 3, -1)).toBe(2);
   // A list of nothing but dividers has no landing spot to report.
   expect(selectableIndex([{ divider: true }], 0)).toBe(-1);
+});
+
+test('the picker shows its working directory with the active folder emphasized', () => {
+  const line = workingDirectoryLine('F:\\bro-cli', 80);
+  expect(plain(line)).toBe('  ◆  working directory  F:\\bro-cli');
+  expect(line).toContain('\x1b[2mworking directory  F:\\');
+  expect(line).toContain('\x1b[1;96mbro-cli\x1b[0m');
+});
+
+test('a long working directory keeps its useful tail within the terminal width', () => {
+  const line = workingDirectoryLine('J:\\very\\deeply\\nested\\workspace\\project-name', 48);
+  expect(plain(line).length).toBeLessThanOrEqual(48);
+  expect(plain(line)).toContain('…');
+  expect(plain(line)).toEndWith('project-name');
 });
