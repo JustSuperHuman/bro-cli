@@ -8,7 +8,8 @@ import {
   mediaLatency,
   videoPricing,
   summarizeEndpointStats,
-  attachStats
+  attachStats,
+  withBundledProviders
 } from './models.js';
 
 test('OpenRouter mapping keeps models from every publisher and orders newest first', () => {
@@ -286,4 +287,40 @@ test('the leaderboard is mapped to ranked rows, best first', () => {
   expect(mapArenaLeaderboard([{ modelId: 'x', winRate: 10 }], 'video')[0]).toMatchObject({ elo: null, battles: 0, category: 'video' });
   expect(mapArenaLeaderboard(null, 'image')).toEqual([]);
   expect(mapArenaLeaderboard(undefined, 'image')).toEqual([]);
+});
+
+test('a provider shipped in the release is added to a cached list that predates it', () => {
+  const cached = { providers: [{ id: 'zai', name: 'Z.ai', models: [{ id: 'glm-5.3' }] }] };
+  const bundled = {
+    providers: [
+      { id: 'zai', name: 'Z.ai (renamed upstream)', models: [{ id: 'glm-4.6' }] },
+      { id: 'openlux', name: 'OpenLux', section: 'other', models: [{ id: 'gpt-6-astra' }] }
+    ]
+  };
+  const merged = withBundledProviders(cached, bundled);
+  // The cached copy still wins every field it sets — no renames, no duplicated
+  // models.
+  expect(merged.providers.map((p) => p.id)).toEqual(['zai', 'openlux']);
+  expect(merged.providers[0]).toEqual(cached.providers[0]);
+  expect(merged.providers[1].name).toBe('OpenLux');
+});
+
+test('a field this release introduced reaches a provider cached before it existed', () => {
+  const cached = { providers: [{ id: 'yunwu', name: 'Yunwu', baseUrl: 'https://yunwu.ai', models: [{ id: 'claude-opus-4-8' }] }] };
+  const bundled = {
+    providers: [{ id: 'yunwu', name: 'Yunwu (云雾)', section: 'other', catalogue: 'newapi', baseUrl: 'https://elsewhere', models: [] }]
+  };
+  const [yunwu] = withBundledProviders(cached, bundled).providers;
+  expect(yunwu.catalogue).toBe('newapi');
+  expect(yunwu.section).toBe('other');
+  // Only what the cached entry left unsaid — its name, URL and models stand.
+  expect(yunwu.name).toBe('Yunwu');
+  expect(yunwu.baseUrl).toBe('https://yunwu.ai');
+  expect(yunwu.models).toEqual([{ id: 'claude-opus-4-8' }]);
+});
+
+test('nothing is added when the cached list already has every bundled provider', () => {
+  const cached = { providers: [{ id: 'zai' }] };
+  expect(withBundledProviders(cached, { providers: [{ id: 'zai' }] })).toBe(cached);
+  expect(withBundledProviders(cached, null)).toBe(cached);
 });

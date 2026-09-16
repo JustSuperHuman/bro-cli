@@ -59,6 +59,21 @@ export function rememberProfile(providerId, profile) {
   });
 }
 
+// The upstream route last chosen at a new-api relay, per provider *and* model:
+// a relay serves each model through a different set of tiers, so the tier that
+// made sense for gpt-6-astra is not even offered for claude-opus-5.
+export function lastTierFor(providerId, model) {
+  return (loadState().lastTierByProvider || {})[`${providerId}@${model || ''}`];
+}
+
+export function rememberTier(providerId, model, tier) {
+  const cur = loadState();
+  saveState({
+    ...cur,
+    lastTierByProvider: { ...(cur.lastTierByProvider || {}), [`${providerId}@${model || ''}`]: tier ?? '' }
+  });
+}
+
 // Remember only the per-provider pick, without making the provider the default
 // — for flows like image gen that shouldn't steal the picker's start position.
 export function rememberModelFor(providerId, model) {

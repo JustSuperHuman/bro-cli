@@ -41,6 +41,34 @@ async function fetchRemote() {
   }
 }
 
+// A provider added in a release has to be choosable the moment it is installed,
+// not when the hosted list is next republished — otherwise an npm update ships
+// a provider nobody can reach, and `bro update` would actively remove it again.
+// The same goes for a field a release *introduces*: a list fetched before this
+// version existed cannot say a provider is a new-api relay, so a Yunwu entry
+// cached last month would keep its old behaviour forever.
+//
+// So: unknown ids are added, and a known id is only filled in where the fetched
+// entry says nothing at all. The fetched list still wins every field it sets —
+// it is the one that gets corrected when a provider changes its URL or drops a
+// model.
+export function withBundledProviders(data, bundled = readJson(BUNDLED)) {
+  if (!Array.isArray(bundled?.providers)) return data;
+  const byId = new Map(bundled.providers.filter((p) => p?.id).map((p) => [p.id, p]));
+  let changed = false;
+  const providers = (data?.providers || []).map((p) => {
+    const extra = byId.get(p?.id);
+    if (!extra) return p;
+    byId.delete(p.id);
+    const missing = Object.entries(extra).filter(([k, v]) => v != null && p[k] == null);
+    if (!missing.length) return p;
+    changed = true;
+    return { ...p, ...Object.fromEntries(missing) };
+  });
+  if (byId.size) providers.push(...byId.values());
+  return changed || byId.size ? { ...data, providers } : data;
+}
+
 // Local-first: use the stored copy so normal runs are instant and work offline.
 // The network is only touched to bootstrap the very first run; use `bro update`
 // to refresh on demand.
@@ -55,7 +83,8 @@ export async function loadModels() {
   }
   if (!data) data = readJson(BUNDLED);
   if (!data) data = { providers: [] };
-  return stripHash(data);
+  // stripHash last, so the bundled list's own '#' examples are dropped too.
+  return stripHash(withBundledProviders(data));
 }
 
 // Force a refresh from REMOTE_URL (used by `bro update`).
@@ -574,7 +603,7 @@ export function mergeProviders(remote, configProviders = []) {
     if (!cp || !cp.id) continue;
     const existing = byId.get(cp.id);
     if (existing) {
-      for (const f of ['baseUrl', 'mode', 'keyEnv', 'keyUrl', 'noKey', 'disable1mContext']) {
+      for (const f of ['baseUrl', 'mode', 'keyEnv', 'keyUrl', 'noKey', 'disable1mContext', 'section', 'catalogue']) {
         if (cp[f] != null) existing[f] = cp[f];
       }
       for (const m of cp.models || []) existing.models.push(m);

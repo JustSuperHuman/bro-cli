@@ -22,9 +22,10 @@ installers and command discovery work on Windows, macOS, and Linux.
 bro
 ```
 
-1. Scroll to a **provider** and press enter.
-2. Scroll to a **model** and press enter. OpenRouter loads its complete live model catalog; move to its model column and type to filter by model name or id. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there, and **h** to rotate the harness (Claude Code · omp · Pi · Codex · DeepSeek).
-3. First time on a paid provider it asks for an API key and saves it.
+1. Scroll to a **provider** and press enter. Aggregators that resell everyone else's models sit in their own **Other Providers** group at the bottom — see [Other Providers](#other-providers--relays-and-the-tier-you-buy-from).
+2. Scroll to a **model** and press enter. OpenRouter and the relays load their complete live model catalog; move to the model column and type to filter by model name or id. Press **Tab** to flip the **Skip permissions** toggle (`--dangerously-skip-permissions`) on/off right there, and **h** to rotate the harness (Claude Code · omp · Pi · Codex · DeepSeek).
+3. On a relay, pick the **tier** — which upstream route serves that model, and at what price.
+4. First time on a paid provider it asks for an API key and saves it.
 
 Every model row shows how the model compares, in columns that adapt to the terminal width:
 
@@ -632,6 +633,60 @@ bro imagine skill --dir <path> # anywhere else
 
 Claude is next in the list and runs **natively** with the Claude harness (your normal Claude login — no proxy). Other Anthropic-compatible providers (OpenRouter, Z.ai) are passed directly to Claude, omp, Pi, or DeepSeek Harness. OpenAI-format providers (Sakana, OpenAI, DeepSeek, Groq, …) use [`claude-code-router`](https://github.com/musistudio/claude-code-router) for Claude, while omp, Pi, and DeepSeek Harness receive native provider entries. `bro` installs any missing helper on first use.
 
+### Other Providers — relays, and the tier you buy from
+
+The last group in the picker is **Other Providers**: aggregators that resell
+everybody else's models behind one endpoint. [OpenLux](https://api.openlux.ai)
+and [Yunwu](https://yunwu.ai) are there today. They sit in their own section
+because they carry the same model *names* as the first-party providers above —
+`claude-opus-5` from Anthropic and `claude-opus-5` from a relay are not the same
+purchase.
+
+bro browses their full live catalogue (OpenLux is ~270 chat models, Yunwu ~200),
+fetched unauthenticated from the relay itself and cached like the OpenRouter
+one, so the model column shows everything on offer rather than a handful of
+names baked into `models.json`. Type to filter it. Age and quality still come
+from the OpenRouter catalog by model id; the price is the relay's own.
+
+The part that matters is the **tier**. A relay serves one model through several
+upstream routes — an official API key, an Azure deployment, a subscription
+client — and each route is a named group with its own price multiplier. Same
+model, same name, order-of-magnitude different bill:
+
+```
+tier (upstream route)              price ×  $/M in·out
+Codex-Gpt-1                         ×0.037  $0.368/$1.84 per M   (cheapest)
+Codex-Gpt-3                         ×0.074  $0.735/$3.68 per M
+Azure-Gpt-5                          ×0.441  $4.41/$22.1 per M
+Openai-Gpt-2                         ×0.735  $7.35/$36.8 per M
+```
+
+So after you pick a model, bro asks which tier — showing only the routes that
+actually serve *that* model, cheapest first, priced per million tokens. The
+model column itself is priced at each model's cheapest tier, so it answers
+"what would this cost me at best". Skip the menu with `--tier`:
+
+```sh
+bro -p openlux -m gpt-6-astra --tier Codex-Gpt-1
+bro -p openlux -m claude-opus-5 --tier Claude-Code-1
+bro -p yunwu  -m claude-opus-4-8
+```
+
+bro also routes per model, not per provider: a model the relay serves in
+Anthropic format runs Claude Code straight against `/v1/messages`, and everything
+else goes through the OpenAI proxy — you don't have to know which is which.
+
+**Tokens are per tier.** The relay fixes a token's group when you create it in
+its console; it cannot be set per request. So bro keeps a key per tier —
+`openlux@Codex-Gpt-1` in `~/.bro/config.json` — and asks for one the first time
+you use a tier you have no token for. A plain `openlux` key (or `OPENLUX_API_KEY`)
+stays the fallback, so a single token still launches every tier it is allowed to
+reach. A green `•` in the tier menu marks the tiers you already have a token for.
+
+Any new-api gateway works the same way — add one under `providers` in
+`~/.bro/config.json` with `"catalogue": "newapi"` and `"section": "other"`, and
+bro will browse its catalogue and offer its tiers too.
+
 ### Flags
 
 ```sh
@@ -645,6 +700,8 @@ bro codex                 # pick a Codex profile or session
 bro codex resume          # resume a Codex session
 bro --pi                  # launch Pi (also --omp / --codex / --dsh / --claude)
 bro -p sakana -m fugu     # skip the menus
+bro -p openlux -m gpt-6-astra --tier Codex-Gpt-1
+                          # relay: pick the upstream route (and its price)
 bro -p zai -m glm-5.3 --print "prompt"
                           # headless: one answer on stdout, then exit
 bro --list                # list every provider + model
@@ -672,6 +729,8 @@ Keys and your own providers/models live in `~/.bro/config.json`:
 {
   "keys": {
     "sakana": "fish_...",
+    "openlux@Codex-Gpt-1": "sk-...   ← a relay token is created for one tier",
+    "openlux": "sk-...   ← fallback for every other tier",
     "#openai": "sk-...   ← any key starting with # is ignored (notes / test data)"
   },
   "providers": [
@@ -682,12 +741,22 @@ Keys and your own providers/models live in `~/.bro/config.json`:
       "baseUrl": "http://localhost:1234/v1/chat/completions",
       "noKey": true,
       "models": [{ "id": "my-model", "name": "My Model" }]
+    },
+    {
+      "id": "myrelay",
+      "name": "My new-api Relay",
+      "section": "other",
+      "catalogue": "newapi",
+      "mode": "anthropic",
+      "baseUrl": "https://relay.example.com",
+      "keyUrl": "https://relay.example.com/console/token",
+      "models": [{ "id": "claude-opus-5", "name": "Claude Opus 5" }]
     }
   ]
 }
 ```
 
-Custom providers merge with the built-in list (same `id` adds models; new `id` adds a provider). The built-in model list is pulled from [`models.json`](https://github.com/JustSuperHuman/bro-cli/blob/main/models.json) on GitHub and cached at `~/.bro/models.cache.json` — run `bro update` to refresh it (override the source with `BRO_MODELS_URL`).
+Custom providers merge with the built-in list (same `id` adds models; new `id` adds a provider). `"section": "other"` files a provider under **Other Providers**; `"catalogue": "newapi"` marks a [new-api](https://github.com/Calcium-Ion/new-api) relay, whose whole catalogue bro fetches from `{baseUrl}/api/pricing` and whose tiers it offers per model — the `models` list is then only an offline fallback. The built-in model list is pulled from [`models.json`](https://github.com/JustSuperHuman/bro-cli/blob/main/models.json) on GitHub and cached at `~/.bro/models.cache.json` — run `bro update` to refresh it (override the source with `BRO_MODELS_URL`).
 
 ---
 

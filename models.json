@@ -1,5 +1,6 @@
 {
   "#note": "Hosted at https://m.justgains.com/models.json and bundled as a fallback. Any field whose key starts with '#' is ignored (handy for notes + test data). 'mode' is one of: native (run Claude with your own login), anthropic (Anthropic-compatible base URL), openai (OpenAI-compatible — routed through the auto-installed proxy).",
+  "#note2": "'section': \"other\" groups a provider under 'Other Providers' at the bottom of the picker. 'catalogue': \"newapi\" marks a new-api relay (OpenLux, Yunwu): bro fetches its whole live catalogue from {baseUrl}/api/pricing and offers the per-model tier (upstream route) menu. The 'models' list is then only an offline fallback.",
   "version": 1,
   "docs": "https://justgains.com",
   "providers": [
@@ -49,12 +50,33 @@
       ]
     },
     {
+      "id": "openlux",
+      "name": "OpenLux",
+      "section": "other",
+      "catalogue": "newapi",
+      "mode": "anthropic",
+      "baseUrl": "https://api.openlux.ai",
+      "keyEnv": "OPENLUX_API_KEY",
+      "keyUrl": "https://api.openlux.ai/console/token",
+      "disable1mContext": true,
+      "models": [
+        { "id": "claude-opus-5", "name": "Claude Opus 5" },
+        { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
+        { "id": "claude-fable-5-1", "name": "Claude Fable 5.1" },
+        { "id": "claude-opus-4-8", "name": "Claude Opus 4.8" },
+        { "id": "gpt-6-astra", "name": "GPT-6 Astra" },
+        { "id": "gpt-5.3-codex", "name": "GPT-5.3 Codex" }
+      ]
+    },
+    {
       "id": "yunwu",
       "name": "Yunwu (云雾)",
+      "section": "other",
+      "catalogue": "newapi",
       "mode": "anthropic",
       "baseUrl": "https://yunwu.ai",
       "keyEnv": "YUNWU_API_KEY",
-      "keyUrl": "https://yunwu.ai",
+      "keyUrl": "https://yunwu.ai/console/token",
       "disable1mContext": true,
       "models": [
         { "id": "claude-fable-5", "name": "Claude Fable 5" },

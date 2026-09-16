@@ -11,6 +11,19 @@ import {
   REMOTE_URL
 } from './models.js';
 import { modelRow, modelHeader, topQuality, anySpeed, catalogueIndex, enrichFromCatalogue } from './model-info.js';
+import {
+  isNewApi,
+  loadNewApiCatalogue,
+  readNewApiCache,
+  modelById,
+  withTier,
+  providerForModel,
+  newApiKey,
+  tierKeyId,
+  tierRow,
+  tierHeader,
+  priceLabel
+} from './newapi.js';
 import { select, selectColumns, promptHidden, isInteractive } from './ui.js';
 import { launch } from './launch.js';
 import { runPool, runPoolAccounts, runAccountProfile, accountProfileChoices, POOL_PROVIDER, ACCOUNT_PROVIDER } from './pool.js';
@@ -28,7 +41,7 @@ import { runTokenReport } from './token-report.js';
 import { runProfilesReport } from './profile-report.js';
 import { ensureHarnessTool, HARNESS_INSTALLS, updateHarnessTool } from './proc.js';
 import { ensureDshProfilesPlugin } from './dsh-profile-plugin.js';
-import { rememberSelection, rememberHarness, lastProvider, lastModelFor, lastProfileFor, lastHarness } from './state.js';
+import { rememberSelection, rememberHarness, rememberTier, lastProvider, lastModelFor, lastProfileFor, lastTierFor, lastHarness } from './state.js';
 import { note } from './out.js';
 import {
   browsersWithClaudeExtension,
@@ -121,6 +134,11 @@ Usage:
   bro --account <name>   Launch with a logged-in profile (Claude, or the Codex
                          profile of that name with -p codex)
   bro -m <model>         Skip the model menu (use with -p)
+  bro --tier <group>     Pick the upstream route at a new-api relay (OpenLux,
+                         Yunwu). One model is served by several, each with its
+                         own price — gpt-6-astra is $10/M through Openai-Gpt-2
+                         and $0.37/M through Codex-Gpt-1, e.g.
+                           bro -p openlux -m gpt-6-astra --tier Codex-Gpt-1
   bro --harness <name>   Choose harness: claude (default), omp, pi, codex or dsh
   bro --omp              Launch with omp instead of Claude Code; bro sets up
                          the provider and omp picks the model (-m overrides)
@@ -178,6 +196,9 @@ export function parseArgs(argv) {
     // them too), so an explicit provider is never overridden.
     else if (t === '--account') { a.account = argv[++i]; a.provider = a.provider || 'account'; }
     else if (t === '--model' || t === '-m') a.model = argv[++i];
+    // --tier names the upstream route at a new-api relay (OpenLux, Yunwu):
+    // the same model is served by several, each with its own price.
+    else if (t === '--tier' || t === '--group') a.tier = argv[++i];
     else if (t === '--harness') a.harness = argv[++i];
     else if (t === '--omp') a.harness = 'omp';
     else if (t === '--pi') a.harness = 'pi';
@@ -215,7 +236,9 @@ const BANNER = [
 ].join('\n');
 
 const tagOf = (p) =>
-  p.mode === 'pool'
+  p.catalogue === 'newapi'
+    ? 'relay · pick a tier'
+  : p.mode === 'pool'
     ? 'rotate accounts'
     : p.mode === 'account'
       ? 'pick login'
@@ -371,6 +394,12 @@ function configuredProviderKeys(providers, config) {
     const key = config.keys?.[provider.id]
       || (provider.keyEnv ? process.env[provider.keyEnv] : '')
       || (provider.mode === 'native' && provider.id === 'anthropic' ? process.env.ANTHROPIC_API_KEY : '')
+      // A relay user may only ever have per-tier tokens and no plain key. The
+      // harnesses bro syncs (omp, Pi, DSH) take one key per provider, so give
+      // them a token that at least reaches part of the catalogue rather than
+      // leaving the provider unauthenticated. The run bro launches itself
+      // replaces this with the token for the tier actually chosen.
+      || Object.entries(config.keys || {}).find(([k, v]) => v && k.startsWith(`${provider.id}@`))?.[1]
       || '';
     return key ? [[provider.id, key]] : [];
   }));
@@ -540,6 +569,19 @@ export async function main(argv) {
   if (args.list) {
     for (const p of providers) {
       console.log(`\n${p.name || p.id}  \x1b[2m(${p.id} · ${tagOf(p)})\x1b[0m`);
+      // A relay's real list is its live catalogue, not the handful of names
+      // models.json carries as an offline fallback — say so rather than let
+      // six rows look like the whole shop.
+      if (isNewApi(p)) {
+        const cached = readNewApiCache(p.id);
+        const rows = cached?.models || p.models || [];
+        console.log(`  \x1b[2m${rows.length} models${cached ? '' : ' (offline fallback — run bro -p ' + p.id + ' to fetch the catalogue)'} · each with its own tiers\x1b[0m`);
+        for (const m of rows) {
+          const tiers = (m.tiers || []).map((t) => t.id);
+          console.log(`  - ${m.id}${tiers.length ? `  \x1b[2m${tiers.join(', ')}\x1b[0m` : ''}`);
+        }
+        continue;
+      }
       for (const m of p.models || []) console.log(`  - ${m.id || '(default)'}${m.name ? `  ${m.name}` : ''}`);
     }
     return 0;
@@ -599,6 +641,23 @@ export async function main(argv) {
       // account pane. (Its models come from the subscription and are chosen
       // after the login, not here.)
       if (p.mode === 'codex') return codexProfileChoices;
+      // A new-api relay publishes its entire catalogue unauthenticated, so the
+      // column can browse all of it. Each row is priced at that model's
+      // cheapest tier — the tier menu after the pick shows what the other
+      // upstream routes charge for the same thing.
+      if (isNewApi(p)) {
+        return async (ctx) => {
+          const cached = readNewApiCache(p.id);
+          if (!cached || cached.age > CATALOGUE_FRESH_MS) {
+            loadNewApiCatalogue({ id: p.id, baseUrl: p.baseUrl, signal: ctx.signal })
+              .then((live) => {
+                if (live && !ctx.signal.aborted) ctx.update(liveRows(enrichModels(live, readOpenRouterCache()?.models), p, ctx));
+              })
+              .catch(() => {});
+          }
+          return liveRows(enrichModels(cached?.models || p.models || [], readOpenRouterCache()?.models), p, ctx, { measure: false });
+        };
+      }
       if (!(p.models || []).length) return null;
       // Every other provider's models are annotated from the OpenRouter
       // catalogue. The rows appear at once from whatever copy is on disk; a
@@ -616,7 +675,15 @@ export async function main(argv) {
     };
     // Providers that are ready to launch (key saved / env var / no key needed)
     // go on top in green, the rest below a divider.
-    const hasKey = (id, keyEnv) => Boolean(config.keys?.[id] || (keyEnv && process.env[keyEnv]));
+    // A relay's token is created for one tier, so a user who only ever uses
+    // Codex-Gpt-1 has `openlux@Codex-Gpt-1` and no plain `openlux` key. That
+    // still counts as configured.
+    const hasKey = (id, keyEnv) =>
+      Boolean(
+        config.keys?.[id]
+        || (keyEnv && process.env[keyEnv])
+        || Object.entries(config.keys || {}).some(([k, v]) => v && k.startsWith(`${id}@`))
+      );
     const isConfigured = (p) => {
       if (p.mode === 'imagine') return mergeImageApis(config.imageApis).some((a) => hasKey(a.id, a.keyEnv));
       if (p.mode === 'native' || p.noKey || ['pool', 'account', 'codex'].includes(p.mode)) return true;
@@ -628,17 +695,24 @@ export async function main(argv) {
       color: configured ? '\x1b[32m' : '',
       detail: tagOf(p),
       children: childrenFor(p),
-      filterableChildren: p.id === 'openrouter' || p.mode === 'account' || p.mode === 'codex',
+      filterableChildren: p.id === 'openrouter' || isNewApi(p) || p.mode === 'account' || p.mode === 'codex',
       // Codex's pane lists logins rather than models, so it reopens on the
       // login used last.
       childValue: p.mode === 'codex' ? lastProfileFor(p.id) : lastModelFor(p.id)
     });
-    const ready = providers.filter((p) => isConfigured(p));
-    const rest = providers.filter((p) => !isConfigured(p));
+    // Aggregators and relays go in their own labelled group at the bottom.
+    // They resell the same model names as the first-party providers above, so
+    // mixing them into one list makes "claude-opus-5" ambiguous.
+    const firstParty = providers.filter((p) => p.section !== 'other');
+    const other = providers.filter((p) => p.section === 'other');
+    const ready = firstParty.filter((p) => isConfigured(p));
+    const rest = firstParty.filter((p) => !isConfigured(p));
     const choices = [
       ...ready.map((p) => toChoice(p, true)),
       ...(ready.length && rest.length ? [{ divider: true }] : []),
-      ...rest.map((p) => toChoice(p, false))
+      ...rest.map((p) => toChoice(p, false)),
+      ...(other.length ? [{ divider: true, label: 'Other Providers' }] : []),
+      ...other.map((p) => toChoice(p, isConfigured(p)))
     ];
 
     const lastP = lastProvider();
@@ -736,6 +810,23 @@ export async function main(argv) {
     if (live) provider.models = live;
   }
 
+  // A relay's rows carry the two things launching needs and models.json cannot
+  // hold: every tier that serves the model, and which protocol that model
+  // speaks. The picker column already fetched them; a -p/-m run has not, so do
+  // it here. Only a fetch that fails outright leaves the bundled fallback list.
+  if (isNewApi(provider)) {
+    const stale = !readNewApiCache(provider.id);
+    if (isInteractive && stale) process.stderr.write(`\x1b[2mFetching the ${provider.name || provider.id} catalogue…\x1b[0m\r`);
+    const live = await loadNewApiCatalogue({
+      id: provider.id,
+      baseUrl: provider.baseUrl,
+      maxAge: CATALOGUE_FRESH_MS,
+      fallback: provider.models
+    });
+    if (isInteractive && stale) process.stderr.write('\x1b[2K');
+    if (live?.length) provider.models = live;
+  }
+
   const models = provider.models || [];
   if (model == null) {
     if (harness === 'omp' || !models.length) {
@@ -757,7 +848,7 @@ export async function main(argv) {
         startIndex: lastM != null ? Math.max(0, models.findIndex((m) => (m.id ?? '') === lastM)) : 0,
         // Drop the heading divider: the single-column list has its own header slot.
         choices: modelRows(annotated, provider).slice(1),
-        filterable: provider.id === 'openrouter',
+        filterable: provider.id === 'openrouter' || isNewApi(provider),
         toggle: { label: 'Skip permissions', value: skip },
         toggles: [HARNESS_TOGGLE(harness)]
       }).catch(() => null);
@@ -770,6 +861,77 @@ export async function main(argv) {
       if (choice.toggleOn !== undefined) skip = choice.toggleOn;
       if (choice.toggles?.harness) harness = choice.toggles.harness;
       if (!args.dryRun) rememberHarness(harness);
+    }
+  }
+
+  // 2b) tier — which upstream route at a new-api relay serves this model. The
+  // relay resells one model through several: an official API key, an Azure
+  // deployment, a subscription client. They answer to the same model name and
+  // differ by an order of magnitude in price, so this is a real choice rather
+  // than a detail, and bro makes it per model because the routes on offer
+  // differ per model.
+  //
+  // The tier is fixed when the token is created in the relay's console — it
+  // cannot be set per request — so the chosen tier also chooses which saved
+  // token to launch with (see keySlot below).
+  let tier = '';
+  let relayModel = null;
+  if (isNewApi(provider) && model) {
+    relayModel = modelById(provider.models, model);
+    const tiers = relayModel?.tiers || [];
+    if (args.tier) {
+      const match = tiers.find((t) => t.id.toLowerCase() === args.tier.toLowerCase());
+      if (!match && tiers.length) {
+        console.error(`${provider.name || provider.id} does not serve ${model} through "${args.tier}".`);
+        console.error(`  Tiers for ${model}: ${tiers.map((t) => t.id).join(', ')}`);
+        return 1;
+      }
+      tier = match?.id || args.tier;
+    } else if (tiers.length === 1) {
+      tier = tiers[0].id;
+    } else if (tiers.length) {
+      const remembered = lastTierFor(provider.id, model);
+      const start = Math.max(0, tiers.findIndex((t) => t.id === remembered));
+      if (headless || args.dryRun) {
+        // Nothing to pick with: take what the menu would have offered first —
+        // the tier used last for this model, else the cheapest one.
+        tier = tiers[start].id;
+        if (!args.dryRun) note(`\x1b[2mNo --tier given; using ${tier} (${priceLabel(tiers[start].pricing)}).\x1b[0m`);
+      } else {
+        // Which tiers already have a token of their own — an empty entry in
+        // config.json is a placeholder, not a key.
+        const keyed = new Set(Object.entries(config.keys || {}).filter(([, v]) => v).map(([k]) => k));
+        const cheapest = tiers[0].ratio;
+        const choice = await select({
+          message: `Choose a tier for ${model} at ${provider.name || provider.id}:`,
+          header: (width) => tierHeader({ width }),
+          startIndex: start,
+          choices: tiers.map((t) => ({
+            label: (width) => tierRow(t, { width, keyed: keyed.has(tierKeyId(provider.id, t.id)), best: cheapest }),
+            value: t.id,
+            filterText: `${t.id} ${t.label || ''}`
+          })),
+          filterable: true,
+          toggle: { label: 'Skip permissions', value: skip },
+          toggles: [HARNESS_TOGGLE(harness)]
+        }).catch(() => null);
+        if (choice == null) {
+          console.log('Cancelled.');
+          return 0;
+        }
+        tier = choice.value;
+        if (choice.toggleOn !== undefined) skip = choice.toggleOn;
+        if (choice.toggles?.harness) harness = choice.toggles.harness;
+        if (!args.dryRun) rememberHarness(harness);
+      }
+    }
+    if (persistChoice && tier) rememberTier(provider.id, model, tier);
+    // Price the row at the tier actually chosen, then point the launcher at the
+    // protocol this model speaks: Claude models take Claude Code straight to
+    // /v1/messages, everything else goes through the OpenAI proxy.
+    if (relayModel) {
+      relayModel = withTier(relayModel, tier);
+      provider = providerForModel(provider, relayModel);
     }
   }
 
@@ -848,26 +1010,35 @@ export async function main(argv) {
   }
 
   // 3) key (skipped for native Claude and noKey/local providers)
+  //
+  // A relay's token carries its tier, so each tier gets its own saved slot
+  // ("openlux@Codex-Gpt-1"). The provider's plain key stays the fallback: one
+  // token still launches every tier it happens to be allowed to reach.
+  const keySlot = tier ? tierKeyId(provider.id, tier) : provider.id;
+  const keyFor = tier ? `${provider.name || provider.id} · ${tier}` : provider.name || provider.id;
   let apiKey = '';
   if (provider.mode !== 'native' && !provider.noKey) {
-    apiKey =
-      (config.keys && config.keys[provider.id]) ||
-      (provider.keyEnv && process.env[provider.keyEnv]) ||
-      '';
+    apiKey = tier
+      ? newApiKey({ providerId: provider.id, tier, config, keyEnv: provider.keyEnv })
+      : (config.keys && config.keys[provider.id]) ||
+        (provider.keyEnv && process.env[provider.keyEnv]) ||
+        '';
     if (!apiKey && !args.dryRun) {
       // A headless run has nowhere to type a key, and the two places it could
       // have come from are worth naming rather than reporting an empty answer.
       if (headless) {
-        console.error(`No API key for ${provider.name || provider.id}, and this run cannot prompt for one.`);
+        console.error(`No API key for ${keyFor}, and this run cannot prompt for one.`);
         if (provider.keyEnv) console.error(`  Set ${provider.keyEnv}, or save it once with an interactive "bro -p ${provider.id}".`);
         else console.error(`  Add it under "keys" in ${CONFIG_PATH}.`);
+        if (tier) console.error(`  A relay token is created for one tier — this one needs a token made for "${tier}".`);
         if (provider.keyUrl) console.error(`  Get one: ${provider.keyUrl}`);
         return 1;
       }
       const hint = provider.keyUrl ? `  \x1b[2m(get one: ${provider.keyUrl})\x1b[0m` : '';
-      apiKey = await promptHidden(`Enter API key for ${provider.name || provider.id}${hint}\n> `).catch(() => '');
+      if (tier) note(`\x1b[2mThe token must be one you created for the "${tier}" group — the tier cannot be set per request.\x1b[0m`);
+      apiKey = await promptHidden(`Enter API key for ${keyFor}${hint}\n> `).catch(() => '');
       if (!apiKey) { console.error('No key entered.'); return 1; }
-      setKey(provider.id, apiKey);
+      setKey(keySlot, apiKey);
       note(`Saved to ${CONFIG_PATH}`);
     }
   }
@@ -875,6 +1046,13 @@ export async function main(argv) {
   if (persistChoice) rememberSelection(provider.id, model, harness);
 
   if (apiKey) providerKeys[provider.id] = apiKey;
+
+  // Say which of the relay's routes this run is about to buy from, and at what
+  // price — the same model through a different tier is a different bill.
+  if (tier && !args.dryRun) {
+    const price = priceLabel(relayModel?.pricing || (relayModel?.perCall != null ? { perCall: relayModel.perCall } : null));
+    note(`\x1b[2mTier ${tier}${price ? ` · ${price}` : ''} · ${provider.mode === 'anthropic' ? 'anthropic-compatible' : 'via proxy'}\x1b[0m`);
+  }
 
   const result = await launch({
     provider,
@@ -890,7 +1068,7 @@ export async function main(argv) {
   });
 
   if (args.dryRun) {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(tier ? { ...result, tier, price: priceLabel(relayModel?.pricing) || undefined } : result, null, 2));
     return 0;
   }
   return typeof result === 'number' ? result : 0;
