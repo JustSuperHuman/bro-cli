@@ -41,7 +41,9 @@ import { runTokenReport } from './token-report.js';
 import { runProfilesReport } from './profile-report.js';
 import { ensureHarnessTool, HARNESS_INSTALLS, updateHarnessTool } from './proc.js';
 import { ensureDshProfilesPlugin } from './dsh-profile-plugin.js';
-import { rememberSelection, rememberHarness, rememberTier, lastProvider, lastModelFor, lastProfileFor, lastTierFor, lastHarness } from './state.js';
+import { runSkillsCommand } from './skills-ui.js';
+import { rememberSelection, rememberHarness, rememberTier, rememberJev, lastProvider, lastModelFor, lastProfileFor, lastTierFor, lastHarness, jevRouting } from './state.js';
+import { jevSupport } from './jev.js';
 import { note } from './out.js';
 import {
   browsersWithClaudeExtension,
@@ -56,6 +58,13 @@ import {
 } from './claude-browser.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+
+export const SKILLS_MENU_CHOICE = {
+  label: '◆ Skills — Claude + Codex',
+  value: { id: 'skills', mode: 'skills' },
+  color: '\x1b[36m',
+  children: [{ label: 'Skills Consolidator — preview and manage', value: 'consolidator' }]
+};
 
 const HELP = `bro — run your preferred coding harness against any provider/model.
 
@@ -93,6 +102,7 @@ Usage:
   bro browser status     Show browser backend and live connection readiness
   bro browser clean      Delete unused bro browser data from earlier setups
   bro browser disable    Stop connecting sessions to the browser
+  bro skills             Inspect and consolidate Claude/Codex skills into .agents
   bro imagine            JustImagine — generate images and video in a
                          self-hosted gallery (folders live in ./.bro/justimagine)
   bro imagine -p <api>   Skip the API menu (e.g. bro imagine -p openrouter)
@@ -139,6 +149,15 @@ Usage:
                          own price — gpt-6-astra is $10/M through Openai-Gpt-2
                          and $0.37/M through Codex-Gpt-1, e.g.
                            bro -p openlux -m gpt-6-astra --tier Codex-Gpt-1
+  bro --jev              Jev Router picks the model for every turn (routes
+                         simple work to Haiku, hard work to Opus). Works with
+                         Claude Code on any Claude profile, and with the codex
+                         CLI on your ChatGPT login:
+                           bro --jev            (this machine's Claude login)
+                           bro account work --jev
+                           bro --codex --jev
+                         Needs JEV_API_KEY in ~/.jev-router.env; installs
+                         jev-router on first use. --no-jev turns it back off.
   bro --harness <name>   Choose harness: claude (default), omp, pi, codex or dsh
   bro --omp              Launch with omp instead of Claude Code; bro sets up
                          the provider and omp picks the model (-m overrides)
@@ -205,6 +224,10 @@ export function parseArgs(argv) {
     else if (t === '--claude') a.harness = 'claude';
     else if (t === '--codex') a.harness = 'codex';
     else if (t === '--dsh' || t === '--deepseek') a.harness = 'dsh';
+    // Jev Router is a switch on the claude/codex harness, not a harness of its
+    // own: it fronts the same CLI and picks the model for each turn.
+    else if (t === '--jev' || t === '--jev-router') a.jev = true;
+    else if (t === '--no-jev') a.jev = false;
     else if (t === '--list' || t === '-l') a.list = true;
     else if (t === 'update' || t === '--update') a.update = true;
     else if (isImagineWord(t)) a.imagine = true;
@@ -316,6 +339,22 @@ const HARNESS_TOGGLE = (harness) => ({
   shortLabel: 'harness'
 });
 
+// The [r] switch turns Jev Router's per-turn routing on for the claude and
+// codex harnesses. It sits next to the harness toggle because it changes the
+// same thing the harness row does: which command bro ends up spawning. Its
+// key is "r" for router — j and k are the lists' own vim-style movement.
+export const JEV_TOGGLE = (on) => ({
+  key: 'r',
+  name: 'jev',
+  label: 'Jev Router',
+  value: on ? 'on' : 'off',
+  options: [
+    { label: 'OFF', value: 'off' },
+    { label: 'ON', value: 'on' }
+  ],
+  shortLabel: 'jev'
+});
+
 // The [b] switch picks which browser the session's browser tools drive, and
 // doubles as the on/off for them: OFF → AUTO → each browser carrying the
 // Claude extension. AUTO is right whenever only one browser has it, which is
@@ -422,6 +461,9 @@ export async function main(argv) {
   if (argv[0] === 'browser') {
     return runClaudeBrowserCommand(argv.slice(1));
   }
+  if (argv[0] === 'skills') {
+    return runSkillsCommand(argv.slice(1));
+  }
   // `bro codex` on its own opens the Codex switcher, the way `bro account`
   // does for Claude; with a sub-command it manages logins and sessions, and
   // with a bare word it launches that profile. A flag is nobody's profile —
@@ -430,7 +472,11 @@ export async function main(argv) {
     ensureDefaultConfig();
     const config = loadConfig();
     return runCodexCommand(argv.slice(1), {
-      skipPermissions: !argv.includes('--safe') && configPermissionMode(config) === 'bypass'
+      skipPermissions: !argv.includes('--safe') && configPermissionMode(config) === 'bypass',
+      // `bro codex …` never reaches the picker, so the sticky toggle and the
+      // two flags are the whole answer here.
+      jev: argv.includes('--jev') || argv.includes('--jev-router')
+        || (!argv.includes('--no-jev') && (jevRouting() || config.jevRouter === true))
     });
   }
 
@@ -514,6 +560,18 @@ export async function main(argv) {
     return 1;
   }
 
+  // Jev Router: the flag wins, then the sticky picker toggle, then the config
+  // default. It only fronts Claude Code and codex — every other harness runs
+  // the way it always did, after saying so once.
+  let jev = args.jev !== undefined ? args.jev : (jevRouting() || config.jevRouter === true);
+  if (jev && harness !== 'claude' && harness !== 'codex') {
+    const support = jevSupport({ harness });
+    console.error(support.reason);
+    console.error(`  ${support.hint}`);
+    jev = false;
+  }
+
+
   // --print is Claude Code's print mode under bro's own name, so it turns into
   // the harness's own flag and everything else the user passed still follows.
   // Checked before the harness is remembered: a combination bro is about to
@@ -543,6 +601,8 @@ export async function main(argv) {
   // A command-line harness is already a completed selection. Persist it now,
   // even when setup or provider authentication later fails.
   if (persistChoice && !args.imagine && args.harness) rememberHarness(harness);
+  // --jev / --no-jev is the same kind of completed choice.
+  if (persistChoice && !args.imagine && args.jev !== undefined) rememberJev(jev);
 
   // `bro imagine` goes straight to the JustImagine gallery (no harness involved).
   if (args.imagine) {
@@ -714,6 +774,7 @@ export async function main(argv) {
     const ready = firstParty.filter((p) => isConfigured(p));
     const rest = firstParty.filter((p) => !isConfigured(p));
     const choices = [
+      SKILLS_MENU_CHOICE,
       ...ready.map((p) => toChoice(p, true)),
       ...(ready.length && rest.length ? [{ divider: true }] : []),
       ...rest.map((p) => toChoice(p, false)),
@@ -730,19 +791,22 @@ export async function main(argv) {
       clearScreen: true,
       banner: BANNER,
       toggle: { label: 'Skip permissions', value: skip },
-      toggles: [HARNESS_TOGGLE(harness), ...(browser ? [browser] : [])]
+      toggles: [HARNESS_TOGGLE(harness), JEV_TOGGLE(jev), ...(browser ? [browser] : [])]
     }).catch(() => null);
     if (!choice) {
       if (headless) { explainNoMenu('a provider and model'); return 1; }
       console.log('Cancelled.');
       return 0;
     }
+    if (choice.value?.mode === 'skills') return runSkillsCommand([]);
     provider = choice.value;
     picked = choice;
     if (choice.toggleOn !== undefined) skip = choice.toggleOn;
     if (choice.toggles?.harness) harness = choice.toggles.harness;
+    if (choice.toggles?.jev) jev = choice.toggles.jev === 'on';
     if (!args.dryRun) {
       rememberHarness(harness);
+      rememberJev(jev);
       applyBrowserToggle(choice.toggles?.browser);
     }
   }
@@ -778,6 +842,7 @@ export async function main(argv) {
     const result = await runCodex({
       model: args.model,
       harness,
+      jev,
       profile: args.account || (typeof child === 'string' ? child : ''),
       session,
       // A session picked here came from a list spanning every login, so the
@@ -857,7 +922,7 @@ export async function main(argv) {
         choices: modelRows(annotated, provider).slice(1),
         filterable: provider.id === 'openrouter' || isNewApi(provider),
         toggle: { label: 'Skip permissions', value: skip },
-        toggles: [HARNESS_TOGGLE(harness)]
+        toggles: [HARNESS_TOGGLE(harness), JEV_TOGGLE(jev)]
       }).catch(() => null);
       if (choice == null) {
         if (headless) { explainNoMenu(`a model for ${provider.name || provider.id}`); return 1; }
@@ -867,7 +932,8 @@ export async function main(argv) {
       model = choice.value;
       if (choice.toggleOn !== undefined) skip = choice.toggleOn;
       if (choice.toggles?.harness) harness = choice.toggles.harness;
-      if (!args.dryRun) rememberHarness(harness);
+      if (choice.toggles?.jev) jev = choice.toggles.jev === 'on';
+      if (!args.dryRun) { rememberHarness(harness); rememberJev(jev); }
     }
   }
 
@@ -920,7 +986,7 @@ export async function main(argv) {
           })),
           filterable: true,
           toggle: { label: 'Skip permissions', value: skip },
-          toggles: [HARNESS_TOGGLE(harness)]
+          toggles: [HARNESS_TOGGLE(harness), JEV_TOGGLE(jev)]
         }).catch(() => null);
         if (choice == null) {
           console.log('Cancelled.');
@@ -929,7 +995,8 @@ export async function main(argv) {
         tier = choice.value;
         if (choice.toggleOn !== undefined) skip = choice.toggleOn;
         if (choice.toggles?.harness) harness = choice.toggles.harness;
-        if (!args.dryRun) rememberHarness(harness);
+        if (choice.toggles?.jev) jev = choice.toggles.jev === 'on';
+        if (!args.dryRun) { rememberHarness(harness); rememberJev(jev); }
       }
     }
     if (persistChoice && tier) rememberTier(provider.id, model, tier);
@@ -1009,6 +1076,7 @@ export async function main(argv) {
       accountName,
       model,
       session,
+      jev,
       extraArgs: args._,
       skipPermissions: skip,
       permissionMode: selectedPermissionMode(),
@@ -1074,6 +1142,7 @@ export async function main(argv) {
     skipPermissions: skip,
     permissionMode: selectedPermissionMode(),
     harness,
+    jev,
     headless,
     dryRun: args.dryRun
   });

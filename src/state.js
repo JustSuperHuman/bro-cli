@@ -96,3 +96,14 @@ export function rememberSelection(providerId, model, harness) {
     ...(harness ? { lastHarness: harness } : {})
   });
 }
+
+// Jev Router on/off. Like the harness, it is a picker toggle that should
+// survive a launch that never happened, so it is persisted on its own.
+export function jevRouting() {
+  return loadState().jevRouting === true;
+}
+
+export function rememberJev(on) {
+  const cur = loadState();
+  saveState({ ...cur, jevRouting: Boolean(on) });
+}

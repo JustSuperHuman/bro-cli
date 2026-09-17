@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { which, globalBinDirs, runInherit, ensureBun, ensureClaude } from './proc.js';
 import { select, selectColumns, prompt, holdOrContinue } from './ui.js';
 import { launchOmp, launchPi, permissionArgs } from './launch.js';
+import { describeJev, ensureJev, jevCommandPath, jevNotice } from './jev.js';
 import { launchDsh } from './deepseek.js';
 import { note } from './out.js';
 import { fetchClaudeUsage, usageSummary } from './claude-usage.js';
@@ -518,6 +519,9 @@ export async function runAccountProfile({
   skipPermissions = permissionMode ? permissionMode === 'bypass' : true,
   session = null,
   resumeWithLocal = false,
+  // An account profile is a claude.ai login like any other, so Jev Router can
+  // front it: jev-claude inherits this profile's CLAUDE_CONFIG_DIR unchanged.
+  jev = false,
   headless = false,
   dryRun = false
 } = {}) {
@@ -545,7 +549,8 @@ export async function runAccountProfile({
       ? ['--resume', session.id, ...(crossProfile ? ['--fork-session'] : [])]
       : [];
     return {
-      via: crossProfile ? 'claude cross-profile session fork' : local ? 'claude local login' : 'claude account profile',
+      via: `${crossProfile ? 'claude cross-profile session fork' : local ? 'claude local login' : 'claude account profile'}${jev ? ' via jev-router' : ''}`,
+      ...(jev ? { jev: describeJev('claude') } : {}),
       poolDir: POOL_DIR,
       account: local ? '(this machine)' : targetName || '(menu)',
       accounts,
@@ -556,8 +561,8 @@ export async function runAccountProfile({
         forkSession: crossProfile
       } : {}),
       claude: {
-        cmd: claudePath,
-        args: [...permissionArgs(permissionMode || (skipPermissions ? 'bypass' : 'manual')), ...(browser?.args || []), ...(model ? ['--model', model] : []), ...resumeArgs, ...extraArgs],
+        cmd: jev ? jevCommandPath('jev-claude') : claudePath,
+        args: [...permissionArgs(permissionMode || (skipPermissions ? 'bypass' : 'manual')), ...(browser?.args || []), ...(model && !jev ? ['--model', model] : []), ...resumeArgs, ...extraArgs],
         env: {
           ...(local
             ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR || '(unset — this machine\'s login)' }
@@ -603,6 +608,9 @@ export async function runAccountProfile({
   }
 
   const { claude, dirs } = ensureClaude();
+  // jev-claude runs the real `claude` from PATH, so Claude Code is resolved
+  // first and its directory is in the environment the wrapper inherits.
+  const jevClaude = jev ? ensureJev('claude') : null;
 
   const sourceConfigDir = session ? configDirForAccount(session.account) : null;
   const targetConfigDir = local ? DEFAULT_CLAUDE_DIR : accountDirFor(account.name);
@@ -628,7 +636,7 @@ export async function runAccountProfile({
     delete env[k];
   }
   env.NODE_NO_WARNINGS = '1';
-  env.PATH = [...dirs, env.PATH || ''].join(path.delimiter);
+  env.PATH = [...(jevClaude?.dirs || []), ...dirs, env.PATH || ''].join(path.delimiter);
 
   // An account profile is a claude.ai login, but only the login the browser
   // extension is signed into (the "owner") can use Claude Code's own --chrome
@@ -642,7 +650,9 @@ export async function runAccountProfile({
 
   const claudeArgs = permissionArgs(permissionMode || (skipPermissions ? 'bypass' : 'manual'));
   claudeArgs.push(...(browser?.args || []));
-  if (model) claudeArgs.push('--model', model);
+  // With Jev Router in front, the model is chosen per turn — pinning one here
+  // would pause routing for the whole session.
+  if (model && !jevClaude) claudeArgs.push('--model', model);
   claudeArgs.push(...resumeArgs, ...extraArgs);
 
   const title = String(session?.title || session?.id || '');
@@ -653,13 +663,14 @@ export async function runAccountProfile({
       ? `Forking “${shortTitle}” from ${sourceName} and resuming as ${account.name}`
       : `Resuming “${shortTitle}” as ${account.name}`
     : `Launching Claude Code as ${account.name}`;
-  note(`\n${banner}${model ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}...\n`);
+  note(`\n${banner}${model && !jevClaude ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}...\n`);
+  if (jevClaude) note(jevNotice('claude'));
 
   const staged = crossProfile
     ? stageSessionForProfile(session, { sourceConfigDir, targetConfigDir })
     : null;
   try {
-    return await runInherit(claude, claudeArgs, env, { cwd, terminalAgent: 'claude' });
+    return await runInherit(jevClaude?.executable || claude, claudeArgs, env, { cwd, terminalAgent: 'claude' });
   } finally {
     staged?.cleanup();
   }

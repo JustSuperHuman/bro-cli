@@ -231,7 +231,7 @@ function printProfiles() {
 
 // `bro codex <login|logout|status|profiles|import|remove|resume>` — login and
 // session management without going through the provider picker.
-export async function runCodexCommand(args = [], { skipPermissions = true } = {}) {
+export async function runCodexCommand(args = [], { skipPermissions = true, jev = false } = {}) {
   const sub = args[0];
   const name = args[1];
 
@@ -240,14 +240,14 @@ export async function runCodexCommand(args = [], { skipPermissions = true } = {}
   if (sub == null) {
     const target = await chooseCodexTarget();
     if (!target) { console.log('Cancelled.'); return 0; }
-    return runCodex({ ...target, harness: 'codex', chooseProfile: true, skipPermissions });
+    return runCodex({ ...target, harness: 'codex', chooseProfile: true, skipPermissions, jev });
   }
   if (sub === 'resume' || sub === 'sessions') {
     const session = name
       ? { id: name, account: null, cwd: '' }
       : (await chooseCodexTarget())?.session;
     if (!session) { console.log('Cancelled.'); return 0; }
-    return runCodex({ session, skipPermissions });
+    return runCodex({ session, skipPermissions, jev });
   }
   if (sub === 'profiles' || sub === 'list' || sub === 'accounts') {
     printProfiles();
@@ -307,7 +307,7 @@ export async function runCodexCommand(args = [], { skipPermissions = true } = {}
   try {
     const target = await chooseCodexProfile(sub);
     if (!target) { console.log('Cancelled.'); return 0; }
-    return await runCodex({ profile: target.name, harness: 'codex', skipPermissions });
+    return await runCodex({ profile: target.name, harness: 'codex', skipPermissions, jev });
   } catch (e) {
     console.error(e.message);
     return 1;
@@ -379,6 +379,9 @@ export async function runCodex({
   session = null,
   manage = false,
   chooseProfile = false,
+  // Route each turn with Jev Router. Only the codex-CLI path can use it: the
+  // bridge that fronts Claude Code with a ChatGPT login is itself a proxy.
+  jev = false,
   extraArgs = [],
   permissionMode,
   skipPermissions = permissionMode ? permissionMode === 'bypass' : true,
@@ -391,6 +394,16 @@ export async function runCodex({
   // resuming one runs the codex CLI whatever the harness toggle says. The same
   // CLI is what the codex harness launches, minus the resume.
   const runCli = Boolean(session) || harness === 'codex';
+  // The bridge already points Claude Code at bro's local Anthropic-compatible
+  // server, so there is no base URL left for jev-claude to own.
+  if (jev && !runCli && !dryRun) {
+    note([
+      '',
+      "Jev Router can't front the Codex bridge: Claude Code is already pointed at bro's local server.",
+      '  Add --codex to run the codex CLI under Jev Router instead.',
+      '  Running without Jev Router.'
+    ].join('\n'));
+  }
 
   if (dryRun) {
     const target = profile || session?.account || '';
@@ -407,6 +420,7 @@ export async function runCodex({
           resumeTitle: session?.title || '',
           fork,
           cwd: session?.cwd || '',
+          jev: runCli && jev,
           dryRun: true
         })),
         profile: profile || session?.account || '(this machine)',
@@ -513,6 +527,7 @@ export async function runCodex({
         sourceProfile: session?.account || '',
         fork,
         cwd: session?.cwd && session.cwd !== process.cwd() ? session.cwd : '',
+        jev,
         dryRun: false
       });
     } catch (e) {

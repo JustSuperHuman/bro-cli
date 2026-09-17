@@ -14,6 +14,7 @@ import {
 import { launchDsh } from './deepseek.js';
 import { note } from './out.js';
 import { browserBackend, claudeBrowserEnabled, prepareClaudeBrowser, usesThirdPartyAuth } from './claude-browser.js';
+import { describeJev, ensureJev, jevCommandPath, jevNotice, jevSupport } from './jev.js';
 import { CHROME_MCP_SERVER_NAME } from './chrome-mcp.js';
 import { MCP_CHROME_SERVER_NAME } from './mcp-chrome-server.js';
 
@@ -23,6 +24,20 @@ const describeBrowserWiring = (env, bridged = usesThirdPartyAuth(env)) =>
   browserBackend() === 'mcp-chrome'
     ? `mcp__${MCP_CHROME_SERVER_NAME}__* (--mcp-config, mcp-chrome extension)`
     : bridged ? `mcp__${CHROME_MCP_SERVER_NAME}__* (--mcp-config)` : '--chrome';
+
+// Jev Router fronts the CLI bro was going to spawn. A route it cannot front
+// says so and runs unrouted rather than failing the launch: the switch is
+// sticky, so one incompatible provider should not strand the next run.
+export function jevPlanFor({ enabled, harness, provider, announce = note }) {
+  if (!enabled) return null;
+  const support = jevSupport({ harness, provider });
+  if (support.ok) return support;
+  announce(`
+${support.reason}
+  ${support.hint}
+  Running without Jev Router.`);
+  return null;
+}
 
 export function permissionArgs(mode = 'auto') {
   if (mode === 'bypass') return ['--dangerously-skip-permissions'];
@@ -276,17 +291,30 @@ const CODEX_KEY_ENV = 'BRO_PROVIDER_API_KEY';
 // bare URLs and names with spaces are not valid TOML on their own.
 const toml = (value) => JSON.stringify(String(value ?? ''));
 
+// OpenRouter's normal bro route is Anthropic-shaped (/v1/messages), but it
+// also exposes the OpenAI Responses API at /api/v1/responses. Codex needs the
+// latter, so keep this translation at the Codex boundary instead of changing
+// the provider's normal Claude/omp/Pi protocol.
+export function codexResponsesBaseUrl(provider) {
+  if (provider.mode === 'codex') return '';
+  if (provider.responsesBaseUrl) return normalizeOpenAiBaseUrl(provider.responsesBaseUrl);
+  if (provider.mode === 'openai') return normalizeOpenAiBaseUrl(provider.baseUrl);
+  if (provider.id === 'openrouter' && provider.baseUrl) {
+    const base = normalizeOpenAiBaseUrl(provider.baseUrl).replace(/\/$/, '');
+    return /\/v1$/i.test(base) ? base : `${base}/v1`;
+  }
+  return '';
+}
+
 // Describe the chosen provider to codex. Codex talks to its own ChatGPT login
-// (the codex provider, which needs no description at all) or to any endpoint
+// (the codex provider, which needs no description at all) or to an endpoint
 // serving OpenAI's Responses API — as of codex 0.147 the older
-// /chat/completions wire format is refused outright, so a provider that only
-// offers that will be turned away by codex itself. Anthropic-shaped providers
-// — the native Claude login, the account pool, OpenRouter/Z.ai via
-// ANTHROPIC_BASE_URL — have no route in at all and are refused here, before
-// anything is spawned.
+// /chat/completions wire format is refused outright. Providers that expose
+// only Anthropic's API are still refused here, before anything is spawned.
 export function codexProviderConfig(provider, apiKey) {
   if (provider.mode === 'codex') return { args: [], env: {} };
-  if (provider.mode !== 'openai') {
+  const baseUrl = codexResponsesBaseUrl(provider);
+  if (!baseUrl) {
     throw new Error(
       `The codex harness can't run ${provider.name || provider.id}: it speaks the Anthropic API, and codex only talks to OpenAI-compatible endpoints.\n` +
         '  Use the claude or omp harness for this provider (press h in the picker, or pass --claude / --omp),\n' +
@@ -296,7 +324,7 @@ export function codexProviderConfig(provider, apiKey) {
   const args = [
     '-c', `model_provider=${toml(CODEX_PROVIDER_SLOT)}`,
     '-c', `model_providers.${CODEX_PROVIDER_SLOT}.name=${toml(provider.name || provider.id)}`,
-    '-c', `model_providers.${CODEX_PROVIDER_SLOT}.base_url=${toml(normalizeOpenAiBaseUrl(provider.baseUrl))}`,
+    '-c', `model_providers.${CODEX_PROVIDER_SLOT}.base_url=${toml(baseUrl)}`,
     '-c', `model_providers.${CODEX_PROVIDER_SLOT}.wire_api=${toml('responses')}`
   ];
   const env = {};
@@ -331,35 +359,43 @@ export async function launchCodex({
   sourceProfile = '',
   fork = false,
   cwd = '',
+  jev = false,
   dryRun = false
 }) {
+  const jevPlan = jevPlanFor({ enabled: jev, harness: 'codex', provider });
   const { args: providerArgs, env: providerEnv } = codexProviderConfig(provider, apiKey);
   const codexArgs = [];
   if (resume) codexArgs.push(fork ? 'fork' : 'resume', resume);
   if (skipPermissions) codexArgs.push('--dangerously-bypass-approvals-and-sandbox');
-  if (model) codexArgs.push('--model', model);
+  // A concrete --model is what pauses Jev's routing in codex's own picker, so
+  // a Jev-fronted run leaves the model to Jev and says so.
+  if (model && !jevPlan) codexArgs.push('--model', model);
   codexArgs.push(...providerArgs, ...extraArgs);
 
   if (dryRun) {
     return {
       via: provider.mode === 'codex' ? 'codex CLI (ChatGPT login)' : `codex CLI → ${provider.name || provider.id}`,
-      cmd: which('codex', globalBinDirs()) || 'codex',
+      cmd: jevPlan ? jevCommandPath(jevPlan.command) : which('codex', globalBinDirs()) || 'codex',
       args: codexArgs,
+      ...(jevPlan ? { jev: describeJev('codex') } : {}),
       ...(home ? { codexHome: home } : {}),
       ...(providerEnv[CODEX_KEY_ENV] ? { env: { [CODEX_KEY_ENV]: '(api key)' } } : {}),
       ...(resume ? { resume, cwd: cwd || process.cwd() } : {}),
-      model: model || '(codex default)'
+      model: jevPlan ? '(chosen per turn by Jev)' : model || '(codex default)'
     };
   }
 
   const { codex, dirs } = ensureCodex();
+  // jev-codex resolves `codex` on PATH itself, so codex is installed first and
+  // its directory is on the PATH the wrapper inherits.
+  const jevCodex = jevPlan ? ensureJev('codex') : null;
   if (cwd && !fs.existsSync(cwd)) throw new Error(`That session's directory is gone: ${cwd}`);
 
   const env = {
     ...process.env,
     ...providerEnv,
     NODE_NO_WARNINGS: '1',
-    PATH: [...dirs, process.env.PATH || ''].join(path.delimiter)
+    PATH: [...(jevCodex?.dirs || []), ...dirs, process.env.PATH || ''].join(path.delimiter)
   };
   // A profile is a whole codex home: credentials, sessions and settings. No
   // profile means the machine's own, so the user's own CODEX_HOME stands.
@@ -373,11 +409,12 @@ export async function launchCodex({
       ? `Forking Codex session${named} from ${sourceProfile || 'this machine'} and resuming${as || ' locally'}`
       : `Resuming Codex session${named}${as}`
     : `Launching Codex${provider.mode === 'codex' ? as : ' / ' + (provider.name || provider.id)}`;
-  note(`\n${banner}${model ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}…`);
+  note(`\n${banner}${model && !jevPlan ? ' / ' + model : ''}${cwd ? `\nin ${cwd}` : ''}…`);
+  if (jevPlan) note(jevNotice('codex'));
   if (provider.mode !== 'codex') {
-    note(`\x1b[2m  codex calls ${normalizeOpenAiBaseUrl(provider.baseUrl)}/responses — a provider that only serves /chat/completions will refuse it.\x1b[0m`);
+    note(`\x1b[2m  codex calls ${codexResponsesBaseUrl(provider)}/responses — a provider that only serves /chat/completions will refuse it.\x1b[0m`);
   }
-  return runInherit(codex, codexArgs, env, { ...(cwd ? { cwd } : {}), terminalAgent: 'codex' });
+  return runInherit(jevCodex?.executable || codex, codexArgs, env, { ...(cwd ? { cwd } : {}), terminalAgent: 'codex' });
 }
 
 // Upsert this provider into the proxy's config and point its default route at the
@@ -428,6 +465,8 @@ export async function launch({
   skipPermissions = true,
   permissionMode = skipPermissions ? 'bypass' : 'manual',
   harness = 'claude',
+  // Route every turn through Jev Router instead of a fixed model.
+  jev = false,
   // No terminal is watching, so the browser is joined but never raised.
   headless = false,
   dryRun = false,
@@ -453,15 +492,18 @@ export async function launch({
     return launchPi({ provider, model, apiKey, extraArgs, dryRun });
   }
   if (harness === 'codex') {
-    return launchCodex({ provider, model, apiKey, extraArgs, skipPermissions, dryRun });
+    return launchCodex({ provider, model, apiKey, extraArgs, skipPermissions, jev, dryRun });
   }
 
   skipPermissions = permissionMode === 'bypass';
+  const jevPlan = jevPlanFor({ enabled: jev, harness: 'claude', provider });
   const claudeArgs = permissionArgs(permissionMode);
   const browserEnabled = claudeBrowserEnabled()
     && !extraArgs.includes('--no-chrome')
     && !extraArgs.includes('--chrome');
-  if (model) claudeArgs.push('--model', provider.mode === 'openai' ? `${provider.id},${model}` : model);
+  // Jev Router owns the model: Claude Code's picker starts on its row, and a
+  // --model here would pin a single model and pause routing for the session.
+  if (model && !jevPlan) claudeArgs.push('--model', provider.mode === 'openai' ? `${provider.id},${model}` : model);
   claudeArgs.push(...extraArgs);
 
   if (provider.mode === 'openai') {
@@ -505,16 +547,22 @@ export async function launch({
 
   if (dryRun) {
     return {
-      via: provider.mode === 'native' ? 'native Claude' : 'anthropic-compatible',
-      cmd: which('claude', globalBinDirs()) || 'claude',
+      via: jevPlan ? 'native Claude via jev-router' : provider.mode === 'native' ? 'native Claude' : 'anthropic-compatible',
+      cmd: jevPlan ? jevCommandPath(jevPlan.command) : which('claude', globalBinDirs()) || 'claude',
       args: claudeArgs,
+      ...(jevPlan ? { jev: describeJev('claude') } : {}),
       baseUrl: provider.mode === 'anthropic' ? provider.baseUrl : '(default)',
       ...(browserEnabled ? { browser: describeBrowserWiring(env) } : {})
     };
   }
 
   const { claude, dirs } = ensureClaude();
-  env.PATH = [...dirs, env.PATH || ''].join(path.delimiter);
+  // jev-claude spawns the real `claude` it finds on PATH, so Claude Code is
+  // installed first and its directory goes into the environment the wrapper
+  // inherits — along with everything else this launch arranged (the profile's
+  // CLAUDE_CONFIG_DIR, the browser wiring, the permission flags).
+  const jevClaude = jevPlan ? ensureJev('claude') : null;
+  env.PATH = [...(jevClaude?.dirs || []), ...dirs, env.PATH || ''].join(path.delimiter);
   // A native login gets Claude Code's own --chrome; an Anthropic-compatible
   // provider gets the same browser through the MCP server, because the
   // ANTHROPIC_AUTH_TOKEN set just above switches the built-in wiring off.
@@ -522,6 +570,7 @@ export async function launch({
     ? await prepareClaudeBrowser({ claudePath: claude, baseEnv: env, skipPermissions, autoStart: !headless })
     : null;
   if (browser) Object.assign(env, browser.env);
-  note(`\nLaunching ${provider.name || provider.id}${model ? ' / ' + model : ''}…`);
-  return runInherit(claude, [...(browser?.args || []), ...claudeArgs], env, { terminalAgent: 'claude' });
+  note(`\nLaunching ${provider.name || provider.id}${model && !jevPlan ? ' / ' + model : ''}…`);
+  if (jevPlan) note(jevNotice('claude'));
+  return runInherit(jevClaude?.executable || claude, [...(browser?.args || []), ...claudeArgs], env, { terminalAgent: 'claude' });
 }

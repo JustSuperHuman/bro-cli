@@ -416,8 +416,12 @@ launches, and the choice sticks until you change it:
 | `CLAUDE` | Claude Code (default) | every provider |
 | `OMP` | [omp](https://omp.sh/), which picks its own model | every provider |
 | `PI` | [Pi](https://github.com/earendil-works/pi), with bro's selected provider/model | every model provider and subscription bridge |
-| `CODEX` | the `codex` CLI | your ChatGPT login, or a provider serving OpenAI's Responses API |
+| `CODEX` | the `codex` CLI | your ChatGPT login, OpenRouter, or a provider serving OpenAI's Responses API |
 | `DEEPSEEK` | DeepSeek Harness Web UI (`dsh web`) | every API provider, the account pool, and the Codex subscription bridge |
+
+The `[r]` switch is separate: it puts
+[Jev Router](#jev-router--a-model-per-turn) in front of `CLAUDE` or `CODEX` so
+the model is chosen per turn rather than per session.
 
 ```sh
 bro --claude              # force Claude Code for this launch
@@ -427,6 +431,45 @@ bro --codex               # force the codex CLI
 bro --dsh                 # force DeepSeek Harness Web
 bro --harness dsh         # same, long form (claude | omp | pi | codex | dsh)
 ```
+
+## Jev Router — a model per turn
+
+[Jev Router](https://github.com/gargpratyush/jev-router) chooses the model for
+each turn instead of you choosing one for the session: mechanical work goes to
+Haiku (or `gpt-5.6-luna`), hard work to Opus (or `gpt-5.6-sol`). The `[r]`
+switch under the menus turns it on, and the choice sticks like the harness does.
+
+```sh
+bro --jev                     # this machine's Claude login, routed per turn
+bro account work --jev        # any Claude profile — the login is unchanged
+bro --codex --jev             # the codex CLI on your ChatGPT login
+bro codex work --jev          # a Codex profile, routed per turn
+bro --no-jev                  # back to picking one model yourself
+```
+
+`jev-claude` and `jev-codex` launch the real CLI behind a loopback proxy, so
+nothing else bro arranged changes: the profile's `CLAUDE_CONFIG_DIR` or
+`CODEX_HOME`, sessions and `--resume`, permission mode, the shared browser and
+every flag after `--` all still apply. Claude Code opens with **Jev Router**
+selected in `/model`, and Codex with the `jev-router` provider — picking a
+concrete model there pauses routing, picking Jev Router again resumes it. Run
+`/jev-explain` (Claude) or `$jev-explain` (Codex) to see why a turn was routed
+where it was.
+
+Routing needs a [TypeSafe](https://docs.typesafe.ai) key:
+
+```sh
+echo "JEV_API_KEY=..." > ~/.jev-router.env   # PowerShell: Set-Content "$HOME\.jev-router.env" "JEV_API_KEY=..."
+```
+
+Without one the CLI still starts, just unrouted — `bro` says so before the
+session opens. The `jev-router` package installs itself on first use.
+
+It fronts Claude Code on a Claude login and the `codex` CLI on a ChatGPT login.
+Anything that already points a CLI somewhere else — an Anthropic-compatible
+provider, the `ccr` proxy, the account pool, the Codex bridge, and the omp / Pi
+/ DeepSeek harnesses — says why it can't be routed and runs unrouted rather
+than failing the launch.
 
 ### DeepSeek Harness provider compatibility
 
@@ -640,7 +683,7 @@ bro imagine skill --dir <path> # anywhere else
 
 ## Providers
 
-Claude is next in the list and runs **natively** with the Claude harness (your normal Claude login — no proxy). Other Anthropic-compatible providers (OpenRouter, Z.ai) are passed directly to Claude, omp, Pi, or DeepSeek Harness. OpenAI-format providers (Sakana, OpenAI, DeepSeek, Groq, …) use [`claude-code-router`](https://github.com/musistudio/claude-code-router) for Claude, while omp, Pi, and DeepSeek Harness receive native provider entries. `bro` installs any missing helper on first use.
+Claude is next in the list and runs **natively** with the Claude harness (your normal Claude login — no proxy). Other Anthropic-compatible providers (OpenRouter, Z.ai) are passed directly to Claude, omp, Pi, or DeepSeek Harness. OpenRouter also exposes its OpenAI Responses endpoint, so the Codex harness routes OpenRouter models through that endpoint automatically. OpenAI-format providers (Sakana, OpenAI, DeepSeek, Groq, …) use [`claude-code-router`](https://github.com/musistudio/claude-code-router) for Claude, while omp, Pi, and DeepSeek Harness receive native provider entries. `bro` installs any missing helper on first use.
 
 ### Other Providers — relays, and the tier you buy from
 
@@ -708,6 +751,7 @@ bro -p codex              # Codex on your ChatGPT subscription (live model list)
 bro codex                 # pick a Codex profile or session
 bro codex resume          # resume a Codex session
 bro --pi                  # launch Pi (also --omp / --codex / --dsh / --claude)
+bro --jev                 # Jev Router picks the model each turn (--no-jev off)
 bro -p sakana -m fugu     # skip the menus
 bro -p openlux -m gpt-6-astra --tier Codex-Gpt-1
                           # relay: pick the upstream route (and its price)
@@ -764,6 +808,10 @@ Keys and your own providers/models live in `~/.bro/config.json`:
   ]
 }
 ```
+
+`"defaultHarness"` picks the harness a fresh install opens on, and
+`"jevRouter": true` turns [Jev Router](#jev-router--a-model-per-turn) on by
+default; the `[h]` and `[r]` switches override both and remember your choice.
 
 Custom providers merge with the built-in list (same `id` adds models; new `id` adds a provider). `"section": "other"` files a provider under **Other Providers**; `"catalogue": "newapi"` marks a [new-api](https://github.com/Calcium-Ion/new-api) relay, whose whole catalogue bro fetches from `{baseUrl}/api/pricing` and whose tiers it offers per model — the `models` list is then only an offline fallback. The built-in model list is pulled from [`models.json`](https://github.com/JustSuperHuman/bro-cli/blob/main/models.json) on GitHub and cached at `~/.bro/models.cache.json` — run `bro update` to refresh it (override the source with `BRO_MODELS_URL`).
 
