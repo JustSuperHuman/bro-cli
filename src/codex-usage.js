@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { codexAuthStatus, freshCodexAuth } from './codex-auth.js';
-import { globalBinDirs, which, windowsCmdLine } from './proc.js';
+import { localBinDirs, npmBinDirs, which, windowsCmdLine } from './proc.js';
 
 const finite = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
 
@@ -100,6 +100,16 @@ async function appServerHome(home) {
   }
 }
 
+// The codex CLI, found once per run. Its usual install locations are a few
+// file checks; npm is only asked for its prefix when those miss, and in the
+// background — usage is fetched while a menu is live, and a synchronous npm
+// start-up would freeze it.
+let codexCli = null;
+export function findCodexCli() {
+  codexCli ||= (async () => which('codex', localBinDirs()) || which('codex', await npmBinDirs()))();
+  return codexCli;
+}
+
 // Codex exposes account quotas through its supported app-server protocol.
 // Using account/rateLimits/read keeps profile isolation, response evolution,
 // and authentication behavior owned by the installed Codex version instead
@@ -107,9 +117,10 @@ async function appServerHome(home) {
 export async function fetchCodexUsage({
   home = '',
   timeoutMs = 6000,
-  executable = which('codex', globalBinDirs()),
+  executable,
   spawnProcess = spawn
 } = {}) {
+  if (executable === undefined) executable = await findCodexCli();
   if (!executable) throw new Error('Codex CLI is not installed');
   const prepared = await appServerHome(home);
   const child = spawnAppServer(executable, {

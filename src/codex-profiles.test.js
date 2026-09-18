@@ -65,6 +65,15 @@ test('importing copies the machine\'s login in, and the label reports its plan',
   expect(plain(codexProfileLabel(profile))).toBe('imported  prolite');
 });
 
+test('a signed-in profile shows its 5h and weekly usage the way a Claude account does', () => {
+  const profile = { name: 'work', authenticated: true, plan: 'pro' };
+  const weeklyOnly = { primary: { usedPercent: 94, windowDurationMins: 10_080, resetsAt: 1 }, secondary: null };
+  expect(plain(codexProfileLabel({ ...profile, usageStats: weeklyOnly }))).toBe('work  5h — · wk 94% · pro');
+  expect(plain(codexProfileLabel({ ...profile, usagePending: true }))).toBe('work  5h … · wk … · pro');
+  expect(plain(codexProfileLabel({ ...profile, usageStats: null }))).toBe('work  usage unavailable · pro');
+  expect(plain(codexProfileLabel({ name: 'gone', authenticated: false, usagePending: true }))).toBe('gone  logged out');
+});
+
 test('a rollout is staged at the same relative path inside the destination profile', () => {
   const source = path.join(HOME, 'sessions', '2026', '08', '01', 'rollout-2026-08-01T22-22-02-019fc047-4079-7c40-b6ba-e868044fadd8.jsonl');
   const session = { id: '019fc047-4079-7c40-b6ba-e868044fadd8', file: source };

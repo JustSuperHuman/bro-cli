@@ -1,5 +1,6 @@
 import readline from 'node:readline';
 import os from 'node:os';
+import { ICON_WIDTH, detectIconMode, isIcon, renderIcons } from './icons.js';
 
 const stdin = process.stdin;
 const stdout = process.stdout;
@@ -86,6 +87,8 @@ export function selectableIndex(items, from, dir = 1) {
 // combining marks / joiners / variation selectors occupy none (they overlay
 // or merge with the previous glyph, so counting them misaligns columns).
 function charWidth(cp) {
+  // An app icon placeholder is drawn two cells wide, see icons.js.
+  if (isIcon(cp)) return ICON_WIDTH;
   if (
     cp === 0x200b || cp === 0x200c || cp === 0x200d || cp === 0xfeff ||
     (cp >= 0x0300 && cp <= 0x036f) ||
@@ -113,7 +116,7 @@ function charWidth(cp) {
     : 1;
 }
 
-function visWidth(s) {
+export function visWidth(s) {
   let w = 0;
   for (const ch of stripAnsi(s)) w += charWidth(ch.codePointAt(0));
   return w;
@@ -208,13 +211,20 @@ function renderKeyedRow(t) {
 // ([{label,value}]) cycles through them instead of flipping on/off. With
 // `filterable`, typing narrows the list by label/value; Backspace edits and
 // Esc clears the filter.
-// `header` (a string or a function of the row width) is painted dim between
-// the message and the list — column headings for rows laid out in columns.
-export function select({ message, choices, startIndex = 0, toggle = null, toggles = [], filterable = false, header = null }) {
+// `header` (a string or a function of the row width, or an array of them for
+// several lines) is painted dim between the message and the list — column
+// headings for rows laid out in columns, or a summary above them.
+// `live(repaint)` is for rows whose labels (or header) are functions reading
+// state that arrives after the menu opens: it's called once the menu is on
+// screen, `repaint()` redraws it, and the function it may return is called
+// when the menu closes.
+export function select({ message, choices, startIndex = 0, toggle = null, toggles = [], filterable = false, header = null, live = null }) {
   if (!isInteractive) {
     return Promise.reject(new Error('A terminal (TTY) is required to choose interactively. Use --provider / --model instead.'));
   }
-  return new Promise((resolve, reject) => {
+  // Settled before the menu reads keys: asking the terminal what it can draw
+  // gets its answer on stdin.
+  return detectIconMode().then(() => new Promise((resolve, reject) => {
     const allChoices = choices;
     let items = allChoices;
     let query = '';
@@ -225,7 +235,8 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
     // moves the cursor up by the row count of the previous paint, so it must
     // never exceed the screen height. Recomputed on terminal resize.
     let visible, lines, rowW;
-    const headerRows = header ? 1 : 0;
+    const headerLines = !header ? [] : Array.isArray(header) ? header : [header];
+    const headerRows = headerLines.length;
     const layout = () => {
       const overhead = 3 + headerRows + (toggle ? 1 : 0) + keyed.length; // message + cwd + hint (+ header, toggle rows)
       // Reserve one result row for the "no matches" state. Otherwise never
@@ -286,7 +297,7 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
       out += '\x1b[0J';
       out += `\x1b[1m${message}\x1b[0m\n`;
       out += workingDirectoryLine(process.cwd(), stdout.columns || 80) + '\n';
-      if (header) out += `\x1b[2m   ${typeof header === 'function' ? header(rowW) : header}\x1b[0m\n`;
+      for (const line of headerLines) out += `\x1b[2m   ${typeof line === 'function' ? line(rowW) : line}\x1b[0m\n`;
       for (let i = offset; i < offset + visible; i++) {
         const c = items[i];
         if (!c) {
@@ -306,7 +317,7 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
       for (const t of keyed) out += keyedRow(t) + '\n';
       out += hint();
       out += '\x1b[?7h';
-      stdout.write(out);
+      stdout.write(renderIcons(out));
       paintedLines = lines;
     };
 
@@ -323,7 +334,11 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
     };
     stdout.on('resize', onResize);
 
+    let closed = false;
+    let stopLive = null;
     const cleanup = () => {
+      closed = true;
+      if (typeof stopLive === 'function') stopLive();
       if (resizeTimer) clearTimeout(resizeTimer);
       stdin.removeListener('keypress', onKey);
       stdout.removeListener('resize', onResize);
@@ -407,7 +422,10 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
 
     stdin.on('keypress', onKey);
     paint('first');
-  });
+    stopLive = live?.(() => {
+      if (!closed) paint('repaint');
+    });
+  }));
 }
 
 // Two-column selector: the left column lists the main choices, the right column
@@ -428,13 +446,18 @@ export function select({ message, choices, startIndex = 0, toggle = null, toggle
 // Enter on the left column takes the highlighted child as-is (or none).
 // Resolves { ...choice, child: {label,value}|null, childFocused, toggleOn?, toggles? };
 // rejects Error('cancelled') on Esc / Ctrl-C. `toggle`/`toggles` as in select().
-// `banner` (multi-line string) is painted once above the picker and survives
-// repaints — the cursor-up repaint math only covers the rows below it.
-export function selectColumns({ message, choices, startIndex = 0, toggle = null, toggles = [], clearScreen = false, banner = null }) {
+// `banner` (a multi-line string, or a function of the terminal width that
+// returns one) is painted above the picker as part of every frame, so a
+// function can show state that changes while the menu is open. `live` works
+// as in select(): called once the menu is on screen with a function that
+// repaints it, its return value called when the menu closes.
+export function selectColumns({ message, choices, startIndex = 0, toggle = null, toggles = [], clearScreen = false, banner = null, live = null }) {
   if (!isInteractive) {
     return Promise.reject(new Error('A terminal (TTY) is required to choose interactively. Use --provider / --model instead.'));
   }
-  return new Promise((resolve, reject) => {
+  // Settled before the menu reads keys: asking the terminal what it can draw
+  // gets its answer on stdin.
+  return detectIconMode().then(() => new Promise((resolve, reject) => {
     let index = Math.max(0, Math.min(startIndex, choices.length - 1));
     while (choices[index]?.divider && index < choices.length - 1) index++;
     let focus = 'left';
@@ -501,13 +524,16 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
 
     // A lazy loader is called with { update, signal }: `update(items)` replaces
     // the rows any time later (ignored once the picker has closed), `signal`
-    // aborts when it closes.
+    // aborts when it closes. An update can land before the loader has even
+    // returned — its first rows are then already out of date and are dropped.
     const ensureLoaded = (i) => {
       const k = kids[i];
       if (k.status !== 'lazy') return;
       k.status = 'loading';
+      let updated = false;
       const update = (items) => {
-        if (finished || k.status === 'loading') return;
+        if (finished) return;
+        updated = true;
         replaceItems(i, items);
         if (index === i) {
           layout();
@@ -517,11 +543,12 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
       Promise.resolve()
         .then(() => choices[i].children({ update, signal: loading.signal }))
         .then((items) => {
+          if (updated) return;
           k.status = 'ready';
           replaceItems(i, items);
         })
         .catch(() => {
-          k.status = 'none';
+          if (!updated) k.status = 'none';
         })
         .finally(() => {
           if (!finished && index === i) {
@@ -533,10 +560,11 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
 
     // ---- layout: known row count so the repaint cursor-up math stays valid.
     // Recomputed on terminal resize (which triggers a fresh full repaint). ----
-    let cols, visible, lines, leftW, rightW;
+    let cols, visible, lines, leftW, rightW, bannerRows;
+    const bannerText = () => (typeof banner === 'function' ? banner(cols) : banner) || '';
     const layout = () => {
       cols = stdout.columns || 80;
-      const bannerRows = banner ? banner.split('\n').length : 0;
+      bannerRows = banner ? bannerText().split('\n').length : 0;
       const overhead = 3 + bannerRows + (toggle ? 1 : 0) + keyed.length; // banner + message + cwd + hint (+ toggle rows)
       const tallest = Math.max(choices.length, ...kids.map((k) => k.items.length));
       // At least 3 rows even on a tiny terminal, but never taller than the
@@ -592,11 +620,12 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     };
 
     // A divider row: a rule, or a labelled rule that names the group beneath
-    // it. A `header` divider is column headings instead, aligned with the rows.
+    // it. A `header` divider is column headings (or a summary line) instead,
+    // aligned with the rows: dim unless its text brings colours of its own.
     const dividerCell = (item, width) => {
       if (item.header) {
         const heading = typeof item.label === 'function' ? item.label(width - 2) : item.label ?? '';
-        return `\x1b[2m${fit('  ' + stripAnsi(heading), width)}\x1b[0m`;
+        return `\x1b[2m${fit('  ' + heading, width)}\x1b[0m`;
       }
       const text = stripAnsi(item.label ?? '');
       if (!text) return `\x1b[2m${'─'.repeat(width)}\x1b[0m`;
@@ -610,8 +639,8 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     restoreSeq = '\x1b[?25h\x1b[?7h';
     stdout.write('\x1b[?25l');
 
-    // mode: 'first' honours clearScreen/banner, 'repaint' overdraws the
-    // previous frame, 'fresh' wipes the screen and repaints banner and all
+    // mode: 'first' honours clearScreen, 'repaint' overdraws the previous
+    // frame, banner included, 'fresh' wipes the screen and repaints it all
     // (used after a resize, when the old rows have rewrapped and the cursor-up
     // math no longer holds). Autowrap is off while painting so a row longer
     // than the terminal truncates instead of wrapping — a wrapped row would
@@ -619,13 +648,10 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     // leave a stale copy of the menu behind.
     const paint = (mode) => {
       let out = '\x1b[?7l';
-      if (mode === 'repaint') {
-        out += `\r\x1b[${paintedLines}A`;
-      } else {
-        if (mode === 'fresh' || clearScreen) out += '\x1b[2J\x1b[H';
-        if (banner) out += banner + '\n';
-      }
+      if (mode === 'repaint') out += `\r\x1b[${paintedLines}A`;
+      else if (mode === 'fresh' || clearScreen) out += '\x1b[2J\x1b[H';
       out += '\x1b[0J';
+      if (banner) out += bannerText() + '\n';
       out += `\x1b[1m${message}\x1b[0m\n`;
       out += workingDirectoryLine(process.cwd(), cols) + '\n';
       const k = kids[index];
@@ -659,8 +685,8 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
       for (const t of keyed) out += renderKeyedRow(t) + '\n';
       out += hint();
       out += '\x1b[?7h';
-      stdout.write(out);
-      paintedLines = lines;
+      stdout.write(renderIcons(out));
+      paintedLines = lines + bannerRows;
     };
 
     // Terminals fire resize continuously while the window is dragged — a full
@@ -678,8 +704,10 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     };
     stdout.on('resize', onResize);
 
+    let stopLive = null;
     const cleanup = () => {
       finished = true;
+      if (typeof stopLive === 'function') stopLive();
       loading.abort();
       if (resizeTimer) clearTimeout(resizeTimer);
       stdin.removeListener('keypress', onKey);
@@ -810,7 +838,12 @@ export function selectColumns({ message, choices, startIndex = 0, toggle = null,
     stdin.on('keypress', onKey);
     ensureLoaded(index);
     paint('first');
-  });
+    stopLive = live?.(() => {
+      if (finished) return;
+      layout();
+      paint('repaint');
+    });
+  }));
 }
 
 // Show something for `ms`, then continue — but let the user steer:

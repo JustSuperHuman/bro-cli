@@ -228,7 +228,35 @@ Profiles are the same standard Claude Code logins stored under
 `~/.claude-max-pool/accounts/<name>/`; `bro` switches by setting
 `CLAUDE_CONFIG_DIR` for that Claude launch and does not overwrite `~/.claude`.
 The interactive profile menu shows each account's current five-hour, weekly,
-and Fable usage before you choose one.
+and Fable usage before you choose one. Beside the logo at the top of `bro`'s
+menus, a **Usage** section shows what's left across all your accounts: one
+line per app, with its five-hour window and its week in columns — and, on
+Claude's line, the same two for Fable:
+
+```
+╭─ Usage ─────────────────────────────────╮
+│        5h   week              5h   week │
+│ ✻     58%    49%    Fable    95%     2% │
+│ >_      —    16%                        │
+╰─────────────────────────────────────────╯
+```
+
+Each figure is that app's own 100%, shared equally by its accounts that have
+the window, so nothing passes 100%. Fable only counts the accounts whose plan
+reports a Fable limit — the others have no Fable access — and is capped by each
+one's overall limits too. An app without a signed-in account gets no line. The
+menu opens at once and the numbers fill in as each account answers.
+
+Claude and Codex appear as their app marks rather than their names, in white
+(black on a light background). Terminals that can draw images show the real
+marks — Windows Terminal 1.22+, xterm, foot, Konsole and WezTerm through
+sixel, iTerm2 and WezTerm through inline images, kitty and Ghostty through the
+kitty graphics protocol — and every other terminal shows each app's own
+terminal mark in bold: Claude Code's `✻` and Codex CLI's `>_`. `bro` asks the
+terminal what it supports once, before the first menu; set `BRO_ICONS` to
+`sixel`, `iterm`, `kitty` or `text` to choose yourself.
+`node scripts/build-icons.js` rebuilds the bundled marks from the installed
+Claude and Codex desktop apps.
 
 ### One shared browser for every model
 
@@ -376,9 +404,12 @@ bro codex remove work     # delete the profile, sessions and all
 bro -p codex --account work --codex   # launch a profile straight from the menus
 ```
 
-Profiles show up in the Codex row's right-hand column with their plan, exactly
-like Claude accounts show theirs — this machine's login first, then each
-profile, then the sessions they can resume.
+Profiles show up in the Codex row's right-hand column with their plan and live
+five-hour and weekly usage, exactly like Claude accounts show theirs — this
+machine's login first, then each profile, then the sessions they can resume.
+What's left across all of them is the Codex line of the Usage section. A plan
+without a five-hour window (Pro currently reports only the weekly one) shows
+`—` there, and a profile imported from another login counts once.
 
 ### Resuming a Codex session
 

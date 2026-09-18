@@ -21,7 +21,11 @@ import { launchOmp, launchPi, permissionArgs } from './launch.js';
 import { describeJev, ensureJev, jevCommandPath, jevEnv, jevNotice } from './jev.js';
 import { launchDsh } from './deepseek.js';
 import { note } from './out.js';
-import { fetchClaudeUsage, usageSummary } from './claude-usage.js';
+import { usageSummary } from './claude-usage.js';
+import { metersText, repaintOnUsage } from './usage.js';
+import { requestAllUsage, requestClaudeUsages, withClaudeUsage } from './account-usage.js';
+import { brandBanner } from './banner.js';
+import { POOL_DIR, accountDirFor, listAccounts } from './claude-accounts.js';
 import { listSessions } from './sessions.js';
 import { chooseResumeProfile, sessionRows, stageFiles } from './profiles.js';
 import { claudeBrowserEnabled, prepareClaudeBrowser } from './claude-browser.js';
@@ -31,8 +35,6 @@ const POOL_ROOT = path.join(__dirname, '..', 'pool');
 const POOL_ENTRY = path.join(POOL_ROOT, 'src', 'index.ts');
 
 const DEFAULT_PORT = 3456;
-const POOL_DIR = process.env.CLAUDE_POOL_DIR || path.join(os.homedir(), '.claude-max-pool');
-const ACCOUNTS_DIR = path.join(POOL_DIR, 'accounts');
 // Claude Code's own config dir — the login used when no profile is selected.
 const DEFAULT_CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const PROXY_LOG = path.join(os.homedir(), '.bro', 'pool-proxy.log');
@@ -62,38 +64,6 @@ const FALLBACK_MODELS = [
   { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5' }
 ];
 
-// --- account inspection (read the pool's on-disk state directly) -----------
-
-function listAccounts() {
-  let names = [];
-  try {
-    names = fs
-      .readdirSync(ACCOUNTS_DIR, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-      .sort();
-  } catch {
-    return [];
-  }
-  return names.map((name) => {
-    let authenticated = false;
-    let subscriptionType = null;
-    try {
-      const creds = JSON.parse(fs.readFileSync(path.join(ACCOUNTS_DIR, name, '.credentials.json'), 'utf8'));
-      const oauth = creds && creds.claudeAiOauth;
-      authenticated = Boolean(oauth && oauth.accessToken);
-      subscriptionType = (oauth && oauth.subscriptionType) || null;
-    } catch {
-      /* no creds yet */
-    }
-    return { name, authenticated, subscriptionType };
-  });
-}
-
-function accountDirFor(name) {
-  return path.join(ACCOUNTS_DIR, name);
-}
-
 const samePath = (a, b) => {
   if (!a || !b) return false;
   const left = path.resolve(a);
@@ -103,94 +73,84 @@ const samePath = (a, b) => {
 
 const configDirForAccount = (name) => name ? accountDirFor(name) : DEFAULT_CLAUDE_DIR;
 
-// Usage percentages carry their own color by pressure (green → amber → red)
-// so the stats read at a glance instead of being one dim blur.
-function usagePercent(value) {
-  if (typeof value !== 'number') return '\x1b[2m—\x1b[0m';
-  const pct = Math.round(value);
-  const color = pct >= 80 ? '\x1b[31m' : pct >= 50 ? '\x1b[33m' : '\x1b[32m';
-  return `${color}${pct}%\x1b[0m`;
-}
-
 export { usageSummary };
 
+const CLAUDE_METERS = [['5h', 'session'], ['wk', 'weekly'], ['Fable', 'fable']];
+
+// One profile row. `usageStats` is the account's meters, null when they
+// couldn't be read; `usagePending` shows placeholders while they're on their
+// way. Without either the row just says whether the account is ready.
 export function accountLabel(a) {
   const state = a.authenticated ? 'ready' : 'logged out';
   const plan = a.subscriptionType ? ` \x1b[2m· ${a.subscriptionType}\x1b[0m` : '';
   if (a.authenticated && a.usageStats) {
     const u = a.usageStats;
-    const usage = `\x1b[2m5h\x1b[0m ${usagePercent(u.session)} \x1b[2m· wk\x1b[0m ${usagePercent(u.weekly)} \x1b[2m· Fable\x1b[0m ${usagePercent(u.fable)}`;
-    return `${a.name}  ${usage}${plan}`;
+    return `${a.name}  ${metersText(CLAUDE_METERS.map(([label, key]) => [label, u[key]]))}${plan}`;
   }
+  if (a.authenticated && a.usagePending) return `${a.name}  ${metersText(CLAUDE_METERS, { pending: true })}${plan}`;
   if (a.authenticated && a.usageStats === null) return `${a.name}  \x1b[2musage unavailable\x1b[0m${plan}`;
   return `${a.name}  \x1b[2m${state}\x1b[0m${plan}`;
 }
 
-async function fetchAccountUsage(account) {
-  return fetchClaudeUsage({ configDir: accountDirFor(account.name) });
-}
-
-async function loadAccountUsages(accounts) {
-  return Promise.all(
-    accounts.map(async (account) => {
-      if (!account.authenticated) return account;
-      try {
-        return { ...account, usageStats: await fetchAccountUsage(account) };
-      } catch {
-        return { ...account, usageStats: null };
-      }
-    })
-  );
-}
-
 // Account list for the two-column picker's right pane: one entry per profile
-// with live usage stats in the label, plus a manage entry (empty value) that
-// falls through to the full account menu.
+// with its usage stats in the label, plus a manage entry (empty value) that
+// falls through to the full account menu. (What's left across all accounts
+// is the Usage section beside the logo, see banner.js.)
 //
 // Below the profiles come the sessions those profiles can resume — this
 // project's first, then everything else with its path, all reachable by typing
 // to filter. A session row carries its source profile; after selection, the
 // user can keep that owner or choose a different profile to resume with.
-export async function accountProfileChoices() {
-  let accounts = listAccounts();
-  if (accounts.some((a) => a.authenticated)) accounts = await loadAccountUsages(accounts);
+//
+// Nothing here waits on the network: the rows come back at once with
+// placeholders, and `update` repaints them as each account's meters and the
+// session history arrive. Called without `update`, it waits for all of it.
+export async function accountProfileChoices({ update } = {}) {
+  const accounts = listAccounts();
+  let sessions = [];
 
-  const rows = [
-    ...accounts.map((a) => ({ label: accountLabel(a), value: a.name })),
-    { label: 'Log in / manage accounts…', value: '' }
+  const rows = () => [
+    ...accounts.map((a) => ({ label: accountLabel(withClaudeUsage(a)), value: a.name })),
+    { label: 'Log in / manage accounts…', value: '' },
+    ...sessionRows(sessions, (s) => ({
+      kind: 'session',
+      id: s.id,
+      account: s.account,
+      cwd: s.cwd,
+      title: s.title,
+      file: s.file
+    }))
   ];
 
-  let sessions = [];
-  try {
-    sessions = await listSessions({
-      sources: [
-        // The machine's own Claude login owns sessions too. Cross-profile
-        // resume stages a fork when the chosen destination differs.
-        { account: null, configDir: DEFAULT_CLAUDE_DIR },
-        ...accounts
-          .filter((a) => a.authenticated)
-          .map((a) => ({ account: a.name, configDir: accountDirFor(a.name) }))
-      ]
-    });
-  } catch {
+  const sessionsLoaded = listSessions({
+    sources: [
+      // The machine's own Claude login owns sessions too. Cross-profile
+      // resume stages a fork when the chosen destination differs.
+      { account: null, configDir: DEFAULT_CLAUDE_DIR },
+      ...accounts
+        .filter((a) => a.authenticated)
+        .map((a) => ({ account: a.name, configDir: accountDirFor(a.name) }))
+    ]
+  }).then(
+    (found) => { sessions = found; },
     // Session history is a convenience — never let it cost you the account menu.
-    return rows;
-  }
+    () => {}
+  );
+  const pending = [...requestClaudeUsages(accounts), sessionsLoaded];
 
-  return [...rows, ...sessionRows(sessions, (s) => ({
-    kind: 'session',
-    id: s.id,
-    account: s.account,
-    cwd: s.cwd,
-    title: s.title,
-    file: s.file
-  }))];
+  if (!update) {
+    await Promise.all(pending);
+    return rows();
+  }
+  for (const promise of pending) promise.then(() => update(rows()));
+  return rows();
 }
 
 // The direct `bro account` route used to open the older profile-only selector.
 // Keep one provider row on the left so the direct `bro account` route uses the
 // same combined profile/session list as the main provider picker.
 async function chooseAccountTarget() {
+  const usage = requestAllUsage();
   const choice = await selectColumns({
     message: 'Choose a Claude account profile or session:',
     choices: [{
@@ -198,7 +158,9 @@ async function chooseAccountTarget() {
       detail: 'pick login',
       children: accountProfileChoices,
       filterableChildren: true
-    }]
+    }],
+    banner: brandBanner(usage),
+    live: repaintOnUsage(usage.promises)
   }).catch(() => null);
 
   if (!choice) return null;
@@ -217,7 +179,7 @@ async function chooseAccountProfile(preferredName) {
   };
 
   while (true) {
-    let accounts = listAccounts();
+    const accounts = listAccounts();
     if (preferredName) {
       const found = accounts.find((a) => a.name === preferredName);
       if (!found) throw new Error(`Unknown account profile: ${preferredName}. Run "bro accounts list" to see profiles.`);
@@ -228,15 +190,11 @@ async function chooseAccountProfile(preferredName) {
       continue;
     }
 
-    if (accounts.some((account) => account.authenticated)) {
-      process.stderr.write('\x1b[2mLoading profile usage…\x1b[0m\r');
-      accounts = await loadAccountUsages(accounts);
-      process.stderr.write('\x1b[2K\r');
-    }
-
+    // The menu opens at once; each row's usage fills in as it arrives.
+    const usages = requestClaudeUsages(accounts);
     const choices = [
       ...accounts.map((a) => ({
-        label: accountLabel(a),
+        label: () => accountLabel(withClaudeUsage(a)),
         value: a.authenticated ? { action: 'use', account: a } : { action: 'login', name: a.name }
       })),
       { label: 'Log in / add another Claude account', value: { action: 'login' } },
@@ -246,7 +204,8 @@ async function chooseAccountProfile(preferredName) {
 
     const choice = await select({
       message: 'Choose a Claude account profile:',
-      choices
+      choices,
+      live: repaintOnUsage(usages)
     }).catch(() => ({ value: { action: 'cancel' } }));
 
     const picked = choice.value;
@@ -267,14 +226,15 @@ async function chooseAccountProfile(preferredName) {
 // profile (plus the machine's native login) is available as a destination.
 // Choosing another destination causes runAccountProfile to stage a fork.
 async function chooseAccountForResume(session) {
-  let accounts = listAccounts();
-  if (accounts.some((account) => account.authenticated)) accounts = await loadAccountUsages(accounts);
+  const accounts = listAccounts();
+  const usages = requestClaudeUsages(accounts);
 
   const target = await chooseResumeProfile({
     session,
-    profiles: accounts.map((account) => ({ name: account.name, label: accountLabel(account) })),
+    profiles: accounts.map((account) => ({ name: account.name, label: () => accountLabel(withClaudeUsage(account)) })),
     localLabel: "This machine's Claude login",
-    manageLabel: 'Log in / manage accounts…'
+    manageLabel: 'Log in / manage accounts…',
+    live: repaintOnUsage(usages)
   });
   if (!target) return null;
   if (!target.manage) return { local: target.local, accountName: target.name };

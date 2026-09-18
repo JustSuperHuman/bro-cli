@@ -251,6 +251,10 @@ export function codexAuthStatus(home = '') {
     loggedIn: true,
     source: auth.path,
     plan: claim.chatgpt_plan_type || null,
-    accountId: auth.accountId
+    accountId: auth.accountId,
+    // The account id alone names a workspace, which a Team plan shares between
+    // users who each have their own limits; this names one user in it.
+    identity: claim.chatgpt_account_user_id
+      || (claim.chatgpt_user_id && auth.accountId ? `${claim.chatgpt_user_id}__${auth.accountId}` : null)
   };
 }

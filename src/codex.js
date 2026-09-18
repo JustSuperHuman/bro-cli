@@ -35,6 +35,9 @@ import { launchDsh } from './deepseek.js';
 import { note } from './out.js';
 import { prepareClaudeBrowser } from './claude-browser.js';
 import { listCodexSessions } from './codex-sessions.js';
+import { repaintOnUsage } from './usage.js';
+import { requestAllUsage, requestCodexUsages, withCodexUsage } from './account-usage.js';
+import { brandBanner } from './banner.js';
 import { samePath } from './sessions.js';
 import { chooseResumeProfile, sessionRows, stageFiles } from './profiles.js';
 import {
@@ -77,38 +80,53 @@ const sessionSources = () => [
 // --- picker rows -----------------------------------------------------------
 
 // The Codex provider's right pane: the logins you can launch under (the
-// machine's own first, then profiles), a way into the full profile menu, and
-// below them the sessions those logins can resume — this project's first, then
-// everything else with its path, all reachable by typing to filter.
-export async function codexProfileChoices() {
+// machine's own first, then profiles) with their usage, a way into the full
+// profile menu, and below them the sessions those logins can resume — this
+// project's first, then everything else with its path, all reachable by
+// typing to filter. (What's left across all accounts is the Usage section
+// beside the logo, see banner.js.)
+//
+// Like the Claude account pane, nothing here waits on the network: the rows
+// come back at once and `update` repaints them as each login's meters and the
+// session history arrive. Called without `update`, it waits for all of it.
+export async function codexProfileChoices({ update } = {}) {
   const local = localCodexProfile();
   const profiles = listCodexProfiles();
-  const rows = [
-    { label: codexProfileLabel(local, { name: LOCAL_LABEL }), value: '' },
-    ...profiles.map((p) => ({ label: codexProfileLabel(p), value: p.name })),
-    { label: 'Log in / manage Codex profiles…', value: { manage: true } }
+  let sessions = [];
+
+  const rows = () => [
+    { label: codexProfileLabel(withCodexUsage(local), { name: LOCAL_LABEL }), value: '' },
+    ...profiles.map((p) => ({ label: codexProfileLabel(withCodexUsage(p)), value: p.name })),
+    { label: 'Log in / manage Codex profiles…', value: { manage: true } },
+    ...sessionRows(sessions, (s) => ({
+      kind: 'codex-session',
+      id: s.id,
+      account: s.account,
+      cwd: s.cwd,
+      title: s.title,
+      file: s.file
+    }))
   ];
 
-  let sessions = [];
-  try {
-    sessions = await listCodexSessions({ sources: sessionSources() });
-  } catch {
+  const sessionsLoaded = listCodexSessions({ sources: sessionSources() }).then(
+    (found) => { sessions = found; },
     // Session history is a convenience — never let it cost you the provider.
-    return rows;
+    () => {}
+  );
+  const pending = [...requestCodexUsages([local, ...profiles]), sessionsLoaded];
+
+  if (!update) {
+    await Promise.all(pending);
+    return rows();
   }
-  return [...rows, ...sessionRows(sessions, (s) => ({
-    kind: 'codex-session',
-    id: s.id,
-    account: s.account,
-    cwd: s.cwd,
-    title: s.title,
-    file: s.file
-  }))];
+  for (const promise of pending) promise.then(() => update(rows()));
+  return rows();
 }
 
 // The direct `bro codex` route: the same combined profile/session list, on its
 // own rather than in the provider picker.
 async function chooseCodexTarget() {
+  const usage = requestAllUsage();
   const choice = await selectColumns({
     message: 'Choose a Codex login or session:',
     choices: [{
@@ -116,7 +134,9 @@ async function chooseCodexTarget() {
       detail: 'chatgpt login',
       children: codexProfileChoices,
       filterableChildren: true
-    }]
+    }],
+    banner: brandBanner(usage),
+    live: repaintOnUsage(usage.promises)
   }).catch(() => null);
 
   if (!choice) return null;
@@ -145,10 +165,12 @@ async function chooseCodexProfile(preferredName = '') {
   while (true) {
     const local = localCodexProfile();
     const profiles = listCodexProfiles();
+    // The menu opens at once; each row's usage fills in as it arrives.
+    const usages = requestCodexUsages([local, ...profiles]);
     const choices = [
-      { label: codexProfileLabel(local, { name: LOCAL_LABEL }), value: { action: 'use', name: '' } },
+      { label: () => codexProfileLabel(withCodexUsage(local), { name: LOCAL_LABEL }), value: { action: 'use', name: '' } },
       ...profiles.map((p) => ({
-        label: codexProfileLabel(p),
+        label: () => codexProfileLabel(withCodexUsage(p)),
         value: p.authenticated ? { action: 'use', name: p.name } : { action: 'login', name: p.name }
       })),
       { label: 'Log in / add another ChatGPT account', value: { action: 'login' } },
@@ -157,8 +179,11 @@ async function chooseCodexProfile(preferredName = '') {
       { label: 'Cancel', value: { action: 'cancel' } }
     ];
 
-    const choice = await select({ message: 'Choose a Codex profile:', choices })
-      .catch(() => ({ value: { action: 'cancel' } }));
+    const choice = await select({
+      message: 'Choose a Codex profile:',
+      choices,
+      live: repaintOnUsage(usages)
+    }).catch(() => ({ value: { action: 'cancel' } }));
     const picked = choice.value;
 
     if (picked.action === 'cancel') return null;
@@ -360,12 +385,16 @@ async function chooseModel(models, skip) {
 // Which login should resume this session: its owner by default, any other
 // profile at the cost of a fork.
 async function resumeTarget(session) {
+  const local = localCodexProfile();
+  const profiles = listCodexProfiles();
+  const usages = requestCodexUsages([local, ...profiles]);
   const target = await chooseResumeProfile({
     session,
-    profiles: listCodexProfiles().map((p) => ({ name: p.name, label: codexProfileLabel(p) })),
+    profiles: profiles.map((p) => ({ name: p.name, label: () => codexProfileLabel(withCodexUsage(p)) })),
     message: 'Choose the Codex profile to resume this session with:',
-    localLabel: LOCAL_LABEL,
-    manageLabel: 'Log in / manage Codex profiles…'
+    localLabel: () => codexProfileLabel(withCodexUsage(local), { name: LOCAL_LABEL }),
+    manageLabel: 'Log in / manage Codex profiles…',
+    live: repaintOnUsage(usages)
   });
   if (!target) return null;
   if (!target.manage) return target.name;

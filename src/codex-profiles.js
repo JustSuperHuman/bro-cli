@@ -18,6 +18,7 @@ import path from 'node:path';
 import { BRO_DIR } from './config.js';
 import { assertProfileName, listProfileDirs } from './profiles.js';
 import { codexAuthStatus } from './codex-auth.js';
+import { codexMeters, metersText } from './usage.js';
 
 // Both roots are read when they're used, not when this module loads: the codex
 // home is the user's own environment variable, which a launch may have changed.
@@ -82,7 +83,7 @@ export function removeCodexProfile(name) {
 export function listCodexProfiles() {
   return listProfileDirs(profilesDir()).map(({ name, dir }) => {
     const status = codexAuthStatus(dir);
-    return { name, dir, authenticated: status.loggedIn, plan: status.plan || null };
+    return { name, dir, authenticated: status.loggedIn, plan: status.plan || null, identity: status.identity || null };
   });
 }
 
@@ -95,16 +96,29 @@ export function localCodexProfile() {
     dir: defaultCodexHome(),
     authenticated: status.loggedIn,
     plan: status.plan || null,
+    identity: status.identity || null,
     // Whether the credentials live in the codex CLI's own directory or in
     // bro's fallback file decides whether the codex CLI can see them.
     source: status.source || ''
   };
 }
 
+const CODEX_METERS = [['5h', 'session'], ['wk', 'weekly']];
+
 // One profile row: name, then dim state — plan when signed in, otherwise the
-// reason it can't be used yet.
+// reason it can't be used yet. Like a Claude account row, a signed-in profile
+// shows its 5h and weekly meters once `usageStats` has them (null when they
+// couldn't be read), with placeholders while `usagePending`.
 export function codexProfileLabel(profile, { name = profile.name || 'local' } = {}) {
   const state = profile.authenticated ? profile.plan || 'ready' : 'logged out';
+  if (!profile.authenticated) return `${name}  \x1b[2m${state}\x1b[0m`;
+  const plan = ` \x1b[2m· ${state}\x1b[0m`;
+  if (profile.usageStats) {
+    const meters = codexMeters(profile.usageStats);
+    return `${name}  ${metersText(CODEX_METERS.map(([label, key]) => [label, meters[key]]))}${plan}`;
+  }
+  if (profile.usagePending) return `${name}  ${metersText(CODEX_METERS, { pending: true })}${plan}`;
+  if (profile.usageStats === null) return `${name}  \x1b[2musage unavailable\x1b[0m${plan}`;
   return `${name}  \x1b[2m${state}\x1b[0m`;
 }
 

@@ -37,6 +37,9 @@ import {
   IMAGINE_PROVIDER
 } from './justimagine.js';
 import { runCodex, runCodexCommand, codexProfileChoices, CODEX_PROVIDER } from './codex.js';
+import { requestAllUsage } from './account-usage.js';
+import { brandBanner } from './banner.js';
+import { repaintOnUsage } from './usage.js';
 import { runTokenReport } from './token-report.js';
 import { runProfilesReport } from './profile-report.js';
 import { ensureHarnessTool, HARNESS_INSTALLS, updateHarnessTool } from './proc.js';
@@ -248,15 +251,6 @@ export function parseArgs(argv) {
   }
   return a;
 }
-
-// Quirky BRO CLI banner over the picker. Cyan fade, shades on.
-const BANNER = [
-  '\x1b[96m   ___  ___  ____     _______   ____\x1b[0m',
-  '\x1b[96m  / _ )/ _ \\/ __ \\   / ___/ /  /  _/\x1b[0m',
-  '\x1b[36m / _  / , _/ /_/ /  / /__/ /___/ /\x1b[0m',
-  '\x1b[36m/____/_/|_|\\____/   \\___/____/___/\x1b[0m  (⌐■_■)',
-  ''
-].join('\n');
 
 const tagOf = (p) =>
   p.catalogue === 'newapi'
@@ -784,12 +778,16 @@ export async function main(argv) {
 
     const lastP = lastProvider();
     const browser = browserToggle();
+    // The Usage section beside the logo: every account's meters, fetched in
+    // the background while the menu is already up.
+    const usage = requestAllUsage();
     const choice = await selectColumns({
       message: 'Choose a provider and model:',
       startIndex: Math.max(0, choices.findIndex((c) => c.value?.id === lastP)),
       choices,
       clearScreen: true,
-      banner: BANNER,
+      banner: brandBanner(usage),
+      live: repaintOnUsage(usage.promises),
       toggle: { label: 'Skip permissions', value: skip },
       toggles: [HARNESS_TOGGLE(harness), JEV_TOGGLE(jev), ...(browser ? [browser] : [])]
     }).catch(() => null);

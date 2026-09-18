@@ -1,4 +1,4 @@
-import { spawn, spawnSync, execSync } from 'node:child_process';
+import { spawn, spawnSync, exec, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,9 +27,7 @@ export function which(name, extraDirs = []) {
 // Where bun / npm drop globally-installed bin shims (so we can find `ccr`
 // even when that directory isn't on PATH — common on Windows).
 export function globalBinDirs() {
-  const dirs = [path.join(os.homedir(), '.bun', 'bin'), path.join(os.homedir(), '.local', 'bin')];
-  if (process.env.BUN_INSTALL) dirs.push(path.join(process.env.BUN_INSTALL, 'bin'));
-  if (process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'npm'));
+  const dirs = localBinDirs();
   try {
     const prefix = execSync('npm config get prefix', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     if (prefix) dirs.push(prefix, path.join(prefix, 'bin'));
@@ -37,6 +35,28 @@ export function globalBinDirs() {
     /* npm not installed */
   }
   return [...new Set(dirs)];
+}
+
+// The same places minus npm's prefix — found with file checks alone, where
+// asking npm is a synchronous npm start-up (about a quarter second).
+export function localBinDirs() {
+  const dirs = [path.join(os.homedir(), '.bun', 'bin'), path.join(os.homedir(), '.local', 'bin')];
+  if (process.env.BUN_INSTALL) dirs.push(path.join(process.env.BUN_INSTALL, 'bin'));
+  if (process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'npm'));
+  return dirs;
+}
+
+// npm's global bin directories, asked for once and without blocking — for
+// lookups that run while a menu is live.
+let npmPrefixDirs = null;
+export function npmBinDirs() {
+  npmPrefixDirs ||= new Promise((resolve) => {
+    exec('npm config get prefix', { encoding: 'utf8', windowsHide: true }, (error, stdout) => {
+      const prefix = error ? '' : String(stdout).trim();
+      resolve(prefix ? [prefix, path.join(prefix, 'bin')] : []);
+    });
+  });
+  return npmPrefixDirs;
 }
 
 function winQuote(a) {

@@ -61,7 +61,9 @@ export function sessionRows(sessions, toValue) {
 // A session defaults to the login that owns it, but every stored profile (plus
 // the machine's own login) is available as a destination; picking a different
 // one is what makes the launcher stage a fork. `profiles` is [{ name, label }]
-// — the label already carries whatever state that harness shows for a login.
+// — the label already carries whatever state that harness shows for a login,
+// and may be a function to re-read that state on every paint (with `live`
+// repainting as it changes, see select()). `localLabel` may be one too.
 // Resolves { local, name } for a destination, { manage: true } when the user
 // wants the full profile menu instead, or null when cancelled.
 export async function chooseResumeProfile({
@@ -69,18 +71,20 @@ export async function chooseResumeProfile({
   profiles,
   message = 'Choose the profile to resume this session with:',
   localLabel = "This machine's login",
-  manageLabel = 'Log in / manage profiles…'
+  manageLabel = 'Log in / manage profiles…',
+  live = null
 }) {
   const originalName = session.account || null;
   const mark = (isOriginal) => (isOriginal ? '  \x1b[2m(original)\x1b[0m' : '');
+  const text = (label, width) => (typeof label === 'function' ? label(width) : label);
   const choices = [
     {
-      label: `${localLabel}  \x1b[2mlocal\x1b[0m${mark(originalName === null)}`,
+      label: (width) => `${text(localLabel, width)}  \x1b[2mlocal\x1b[0m${mark(originalName === null)}`,
       value: { local: true, name: '' },
       filterText: 'local default this machine'
     },
     ...profiles.map((profile) => ({
-      label: `${profile.label}${mark(profile.name === originalName)}`,
+      label: (width) => `${text(profile.label, width)}${mark(profile.name === originalName)}`,
       value: { local: false, name: profile.name },
       filterText: profile.name
     })),
@@ -90,7 +94,8 @@ export async function chooseResumeProfile({
     message,
     choices,
     startIndex: originalName === null ? 0 : Math.max(0, choices.findIndex((c) => c.value?.name === originalName)),
-    filterable: true
+    filterable: true,
+    live
   }).catch(() => null);
   return choice ? choice.value : null;
 }

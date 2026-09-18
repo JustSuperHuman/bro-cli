@@ -19,6 +19,12 @@ test('profile usage preserves the limits users use to choose an account', () => 
   expect(plain).toContain('5h 17% · wk 28% · Fable 53%');
 });
 
+test('a profile whose usage is still loading keeps the row shape with placeholders', () => {
+  const label = accountLabel({ name: 'James', authenticated: true, subscriptionType: 'max', usagePending: true })
+    .replace(/\x1b\[[0-9;]*m/g, '');
+  expect(label).toBe('James  5h … · wk … · Fable … · max');
+});
+
 test('a stats outage does not hide or disable an authenticated profile', () => {
   const label = accountLabel({ name: 'work', authenticated: true, subscriptionType: 'team', usageStats: null });
   expect(label).toContain('work');
