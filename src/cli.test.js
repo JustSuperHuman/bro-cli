@@ -2,10 +2,23 @@ import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isHeadlessRun, parseArgs } from './cli.js';
+import { isHeadlessRun, parseArgs, SKILLS_MENU_CHOICE } from './cli.js';
 import { parseImagineArgs } from './justimagine.js';
 
 const src = path.dirname(fileURLToPath(import.meta.url));
+
+test('Skills is a top-level menu feature with a consolidator entry', () => {
+  expect(SKILLS_MENU_CHOICE.label).toContain('Skills');
+  expect(SKILLS_MENU_CHOICE.value.mode).toBe('skills');
+  expect(SKILLS_MENU_CHOICE.children[0].label).toContain('Consolidator');
+});
+
+test('the installed entry point routes skills help without launching a harness', () => {
+  const result = spawnSync(process.execPath, [path.join(src, '..', 'bin', 'bro.js'), 'skills', '--help'], { encoding: 'utf8' });
+  expect(result.status).toBe(0);
+  expect(result.stdout).toContain('bro skills');
+  expect(result.stdout).toContain('--dry-run');
+});
 
 test('--print takes an optional prompt and never eats a following flag', () => {
   expect(parseArgs(['--print', 'hello there']).print).toBe('hello there');

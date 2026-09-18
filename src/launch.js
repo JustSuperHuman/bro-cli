@@ -14,7 +14,7 @@ import {
 import { launchDsh } from './deepseek.js';
 import { note } from './out.js';
 import { browserBackend, claudeBrowserEnabled, prepareClaudeBrowser, usesThirdPartyAuth } from './claude-browser.js';
-import { describeJev, ensureJev, jevCommandPath, jevNotice, jevSupport } from './jev.js';
+import { describeJev, ensureJev, jevCommandPath, jevEnv, jevNotice, jevSupport } from './jev.js';
 import { CHROME_MCP_SERVER_NAME } from './chrome-mcp.js';
 import { MCP_CHROME_SERVER_NAME } from './mcp-chrome-server.js';
 
@@ -395,7 +395,11 @@ export async function launchCodex({
     ...process.env,
     ...providerEnv,
     NODE_NO_WARNINGS: '1',
-    PATH: [...(jevCodex?.dirs || []), ...dirs, process.env.PATH || ''].join(path.delimiter)
+    PATH: [...(jevCodex?.dirs || []), ...dirs, process.env.PATH || ''].join(path.delimiter),
+    // jev-router reads its key from the environment and its own .env files; a
+    // key bro asked for and saved lives in ~/.bro/config.json, so bro is the
+    // one that has to put it there.
+    ...(jevPlan ? jevEnv() : {})
   };
   // A profile is a whole codex home: credentials, sessions and settings. No
   // profile means the machine's own, so the user's own CODEX_HOME stands.
@@ -563,6 +567,7 @@ export async function launch({
   // CLAUDE_CONFIG_DIR, the browser wiring, the permission flags).
   const jevClaude = jevPlan ? ensureJev('claude') : null;
   env.PATH = [...(jevClaude?.dirs || []), ...dirs, env.PATH || ''].join(path.delimiter);
+  if (jevClaude) Object.assign(env, jevEnv());
   // A native login gets Claude Code's own --chrome; an Anthropic-compatible
   // provider gets the same browser through the MCP server, because the
   // ANTHROPIC_AUTH_TOKEN set just above switches the built-in wiring off.

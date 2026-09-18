@@ -18,6 +18,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ensureGlobalPackage, globalBinDirs, which } from './proc.js';
+import { CONFIG_PATH, loadConfig, setKey } from './config.js';
+import { promptHidden } from './ui.js';
+import { note } from './out.js';
 
 export const JEV_PACKAGE = Object.freeze({
   label: 'Jev Router',
@@ -39,6 +42,14 @@ export const jevEnvFiles = (cwd = process.cwd(), home = os.homedir()) => [
 
 const KEY_NAMES = ['JEV_API_KEY', 'TYPESAFE_API_KEY'];
 
+// The slot a key entered at bro's prompt is saved under, alongside every other
+// provider key in ~/.bro/config.json. jev-router itself only reads the
+// environment and its own .env files, so a key stored here is handed to it as
+// JEV_API_KEY when the session starts.
+export const JEV_KEY_ID = 'jev';
+
+export const JEV_KEY_URL = 'https://docs.typesafe.ai';
+
 function fileHasKey(file) {
   let text = '';
   try {
@@ -52,12 +63,55 @@ function fileHasKey(file) {
 // Whether routing will actually happen. Without a key jev-router still starts
 // the CLI, just with no routing at all — worth saying before the session opens
 // rather than leaving the user to notice a one-line warning scroll past.
-export function jevKeyStatus({ env = process.env, files = jevEnvFiles() } = {}) {
+export function jevKeyStatus({ env = process.env, files = jevEnvFiles(), config = loadConfig() } = {}) {
   const fromEnv = KEY_NAMES.find((name) => env[name]);
-  if (fromEnv) return { found: true, source: fromEnv };
+  if (fromEnv) return { found: true, source: fromEnv, key: env[fromEnv] };
+  // A key bro asked for and saved. It carries its value, because bro is the
+  // one that has to put it in the environment jev-router reads.
+  const saved = config?.keys?.[JEV_KEY_ID];
+  if (saved) return { found: true, source: CONFIG_PATH, key: saved };
   const file = files.find((candidate) => fileHasKey(candidate));
-  if (file) return { found: true, source: file };
-  return { found: false, source: '', files };
+  if (file) return { found: true, source: file, key: '' };
+  return { found: false, source: '', key: '', files };
+}
+
+// The environment a Jev-fronted child needs: nothing when jev-router can find
+// the key by itself, and JEV_API_KEY when bro is holding it.
+export function jevEnv(status = jevKeyStatus()) {
+  return status.found && status.key ? { JEV_API_KEY: status.key } : {};
+}
+
+// Ask for a key the way bro asks for any other provider's, and save it in the
+// same place. Only for a route Jev can actually front, and only when there is
+// a terminal to type at: a headless run says what is missing and carries on
+// unrouted rather than hanging on a prompt nobody can answer.
+export async function ensureJevKey({
+  harness = 'claude',
+  provider = {},
+  interactive = true,
+  ask = promptHidden,
+  announce = note,
+  save = setKey,
+  status = jevKeyStatus()
+} = {}) {
+  if (!jevSupport({ harness, provider }).ok) return status;
+  if (status.found) return status;
+  if (!interactive) {
+    announce(
+      '\x1b[2mJev Router has no JEV_API_KEY, so this run is unrouted.\n'
+        + '  Set JEV_API_KEY, or run bro interactively once to save one.\x1b[0m'
+    );
+    return status;
+  }
+  announce(`\x1b[2mJev Router needs a TypeSafe key to choose models — get one: ${JEV_KEY_URL}\x1b[0m`);
+  const entered = (await ask('Enter Jev (TypeSafe) API key (blank = run unrouted)\n> ').catch(() => '')).trim();
+  if (!entered) {
+    announce('\x1b[2mNo key entered — running without routing.\x1b[0m');
+    return status;
+  }
+  save(JEV_KEY_ID, entered);
+  announce(`\x1b[2mSaved to ${CONFIG_PATH}\x1b[0m`);
+  return { found: true, source: CONFIG_PATH, key: entered };
 }
 
 // The routes jev-router can front. Claude Code must be running on its own

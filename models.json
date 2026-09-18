@@ -24,6 +24,7 @@
       "name": "OpenRouter",
       "mode": "anthropic",
       "baseUrl": "https://openrouter.ai/api",
+      "responsesBaseUrl": "https://openrouter.ai/api/v1",
       "keyEnv": "OPENROUTER_API_KEY",
       "keyUrl": "https://openrouter.ai/keys",
       "models": [

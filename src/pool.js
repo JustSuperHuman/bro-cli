@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { which, globalBinDirs, runInherit, ensureBun, ensureClaude } from './proc.js';
 import { select, selectColumns, prompt, holdOrContinue } from './ui.js';
 import { launchOmp, launchPi, permissionArgs } from './launch.js';
-import { describeJev, ensureJev, jevCommandPath, jevNotice } from './jev.js';
+import { describeJev, ensureJev, jevCommandPath, jevEnv, jevNotice } from './jev.js';
 import { launchDsh } from './deepseek.js';
 import { note } from './out.js';
 import { fetchClaudeUsage, usageSummary } from './claude-usage.js';
@@ -637,6 +637,7 @@ export async function runAccountProfile({
   }
   env.NODE_NO_WARNINGS = '1';
   env.PATH = [...(jevClaude?.dirs || []), ...dirs, env.PATH || ''].join(path.delimiter);
+  if (jevClaude) Object.assign(env, jevEnv());
 
   // An account profile is a claude.ai login, but only the login the browser
   // extension is signed into (the "owner") can use Claude Code's own --chrome

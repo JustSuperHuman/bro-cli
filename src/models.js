@@ -603,7 +603,7 @@ export function mergeProviders(remote, configProviders = []) {
     if (!cp || !cp.id) continue;
     const existing = byId.get(cp.id);
     if (existing) {
-      for (const f of ['baseUrl', 'mode', 'keyEnv', 'keyUrl', 'noKey', 'disable1mContext', 'section', 'catalogue']) {
+      for (const f of ['baseUrl', 'responsesBaseUrl', 'mode', 'keyEnv', 'keyUrl', 'noKey', 'disable1mContext', 'section', 'catalogue']) {
         if (cp[f] != null) existing[f] = cp[f];
       }
       for (const m of cp.models || []) existing.models.push(m);

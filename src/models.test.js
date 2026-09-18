@@ -319,6 +319,12 @@ test('a field this release introduced reaches a provider cached before it existe
   expect(yunwu.models).toEqual([{ id: 'claude-opus-4-8' }]);
 });
 
+test('the OpenRouter Responses endpoint is added to an older cached provider', () => {
+  const cached = { providers: [{ id: 'openrouter', mode: 'anthropic', baseUrl: 'https://openrouter.ai/api' }] };
+  const bundled = { providers: [{ id: 'openrouter', mode: 'anthropic', baseUrl: 'https://openrouter.ai/api', responsesBaseUrl: 'https://openrouter.ai/api/v1' }] };
+  expect(withBundledProviders(cached, bundled).providers[0].responsesBaseUrl).toBe('https://openrouter.ai/api/v1');
+});
+
 test('nothing is added when the cached list already has every bundled provider', () => {
   const cached = { providers: [{ id: 'zai' }] };
   expect(withBundledProviders(cached, { providers: [{ id: 'zai' }] })).toBe(cached);

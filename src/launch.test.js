@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   codexProviderConfig,
+  codexResponsesBaseUrl,
   launchCodex,
   launchPi,
   piModelFor,
@@ -14,6 +15,13 @@ import {
 
 const deepseek = { id: 'deepseek', name: 'DeepSeek', mode: 'openai', baseUrl: 'https://api.deepseek.com/chat/completions' };
 const codex = { id: 'codex', name: 'Codex (ChatGPT subscription)', mode: 'codex' };
+const openrouter = {
+  id: 'openrouter',
+  name: 'OpenRouter',
+  mode: 'anthropic',
+  baseUrl: 'https://openrouter.ai/api',
+  models: [{ id: 'stealth/union-alpha' }]
+};
 
 const configOf = (args) => Object.fromEntries(
   args.filter((a, i) => args[i - 1] === '-c').map((entry) => {
@@ -39,6 +47,16 @@ test('an OpenAI-compatible provider is described to codex for one run, key held 
   expect(env.BRO_PROVIDER_API_KEY).toBe('sk-test');
   // The key is never spelled out in the arguments, which are world-readable.
   expect(args.join(' ')).not.toContain('sk-test');
+});
+
+test('OpenRouter uses its Responses API route when selected with the codex harness', () => {
+  expect(codexResponsesBaseUrl(openrouter)).toBe('https://openrouter.ai/api/v1');
+  const { args, env } = codexProviderConfig(openrouter, 'sk-or-test');
+  const config = configOf(args);
+
+  expect(config['model_providers.bro.base_url']).toBe('https://openrouter.ai/api/v1');
+  expect(config['model_providers.bro.wire_api']).toBe('responses');
+  expect(env.BRO_PROVIDER_API_KEY).toBe('sk-or-test');
 });
 
 test('a provider that needs no key names no env var, so codex does not demand one', () => {

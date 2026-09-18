@@ -30,6 +30,7 @@ import { rememberSelection, rememberProfile, lastModelFor } from './state.js';
 import { isCodexLoggedIn, codexLogin, codexLogout, codexAuthStatus } from './codex-auth.js';
 import { fetchCodexModels, startCodexBridge, DEFAULT_PORT } from './codex-bridge.js';
 import { launchCodex, launchOmp, launchPi } from './launch.js';
+import { ensureJevKey } from './jev.js';
 import { launchDsh } from './deepseek.js';
 import { note } from './out.js';
 import { prepareClaudeBrowser } from './claude-browser.js';
@@ -502,6 +503,9 @@ export async function runCodex({
   // The codex CLI carries its own ChatGPT login and model picker, so it needs
   // neither bro's model menu nor the bridge.
   if (runCli) {
+    // Jev needs a key to decide anything; ask for it once and save it the way
+    // a provider key is saved. A blank answer runs the session unrouted.
+    if (jev) await ensureJevKey({ harness: 'codex', provider: CODEX_PROVIDER, interactive: !headless });
     // Resuming is a one-off jump back into an old conversation — it shouldn't
     // rewrite the provider/model the picker opens on next time. A headless
     // run is a one-off for the same reason: a script doing a job, not someone

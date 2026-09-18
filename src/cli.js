@@ -43,7 +43,7 @@ import { ensureHarnessTool, HARNESS_INSTALLS, updateHarnessTool } from './proc.j
 import { ensureDshProfilesPlugin } from './dsh-profile-plugin.js';
 import { runSkillsCommand } from './skills-ui.js';
 import { rememberSelection, rememberHarness, rememberTier, rememberJev, lastProvider, lastModelFor, lastProfileFor, lastTierFor, lastHarness, jevRouting } from './state.js';
-import { jevSupport } from './jev.js';
+import { ensureJevKey, jevSupport } from './jev.js';
 import { note } from './out.js';
 import {
   browsersWithClaudeExtension,
@@ -1072,6 +1072,7 @@ export async function main(argv) {
     }
     // Remember the account (not a model) so the picker preselects it next time.
     if (persistChoice && !session) rememberSelection(provider.id, accountName);
+    if (jev) await ensureJevKey({ harness: 'claude', provider, interactive: !headless && !args.dryRun });
     const result = await runAccountProfile({
       accountName,
       model,
@@ -1131,6 +1132,11 @@ export async function main(argv) {
     const price = priceLabel(relayModel?.pricing || (relayModel?.perCall != null ? { perCall: relayModel.perCall } : null));
     note(`\x1b[2mTier ${tier}${price ? ` · ${price}` : ''} · ${provider.mode === 'anthropic' ? 'anthropic-compatible' : 'via proxy'}\x1b[0m`);
   }
+
+  // Jev picks the model, so its key is asked for the same way a provider's is
+  // — once, saved in ~/.bro/config.json, and handed to jev-router as
+  // JEV_API_KEY at launch. Skipped for a route Jev cannot front.
+  if (jev) await ensureJevKey({ harness, provider, interactive: !headless && !args.dryRun });
 
   const result = await launch({
     provider,

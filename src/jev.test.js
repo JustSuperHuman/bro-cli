@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { jevKeyStatus, jevNotice, jevSupport, JEV_COMMANDS } from './jev.js';
+import { ensureJevKey, jevEnv, jevKeyStatus, jevNotice, jevSupport, JEV_COMMANDS, JEV_KEY_ID } from './jev.js';
 import { jevPlanFor, launchCodex, launch } from './launch.js';
 import { parseArgs, JEV_TOGGLE } from './cli.js';
 import { normalizeKeyed } from './ui.js';
@@ -47,18 +47,92 @@ test('an unsupported route explains itself and runs unrouted', () => {
   expect(jevPlanFor({ enabled: true, harness: 'claude', provider: native, announce: () => {} }).ok).toBe(true);
 });
 
-test('the key is found in the environment or in jev-router\'s own env file', () => {
-  expect(jevKeyStatus({ env: { JEV_API_KEY: 'k' }, files: [] })).toEqual({ found: true, source: 'JEV_API_KEY' });
-  expect(jevKeyStatus({ env: { TYPESAFE_API_KEY: 'k' }, files: [] }).source).toBe('TYPESAFE_API_KEY');
+test("the key is found in the environment, in bro's config, or in jev-router's own env file", () => {
+  const none = { keys: {} };
+  expect(jevKeyStatus({ env: { JEV_API_KEY: 'k' }, files: [], config: none }))
+    .toEqual({ found: true, source: 'JEV_API_KEY', key: 'k' });
+  expect(jevKeyStatus({ env: { TYPESAFE_API_KEY: 'k' }, files: [], config: none }).source).toBe('TYPESAFE_API_KEY');
+
+  // A key bro asked for and saved carries its value, because bro has to put it
+  // in the environment jev-router reads.
+  const saved = jevKeyStatus({ env: {}, files: [], config: { keys: { [JEV_KEY_ID]: 'saved-key' } } });
+  expect(saved.found).toBe(true);
+  expect(saved.key).toBe('saved-key');
+  expect(jevEnv(saved)).toEqual({ JEV_API_KEY: 'saved-key' });
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bro-jev-'));
   const file = path.join(dir, '.jev-router.env');
   fs.writeFileSync(file, '# comment\nJEV_API_KEY=abc123\n');
-  expect(jevKeyStatus({ env: {}, files: [file] })).toEqual({ found: true, source: file });
+  const fromFile = jevKeyStatus({ env: {}, files: [file], config: none });
+  expect(fromFile).toEqual({ found: true, source: file, key: '' });
+  // jev-router reads that file itself, so bro has nothing to pass along.
+  expect(jevEnv(fromFile)).toEqual({});
 
   fs.writeFileSync(file, 'JEV_API_KEY=\n');
-  expect(jevKeyStatus({ env: {}, files: [file] }).found).toBe(false);
+  expect(jevKeyStatus({ env: {}, files: [file], config: none }).found).toBe(false);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a missing key is asked for once and saved', async () => {
+  const saved = [];
+  const said = [];
+  const status = await ensureJevKey({
+    harness: 'claude',
+    provider: native,
+    status: { found: false, source: '', key: '', files: [] },
+    ask: async () => '  typesafe-key  ',
+    announce: (m) => said.push(m),
+    save: (id, key) => saved.push([id, key])
+  });
+  expect(saved).toEqual([[JEV_KEY_ID, 'typesafe-key']]);
+  expect(status.found).toBe(true);
+  expect(status.key).toBe('typesafe-key');
+  expect(said.join(' ')).toContain('docs.typesafe.ai');
+});
+
+test('a blank answer runs unrouted instead of saving an empty key', async () => {
+  const saved = [];
+  const status = await ensureJevKey({
+    harness: 'claude',
+    provider: native,
+    status: { found: false, source: '', key: '', files: [] },
+    ask: async () => '',
+    announce: () => {},
+    save: (id, key) => saved.push([id, key])
+  });
+  expect(saved).toEqual([]);
+  expect(status.found).toBe(false);
+});
+
+test('a route Jev cannot front is never asked for a key', async () => {
+  const saved = [];
+  let asked = false;
+  await ensureJevKey({
+    harness: 'claude',
+    provider: glm,
+    ask: async () => { asked = true; return 'k'; },
+    announce: () => {},
+    save: (id, key) => saved.push([id, key])
+  });
+  expect(asked).toBe(false);
+  expect(saved).toEqual([]);
+});
+
+test('a headless run says what is missing rather than waiting for a prompt', async () => {
+  const said = [];
+  let asked = false;
+  const status = await ensureJevKey({
+    harness: 'codex',
+    provider: codex,
+    interactive: false,
+    status: { found: false, source: '', key: '', files: [] },
+    ask: async () => { asked = true; return 'k'; },
+    announce: (m) => said.push(m),
+    save: () => {}
+  });
+  expect(asked).toBe(false);
+  expect(status.found).toBe(false);
+  expect(said.join(' ')).toContain('JEV_API_KEY');
 });
 
 test('a missing key is reported before the session opens', () => {
