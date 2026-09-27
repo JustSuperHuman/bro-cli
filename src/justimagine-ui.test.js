@@ -386,3 +386,58 @@ test('the menu opens upward only when downward is genuinely too short', () => {
   expect(tight.up).toBe(true);
   expect(tight.height).toBeGreaterThanOrEqual(200);
 });
+
+// ---- the dashboard: chat-style feed, bento batches, virtualised ----
+
+test('every select in the page is fronted by the shared dropdown', () => {
+  const selects = [...html.matchAll(/<select id="([^"]+)"/g)].map((m) => m[1]);
+  expect(selects.length).toBeGreaterThan(5);
+  const enhanced = new Set([...app.matchAll(/enhanceSelect\((\w+)/g)].map((m) => m[1]));
+  const varOf = { api: 'apiSel', size: 'sizeSel', quality: 'qualitySel', duration: 'durSel', resolution: 'resSel', aspect: 'aspSel', moveTo: 'moveSel' };
+  for (const id of selects) expect(enhanced.has(varOf[id])).toBe(true);
+  // code that sets .value, refills options or disables the select repaints it
+  expect(app).toContain("Object.defineProperty(sel, 'value'");
+  expect(app).toContain('new MutationObserver(sync)');
+});
+
+test('folders are listed most recently touched first', () => {
+  expect(app).toMatch(/const byRecent = \(a, b\) => \(b\.latest \|\| 0\) - \(a\.latest \|\| 0\)/);
+  expect(app).toContain('[...node.children].sort(byRecent)');
+});
+
+test('a batch groups by its id, and older history by prompt and time', () => {
+  expect(app).toContain("if (x.batch) key = 'b:' + x.batch;");
+  expect(app).toContain('SAME_BATCH_MS');
+});
+
+// Odd batches lead with a double tile only when the rest close into a clean
+// two-row block; the rule is pure, so it is run here for every batch size.
+test('the bento leads with a big tile exactly when the batch closes cleanly', () => {
+  const src = app.match(/ {2}function layoutOf\([\s\S]*?\n {2}\}/)[0];
+  const make = (cols, tileW = 200, feedH = 900) =>
+    new Function('V', 'feed', 'TILE_GAP', `${src}\nreturn layoutOf;`)({ cols, tileW }, { clientHeight: feedH }, 8);
+  const five = make(5);
+  expect(five(5)).toEqual({ feature: true, rows: 2, cols: 4 });
+  expect(five(3)).toEqual({ feature: true, rows: 2, cols: 3 });
+  expect(five(4)).toEqual({ feature: false, rows: 1, cols: 5 });
+  expect(five(1).feature).toBe(false);
+  // 7 needs five columns; with four it is plain rows
+  expect(make(4)(7)).toEqual({ feature: false, rows: 2, cols: 4 });
+  // a big tile taller than the feed can show is not a feature
+  expect(make(5, 400, 600)(5).feature).toBe(false);
+});
+
+test('the feed is virtualised and anchored, not one long DOM', () => {
+  // only the groups near the viewport are rendered, at measured offsets
+  expect(app).toContain('function reconcile(s, e, tops)');
+  expect(app).toContain('node.style.transform = `translateY(${tops[i]}px)`');
+  // and the reader stays put while older pages arrive above them
+  expect(app).toMatch(/if \(!a \|\| a\.bottom\) setTop\(feed\.scrollHeight\)/);
+  expect(html).toContain('id="jumpLatest"');
+});
+
+test('scrollbars fade in on use and out after', () => {
+  expect(html).toContain('.scroll:hover, .scroll.scrolling { border-color: var(--thumb)');
+  expect(html).toContain('border-color: inherit');
+  expect(app).toContain("t.classList.add('scrolling')");
+});
