@@ -1,0 +1,161 @@
+<div id="video-cost-table">
+  <style>
+    #video-cost-table { color:var(--foreground); max-width:1180px; margin:0 auto; padding:24px 0; }
+    #video-cost-table .vt-heading { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:12px 28px; margin-bottom:28px; }
+    #video-cost-table .vt-heading h2 { margin:0 0 8px; }
+    #video-cost-table .vt-date { padding-top:6px; }
+    #video-cost-table .vt-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:12px 28px; margin-bottom:20px; }
+    #video-cost-table .vt-legend { display:flex; align-items:center; gap:8px; padding-bottom:8px; }
+    #video-cost-table .vt-swatch { width:20px; height:20px; display:inline-grid; place-items:center; border-radius:4px; background:color-mix(in srgb,var(--green) 16%,transparent); }
+    #video-cost-table .vt-table { width:100%; border-collapse:collapse; }
+    #video-cost-table .vt-table th, #video-cost-table .vt-table td { vertical-align:middle; }
+    #video-cost-table .vt-table thead th { font-weight:500; padding:12px 10px; }
+    #video-cost-table .vt-table thead tr:first-child th { border-bottom:1px solid var(--border); }
+    #video-cost-table .vt-table thead tr:last-child th { border-bottom:1px solid var(--border); }
+    #video-cost-table .vt-table tbody th, #video-cost-table .vt-table tbody td { padding:10px 6px; border-bottom:1px solid color-mix(in srgb,var(--border) 65%,transparent); }
+    #video-cost-table .vt-table tbody tr:last-child th, #video-cost-table .vt-table tbody tr:last-child td { border-bottom:0; }
+    #video-cost-table .vt-table th:first-child { padding-left:0; }
+    #video-cost-table .vt-table .vt-group-start { border-left:1px solid var(--border); }
+    #video-cost-table .vt-group-note { display:block; margin-top:5px; font-weight:400; color:var(--muted-foreground); }
+    #video-cost-table .vt-model { font-weight:500; min-width:166px; text-align:left; }
+    #video-cost-table .vt-setting { display:block; margin-top:5px; white-space:nowrap; font-weight:400; color:var(--muted-foreground); }
+    #video-cost-table .vt-price { white-space:nowrap; color:var(--foreground); }
+    #video-cost-table .vt-price-content { display:flex; min-width:72px; min-height:49px; padding:8px; box-sizing:border-box; flex-direction:column; justify-content:center; align-items:flex-end; gap:3px; }
+    #video-cost-table .vt-price[data-cheapest="true"] .vt-price-content { background:color-mix(in srgb,var(--green) 14%,transparent); border-radius:6px; color:var(--foreground); }
+    #video-cost-table .vt-price[data-cheapest="true"] .vt-amount { font-weight:500; }
+    #video-cost-table .vt-footer { display:grid; gap:10px; margin-top:22px; }
+    #video-cost-table .vt-sources { display:flex; flex-wrap:wrap; gap:8px 20px; margin-top:4px; }
+    @media (max-width:600px) {
+      #video-cost-table { padding:8px 0; }
+      #video-cost-table .vt-heading { margin-bottom:20px; }
+      #video-cost-table .vt-toolbar { gap:12px; margin-bottom:16px; }
+    }
+  </style>
+  <div class="vt-heading">
+    <div>
+      <h2>Video generation pricing</h2>
+      <div class="text-muted">Higgsfield vs. OpenRouter · USD per generated second</div>
+    </div>
+    <div class="text-small text-muted vt-date">Price snapshot · Sep 26, 2026</div>
+  </div>
+  <div class="vt-toolbar">
+    <div class="vt-legend text-small">
+      <span class="vt-swatch" aria-hidden="true">✓</span>
+      <span>Higgsfield: every price below OpenRouter</span>
+    </div>
+    <div class="vt-legend text-small">
+      <span class="vt-swatch" aria-hidden="true">✓</span>
+      <span>OpenRouter: below all Higgsfield options</span>
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table vt-table tabular-nums" aria-describedby="vt-assumptions vt-status">
+      <caption class="sr-only">Cost per generated second with all six Higgsfield billing and credit usage scenarios. Every Higgsfield price below the same model's OpenRouter price is highlighted. OpenRouter is highlighted when it costs less than all six Higgsfield options. Savings percentages use the other provider as the baseline; OpenRouter savings use the least expensive Higgsfield option. Percentages in the column headings mean credits used.</caption>
+      <thead>
+        <tr>
+          <th scope="col" rowspan="2">Model<span class="vt-group-note text-small">Output settings</span></th>
+          <th scope="col" rowspan="2" class="text-end">OpenRouter<span class="vt-group-note text-small">Includes 5.5% fee</span></th>
+          <th scope="colgroup" colspan="3" class="text-center vt-group-start">Higgsfield · monthly<span class="vt-group-note text-small">$59 / month · credits used</span></th>
+          <th scope="colgroup" colspan="3" class="text-center vt-group-start">Higgsfield · annual<span class="vt-group-note text-small">$47 / month · credits used</span></th>
+        </tr>
+        <tr>
+          <th scope="col" class="text-end vt-group-start" data-column="monthly-100">100%</th>
+          <th scope="col" class="text-end" data-column="monthly-75">75%</th>
+          <th scope="col" class="text-end" data-column="monthly-50">50%</th>
+          <th scope="col" class="text-end vt-group-start" data-column="annual-100">100%</th>
+          <th scope="col" class="text-end" data-column="annual-75">75%</th>
+          <th scope="col" class="text-end" data-column="annual-50">50%</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="vt-footer">
+  <div class="text-small" id="vt-status">Savings: Higgsfield vs. OpenRouter; OpenRouter vs. the cheapest Higgsfield option.</div>
+  <div class="text-small text-muted" id="vt-assumptions">Higgsfield Plus · 1,200 credits per month · Annual plan billed $564 upfront · Unlimited benefits excluded</div>
+  <div class="text-small text-muted">† Promotional Higgsfield quote · Kling: OpenRouter Standard route</div>
+  <div class="vt-sources text-small">
+    <a href="https://higgsfield.ai/ai/video" target="_blank" rel="noreferrer">Higgsfield quotes</a>
+    <a href="https://higgsfield.ai/pricing" target="_blank" rel="noreferrer">Higgsfield plans</a>
+    <a href="https://openrouter.ai/api/v1/videos/models" target="_blank" rel="noreferrer">OpenRouter rates</a>
+    <a href="https://openrouter.ai/pricing" target="_blank" rel="noreferrer">OpenRouter fee</a>
+  </div>
+  </div>
+  <script>
+    (() => {
+      const root = document.getElementById('video-cost-table');
+      const tbody = root.querySelector('tbody');
+      const keys = ['monthly-100','monthly-75','monthly-50','annual-100','annual-75','annual-50'];
+      const rows = [
+        { name:'Veo 3.1 Lite', settings:'720p · audio · 8s', credits:12, seconds:8, base:0.05 },
+        { name:'MiniMax H3 Max', settings:'768p · silent · 5s', credits:12.5, seconds:5, base:0.08 },
+        { name:'Wan 3.0', settings:'720p · audio · 5s', credits:9, seconds:5, base:0.10, promo:true },
+        { name:'Veo 3.1 Fast', settings:'720p · audio · 8s', credits:32, seconds:8, base:0.10 },
+        { name:'Kling 3.0', settings:'720p · audio · 5s', credits:10, seconds:5, base:0.126 },
+        { name:'MiniMax H3', settings:'2K · audio · 5s', credits:10, seconds:5, base:0.13, promo:true },
+        { name:'Grok Imagine 1.5', settings:'720p · audio · 5s', credits:22.5, seconds:5, base:0.14 },
+        { name:'Seedance 2.0', settings:'720p · audio · 8s', credits:36, seconds:8, base:0.1512, promo:true },
+        { name:'FLUX.3 Video', settings:'720p · audio · 5s', credits:27.5, seconds:5, base:0.17 },
+        { name:'Seedance 2.5', settings:'720p · audio · 5s', credits:35, seconds:5, base:0.23112 },
+        { name:'Veo 3.1', settings:'720p · audio · 8s', credits:80, seconds:8, base:0.40 }
+      ].map(row => {
+        const costs = { router:row.base*1.055 };
+        for (const key of keys) {
+          const [billing, percent] = key.split('-');
+          costs[key] = row.credits/row.seconds*(billing==='monthly'?59:47)/1200/(Number(percent)/100);
+        }
+        return {...row,costs};
+      });
+      const money = value => '$'+(Math.round((value+Number.EPSILON)*1000)/1000).toFixed(3);
+      function render() {
+        const fragment=document.createDocumentFragment();
+        for (const row of rows) {
+          const router=row.costs.router;
+          const cheapestHiggsfield=Math.min(...keys.map(key=>row.costs[key]));
+          const tr=document.createElement('tr');
+          tr.dataset.model=row.name;
+          const label=document.createElement('th');
+          label.scope='row';
+          label.className='vt-model';
+          label.textContent=row.name+(row.promo?' †':'');
+          const setting=document.createElement('span');
+          setting.className='vt-setting text-small';
+          setting.textContent=row.settings;
+          label.append(setting);
+          tr.append(label);
+          for (const key of ['router',...keys]) {
+            const td=document.createElement('td');
+            td.className='vt-price text-end';
+            if(key==='monthly-100'||key==='annual-100') td.classList.add('vt-group-start');
+            td.dataset.column=key;
+            const comparisonPrice=key==='router'?cheapestHiggsfield:router;
+            const cheaper=row.costs[key]<comparisonPrice-1e-12;
+            const savings=(1-row.costs[key]/comparisonPrice)*100;
+            td.dataset.cheapest=String(cheaper);
+            const content=document.createElement('span');
+            content.className='vt-price-content';
+            const amount=document.createElement('span');
+            amount.className='vt-amount';
+            amount.textContent=(cheaper?'✓ ':'')+money(row.costs[key]);
+            content.append(amount);
+            if(cheaper) {
+              td.setAttribute('aria-label',money(row.costs[key])+' per second, '+savings.toFixed(1)+'% cheaper than '+(key==='router'?'the cheapest Higgsfield option':'OpenRouter'));
+              const discount=document.createElement('span');
+              discount.className='vt-saving text-small';
+              discount.textContent=savings.toFixed(1)+'% less';
+              content.append(discount);
+            }
+            td.append(content);
+            tr.append(td);
+          }
+          fragment.append(tr);
+        }
+        tbody.replaceChildren(fragment);
+        for(const th of root.querySelectorAll('thead [data-column]')) {
+          th.setAttribute('aria-label',th.textContent+' credits used');
+        }
+      }
+      render();
+    })();
+  </script>
+</div>

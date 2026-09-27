@@ -1,0 +1,121 @@
+<div id="video-cost-comparison">
+  <style>
+    #video-cost-comparison { color: var(--foreground); }
+    #video-cost-comparison .vc-legend { display:flex; flex-wrap:wrap; gap:6px 18px; margin:12px 0 8px; }
+    #video-cost-comparison .vc-legend button { display:inline-flex; align-items:center; gap:7px; background:transparent; border:0; border-radius:0; padding:4px 0; color:var(--foreground); font:inherit; cursor:pointer; }
+    #video-cost-comparison .vc-legend button[aria-pressed="false"] { text-decoration:line-through; opacity:.6; }
+    #video-cost-comparison .vc-swatch { width:14px; height:10px; display:inline-block; }
+    #video-cost-comparison .vc-chart { display:block; width:100%; overflow:visible; }
+    #video-cost-comparison .vc-chart text { fill:var(--foreground); font-size:12px; font-family:inherit; }
+    #video-cost-comparison .vc-chart .vc-model { font-weight:500; }
+    #video-cost-comparison .vc-chart .vc-setting { fill:var(--muted-foreground); }
+    #video-cost-comparison .vc-chart .domain, #video-cost-comparison .vc-chart .tick line { stroke:var(--border); }
+    #video-cost-comparison .vc-sources { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:8px; }
+  </style>
+  <h3>Cost per generated video second</h3>
+  <div class="text-small text-muted">USD · September 26, 2026 · Lower is cheaper</div>
+  <div class="vc-legend" aria-label="Price series">
+    <button type="button" data-series="monthly" aria-pressed="true"><span class="vc-swatch" style="background:var(--viz-series-1)"></span>Higgsfield Plus monthly</button>
+    <button type="button" data-series="annual" aria-pressed="true"><span class="vc-swatch" style="background:var(--viz-series-2)"></span>Higgsfield Plus annual</button>
+    <button type="button" data-series="router" aria-pressed="true"><span class="vc-swatch" style="background:var(--viz-series-3)"></span>OpenRouter + 5.5% fee</button>
+  </div>
+  <svg class="vc-chart" role="img" aria-labelledby="vc-title vc-desc">
+    <title id="vc-title">Higgsfield versus OpenRouter video generation costs</title>
+    <desc id="vc-desc">Eleven models compared using the same resolution on each platform. Audio is included except for MiniMax H3 Max, which is silent. Higgsfield costs allocate the full Plus plan price across all 1,200 monthly credits. Annual billing requires a yearly commitment. Each row uses a verified five- or eight-second quote, divided by its duration. Dagger marks current Higgsfield promotional quotes.</desc>
+  </svg>
+  <div class="text-small text-muted">† Current Higgsfield promotion · H3: 2K · H3 Max: 768p, silent · Other rows: 720p, audio</div>
+  <div class="vc-sources text-small">
+    <a href="https://higgsfield.ai/ai/video" target="_blank" rel="noreferrer">Higgsfield live quotes</a>
+    <a href="https://higgsfield.ai/pricing" target="_blank" rel="noreferrer">Higgsfield plans</a>
+    <a href="https://openrouter.ai/api/v1/videos/models" target="_blank" rel="noreferrer">OpenRouter model rates</a>
+    <a href="https://openrouter.ai/pricing" target="_blank" rel="noreferrer">OpenRouter fee</a>
+  </div>
+  <div class="sr-only" aria-live="polite" id="vc-status"></div>
+  <div class="sr-only"><table id="vc-data"><caption>USD per generated video second</caption><thead><tr><th>Model and settings</th><th>Higgsfield Plus monthly</th><th>Higgsfield Plus annual</th><th>OpenRouter including fee</th></tr></thead><tbody></tbody></table></div>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+  <script>
+  (() => {
+    const root = document.getElementById('video-cost-comparison');
+    const rows = [
+      {id:'veo-lite', name:'Veo 3.1 Lite', resolution:'720p', seconds:8, credits:12, base:0.05, audio:true},
+      {id:'h3-max', name:'MiniMax H3 Max', resolution:'768p', seconds:5, credits:12.5, base:0.08, audio:false},
+      {id:'wan-3', name:'Wan 3.0', resolution:'720p', seconds:5, credits:9, regularCredits:13, base:0.10, audio:true},
+      {id:'veo-fast', name:'Veo 3.1 Fast', resolution:'720p', seconds:8, credits:32, base:0.10, audio:true},
+      {id:'kling-3', name:'Kling 3.0', resolution:'720p', seconds:5, credits:10, base:0.126, audio:true, note:'OpenRouter Standard tier'},
+      {id:'h3', name:'MiniMax H3', resolution:'2K', seconds:5, credits:10, regularCredits:20, base:0.13, audio:true},
+      {id:'grok', name:'Grok Imagine 1.5', resolution:'720p', seconds:5, credits:22.5, base:0.14, audio:true},
+      {id:'seedance-2', name:'Seedance 2.0', resolution:'720p', seconds:8, credits:36, regularCredits:48, base:0.1512, audio:true},
+      {id:'flux-3', name:'FLUX.3 Video', resolution:'720p', seconds:5, credits:27.5, base:0.17, audio:true},
+      {id:'seedance-25', name:'Seedance 2.5', resolution:'720p', seconds:5, credits:35, base:0.23112, audio:true},
+      {id:'veo', name:'Veo 3.1', resolution:'720p', seconds:8, credits:80, base:0.40, audio:true}
+    ].map(d => ({...d, monthly:d.credits/d.seconds*59/1200, annual:d.credits/d.seconds*47/1200, router:d.base*1.055}));
+    const series = [
+      {id:'monthly', label:'Higgsfield Plus monthly', color:'var(--viz-series-1)'},
+      {id:'annual', label:'Higgsfield Plus annual', color:'var(--viz-series-2)'},
+      {id:'router', label:'OpenRouter including 5.5% fee', color:'var(--viz-series-3)'}
+    ];
+    const money = d => '$'+d.toFixed(3);
+    let enabled = new Set(series.map(s=>s.id));
+    const readState = state => {
+      const saved = state?.privateContent?.visibleSeries;
+      if (Array.isArray(saved)) enabled = new Set(saved.filter(id=>series.some(s=>s.id===id)));
+    };
+    readState(window.openai?.widgetState);
+    const svg = d3.select(root.querySelector('.vc-chart'));
+    const extent = d3.extent(rows.flatMap(d=>series.map(s=>d[s.id])));
+    const domainMax = extent[1]*1.025;
+    const tbody = root.querySelector('#vc-data tbody');
+    for (const row of rows) {
+      const tr=document.createElement('tr');
+      [row.name+'; '+row.resolution+'; '+(row.audio?'audio':'silent'), money(row.monthly), money(row.annual), money(row.router)].forEach((value,i)=>{const td=document.createElement(i===0?'th':'td');td.textContent=value;tr.append(td);});
+      tbody.append(tr);
+    }
+    function draw(animate=false) {
+      const width = root.getBoundingClientRect().width;
+      if (!width) return;
+      const narrow = width<560;
+      const left = narrow ? 14 : 166;
+      const right = 62;
+      const top = 32;
+      const rowHeight = narrow ? 100 : 76;
+      const plotHeight = rows.length*rowHeight;
+      const height = top+plotHeight+52;
+      const x=d3.scaleLinear().domain([0,domainMax]).range([left+4,width-right]);
+      svg.attr('viewBox',`0 0 ${width} ${height}`).attr('height',height);
+      svg.selectAll('rect[data-chart-frame]').data([0]).join('rect').attr('data-chart-frame','').attr('x',left).attr('y',top-6).attr('width',width-left-3).attr('height',plotHeight+10).attr('fill','none').attr('stroke','var(--border)');
+      const axis=svg.selectAll('g.vc-axis').data([0]).join('g').attr('class','vc-axis').attr('transform',`translate(0,${top+plotHeight+4})`).call(d3.axisBottom(x).ticks(narrow?3:5).tickFormat(d3.format('$.2f')).tickSize(4));
+      axis.selectAll('.tick text').attr('dy','1em');
+      svg.selectAll('text.axis-title[data-axis="x"]').data([0]).join('text').attr('class','axis-title').attr('data-axis','x').attr('x',(left+width-right)/2).attr('y',height-3).attr('text-anchor','middle').text('USD / generated second');
+      svg.selectAll('text.axis-title[data-axis="y"]').data([0]).join('text').attr('class','axis-title').attr('data-axis','y').attr('x',narrow?14:0).attr('y',17).text('Model / output settings');
+      const groups=svg.selectAll('g.vc-row').data(rows,d=>d.id).join('g').attr('class','vc-row').attr('transform',(d,i)=>`translate(0,${top+i*rowHeight})`);
+      groups.each(function(row) {
+        const g=d3.select(this);
+        const labelY=narrow?14:27;
+        g.selectAll('text.vc-model').data([row]).join('text').attr('class','vc-model').attr('x',narrow?left+4:0).attr('y',labelY).text(row.name+(row.regularCredits?' †':''));
+        g.selectAll('text.vc-setting').data([row]).join('text').attr('class','vc-setting').attr('x',narrow?left+4:0).attr('y',labelY+17).text(row.resolution+' · '+(row.audio?'audio':'silent'));
+        const barTop=narrow?40:8;
+        const marks=g.selectAll('g.vc-series').data(series,s=>s.id).join('g').attr('class','vc-series').attr('data-series',s=>s.id).attr('transform',(s,i)=>`translate(0,${barTop+i*18})`);
+        const bars=marks.selectAll('rect.vc-bar').data(s=>[s],s=>s.id).join('rect').attr('class','vc-bar').attr('x',x(0)).attr('y',0).attr('height',12).attr('fill',s=>s.color);
+        const barTarget=animate&&!matchMedia('(prefers-reduced-motion: reduce)').matches?bars.transition().duration(180):bars;
+        barTarget.attr('width',s=>enabled.has(s.id)?x(row[s.id])-x(0):0);
+        marks.selectAll('text.vc-value').data(s=>[s],s=>s.id).join('text').attr('class','vc-value').attr('x',s=>x(row[s.id])+7).attr('y',10).attr('opacity',s=>enabled.has(s.id)?1:0).text(s=>money(row[s.id]));
+        const detail=[row.name, row.resolution+' '+(row.audio?'with audio':'silent'), 'Higgsfield quote: '+row.credits+' credits / '+row.seconds+'s', ...series.filter(s=>enabled.has(s.id)).map(s=>s.label+': '+money(row[s.id])+'/s'), row.note||''].filter(Boolean).join(' · ');
+        g.selectAll('rect.vc-hit').data([row]).join('rect').attr('class','vc-hit').attr('data-chart-hit','').attr('data-tooltip',detail).attr('x',left).attr('y',0).attr('width',width-left-4).attr('height',rowHeight-4).attr('fill','transparent');
+      });
+      for (const button of root.querySelectorAll('.vc-legend button')) button.setAttribute('aria-pressed',String(enabled.has(button.dataset.series)));
+      const labels=[...svg.node().querySelectorAll('text')].map(e=>({element:e,box:e.getBBox()}));
+      for (const {element,box} of labels) if (box.x+box.width>width-2) {element.setAttribute('text-anchor','end');element.setAttribute('x',String(width-3));}
+    }
+    for (const button of root.querySelectorAll('.vc-legend button')) button.addEventListener('click',()=>{
+      const id=button.dataset.series;
+      enabled.has(id)?enabled.delete(id):enabled.add(id);
+      draw(true);
+      root.querySelector('#vc-status').textContent='Visible: '+series.filter(s=>enabled.has(s.id)).map(s=>s.label).join(', ');
+      window.openai?.setWidgetState?.({modelContent:{comparison:'Video generation cost per second',date:'2026-09-26'},privateContent:{visibleSeries:[...enabled]}})?.catch(()=>{});
+    });
+    window.addEventListener('openai:set_globals',event=>{if(event.detail?.globals?.widgetState){readState(event.detail.globals.widgetState);draw();}});
+    new ResizeObserver(()=>draw()).observe(root);
+    draw();
+  })();
+  </script>
+</div>
