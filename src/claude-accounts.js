@@ -24,15 +24,17 @@ export function listAccounts() {
   return names.map((name) => {
     let authenticated = false;
     let subscriptionType = null;
+    let rateLimitTier = null;
     try {
       const creds = JSON.parse(fs.readFileSync(path.join(ACCOUNTS_DIR, name, '.credentials.json'), 'utf8'));
       const oauth = creds && creds.claudeAiOauth;
       authenticated = Boolean(oauth && oauth.accessToken);
       subscriptionType = (oauth && oauth.subscriptionType) || null;
+      rateLimitTier = (oauth && oauth.rateLimitTier) || null;
     } catch {
       /* no creds yet */
     }
-    return { name, authenticated, subscriptionType };
+    return { name, authenticated, subscriptionType, rateLimitTier };
   });
 }
 

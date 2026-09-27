@@ -247,6 +247,20 @@ reports a Fable limit — the others have no Fable access — and is capped by e
 one's overall limits too. An app without a signed-in account gets no line. The
 menu opens at once and the numbers fill in as each account answers.
 
+A 5-hour figure is never more than the week can still pay for. Neither
+Anthropic nor OpenAI publishes how much of a week one 5-hour window costs (and
+it changes — Anthropic doubled the 5-hour windows in May 2026 and left the
+weekly limits alone), so `bro` measures it. Every time it reads an account's
+meters it keeps the reading in `~/.bro/usage-history.json`, and within one
+window it compares how far the weekly meter climbed against the 5-hour one. A
+figure the week cuts short shows with `≈`, and the box's bottom edge says so.
+That matters most for Fable: its allowance is half the week, so 2% of it left
+is one weekly point — on a plan where a full window costs 16% of the week,
+enough for only `≈6%` of the window, however open the window itself is. An
+account with too few readings of its own borrows its plan tier's measure, then
+any plan's (the box says when); with none at all yet, it says
+`Fable 5h: measuring`. `BRO_USAGE_HISTORY` moves the history file.
+
 Claude and Codex appear as their app marks rather than their names, in white
 (black on a light background). Terminals that can draw images show the real
 marks — Windows Terminal 1.22+, xterm, foot, Konsole and WezTerm through
@@ -353,6 +367,52 @@ Session history is read from `~/.claude/projects/` and each profile's own
 scan takes a moment, later ones are instant.
 
 **Failover:** when the serving account's usage/rate limit runs out before any output has streamed, the pool transparently sidelines it and retries the turn on the next account — you just keep going. Set `CLAUDE_POOL_BACKEND=cli` to use the older subprocess backend. Requires Bun (`bro` finds it automatically; install from [bun.sh](https://bun.sh)). See [`pool/README.md`](./pool/README.md) for the pool's own docs, endpoints, and configuration.
+
+### Big task, small task — open the login that fits
+
+Rather than reading the Usage box and picking a login by name, name the *job*
+and let `bro` pick:
+
+```sh
+bro --large-task          # Claude: the login with the most allowance left
+bro --small-task          # Claude: the emptiest login that can still finish
+bro codex --large-task    # the same two, over the Codex logins
+bro codex --small-task
+```
+
+`--large-task` keeps a long run off a near-spent account. `--small-task` does
+the opposite on purpose: it burns down the accounts that are nearly done for
+the week anyway, so the roomy ones stay roomy for the work that needs them.
+
+The choice uses **both** meters, converted into one currency:
+
+| | what it measures | what it does |
+|---|---|---|
+| **week** | how much allowance is left at all | **ranks** the logins — a week refills once, a 5-hour window five times a day, so this is the budget |
+| **5h** | how much can be spent before this window resets | **gates and breaks ties** — converted into weekly points through the account's measured 5h-to-week ratio (see [usage history](#config)), so a wide-open window worth one weekly point is not mistaken for room |
+
+A login spent in *either* window is passed over while another can still
+finish the job; when every login is spent, `bro` says so and takes the best of
+them. `bro` prints the login it chose and what it had left, on stderr:
+
+```
+Large task: claude-2 — the roomiest login (week 100% · 5h 100% left).
+Small task: James — the emptiest login that can still finish it (week 25% · 5h 100% left).
+```
+
+Both flags combine with everything else — `bro --large-task --jev`,
+`bro --small-task --print "one-line answer"`, `bro --large-task -m claude-opus-5`
+— and naming a login outright (`--account work`) still wins, since the flags
+only choose when nothing else has.
+
+Desktop icons for all four are in [`assets/icons/`](./assets/icons) as PNG and
+ICO, for Windows Terminal profiles, shortcuts and taskbar tiles. They are
+colour-coded, because a taskbar draws them at 16 px where nothing smaller than
+a block of colour survives: the **plate** is the app (Claude's clay, Codex's
+black) and the **band** across the foot is the task, in the same palette the
+meters use — **green** for the large task, **red** for the small one, with the
+arrow and the mark's size repeating it in shape. Rebuild them from the
+installed Claude and Codex apps with `npm run icons:tasks`.
 
 ## Codex (ChatGPT subscription)
 
@@ -589,6 +649,66 @@ variable) and never touches `~/.codex/config.toml`. Anthropic-shaped providers
 and are refused up front rather than failing mid-turn. Skip-permissions maps to
 codex's `--dangerously-bypass-approvals-and-sandbox`.
 
+## ChatJimmy — an 8B model on silicon, free
+
+[chatjimmy.ai](https://chatjimmy.ai) is Taalas' demo of Llama 3.1 8B etched into
+a chip: ~15–20k tokens/second, answers in a few hundred milliseconds, no key.
+It has no API, so `bro` serves one: pick **ChatJimmy** in the picker (or pass
+`-p chatjimmy`) and `bro` starts a small Anthropic-compatible endpoint inside
+its own process, points the harness at it, and closes it when the harness exits.
+
+```sh
+bro -p chatjimmy                         # Claude Code on ChatJimmy
+bro -p chatjimmy -m llama3.1-8B+jev      # … with Jev choosing each step
+bro -p chatjimmy --print "What version is this project?"
+```
+
+The model's window is about 6,100 tokens *including* its reply — smaller than
+Claude Code's own system prompt — so the Claude harness is launched lean
+(`--strict-mcp-config --disable-slash-commands --no-chrome --setting-sources ""
+--tools Read,Write,Edit,Bash,Glob,Grep` and a one-line `--system-prompt`), and
+the endpoint rewrites every request to fit: a compact prompt with one-line tool
+summaries, paths shown relative to the project, long files cut down to the
+parts the request names, and old tool output trimmed first. ChatJimmy has no
+tool calling, so it answers in Llama 3.1's JSON call format and the endpoint
+turns that into `tool_use` blocks.
+
+An 8B model needs guard rails Claude Code does not supply, and the endpoint runs
+on the same machine, so it checks each change against the real files before
+Claude Code applies it: it reads a file before letting it be edited, keeps
+edits to the function the request names, turns "add a function" done by
+overwriting into an append, refuses changes that leave JS/JSON unparseable or
+use `require()` in an ES-module project, stops repeated calls and runaway
+loops, and sends back answers that claim a change nobody made or ignore what a
+search found. Each rule is there because the model failed that way in
+`scripts/chatjimmy-eval.js`.
+
+**`llama3.1-8B+jev`** adds [Jev](https://docs.typesafe.ai), TypeSafe's calibrated
+decision model, as a step router: each turn it picks the next step (answer,
+Read, Glob, Grep, Bash, Write, Edit) in parallel with ChatJimmy, and when
+ChatJimmy chose differently and Jev is confident, ChatJimmy is told which tool
+to use. ChatJimmy still writes every argument and every word. It uses the
+TypeSafe key Jev Router already uses (`JEV_API_KEY`, or the one `bro` saved),
+else an OpenRouter key (`OPENROUTER_API_KEY` or `openrouter` under `keys`);
+without either it runs plain ChatJimmy and says so.
+
+| 18 tasks × 3 runs, Claude Code headless | pass rate |
+| --- | --- |
+| `llama3.1-8B` | 51/54 (94%) |
+| `llama3.1-8B+jev` | 54/54 (100%) |
+
+```sh
+npm run eval:chatjimmy                                   # the end-to-end eval
+node scripts/chatjimmy-eval.js --model llama3.1-8B+jev --repeat 3 --keep
+BRO_CHATJIMMY_TRACE=./trace bro -p chatjimmy --print "…"  # every prompt/reply as JSON
+```
+
+Each request is logged to `~/.bro/chatjimmy.log`. omp, Pi and DeepSeek Harness
+get the same endpoint as an Anthropic-compatible provider (untested beyond
+launch); Codex needs OpenAI's Responses API and is refused. This drives the
+public web demo's backend — Taalas sells keyed API access separately — so treat
+it as a way to try the model, not a production route.
+
 ## ✦ JustImagine — images & video
 
 `bro imagine` (also the first option in the menu) doesn't launch a harness at all. It asks which image API to use, then serves a local gallery and opens it in your browser. Everything runs on your machine; nothing leaves it except the call to the generation API.
@@ -775,10 +895,15 @@ bro will browse its catalogue and offer its tiers too.
 ```sh
 bro -p pool               # Multiple Claude Account Proxy (pool many plans)
 bro account work          # launch Claude using one logged-in account profile
+bro --large-task          # open the Claude login with the most allowance left
+bro --small-task          # open the emptiest Claude login that can still finish
+bro codex --large-task    # the same two, over the Codex logins
+bro codex --small-task
 bro browser setup         # give every model bro launches your own browser
 bro browser use edge      # pin which browser sessions drive
 bro browser status        # show browser/extension/bridge readiness
 bro -p codex              # Codex on your ChatGPT subscription (live model list)
+bro -p chatjimmy          # free Llama 3.1 8B on Taalas silicon (lean Claude Code)
 bro codex                 # pick a Codex profile or session
 bro codex resume          # resume a Codex session
 bro --pi                  # launch Pi (also --omp / --codex / --dsh / --claude)

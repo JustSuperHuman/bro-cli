@@ -22,6 +22,13 @@ test('a titled box is square: every row the same width, the title in its top edg
   expect(new Set(box.map(visWidth)).size).toBe(1);
 });
 
+test('a caption sits in the bottom edge, and widens the box when it needs to', () => {
+  const box = titledBox('Usage', ['ab'], { caption: 'Fable 5h: measuring' }).map(plain);
+  expect(box[2]).toBe('╰─ Fable 5h: measuring ─╯');
+  expect(box[1]).toBe(`│ ab${' '.repeat(19)} │`);
+  expect(new Set(box.map(visWidth)).size).toBe(1);
+});
+
 test('the Usage section sits beside the logo when it fits, its rows lined up', () => {
   const rows = brandBanner(loading)(120).split('\n');
   // Logo and box share five rows, then a blank one before the picker.

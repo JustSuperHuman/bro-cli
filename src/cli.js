@@ -37,7 +37,9 @@ import {
   IMAGINE_PROVIDER
 } from './justimagine.js';
 import { runCodex, runCodexCommand, codexProfileChoices, CODEX_PROVIDER } from './codex.js';
+import { runChatJimmy, CHATJIMMY_PROVIDER } from './chatjimmy.js';
 import { requestAllUsage } from './account-usage.js';
+import { describeTaskChoice, resolveTaskProfile } from './task-size.js';
 import { brandBanner } from './banner.js';
 import { repaintOnUsage } from './usage.js';
 import { runTokenReport } from './token-report.js';
@@ -77,6 +79,9 @@ Usage:
                          plans, then launch Claude Code across them
   bro account [name]     Pick/run one logged-in Claude account profile
                          (sessions are listed too; choose their resume profile)
+  bro --large-task       Open the Claude account with the most allowance left
+  bro --small-task       Open the emptiest Claude account that can still
+                         finish the job (add \`codex\` for the Codex logins)
   bro accounts list      List pool accounts
   bro accounts login <name>
                          Add/log in a Claude account for the pool
@@ -135,6 +140,10 @@ Usage:
                          Show login status for a profile / this machine
   bro codex logout [name]
                          Remove stored ChatGPT credentials
+  bro -p chatjimmy       Claude Code on ChatJimmy — Llama 3.1 8B etched into
+                         silicon (chatjimmy.ai), free, ~6k-token window. Runs a
+                         lean Claude Code against a local endpoint;
+                         -m llama3.1-8B+jev lets Jev pick each step
   bro profiles           24h / 7d / 30d usage for all Claude + Codex profiles
   bro tokens             Lifetime + last-30d tokens for all Claude + Codex
                          profiles
@@ -146,6 +155,18 @@ Usage:
   bro -p <provider>      Skip the provider menu (id or name)
   bro --account <name>   Launch with a logged-in profile (Claude, or the Codex
                          profile of that name with -p codex)
+  bro --large-task       Open the login with the most allowance left, so a
+                         long job doesn't run out halfway. Claude by default;
+                         add it to Codex with \`bro codex --large-task\`
+  bro --small-task       Open the emptiest login that can still finish the
+                         job, keeping the roomy ones roomy. Same two apps:
+                           bro --large-task              Claude, most left
+                           bro --small-task              Claude, least left
+                           bro codex --large-task        Codex, most left
+                           bro codex --small-task        Codex, least left
+                         Both take every other flag, e.g.
+                           bro --large-task --jev
+                           bro --small-task --print "one-line answer"
   bro -m <model>         Skip the model menu (use with -p)
   bro --tier <group>     Pick the upstream route at a new-api relay (OpenLux,
                          Yunwu). One model is served by several, each with its
@@ -217,6 +238,12 @@ export function parseArgs(argv) {
     // account switcher; alongside -p it just names the profile (Codex has
     // them too), so an explicit provider is never overridden.
     else if (t === '--account') { a.account = argv[++i]; a.provider = a.provider || 'account'; }
+    // --large-task / --small-task name a login by what it has left rather
+    // than by name (task-size.js). Like --account they mean the Claude
+    // account switcher on their own, and just pick the login when a provider
+    // with logins is already named.
+    else if (t === '--large-task' || t === '--big-task') { a.taskSize = 'large'; a.provider = a.provider || 'account'; }
+    else if (t === '--small-task') { a.taskSize = 'small'; a.provider = a.provider || 'account'; }
     else if (t === '--model' || t === '-m') a.model = argv[++i];
     // --tier names the upstream route at a new-api relay (OpenLux, Yunwu):
     // the same model is served by several, each with its own price.
@@ -242,6 +269,15 @@ export function parseArgs(argv) {
       a.provider = 'account';
       if (argv[i + 1] && !argv[i + 1].startsWith('-')) a.account = argv[++i];
     }
+    // `bro codex <name>` and bare `bro codex` are handled before parsing;
+    // what reaches here is `bro codex --<flag>`, which names the Codex
+    // provider the same way `bro account --<flag>` names the Claude one —
+    // and means the codex CLI, like every other `bro codex …` route, unless
+    // a later flag asks for another harness.
+    else if (t === 'codex' && i === 0 && !a.provider) {
+      a.provider = 'codex';
+      a.harness = a.harness || 'codex';
+    }
     else {
       // Unknown args belong to Claude. Once Claude args begin, preserve the
       // rest verbatim so values like `bro --resume update` are not re-parsed.
@@ -263,6 +299,8 @@ const tagOf = (p) =>
       ? 'chatgpt login'
     : p.mode === 'imagine'
       ? 'images + video'
+    : p.mode === 'chatjimmy'
+      ? 'free demo · 8B · ~6k ctx'
       : p.mode === 'native'
         ? 'native'
         : p.mode === 'anthropic'
@@ -617,7 +655,7 @@ export async function main(argv) {
 
   const data = await loadModels();
   // The account pool and JustImagine are always pinned on top — no models.json entry needed.
-  const providers = [IMAGINE_PROVIDER, POOL_PROVIDER, ACCOUNT_PROVIDER, CODEX_PROVIDER, ...mergeProviders(data, config.providers)];
+  const providers = [IMAGINE_PROVIDER, POOL_PROVIDER, ACCOUNT_PROVIDER, CODEX_PROVIDER, ...mergeProviders(data, config.providers), CHATJIMMY_PROVIDER];
 
   if (!providers.length) {
     console.error('No providers available. Check your network or ~/.bro/config.json.');
@@ -660,6 +698,29 @@ export async function main(argv) {
       (p) => p.id === args.provider || (p.name || '').toLowerCase() === args.provider.toLowerCase()
     );
     if (!provider) { console.error(`Unknown provider: ${args.provider}  (try: bro --list)`); return 1; }
+    // --large-task / --small-task: read every login's meters and name the one
+    // that fits the job, so the run skips the picker exactly as a spelled-out
+    // --account would. A login named outright still wins — the flag is a way
+    // of choosing, not an override.
+    if (args.taskSize && !args.account) {
+      const app = provider.mode === 'account' ? 'claude' : provider.mode === 'codex' ? 'codex' : null;
+      if (!app) {
+        console.error(`--${args.taskSize}-task chooses between logins; ${provider.name || provider.id} has none.`);
+        console.error('  Use it with the Claude accounts (bro --large-task) or Codex (bro codex --large-task).');
+        return 1;
+      }
+      if (isInteractive) process.stderr.write('\x1b[2mReading account usage…\x1b[0m\r');
+      const chosen = await resolveTaskProfile({ app, size: args.taskSize });
+      if (isInteractive) process.stderr.write('\x1b[2K');
+      // Without meters there is nothing to choose on, and guessing here
+      // spends the wrong subscription: say so and fall back to the picker.
+      if (chosen.name == null) {
+        note(`\x1b[2m${chosen.reason} Falling back to the usual picker.\x1b[0m`);
+      } else {
+        note(`\x1b[2m${describeTaskChoice(chosen, args.taskSize)}\x1b[0m`);
+        args.account = chosen.name;
+      }
+    }
   } else {
     const apiKey = args.dryRun ? '' : openRouterKey(config);
     // Rows for a model list, and — with an OpenRouter key — a background pass
@@ -1024,6 +1085,24 @@ export async function main(argv) {
     });
     // A dry run normally describes what would happen; a refused combination
     // has already said why and only has its exit code left to report.
+    if (args.dryRun && typeof result !== 'number') { console.log(JSON.stringify(result, null, 2)); return 0; }
+    return typeof result === 'number' ? result : 0;
+  }
+
+  // ChatJimmy: serve a local Anthropic-compatible endpoint in this process and
+  // launch the harness against it (Claude Code in its lean ChatJimmy mode).
+  if (provider.mode === 'chatjimmy') {
+    if (persistChoice) rememberSelection(provider.id, model, harness);
+    const result = await runChatJimmy({
+      model,
+      extraArgs: args._,
+      permissionMode: selectedPermissionMode(),
+      harness,
+      providers,
+      providerKeys,
+      headless,
+      dryRun: args.dryRun
+    });
     if (args.dryRun && typeof result !== 'number') { console.log(JSON.stringify(result, null, 2)); return 0; }
     return typeof result === 'number' ? result : 0;
   }

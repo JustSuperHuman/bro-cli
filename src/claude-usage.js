@@ -1,12 +1,19 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   readClaudeCredentials,
   writeClaudeCredentials
 } from './claude-oauth-bridge.js';
+import { recordReading } from './usage-history.js';
 
 const OAUTH_TOKEN_URL = process.env.CLAUDE_OAUTH_TOKEN_URL || 'https://platform.claude.com/v1/oauth/token';
 const OAUTH_CLIENT_ID = process.env.CLAUDE_OAUTH_CLIENT_ID || '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 
+// The three meters an account's usage comes down to, as used percentages,
+// with when each window resets — which tells readings of the same window
+// apart from readings of the next one. `fable` is null on plans with no Fable
+// allowance.
 export function usageSummary(payload) {
   const fable = Array.isArray(payload?.limits)
     ? payload.limits.find((limit) =>
@@ -16,7 +23,9 @@ export function usageSummary(payload) {
   return {
     session: payload?.five_hour?.utilization ?? null,
     weekly: payload?.seven_day?.utilization ?? null,
-    fable: fable?.percent ?? null
+    fable: fable?.percent ?? null,
+    sessionResetsAt: payload?.five_hour?.resets_at ?? null,
+    weeklyResetsAt: payload?.seven_day?.resets_at ?? null
   };
 }
 
@@ -53,9 +62,28 @@ async function refreshClaudeToken(configDir, credentials, { timeoutMs }) {
   return oauth.accessToken;
 }
 
+// Which Claude user (in which organization) a config dir is signed in as —
+// null when it can't be told. Two profiles signed in as the same user share
+// one allowance.
+export async function claudeIdentity(configDir) {
+  try {
+    const { oauthAccount } = JSON.parse(await fs.promises.readFile(path.join(configDir, '.claude.json'), 'utf8'));
+    return oauthAccount?.accountUuid ? `${oauthAccount.accountUuid}:${oauthAccount.organizationUuid || ''}` : null;
+  } catch {
+    return null;
+  }
+}
+
+// Where a config dir's readings are kept (usage-history.js): under the account
+// it's signed in as where that's known, so a profile signed into another
+// account starts a history of its own.
+export const claudeHistoryKey = (configDir, identity) =>
+  identity || `claude:${configDir ? path.resolve(configDir) : 'default'}`;
+
 // Fetch the same subscription meters Claude's account picker presents. Token
 // refresh is persisted to the profile's real credential store, so the bridge
-// and Claude Code keep seeing one coherent login.
+// and Claude Code keep seeing one coherent login. Every answer is also kept
+// as a reading, for measuring how much of a week one 5-hour window is worth.
 export async function fetchClaudeUsage({ configDir, timeoutMs = 6000 } = {}) {
   const credentials = readClaudeCredentials({ configDir });
   const oauth = credentials?.claudeAiOauth;
@@ -78,5 +106,12 @@ export async function fetchClaudeUsage({ configDir, timeoutMs = 6000 } = {}) {
     response = await request(await refreshClaudeToken(configDir, credentials, { timeoutMs }));
   }
   if (!response.ok) throw new Error(`usage request failed (${response.status})`);
-  return usageSummary(await response.json());
+  const summary = usageSummary(await response.json());
+  try {
+    const identity = await claudeIdentity(configDir);
+    recordReading(claudeHistoryKey(configDir, identity), { ...summary, tier: oauth.rateLimitTier || null });
+  } catch {
+    /* the history is a refinement; the meters stand without it */
+  }
+  return summary;
 }

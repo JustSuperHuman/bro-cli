@@ -101,20 +101,50 @@ const left = (used) => (typeof used === 'number' && Number.isFinite(used) ? Math
 const gated = (value, weekly) => (value == null ? null : weekly === 0 ? 0 : value);
 const tighter = (a, b) => (a == null ? b : b == null ? a : Math.min(a, b));
 
+// Fable's allowance, on the plans that have one: "up to 50% of your weekly
+// usage limits" (Anthropic, Claude Fable models on your plan). Its meter
+// reads against that half, so one point of it is half a weekly point.
+export const FABLE_SHARE = 0.5;
+
+// What's left of the 5-hour window (`session`, in 5h points) when the week
+// can only pay for `affordable` of them — known only once the account's
+// 5h-to-week ratio has been measured (usage-history.js). `estimated` marks a
+// figure the week cut down by that measure.
+function windowLeft(session, weekLeft, affordable) {
+  if (session == null) return { value: null, estimated: false };
+  if (weekLeft === 0) return { value: 0, estimated: false };
+  if (affordable != null && affordable < session) return { value: affordable, estimated: true };
+  return { value: session, estimated: false };
+}
+
 // One Claude account's headroom, as a percentage of its own allowance per
 // window. Only accounts whose usage reports a Fable limit can use Fable at
 // all; the rest have no Fable headroom (null), not their overall headroom.
-// Where there is one, Fable is capped by the account's overall limits and by
-// its own weekly limit on top — whichever is tighter.
-export function claudeHeadroom(stats) {
+//
+// With `ratio` — weekly points per 5-hour point, measured for this account —
+// each 5-hour figure is what the window has left *and the week can still pay
+// for*: an account with 95% of its window open but 1 weekly point left can
+// really spend only 1 / ratio of it. Fable's week is the tighter of its own
+// allowance and what's left of the week overall, in Fable units; its 5-hour
+// figure is bounded by that, converted back through the ratio. Without a
+// ratio, only an exhausted week closes the window.
+export function claudeHeadroom(stats, { ratio = null } = {}) {
   if (!stats) return null;
   const wk = left(stats.weekly);
-  const fableWk = left(stats.fable) == null ? null : tighter(wk, left(stats.fable));
+  const session = left(stats.session);
+  const affordable = (weeklyPoints) => (ratio > 0 && weeklyPoints != null ? weeklyPoints / ratio : null);
+  const fableWk = left(stats.fable) == null
+    ? null
+    : tighter(left(stats.fable), wk == null ? null : Math.min(100, wk / FABLE_SHARE));
+  const h5 = windowLeft(session, wk, affordable(wk));
+  const fable5h = fableWk == null ? null : windowLeft(session, fableWk, affordable(fableWk * FABLE_SHARE));
   return {
-    h5: gated(left(stats.session), wk),
+    h5: h5.value,
     wk,
-    fable5h: fableWk == null ? null : gated(left(stats.session), fableWk),
-    fableWk
+    fable5h: fable5h ? fable5h.value : null,
+    fableWk,
+    measured: ratio > 0,
+    estimated: { h5: h5.estimated, fable5h: Boolean(fable5h?.estimated) }
   };
 }
 
@@ -130,13 +160,13 @@ export function codexHeadroom(summary) {
 function distinctRooms(logins, headroom) {
   const seen = new Set();
   const rooms = [];
-  for (const { stats, identity } of logins) {
-    if (!stats) continue;
-    if (identity) {
-      if (seen.has(identity)) continue;
-      seen.add(identity);
+  for (const login of logins) {
+    if (!login.stats) continue;
+    if (login.identity) {
+      if (seen.has(login.identity)) continue;
+      seen.add(login.identity);
     }
-    rooms.push(headroom(stats));
+    rooms.push(headroom(login.stats, login));
   }
   return rooms;
 }
@@ -157,18 +187,27 @@ function sumWindow(rooms, key) {
 // can pass 100%. Fable is Claude's alone and a 100% of its own, shared by the
 // accounts that have Fable at all.
 //
-// `claude` and `codex` are [{ stats, identity }] — stats undefined while
-// loading, null when unavailable. Each app comes back with its windows in
-// whole percent (null when none of its accounts has that window), whether
-// any of its logins is still loading, how many couldn't be read, and how many
-// signed-in logins it has at all.
+// `claude` and `codex` are [{ stats, identity, ratio }] — stats undefined
+// while loading, null when unavailable; ratio as in claudeHeadroom. Each app
+// comes back with its windows in whole percent (null when none of its
+// accounts has that window), whether any of its logins is still loading, how
+// many couldn't be read, and how many signed-in logins it has at all. Claude
+// also says which 5-hour figures the week cut down by a measured estimate,
+// and how many of its Fable accounts have no measure yet.
 export function appHeadroom({ claude = [], codex = [] }) {
   const summarize = (logins, headroom, windows) => {
     const rooms = distinctRooms(logins, headroom);
     const app = {
       logins: logins.length,
       loading: logins.some((login) => login.stats === undefined),
-      unavailable: logins.filter((login) => login.stats === null).length
+      unavailable: logins.filter((login) => login.stats === null).length,
+      estimated: {
+        h5: rooms.some((room) => room.estimated?.h5),
+        fable5h: rooms.some((room) => room.estimated?.fable5h)
+      },
+      // An estimate made with another plan's measure rather than its own.
+      borrowed: rooms.some((room) => (room.estimated?.h5 || room.estimated?.fable5h) && room.ratioSource === 'plans'),
+      unmeasuredFable: rooms.filter((room) => room.fableWk != null && room.measured === false).length
     };
     for (const key of windows) {
       const { left, count } = sumWindow(rooms, key);
@@ -177,7 +216,11 @@ export function appHeadroom({ claude = [], codex = [] }) {
     return app;
   };
   return {
-    claude: summarize(claude, claudeHeadroom, ['h5', 'wk', 'fable5h', 'fableWk']),
+    claude: summarize(
+      claude,
+      (stats, login) => ({ ...claudeHeadroom(stats, { ratio: login.ratio }), ratioSource: login.ratioSource ?? null }),
+      ['h5', 'wk', 'fable5h', 'fableWk']
+    ),
     codex: summarize(codex, codexHeadroom, ['h5', 'wk'])
   };
 }
@@ -185,11 +228,16 @@ export function appHeadroom({ claude = [], codex = [] }) {
 // A figure, right-aligned in four columns and coloured by how much is left.
 // It sets normal intensity itself: a menu paints its header rows dim, and a
 // line that starts with an icon has no reset before its first figure.
-function leftFigure(value, loading) {
+// `estimated` prefixes ≈: the week cut the figure down, by a measured ratio.
+function leftFigure(value, loading, { estimated = false } = {}) {
   if (loading) return `${DIM}   …${RESET}`;
   if (value == null) return `${DIM}   —${RESET}`;
   const color = value <= 20 ? RED : value <= 50 ? AMBER : GREEN;
-  return `${NORMAL}${color}${String(value).padStart(3)}%${RESET}`;
+  const text = `${value}%`;
+  // A cut that still rounds to 100% is no cut worth marking — and ≈100%
+  // wouldn't fit the column.
+  if (!estimated || text.length > 3) return `${NORMAL}${color}${text.padStart(4)}${RESET}`;
+  return `${NORMAL}${' '.repeat(3 - text.length)}${DIM}≈${RESET}${color}${text}${RESET}`;
 }
 
 const heading = (text) => `${DIM}${text.padStart(4)}${RESET}`;
@@ -217,10 +265,29 @@ export function leftLines(summary) {
   const header = `${gap(ICON_WIDTH + 3)}${heading('5h')}${gap(3)}${heading('week')}`
     + (withFable ? `${gap(4 + 5 + 3)}${heading('5h')}${gap(3)}${heading('week')}` : '');
   const lines = apps.map(({ icon, app, fable }) => {
-    let line = `${icon}${gap(3)}${leftFigure(app.h5, app.loading)}${gap(3)}${leftFigure(app.wk, app.loading)}`;
-    if (fable) line += `${gap(4)}${DIM}Fable${RESET}${gap(3)}${leftFigure(app.fable5h, app.loading)}${gap(3)}${leftFigure(app.fableWk, app.loading)}`;
+    const estimated = app.estimated || {};
+    let line = `${icon}${gap(3)}${leftFigure(app.h5, app.loading, { estimated: estimated.h5 })}${gap(3)}${leftFigure(app.wk, app.loading)}`;
+    if (fable) {
+      line += `${gap(4)}${DIM}Fable${RESET}${gap(3)}${leftFigure(app.fable5h, app.loading, { estimated: estimated.fable5h })}`
+        + `${gap(3)}${leftFigure(app.fableWk, app.loading)}`;
+    }
     if (app.unavailable) line += `${gap(fable ? 3 : 4)}${DIM}${app.unavailable} unavailable${RESET}`;
     return line;
   });
   return [header, ...lines].map((line) => () => line);
+}
+
+// What the figures need explaining, if anything: a ≈ means the week cut that
+// 5-hour figure down by a measured ratio (possibly another plan's); Fable
+// accounts without any measure yet show only what their window has left,
+// which the week may not cover.
+export function leftNotes(summary) {
+  const { claude } = summary;
+  if (!claude.logins || claude.loading) return [];
+  const notes = [];
+  if (claude.estimated?.h5 || claude.estimated?.fable5h) {
+    notes.push(claude.borrowed ? '≈ capped by the week (other plans\' ratio)' : '≈ capped by the week');
+  }
+  if (claude.unmeasuredFable) notes.push('Fable 5h: measuring');
+  return notes;
 }

@@ -18,6 +18,7 @@
     "pool",
     "dsh-plugin-profiles",
     "skills",
+    "assets",
     "models.json",
     "video-models.json",
     "README.md",
@@ -30,7 +31,9 @@
     "start": "node bin/bro.js",
     "bro": "node bin/bro.js",
     "deploy": "node scripts/deploy.js",
-    "deploy:check": "node scripts/deploy.js --dry-run"
+    "deploy:check": "node scripts/deploy.js --dry-run",
+    "eval:chatjimmy": "node scripts/chatjimmy-eval.js",
+    "icons:tasks": "node scripts/build-task-icons.js"
   },
   "keywords": [
     "claude",

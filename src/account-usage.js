@@ -6,32 +6,21 @@
 // section, the Claude and Codex panes and the resume / manage menus after
 // them cost one fetch per login, not one per menu.
 
-import fs from 'node:fs';
-import path from 'node:path';
 import { accountDirFor, listAccounts } from './claude-accounts.js';
-import { fetchClaudeUsage } from './claude-usage.js';
+import { claudeHistoryKey, claudeIdentity, fetchClaudeUsage } from './claude-usage.js';
 import { fetchCodexUsage } from './codex-usage.js';
 import { listCodexProfiles, localCodexProfile } from './codex-profiles.js';
-import { appHeadroom, leftLines, peekUsage, requestUsage } from './usage.js';
+import { appHeadroom, leftLines, leftNotes, peekUsage, requestUsage } from './usage.js';
+import { measuredRatio } from './usage-history.js';
 
 // --- Claude ------------------------------------------------------------------
 
 const claudeKey = (account) => `claude:${accountDirFor(account.name)}`;
 
-// Which Claude user (in which organization) a profile is signed in as, so an
-// account imported under two names counts once.
-async function claudeIdentity(configDir) {
-  try {
-    const { oauthAccount } = JSON.parse(await fs.promises.readFile(path.join(configDir, '.claude.json'), 'utf8'));
-    return oauthAccount?.accountUuid ? `${oauthAccount.accountUuid}:${oauthAccount.organizationUuid || ''}` : null;
-  } catch {
-    return null;
-  }
-}
-
 // Start fetching every signed-in account's meters — or reuse the answers a
 // menu opened a moment ago already has. One promise per account, never
-// rejecting.
+// rejecting. The identity lets an account imported under two names count
+// once; every fetch also records a reading (claude-usage.js).
 export function requestClaudeUsages(accounts) {
   return accounts
     .filter((account) => account.authenticated)
@@ -85,17 +74,32 @@ export function requestAllUsage({ accounts = listAccounts(), logins = codexLogin
   };
 }
 
-// What each app has left right now: a heading line, then a line for Claude
-// and one for Codex (each only when it has a signed-in login), as functions
-// of the width available.
-export function usageLeftLines({ accounts, logins }) {
+// What each app has left right now (usage.js appHeadroom), each Claude
+// account's 5-hour figures bounded by what its week still covers wherever
+// its 5h-to-week ratio has been measured — by the account, its plan tier, or
+// failing both, every plan together.
+function usageSummary({ accounts, logins }) {
   const claude = accounts
     .filter((account) => account.authenticated)
     .map(withClaudeUsage)
-    .map((account) => ({ stats: account.usageStats, identity: account.usageStats?.identity }));
+    .map((account) => {
+      const identity = account.usageStats?.identity;
+      const measured = account.usageStats
+        ? measuredRatio({ key: claudeHistoryKey(accountDirFor(account.name), identity), tier: account.rateLimitTier })
+        : null;
+      return { stats: account.usageStats, identity, ratio: measured?.ratio ?? null, ratioSource: measured?.source ?? null };
+    });
   const codex = logins
     .filter((login) => login.authenticated)
     .map(withCodexUsage)
     .map((login) => ({ stats: login.usageStats, identity: login.identity }));
-  return leftLines(appHeadroom({ claude, codex }));
+  return appHeadroom({ claude, codex });
+}
+
+// The Usage section's content: a heading line, then a line for Claude and one
+// for Codex (each only when it has a signed-in login), as functions of the
+// width available — and the notes its figures need.
+export function usageLeftSection(usage) {
+  const summary = usageSummary(usage);
+  return { lines: leftLines(summary), notes: leftNotes(summary) };
 }
