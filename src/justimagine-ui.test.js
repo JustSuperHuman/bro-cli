@@ -441,3 +441,20 @@ test('scrollbars fade in on use and out after', () => {
   expect(html).toContain('border-color: inherit');
   expect(app).toContain("t.classList.add('scrolling')");
 });
+
+test('a folder shows everything under it, keyed by folder and file', () => {
+  // "All generations" is the whole gallery, not just the loose files at the top
+  expect(app).toContain('&deep=1&offset=');
+  // two subfolders can hold a file of the same name, so nothing keys on the name alone
+  expect(app).toContain('const itemKey = (it) =>');
+  expect(app).not.toMatch(/selection\.(?:has|add|delete)\([a-z.]*\.file\)/);
+  // a move from several folders is one request per source folder
+  expect(app).toMatch(/for \(const \[from, list\] of bySource\)/);
+});
+
+test('the image / video switch is icons, not words', () => {
+  const modes = html.slice(html.indexOf('<div class="modes">'), html.indexOf('</div>', html.indexOf('<div class="modes">')));
+  expect(modes).toContain('aria-label="Image"');
+  expect(modes).toContain('aria-label="Video"');
+  expect(modes).not.toMatch(/>\s*(?:✦ )?Image\s*</);
+});
