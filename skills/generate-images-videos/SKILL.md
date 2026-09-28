@@ -56,8 +56,12 @@ Fields that matter:
 | `audio`, `seed`, `frames` | Whether `audio: true`, `seed: n` and first/last-frame conditioning are supported. `frames: ["first_frame"]` means image-to-video works. |
 
 Defaults if you don't care: `google/gemini-3.1-flash-image` for images (fast,
-cheap, excellent with reference images), `google/veo-3.1` for video. Video always
-runs on OpenRouter, whatever the image API is.
+cheap, excellent with reference images), `google/veo-3.1` for video. Each video
+model runs on the provider its `api` names (OpenRouter or OpenLux).
+
+To repeat the user's last choices — the provider, model and knobs they picked in
+the gallery — send `"reuse": true` and leave those fields out; the response's
+`reused` says what was filled in. `GET /api/settings` shows them.
 
 ## 2. Queue the work
 
