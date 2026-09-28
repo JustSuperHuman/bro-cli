@@ -29,3 +29,25 @@ Seedance conversion at 16:9, 1280x720, 24 fps: 1280 * 720 * 24 / 1024 = 21,600 t
 Quote duration matters: the chart divides each observed quote by its own duration; it does not assert every clip length has identical effective pricing. Seedance 2.0 Fast was inspected (20 credits / 8s at 720p) but omitted because the interface explicitly said unavailable in the US. Sora was not included because a current selectable model quote was not established.
 
 Higgsfield sources: https://higgsfield.ai/ai/video and https://higgsfield.ai/pricing. OpenRouter fee: https://openrouter.ai/pricing. These are published quotes, not paid generation benchmarks or proof of output quality.
+
+## OpenLux (added September 28, 2026)
+
+Chart: `video-cost-3way.html` compares Higgsfield Plus at 100% / 75% / 50% of monthly credits used against OpenRouter and OpenLux, and marks the cheapest and second-cheapest option per model.
+
+OpenLux catalogue from https://api.openlux.ai/api/pricing, saved as `openlux-pricing.json`. OpenLux sells $1 of credit for $1 (`price: 1` in `/api/status`). Their docs (doc.openlux.ai, "分组的特殊性及价格差异") state that a route's group ratio multiplies the official price: at ratio 1.65, $1 of official price is charged $1.65.
+
+| Model | OpenLux model / route | Ratio | $/s |
+| --- | --- | ---: | ---: |
+| Veo 3.1 Lite | not offered | — | — |
+| MiniMax H3 Max | aigc-video-hailuo / Aigc-Video-1 | 0.9 | 0.08 × 0.9 = 0.072 |
+| Wan 3.0 | wan3.0-video / Alibaba-video-2 | 0.7 | 0.01 × 10 (720p) × 0.7 = 0.070 |
+| Veo 3.1 Fast | veo_3_1-fast / Discounted-Gemini-1 | 0.07353 | 0.576 per 8s clip × ratio ÷ 8 = 0.0053 |
+| Kling 3.0 | kling-video / Kling-2 | 0.85 | 0.126 × 0.85 = 0.107 |
+| MiniMax H3 | aigc-video-hailuo / Aigc-Video-1 | 0.9 | 0.13 × 0.9 = 0.117 |
+| Grok Imagine 1.5 | grok-imagine-video-1.5-preview / Xai-Grok-1 | 0.44118 | 0.14 × 0.44118 = 0.062 |
+| Seedance 2.0 | doubao-seedance-2-0-260128 / Seedance-1 | 0.65 | 0.1512 × 0.65 = 0.098 |
+| FLUX.3 Video | not offered | — | — |
+| Seedance 2.5 | doubao-seedance-2-5-260628 / Seedance-1 | 0.65 | 0.23112 × 0.65 = 0.150 |
+| Veo 3.1 | veo_3_1 / Discounted-Gemini-1 | 0.07353 | 0.768 per 8s clip × ratio ÷ 8 = 0.0071 |
+
+Wan 3.0 and both Veo rows use prices from OpenLux's own catalogue. For the rest the catalogue lists only a placeholder price (billing is dynamic, based on the upstream price), so the official list rate is taken from OpenRouter's pre-fee price and the route multiplier is applied. The Veo route is an unofficial "discounted" relay with a fixed price per clip; its reliability wasn't verified. OpenLux bulk top-up discounts (1–7.5%) and card fees are excluded.

@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Higgsfield vs OpenRouter · video cost per second</title>
+<style>
+  :root {
+    --bg: #0f1012;
+    --panel: #17181b;
+    --panel-2: #1d1f23;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #8a8983;
+    --grid: #2a2b2e;
+    --axis: #3a3b3e;
+    --hf: #3987e5;
+    --hf-band: rgba(57,135,229,0.22);
+    --or: #d95926;
+    --win: #2fd27a;
+    --win-bg: rgba(47,210,122,0.12);
+    --win2-bg: rgba(47,210,122,0.05);
+    --win2-edge: rgba(47,210,122,0.45);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); }
+  body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased; }
+  #poster {
+    width: 1600px; padding: 64px 72px 52px; position: relative; overflow: hidden;
+    background:
+      radial-gradient(900px 520px at 88% -8%, rgba(217,89,38,0.20), transparent 60%),
+      radial-gradient(900px 560px at 4% 0%, rgba(57,135,229,0.22), transparent 62%),
+      var(--bg);
+  }
+  .top { display: flex; justify-content: space-between; align-items: flex-end; gap: 40px; margin-bottom: 36px; }
+  .eyebrow { font-size: 15px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 14px; }
+  h1 { margin: 0; font-size: 58px; line-height: 1.04; font-weight: 700; letter-spacing: -0.02em; }
+  h1 .hf { color: var(--hf); }
+  h1 .or { color: var(--or); }
+  .lede { margin: 16px 0 0; font-size: 19px; color: var(--ink-2); max-width: 900px; line-height: 1.45; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-bottom: 30px; }
+  .stat { background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02)); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 22px 26px; }
+  .stat .k { font-size: 14px; color: var(--ink-2); font-weight: 600; display: flex; align-items: center; gap: 9px; }
+  .stat .v { font-size: 48px; font-weight: 700; margin-top: 6px; letter-spacing: -0.02em; }
+  .stat .v small { font-size: 18px; font-weight: 500; color: var(--muted); margin-left: 6px; letter-spacing: 0; }
+  .stat .n { font-size: 14px; color: var(--muted); margin-top: 2px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+
+  .panel { background: var(--panel); border: 1px solid rgba(255,255,255,0.07); border-radius: 22px; padding: 26px 28px 20px; }
+  .legend { display: flex; gap: 30px; align-items: center; font-size: 15px; color: var(--ink-2); padding: 0 4px 16px; border-bottom: 1px solid var(--grid); }
+  .legend .item { display: inline-flex; align-items: center; gap: 9px; }
+  .legend .spacer { flex: 1; }
+  .pill { display: inline-flex; align-items: center; font-size: 11.5px; font-weight: 800; letter-spacing: .06em; border-radius: 99px; padding: 2px 8px; }
+  .pill.p1 { background: var(--win); color: #06240f; }
+  .pill.p2 { color: var(--win); border: 1px solid var(--win2-edge); }
+
+  .grid { display: grid; grid-template-columns: 230px 1fr 132px 132px 132px 132px; column-gap: 10px; align-items: center; }
+  .head { padding: 16px 4px 10px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .07em; }
+  .head .c { text-align: right; padding-right: 12px; }
+  .head .c.hfh { color: var(--hf); }
+  .head .c.orh { color: var(--or); }
+  .head .c span { display: block; font-size: 11.5px; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--muted); margin-top: 2px; }
+  .row { padding: 0 4px; height: 70px; border-top: 1px solid var(--grid); }
+  .name { font-size: 19px; font-weight: 650; }
+  .name .dg { color: var(--muted); font-weight: 400; font-size: 15px; }
+  .set { font-size: 13.5px; color: var(--muted); margin-top: 3px; }
+  .track { position: relative; height: 70px; }
+  .cell { justify-self: end; width: 124px; height: 54px; border-radius: 12px; display: flex; flex-direction: column; align-items: flex-end; justify-content: center; padding: 0 12px; border: 1.5px solid transparent; font-variant-numeric: tabular-nums; }
+  .cell .amt { font-size: 19px; font-weight: 500; color: var(--ink-2); }
+  .cell .d { font-size: 12.5px; color: var(--muted); }
+  .cell.first { background: var(--win-bg); border-color: var(--win); }
+  .cell.first .amt { color: var(--win); font-weight: 750; }
+  .cell.second { background: var(--win2-bg); border-color: var(--win2-edge); border-style: dashed; }
+  .cell.second .amt { color: var(--ink); font-weight: 650; }
+  .cell .top-line { display: flex; align-items: center; gap: 7px; }
+  .axis { padding: 0 4px; height: 34px; border-top: 1px solid var(--axis); }
+
+  .foot { display: flex; justify-content: space-between; gap: 40px; margin-top: 22px; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+  .foot b { color: var(--ink-2); font-weight: 600; }
+  svg { overflow: visible; }
+</style>
+</head>
+<body>
+<div id="poster">
+  <div class="top">
+    <div>
+      <div class="eyebrow">AI video pricing · September 2026</div>
+      <h1><span class="hf">Higgsfield</span> vs <span class="or">OpenRouter</span><br>cost per second of video</h1>
+      <p class="lede">Higgsfield Plus ($59/mo, 1,200 credits) gets pricier the less of your plan you use. Here's the real cost at 100%, 75% and 50% of your credits used, next to OpenRouter's pay-as-you-go price for the same model and settings.</p>
+    </div>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="panel">
+    <div class="legend">
+      <span class="item"><svg width="62" height="14"><rect x="1" y="4" width="60" height="6" rx="3" fill="var(--hf-band)"/><circle cx="7" cy="7" r="6" fill="var(--hf)" stroke="var(--panel)" stroke-width="2"/><circle cx="31" cy="7" r="5" fill="var(--panel)" stroke="var(--hf)" stroke-width="3.2"/><circle cx="55" cy="7" r="5" fill="var(--panel)" stroke="var(--hf)" stroke-width="1.6"/></svg>Higgsfield · 100% → 75% → 50% of credits used</span>
+      <span class="item"><svg width="16" height="16"><rect x="3" y="3" width="10" height="10" transform="rotate(45 8 8)" fill="var(--or)"/></svg>OpenRouter · incl. 5.5% credit fee</span>
+      <span class="spacer"></span>
+      <span class="item"><span class="pill p1">1ST</span>cheapest</span>
+      <span class="item"><span class="pill p2">2ND</span>second cheapest</span>
+    </div>
+    <div class="grid head">
+      <div>Model</div>
+      <div id="scaleNote">USD per second · log scale · left is cheaper</div>
+      <div class="c hfh">100% used<span>Higgsfield</span></div>
+      <div class="c hfh">75% used<span>Higgsfield</span></div>
+      <div class="c hfh">50% used<span>Higgsfield</span></div>
+      <div class="c orh">OpenRouter<span>pay as you go</span></div>
+    </div>
+    <div id="rows"></div>
+    <div class="grid axis"><div></div><div class="track" id="axis" style="height:34px"></div><div></div><div></div><div></div><div></div></div>
+  </div>
+
+  <div class="foot">
+    <div><b>Method.</b> Higgsfield: live credit quote ÷ clip length × $59 ÷ 1,200 credits ÷ share of credits used; Unlimited windows excluded. OpenRouter: published rate + 5.5% credit fee; Seedance converted from tokens at 720p/24 fps.<br>Same resolution on both sides (720p unless noted). † Higgsfield promotional quote. Taxes excluded. Published prices, not paid benchmarks.</div>
+    <div style="text-align:right;white-space:nowrap">Sources: higgsfield.ai/pricing · higgsfield.ai/ai/video<br>openrouter.ai/api/v1/videos/models · openrouter.ai/pricing</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const MODELS = [
+    { name: 'Veo 3.1 Lite',     set: '720p · audio · 8s',  credits: 12,   seconds: 8, router: 0.05 },
+    { name: 'MiniMax H3 Max',   set: '768p · silent · 5s', credits: 12.5, seconds: 5, router: 0.08 },
+    { name: 'Wan 3.0',          set: '720p · audio · 5s',  credits: 9,    seconds: 5, router: 0.10, promo: true },
+    { name: 'Veo 3.1 Fast',     set: '720p · audio · 8s',  credits: 32,   seconds: 8, router: 0.10 },
+    { name: 'Kling 3.0',        set: '720p · audio · 5s',  credits: 10,   seconds: 5, router: 0.126 },
+    { name: 'MiniMax H3',       set: '2K · audio · 5s',    credits: 10,   seconds: 5, router: 0.13, promo: true },
+    { name: 'Grok Imagine 1.5', set: '720p · audio · 5s',  credits: 22.5, seconds: 5, router: 0.14 },
+    { name: 'Seedance 2.0',     set: '720p · audio · 8s',  credits: 36,   seconds: 8, router: 0.1512, promo: true },
+    { name: 'FLUX.3 Video',     set: '720p · audio · 5s',  credits: 27.5, seconds: 5, router: 0.17 },
+    { name: 'Seedance 2.5',     set: '720p · audio · 5s',  credits: 35,   seconds: 5, router: 0.23112 },
+    { name: 'Veo 3.1',          set: '720p · audio · 8s',  credits: 80,   seconds: 8, router: 0.40 }
+  ];
+  const KEYS = ['hf100', 'hf75', 'hf50', 'or'];
+  const rows = MODELS.map(m => {
+    const base = m.credits / m.seconds * 59 / 1200;
+    const p = { hf100: base, hf75: base / 0.75, hf50: base / 0.5, or: m.router * 1.055 };
+    const order = [...KEYS].sort((a, b) => p[a] - p[b]);
+    const rank = Object.fromEntries(order.map((k, i) => [k, i + 1]));
+    return { ...m, p, rank, min: p[order[0]] };
+  });
+  const money = v => '$' + v.toFixed(3);
+
+  // stats
+  const orWins = rows.filter(r => r.rank.or === 1).length;
+  const hfWins = rows.length - orWins;
+  const avg = (f) => rows.reduce((s, r) => s + f(r), 0) / rows.length;
+  const at50 = avg(r => r.p.hf50 / r.p.or);
+  const hfWinNames = rows.filter(r => r.rank.or !== 1).map(r => r.name);
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><div class="k"><span class="dot" style="background:var(--or)"></span>OpenRouter is cheapest</div>
+      <div class="v">${orWins}<small>of ${rows.length} models</small></div>
+      <div class="n">even against Higgsfield at 100% credit usage</div></div>
+    <div class="stat"><div class="k"><span class="dot" style="background:var(--hf)"></span>Higgsfield wins only at full usage</div>
+      <div class="v">${hfWins}<small>of ${rows.length} models</small></div>
+      <div class="n">${hfWinNames.join(', ')}</div></div>
+    <div class="stat"><div class="k"><span class="dot" style="background:var(--muted)"></span>Use half your credits and you pay</div>
+      <div class="v">${at50.toFixed(1)}×<small>OpenRouter's price</small></div>
+      <div class="n">average across all ${rows.length} models</div></div>`;
+
+  // scale
+  const lo = Math.log(0.04), hi = Math.log(1.1);
+  const TICKS = [0.05, 0.1, 0.2, 0.5, 1];
+
+  const host = document.getElementById('rows');
+  host.innerHTML = rows.map((r, i) => {
+    const cells = KEYS.map(k => {
+      const rk = r.rank[k];
+      const cls = rk === 1 ? ' first' : rk === 2 ? ' second' : '';
+      const pill = rk === 1 ? '<span class="pill p1">1ST</span>' : rk === 2 ? '<span class="pill p2">2ND</span>' : '';
+      const gap = r.p[k] / r.min - 1;
+      const d = rk === 1 ? 'cheapest' : '+' + Math.round(gap * 100) + '%';
+      return `<div class="cell${cls}"><div class="top-line">${pill}<span class="amt">${money(r.p[k])}</span></div><span class="d">${d}</span></div>`;
+    }).join('');
+    return `<div class="grid row"><div><div class="name">${r.name}${r.promo ? ' <span class="dg">†</span>' : ''}</div><div class="set">${r.set}</div></div><div class="track" data-i="${i}"></div>${cells}</div>`;
+  }).join('');
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const mk = (tag, a, parent, text) => { const n = document.createElementNS(NS, tag); for (const k in a) if (a[k] != null) n.setAttribute(k, a[k]); if (text != null) n.textContent = text; parent.appendChild(n); return n; };
+
+  const tracks = [...document.querySelectorAll('.track[data-i]')];
+  const W = tracks[0].getBoundingClientRect().width;
+  const pad = 16;
+  const x = v => pad + (Math.log(v) - lo) / (hi - lo) * (W - pad * 2);
+
+  tracks.forEach(t => {
+    const r = rows[+t.dataset.i];
+    const svg = mk('svg', { width: W, height: 70, style: 'position:absolute;inset:0' }, t);
+    for (const tk of TICKS) mk('line', { x1: x(tk), x2: x(tk), y1: 0, y2: 70, stroke: 'var(--grid)' }, svg);
+    const cy = 38;
+    mk('rect', { x: x(r.p.hf100) - 3, y: cy - 3.5, width: x(r.p.hf50) - x(r.p.hf100) + 6, height: 7, rx: 3.5, fill: 'var(--hf-band)' }, svg);
+    const order = [...KEYS].sort((a, b) => r.p[b] - r.p[a]);
+    for (const k of order) {
+      const cx = x(r.p[k]); const rk = r.rank[k];
+      if (rk <= 2) mk('circle', { cx, cy, r: 13, fill: rk === 1 ? 'rgba(47,210,122,0.14)' : 'none', stroke: 'var(--win)', 'stroke-width': rk === 1 ? 2.5 : 1.5, 'stroke-dasharray': rk === 1 ? null : '3.5 3', opacity: rk === 1 ? 1 : 0.75 }, svg);
+      if (k === 'hf100') mk('circle', { cx, cy, r: 6.5, fill: 'var(--hf)', stroke: 'var(--panel)', 'stroke-width': 2 }, svg);
+      if (k === 'hf75') mk('circle', { cx, cy, r: 5.5, fill: 'var(--panel)', stroke: 'var(--hf)', 'stroke-width': 3.4 }, svg);
+      if (k === 'hf50') mk('circle', { cx, cy, r: 5.5, fill: 'var(--panel)', stroke: 'var(--hf)', 'stroke-width': 1.8 }, svg);
+      if (k === 'or') mk('rect', { x: cx - 6, y: cy - 6, width: 12, height: 12, transform: `rotate(45 ${cx} ${cy})`, fill: 'var(--or)', stroke: 'var(--panel)', 'stroke-width': 2 }, svg);
+    }
+    const first = KEYS.find(k => r.rank[k] === 1);
+    mk('text', { x: x(r.p[first]), y: cy - 19, 'text-anchor': 'middle', fill: 'var(--win)', 'font-size': 12.5, 'font-weight': 700, 'font-family': 'inherit' }, svg, '1st');
+  });
+
+  const axis = document.getElementById('axis');
+  const asvg = mk('svg', { width: W, height: 34, style: 'position:absolute;inset:0' }, axis);
+  for (const tk of TICKS) mk('text', { x: x(tk), y: 22, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 13, 'font-family': 'inherit' }, asvg, '$' + (tk < 1 ? tk.toFixed(2) : '1.00'));
+  document.body.dataset.ready = '1';
+})();
+</script>
+</body>
+</html>

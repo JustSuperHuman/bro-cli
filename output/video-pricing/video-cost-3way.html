@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video generation cost · Higgsfield vs OpenRouter vs OpenLux</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --ring: rgba(11,11,11,0.10);
+    --hf: #2a78d6;
+    --hf-band: rgba(42,120,214,0.16);
+    --or: #eb6834;
+    --ol: #1baf7a;
+    --first-bg: #dff3df;
+    --first-ink: #006300;
+    --first-edge: #0ca30c;
+    --second-bg: #eef7ee;
+    --second-edge: #8ccf8c;
+    --shadow: 0 1px 2px rgba(11,11,11,0.04), 0 8px 24px rgba(11,11,11,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+      --hf: #3987e5; --hf-band: rgba(57,135,229,0.22); --or: #d95926; --ol: #199e70;
+      --first-bg: #12351a; --first-ink: #5fd35f; --first-edge: #0ca30c;
+      --second-bg: #172619; --second-edge: #2f6b34;
+      --shadow: none;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --hf: #3987e5; --hf-band: rgba(57,135,229,0.22); --or: #d95926; --ol: #199e70;
+    --first-bg: #12351a; --first-ink: #5fd35f; --first-edge: #0ca30c;
+    --second-bg: #172619; --second-edge: #2f6b34;
+    --shadow: none;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .viz-root { background: var(--page); color: var(--ink); min-height: 100vh; padding: 40px 24px 64px; line-height: 1.45; }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px 32px; margin-bottom: 28px; }
+  .eyebrow { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
+  h1 { font-size: 30px; line-height: 1.15; margin: 0 0 8px; font-weight: 650; letter-spacing: -0.01em; }
+  .sub { color: var(--ink-2); font-size: 15px; margin: 0; max-width: 680px; }
+
+  .seg { display: inline-flex; background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 3px; gap: 2px; }
+  .seg button { font: inherit; font-size: 13px; border: 0; background: transparent; color: var(--ink-2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); font-weight: 600; }
+  .seg-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 22px; }
+  .tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 14px; padding: 16px 18px; box-shadow: var(--shadow); }
+  .tile-top { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); font-weight: 600; }
+  .tile-value { font-size: 30px; font-weight: 650; margin-top: 6px; }
+  .tile-value small { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 4px; }
+  .tile-note { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+
+  .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 16px; padding: 22px 22px 18px; box-shadow: var(--shadow); margin-bottom: 22px; }
+  .card h2 { font-size: 17px; margin: 0 0 4px; font-weight: 650; }
+  .card .desc { font-size: 13px; color: var(--muted); margin: 0 0 14px; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13px; color: var(--ink-2); margin-bottom: 8px; align-items: center; }
+  .legend span.item { display: inline-flex; align-items: center; gap: 7px; }
+  .legend svg { overflow: visible; }
+
+  .chart { display: block; width: 100%; overflow: visible; }
+  .chart text { font-family: inherit; }
+  .chart .model { font-size: 13px; font-weight: 600; fill: var(--ink); }
+  .chart .setting { font-size: 11.5px; fill: var(--muted); }
+  .chart .tick { font-size: 11.5px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+  .chart .rank { font-size: 10.5px; font-weight: 700; fill: var(--first-ink); }
+  .chart .rowhit { fill: transparent; cursor: default; }
+  .chart .rowhit:hover { fill: var(--ring); }
+
+  .tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink); border: 1px solid var(--ring);
+    border-radius: 10px; padding: 10px 12px; font-size: 12.5px; box-shadow: 0 8px 28px rgba(0,0,0,0.18); min-width: 230px; opacity: 0; transition: opacity .08s; }
+  .tip b { display: block; font-size: 13px; margin-bottom: 6px; }
+  .tip .r { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; font-variant-numeric: tabular-nums; }
+  .tip .r span:first-child { color: var(--ink-2); }
+  .tip .r.first span:last-child { color: var(--first-ink); font-weight: 700; }
+  .tip .r.second span:last-child { font-weight: 600; }
+
+  .table-wrap { overflow-x: auto; margin: 0 -6px; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 14px; min-width: 820px; }
+  thead th { font-size: 12px; font-weight: 600; color: var(--ink-2); text-align: right; padding: 10px 8px; border-bottom: 1px solid var(--axis); vertical-align: bottom; }
+  thead th:first-child { text-align: left; }
+  thead tr.groups th { border-bottom: 0; padding-bottom: 2px; font-size: 13px; color: var(--ink); }
+  thead tr.groups th.hf { text-align: center; border-bottom: 2px solid var(--hf); }
+  thead .pv { display: inline-flex; align-items: center; gap: 6px; }
+  .gnote { display: block; font-weight: 400; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  tbody th { text-align: left; font-weight: 600; padding: 10px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  tbody th .setting { display: block; font-weight: 400; font-size: 12px; color: var(--muted); margin-top: 2px; }
+  tbody td { text-align: right; padding: 6px 6px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+  td.split, th.split { border-left: 1px solid var(--grid); }
+  .cell { display: inline-flex; flex-direction: column; align-items: flex-end; justify-content: center; min-width: 104px; min-height: 48px; padding: 6px 10px; border-radius: 9px; border: 1.5px solid transparent; }
+  .cell .amt { font-size: 14.5px; }
+  .cell .delta { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+  .cell.na .amt { color: var(--muted); font-size: 12.5px; }
+  .cell.first { background: var(--first-bg); border-color: var(--first-edge); }
+  .cell.first .amt { font-weight: 700; color: var(--first-ink); }
+  .cell.second { background: var(--second-bg); border-color: var(--second-edge); border-style: dashed; }
+  .cell.second .amt { font-weight: 650; }
+  .pill { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; border-radius: 99px; padding: 1px 7px; margin-bottom: 3px; }
+  .pill.p1 { background: var(--first-edge); color: #fff; }
+  .pill.p2 { background: transparent; color: var(--first-ink); border: 1px solid var(--second-edge); }
+  .dagger { color: var(--muted); font-weight: 400; }
+
+  .key { display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 12.5px; color: var(--ink-2); margin: 12px 2px 0; align-items: center; }
+  .key .cell { min-width: 0; min-height: 0; padding: 3px 9px; flex-direction: row; gap: 6px; }
+
+  .notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px 32px; font-size: 13px; color: var(--ink-2); }
+  .notes h3 { font-size: 13px; color: var(--ink); margin: 0 0 4px; }
+  .notes p { margin: 0 0 6px; }
+  .notes a { color: var(--hf); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  @media (max-width: 640px) {
+    .viz-root { padding: 24px 14px 48px; }
+    h1 { font-size: 24px; }
+    .card { padding: 16px 12px 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="viz-root" id="root">
+<div class="wrap">
+
+  <header>
+    <div>
+      <div class="eyebrow">Video generation pricing · Sep 28, 2026</div>
+      <h1>What one second of AI video actually costs</h1>
+      <p class="sub">Higgsfield Plus at 100%, 75% and 50% of its monthly credits used, against pay-as-you-go OpenRouter and OpenLux, for the same model and output settings. The cheapest and second-cheapest option for every model are highlighted.</p>
+    </div>
+    <div>
+      <div class="seg-label">Higgsfield Plus billing</div>
+      <div class="seg" role="group" aria-label="Higgsfield billing">
+        <button type="button" data-billing="monthly" aria-pressed="true">Monthly · $59</button>
+        <button type="button" data-billing="annual" aria-pressed="false">Annual · $47/mo</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="tiles" id="tiles" aria-label="Cheapest option counts"></section>
+
+  <section class="card" aria-labelledby="chart-title">
+    <h2 id="chart-title">Cost per generated second, by model</h2>
+    <p class="desc">USD per second of output · log scale, so each gridline step is a multiple · further left is cheaper · hover a row for exact prices</p>
+    <div class="legend" id="legend">
+      <span class="item"><svg width="54" height="12"><rect x="1" y="3" width="52" height="6" rx="3" fill="var(--hf-band)"/><circle cx="6" cy="6" r="5" fill="var(--hf)" stroke="var(--surface)" stroke-width="2"/><circle cx="27" cy="6" r="4.5" fill="var(--surface)" stroke="var(--hf)" stroke-width="3"/><circle cx="48" cy="6" r="4.5" fill="var(--surface)" stroke="var(--hf)" stroke-width="1.5"/></svg>Higgsfield · 100% → 75% → 50% of credits used</span>
+      <span class="item"><svg width="14" height="14"><rect x="2.5" y="2.5" width="9" height="9" transform="rotate(45 7 7)" fill="var(--or)" stroke="var(--surface)" stroke-width="2"/></svg>OpenRouter <span style="color:var(--muted)">(+5.5% credit fee)</span></span>
+      <span class="item"><svg width="14" height="14"><rect x="2" y="2" width="10" height="10" rx="2" fill="var(--ol)" stroke="var(--surface)" stroke-width="2"/></svg>OpenLux</span>
+      <span class="item"><svg width="16" height="16"><circle cx="8" cy="8" r="7" fill="none" stroke="var(--first-edge)" stroke-width="2"/></svg>1st / 2nd cheapest (labelled)</span>
+    </div>
+    <svg class="chart" id="chart" role="img" aria-labelledby="chart-title chart-desc">
+      <desc id="chart-desc">Dot plot of eleven video models. For each, the Higgsfield range from full to half credit usage, the OpenRouter price, and the OpenLux price. The full numbers are in the table below.</desc>
+    </svg>
+  </section>
+
+  <section class="card" aria-labelledby="table-title">
+    <h2 id="table-title">Full price table</h2>
+    <p class="desc">USD per generated second · % above the cheapest option shown under each price</p>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">Cost per generated second for each model on five options. The cheapest and second-cheapest option per model are marked.</caption>
+        <thead>
+          <tr class="groups">
+            <th rowspan="2" style="vertical-align:bottom;border-bottom:1px solid var(--axis)">Model<span class="gnote">Output settings</span></th>
+            <th colspan="3" class="hf split" id="hf-head">Higgsfield Plus · monthly <span class="gnote" id="hf-note">$59 / month · 1,200 credits</span></th>
+            <th rowspan="2" class="split" style="border-bottom:1px solid var(--axis)"><span class="pv"><svg width="12" height="12"><rect x="2" y="2" width="8" height="8" transform="rotate(45 6 6)" fill="var(--or)"/></svg>OpenRouter</span><span class="gnote">incl. 5.5% fee</span></th>
+            <th rowspan="2" class="split" style="border-bottom:1px solid var(--axis)"><span class="pv"><svg width="12" height="12"><rect x="1.5" y="1.5" width="9" height="9" rx="2" fill="var(--ol)"/></svg>OpenLux</span><span class="gnote">route multiplier applied</span></th>
+          </tr>
+          <tr>
+            <th class="split">100% used</th>
+            <th>75% used</th>
+            <th>50% used</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="key">
+      <span class="cell first"><span class="pill p1">1st</span>Cheapest</span>
+      <span class="cell second"><span class="pill p2">2nd</span>Second cheapest</span>
+      <span>— Not offered on that platform</span>
+      <span><span class="dagger">†</span> Higgsfield promotional quote</span>
+      <span><span class="dagger">‡</span> OpenLux discounted relay route (per-clip price)</span>
+    </div>
+  </section>
+
+  <section class="card notes" aria-label="Method and sources">
+    <div>
+      <h3>How the numbers are built</h3>
+      <p><b>Higgsfield:</b> live credit quote ÷ clip length × plan price ÷ 1,200 credits ÷ share of credits you actually use. Using 75% of your credits makes every second 1.33× dearer; 50% makes it 2×. Unlimited windows excluded.</p>
+      <p><b>OpenRouter:</b> published per-second (or per-token, converted at 720p/24 fps) rates plus the 5.5% credit-purchase fee.</p>
+      <p><b>OpenLux:</b> official upstream price × the route's group multiplier (OpenLux's own rule: at multiplier 0.65, $1 of official price costs $0.65). $1 of OpenLux credit costs $1. Wan 3.0 and both Veo rows come straight from OpenLux's catalogue; the other rows apply the multiplier to the official list rate (as listed on OpenRouter).</p>
+    </div>
+    <div>
+      <h3>Caveats</h3>
+      <p>‡ Veo on OpenLux runs through <code>Discounted-Gemini-1</code>, a fixed per-clip price ($0.056 per 8s Veo 3.1 clip, $0.042 for Fast) — an unofficial relay route; reliability and output limits aren't verified here.</p>
+      <p>Same resolution per row on every platform (720p unless noted). Taxes, card fees and OpenLux bulk top-up discounts (1–7.5%) excluded. Published prices, not paid benchmarks.</p>
+      <p>Sources: <a href="https://higgsfield.ai/ai/video">Higgsfield quotes</a> · <a href="https://higgsfield.ai/pricing">plans</a> · <a href="https://openrouter.ai/api/v1/videos/models">OpenRouter rates</a> · <a href="https://openrouter.ai/pricing">fee</a> · <a href="https://api.openlux.ai/api/pricing">OpenLux catalogue</a> · <a href="https://doc.openlux.ai">group-multiplier rule</a></p>
+    </div>
+  </section>
+
+</div>
+<div class="tip" id="tip" role="tooltip"></div>
+</div>
+
+<script>
+(() => {
+  // credits/seconds: Higgsfield live quote. router: OpenRouter list $/s before fee.
+  // lux: OpenLux $/s (null = not offered). luxNote marks the discounted per-clip route.
+  const MODELS = [
+    { name: 'Veo 3.1 Lite',     set: '720p · audio · 8s',  credits: 12,   seconds: 8, router: 0.05,    lux: null },
+    { name: 'MiniMax H3 Max',   set: '768p · silent · 5s', credits: 12.5, seconds: 5, router: 0.08,    lux: 0.08 * 0.9 },
+    { name: 'Wan 3.0',          set: '720p · audio · 5s',  credits: 9,    seconds: 5, router: 0.10,    lux: 0.01 * 10 * 0.7, promo: true },
+    { name: 'Veo 3.1 Fast',     set: '720p · audio · 8s',  credits: 32,   seconds: 8, router: 0.10,    lux: 0.576 * 0.07353 / 8, luxNote: true },
+    { name: 'Kling 3.0',        set: '720p · audio · 5s',  credits: 10,   seconds: 5, router: 0.126,   lux: 0.126 * 0.85 },
+    { name: 'MiniMax H3',       set: '2K · audio · 5s',    credits: 10,   seconds: 5, router: 0.13,    lux: 0.13 * 0.9, promo: true },
+    { name: 'Grok Imagine 1.5', set: '720p · audio · 5s',  credits: 22.5, seconds: 5, router: 0.14,    lux: 0.14 * 0.44118 },
+    { name: 'Seedance 2.0',     set: '720p · audio · 8s',  credits: 36,   seconds: 8, router: 0.1512,  lux: 0.1512 * 0.65, promo: true },
+    { name: 'FLUX.3 Video',     set: '720p · audio · 5s',  credits: 27.5, seconds: 5, router: 0.17,    lux: null },
+    { name: 'Seedance 2.5',     set: '720p · audio · 5s',  credits: 35,   seconds: 5, router: 0.23112, lux: 0.23112 * 0.65 },
+    { name: 'Veo 3.1',          set: '720p · audio · 8s',  credits: 80,   seconds: 8, router: 0.40,    lux: 0.768 * 0.07353 / 8, luxNote: true }
+  ];
+  const PLAN = { monthly: 59, annual: 47 };
+  const OPTIONS = [
+    { key: 'hf100', label: 'Higgsfield · 100% used', short: 'Higgsfield 100%', provider: 'hf' },
+    { key: 'hf75',  label: 'Higgsfield · 75% used',  short: 'Higgsfield 75%',  provider: 'hf' },
+    { key: 'hf50',  label: 'Higgsfield · 50% used',  short: 'Higgsfield 50%',  provider: 'hf' },
+    { key: 'or',    label: 'OpenRouter',             short: 'OpenRouter',      provider: 'or' },
+    { key: 'ol',    label: 'OpenLux',                short: 'OpenLux',         provider: 'ol' }
+  ];
+  let billing = 'monthly';
+
+  const money = v => v == null ? '—' : '$' + (v < 0.01 ? v.toFixed(4) : v.toFixed(3));
+
+  function compute() {
+    return MODELS.map(m => {
+      const perCreditSecond = m.credits / m.seconds * PLAN[billing] / 1200;
+      const p = { hf100: perCreditSecond, hf75: perCreditSecond / 0.75, hf50: perCreditSecond / 0.5, or: m.router * 1.055, ol: m.lux };
+      const ranked = OPTIONS.filter(o => p[o.key] != null).sort((a, b) => p[a.key] - p[b.key]);
+      const rank = {};
+      ranked.forEach((o, i) => { rank[o.key] = i + 1; });
+      return { ...m, p, rank, min: p[ranked[0].key] };
+    });
+  }
+
+  // ---- tiles ----
+  function renderTiles(rows) {
+    const wins = { hf: 0, or: 0, ol: 0 }, podium = { hf: 0, or: 0, ol: 0 };
+    for (const r of rows) for (const o of OPTIONS) {
+      if (r.rank[o.key] === 1) wins[o.provider]++;
+      if (r.rank[o.key] <= 2) podium[o.provider]++;
+    }
+    const hfAvgGap = rows.reduce((s, r) => s + r.p.hf50 / r.p.hf100, 0) / rows.length;
+    const olRows = rows.filter(r => r.p.ol != null);
+    const olSaving = olRows.reduce((s, r) => s + (1 - r.p.ol / r.p.or), 0) / olRows.length;
+    const tile = (swatch, name, value, total, note) => `
+      <div class="tile"><div class="tile-top">${swatch}${name}</div>
+      <div class="tile-value">${value}<small>${total}</small></div><div class="tile-note">${note}</div></div>`;
+    const sw = c => `<svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="${c}"/></svg>`;
+    document.getElementById('tiles').innerHTML =
+      tile(sw('var(--ol)'), 'OpenLux · cheapest', wins.ol, ` of ${rows.length} models`, `in the top two for ${podium.ol} · offers ${olRows.length} of ${rows.length} models`) +
+      tile(sw('var(--hf)'), 'Higgsfield · cheapest', wins.hf, ` of ${rows.length} models`, `in the top two for ${podium.hf} models (any usage level)`) +
+      tile(sw('var(--or)'), 'OpenRouter · cheapest', wins.or, ` of ${rows.length} models`, `in the top two for ${podium.or} models`) +
+      tile(sw('var(--muted)'), 'OpenLux vs OpenRouter', Math.round(olSaving * 100) + '%', ' cheaper', `average across the ${olRows.length} models both offer`);
+  }
+
+  // ---- table ----
+  function renderTable(rows) {
+    document.getElementById('hf-head').firstChild.nodeValue = `Higgsfield Plus · ${billing} `;
+    document.getElementById('hf-note').textContent = billing === 'monthly' ? '$59 / month · 1,200 credits' : '$47 / month billed yearly ($564) · 1,200 credits/mo';
+    const tbody = document.getElementById('tbody');
+    tbody.innerHTML = rows.map(r => {
+      const cells = OPTIONS.map((o, i) => {
+        const v = r.p[o.key];
+        const split = (i === 0 || i >= 3) ? ' class="split"' : '';
+        if (v == null) return `<td${split}><span class="cell na" aria-label="Not offered"><span class="amt">Not offered</span></span></td>`;
+        const rk = r.rank[o.key];
+        const cls = rk === 1 ? ' first' : rk === 2 ? ' second' : '';
+        const pill = rk === 1 ? '<span class="pill p1">1st</span>' : rk === 2 ? '<span class="pill p2">2nd</span>' : '';
+        const mark = o.key === 'ol' && r.luxNote ? ' <span class="dagger">‡</span>' : '';
+        const gap = v / r.min - 1;
+        const delta = rk === 1 ? 'cheapest' : '+' + (gap >= 9.995 ? Math.round(gap * 100).toLocaleString() : (gap * 100).toFixed(0)) + '%';
+        const label = `${o.label}: ${money(v)} per second` + (rk <= 2 ? `, ${rk === 1 ? 'cheapest' : 'second cheapest'}` : '') + (rk === 1 ? '' : `, ${delta} vs cheapest`);
+        return `<td${split}><span class="cell${cls}" aria-label="${label}">${pill}<span class="amt">${money(v)}${mark}</span><span class="delta">${delta}</span></span></td>`;
+      }).join('');
+      return `<tr><th scope="row">${r.name}${r.promo ? ' <span class="dagger">†</span>' : ''}<span class="setting">${r.set}</span></th>${cells}</tr>`;
+    }).join('');
+  }
+
+  // ---- chart ----
+  const svg = document.getElementById('chart');
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs, parent, text) => {
+    const n = document.createElementNS(NS, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    if (text != null) n.textContent = text;
+    (parent || svg).appendChild(n);
+    return n;
+  };
+  const TICKS = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1];
+
+  function drawChart(rows) {
+    const desc = svg.querySelector('desc');
+    svg.replaceChildren(desc);
+    const width = svg.getBoundingClientRect().width || 900;
+    const narrow = width < 620;
+    const left = narrow ? 8 : 176, right = 24, top = 10;
+    const rowH = narrow ? 72 : 60;
+    const plotTop = top;
+    const plotH = rows.length * rowH;
+    const height = plotTop + plotH + 34;
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('height', height);
+
+    const lo = Math.log(0.004), hi = Math.log(1.25);
+    const x0 = left + 6, x1 = width - right;
+    const x = v => x0 + (Math.log(v) - lo) / (hi - lo) * (x1 - x0);
+
+    const grid = el('g', {});
+    for (const t of narrow ? [0.005, 0.02, 0.1, 0.5] : TICKS) {
+      el('line', { x1: x(t), x2: x(t), y1: plotTop, y2: plotTop + plotH, stroke: 'var(--grid)', 'stroke-width': 1 }, grid);
+      el('text', { x: x(t), y: plotTop + plotH + 18, 'text-anchor': 'middle', class: 'tick' }, grid, '$' + (t < 0.01 ? t.toFixed(3) : t < 1 ? String(t).replace(/^0/, '0') : t.toFixed(2)));
+    }
+    el('line', { x1: x0, x2: x1, y1: plotTop + plotH, y2: plotTop + plotH, stroke: 'var(--axis)', 'stroke-width': 1 });
+
+    rows.forEach((r, i) => {
+      const yTop = plotTop + i * rowH;
+      const cy = yTop + (narrow ? 46 : rowH / 2 + 2);
+      const g = el('g', {});
+      if (i > 0) el('line', { x1: narrow ? 0 : 0, x2: x1, y1: yTop, y2: yTop, stroke: 'var(--grid)', 'stroke-width': 1, opacity: 0.6 }, g);
+      if (narrow) {
+        el('text', { x: 8, y: yTop + 17, class: 'model' }, g, r.name + (r.promo ? ' †' : ''));
+      } else {
+        el('text', { x: 0, y: cy - 3, class: 'model' }, g, r.name + (r.promo ? ' †' : ''));
+        el('text', { x: 0, y: cy + 13, class: 'setting' }, g, r.set);
+      }
+
+      // Higgsfield band from 100% to 50% usage
+      el('rect', { x: x(r.p.hf100) - 3, y: cy - 3, width: x(r.p.hf50) - x(r.p.hf100) + 6, height: 6, rx: 3, fill: 'var(--hf-band)' }, g);
+
+      const marks = [];
+      const ring = (o, cx) => {
+        const rk = r.rank[o.key];
+        if (rk > 2) return;
+        el('circle', { cx, cy, r: 11, fill: 'none', stroke: 'var(--first-edge)', 'stroke-width': rk === 1 ? 2.5 : 1.5, 'stroke-dasharray': rk === 1 ? null : '3 2.5' }, g);
+        marks.push({ rk, cx, v: r.p[o.key] });
+      };
+      // draw expensive first so cheap markers sit on top
+      const order = OPTIONS.filter(o => r.p[o.key] != null).sort((a, b) => r.p[b.key] - r.p[a.key]);
+      for (const o of order) {
+        const cx = x(r.p[o.key]);
+        ring(o, cx);
+        if (o.key === 'hf100') el('circle', { cx, cy, r: 5.5, fill: 'var(--hf)', stroke: 'var(--surface)', 'stroke-width': 2 }, g);
+        if (o.key === 'hf75') el('circle', { cx, cy, r: 5, fill: 'var(--surface)', stroke: 'var(--hf)', 'stroke-width': 3.2 }, g);
+        if (o.key === 'hf50') el('circle', { cx, cy, r: 5, fill: 'var(--surface)', stroke: 'var(--hf)', 'stroke-width': 1.6 }, g);
+        if (o.key === 'or') el('rect', { x: cx - 5, y: cy - 5, width: 10, height: 10, transform: `rotate(45 ${cx} ${cy})`, fill: 'var(--or)', stroke: 'var(--surface)', 'stroke-width': 2 }, g);
+        if (o.key === 'ol') el('rect', { x: cx - 5.5, y: cy - 5.5, width: 11, height: 11, rx: 2.5, fill: 'var(--ol)', stroke: 'var(--surface)', 'stroke-width': 2 }, g);
+      }
+      // rank labels: 1st above; 2nd above too unless it would collide, then below
+      const m1 = marks.find(m => m.rk === 1), m2 = marks.find(m => m.rk === 2);
+      if (m1) el('text', { x: m1.cx, y: cy - 15, 'text-anchor': 'middle', class: 'rank' }, g, '1st ' + money(m1.v));
+      if (m2) {
+        const clash = m1 && Math.abs(m2.cx - m1.cx) < 78;
+        el('text', { x: m2.cx, y: clash ? cy + 24 : cy - 15, 'text-anchor': 'middle', class: 'rank', opacity: 0.8 }, g, '2nd');
+      }
+
+      const hit = el('rect', { x: 0, y: yTop + 1, width: x1, height: rowH - 2, rx: 6, class: 'rowhit' }, svg);
+      hit.addEventListener('mousemove', e => showTip(e, r));
+      hit.addEventListener('mouseleave', hideTip);
+      svg.insertBefore(hit, g);
+    });
+  }
+
+  const tip = document.getElementById('tip');
+  function showTip(e, r) {
+    const lines = OPTIONS.map(o => {
+      const v = r.p[o.key];
+      const rk = r.rank[o.key];
+      const cls = rk === 1 ? 'first' : rk === 2 ? 'second' : '';
+      const tag = rk === 1 ? ' · 1st' : rk === 2 ? ' · 2nd' : '';
+      return `<div class="r ${cls}"><span>${o.short}</span><span>${v == null ? 'not offered' : money(v) + '/s' + tag}</span></div>`;
+    }).join('');
+    tip.innerHTML = `<b>${r.name} <span style="font-weight:400;color:var(--muted)">${r.set}</span></b>${lines}`;
+    const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+    let lx = e.clientX + pad, ly = e.clientY + pad;
+    if (lx + w > innerWidth - 8) lx = e.clientX - w - pad;
+    if (ly + h > innerHeight - 8) ly = e.clientY - h - pad;
+    tip.style.left = lx + 'px'; tip.style.top = ly + 'px'; tip.style.opacity = 1;
+  }
+  function hideTip() { tip.style.opacity = 0; }
+
+  function render() {
+    const rows = compute();
+    renderTiles(rows);
+    renderTable(rows);
+    drawChart(rows);
+  }
+  for (const b of document.querySelectorAll('.seg button')) b.addEventListener('click', () => {
+    billing = b.dataset.billing;
+    for (const x of document.querySelectorAll('.seg button')) x.setAttribute('aria-pressed', String(x === b));
+    render();
+  });
+  new ResizeObserver(() => drawChart(compute())).observe(svg);
+  render();
+})();
+</script>
+</body>
+</html>
