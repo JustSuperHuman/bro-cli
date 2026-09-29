@@ -37,10 +37,12 @@ fn find_bro() -> PathBuf {
     here.filter(|p| p.is_file()).or_else(|| which(&exe("bro"))).unwrap_or_else(|| PathBuf::from(exe("bro")))
 }
 
-/// The fork installs a per-user `wt.exe` shim that opens the dev build.
+/// The fork: its `wtd.exe` app alias, else the per-user `wt.exe` shim that forwards to it.
 fn fork_terminal() -> Option<PathBuf> {
-    let shim = dirs::data_local_dir()?.join("Programs").join("WindowsTerminalDevShim").join("wt.exe");
-    shim.is_file().then_some(shim)
+    let local = dirs::data_local_dir()?;
+    [local.join("Microsoft").join("WindowsApps").join("wtd.exe"), local.join("Programs").join("WindowsTerminalDevShim").join("wt.exe")]
+        .into_iter()
+        .find(|p| p.exists())
 }
 
 /// Only the fork understands `--app`; assume the shim is the fork, anything else (BRO_TERMINAL) is trusted.
@@ -54,13 +56,18 @@ fn app_mode_args(bro: &Path, cwd: &Path, icon: Option<&Path>, args: &[String]) -
         v.extend(["--app-icon".into(), i.display().to_string()]);
     }
     v.extend(["-d".into(), cwd.display().to_string(), "--".into(), bro.display().to_string()]);
-    v.extend(args.iter().cloned());
+    v.extend(args.iter().map(|a| escape_wt(a)));
     v
+}
+
+/// Terminal splits its command line into commands at `;` — keep bro's arguments whole.
+fn escape_wt(a: &str) -> String {
+    a.replace(';', r"\;")
 }
 
 fn plain_wt_args(bro: &Path, cwd: &Path, args: &[String]) -> Vec<String> {
     let mut v = vec!["-w".into(), "new".into(), "--title".into(), "bro".into(), "-d".into(), cwd.display().to_string(), "--".into(), bro.display().to_string()];
-    v.extend(args.iter().cloned());
+    v.extend(args.iter().map(|a| escape_wt(a)));
     v
 }
 
@@ -99,5 +106,6 @@ mod tests {
         let dash = a.iter().position(|s| s == "--").unwrap();
         assert_eq!(a[dash + 1], "C:/bin/bro.exe");
         assert_eq!(a.last().unwrap(), "F:/code/x");
+        assert_eq!(escape_wt("a;b"), r"a\;b");
     }
 }
