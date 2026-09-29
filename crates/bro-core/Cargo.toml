@@ -1,0 +1,23 @@
+[package]
+name = "bro-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "bro data layer: config, profiles, providers, sessions, usage, credentials, launch specs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+dirs.workspace = true
+parking_lot.workspace = true
+base64.workspace = true
+sha2.workspace = true
+rand.workspace = true
+chrono.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

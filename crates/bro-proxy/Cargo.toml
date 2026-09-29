@@ -1,0 +1,29 @@
+[package]
+name = "bro-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Anthropic Messages <-> OpenAI (Chat Completions / Responses) translating proxy with Claude account pool failover"
+
+[dependencies]
+bro-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+http.workspace = true
+async-stream.workspace = true
+tokio-stream.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
