@@ -8,6 +8,8 @@
 //! Contract rule: the public items declared in this file and its modules are the
 //! API other crates build against. Add freely; do not rename or remove.
 
+pub mod util;
+pub mod http;
 pub mod paths;
 pub mod config;
 pub mod providers;
