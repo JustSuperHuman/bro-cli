@@ -37,7 +37,7 @@ impl Client {
                             None => break,
                         },
                         m = rx.next() => match m {
-                            Some(Ok(Message::Text(t))) => { if let Ok(v) = serde_json::from_str::<Value>(&t) { if in_tx.send(v).is_err() { break; } } }
+                            Some(Ok(Message::Text(t))) => { if let Ok(v) = serde_json::from_str::<Value>(&t) && in_tx.send(v).is_err() { break; } }
                             Some(Ok(_)) => {}
                             _ => break,
                         },
