@@ -167,7 +167,7 @@ pub struct ProxySettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: "ultra".into(),
+            theme: "graphite".into(),
             prefix: "ctrl+space".into(),
             shell: None,
             nerd_font: false,
@@ -329,7 +329,7 @@ mod tests {
     fn settings_defaults_and_round_trip() {
         let _sb = sandbox();
         let s = Settings::load();
-        assert_eq!(s.theme, "ultra");
+        assert_eq!(s.theme, "graphite");
         assert_eq!(s.prefix, "ctrl+space");
         assert!(!s.nerd_font);
         let mut s2 = s.clone();
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(back.keys["palette"], "ctrl+k");
         assert_eq!(back.bridge.port, 10001);
         std::fs::write(paths::settings_path(), "theme = 3").unwrap();
-        assert_eq!(Settings::load().theme, "ultra");
+        assert_eq!(Settings::load().theme, "graphite");
     }
 
     #[test]

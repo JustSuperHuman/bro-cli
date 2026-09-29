@@ -1,7 +1,7 @@
 //! Colour themes (ported from z4-oriel). A theme sets a handful of colours; background and body text come from
 //! the terminal itself (`Color::Reset`) so bro looks native anywhere.
 //!
-//! * built-in palettes (oriel's, `ultra` — the animated default — included)
+//! * built-in palettes: `graphite` (the calm, neutral default), `paper` (light), oriel's and `ultra`
 //! * `terminal`: ANSI colours only, so it follows the terminal's own theme
 //! * your own: `~/.bro/themes/<name>.toml`, live-reloaded when the file changes:
 //!
@@ -45,6 +45,8 @@ pub struct Theme {
 type Palette = (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str, &'static str, &'static str, &'static str);
 
 const PALETTES: &[Palette] = &[
+    // neutral: greys with a cool off-white accent — the harness colours carry the colour
+    ("graphite", "#d9dde4", "#9fb4cc", "#34363b", "#7c7f87", "#4a4d55", "#e3c27d", "#8fcf9c", "#ef7b7b"),
     ("ultra", "#b48cff", "#8be9fd", "#3d3852", "#7d7896", "#5c5480", "#ff9ad5", "#7dffc8", "#ff6b9d"),
     ("oriel", "#d4884a", "#ffd2a8", "#3c3c3c", "#6e6e6e", "#555555", "#e6b673", "#9cc46a", "#e0694a"),
     ("ember", "#ff5f3a", "#ffc7a8", "#4a2a24", "#7a5c55", "#6a3a30", "#ff9b6b", "#c2cc5a", "#ff4a3a"),
@@ -59,7 +61,7 @@ const PALETTES: &[Palette] = &[
 ];
 
 /// The default theme name.
-pub const DEFAULT: &str = "ultra";
+pub const DEFAULT: &str = "graphite";
 
 /// Every theme you can pick: built-ins, `terminal`, then your own files.
 pub fn names() -> Vec<String> {
@@ -75,6 +77,7 @@ pub fn names() -> Vec<String> {
 /// The themes that come with bro.
 pub fn builtin_names() -> Vec<String> {
     let mut v: Vec<String> = PALETTES.iter().map(|p| p.0.to_string()).collect();
+    v.insert(1, "paper".into());
     v.push("terminal".into());
     v
 }
@@ -115,6 +118,9 @@ fn builtin(name: &str) -> Theme {
     if name == "terminal" {
         return terminal();
     }
+    if name == "paper" {
+        return paper();
+    }
     let p = PALETTES.iter().find(|p| p.0 == name).unwrap_or(&PALETTES[0]);
     let c = |s| hex(s).unwrap_or(Color::Reset);
     // borders and hints lean grey so the theme colour is saved for what matters
@@ -132,6 +138,35 @@ fn builtin(name: &str) -> Theme {
         good: c(p.7),
         danger: c(p.8),
         animated: p.0 == "ultra",
+    }
+}
+
+/// Light: bro paints its own white background (and the sessions' default colours with it).
+fn paper() -> Theme {
+    let c = |s| hex(s).unwrap_or(Color::Reset);
+    Theme {
+        name: "paper".into(),
+        bg: c("#fbfbfa"),
+        fg: c("#24292f"),
+        accent: c("#1f2328"),
+        shine: c("#0969da"),
+        frame: c("#d0d7de"),
+        muted: c("#6e7781"),
+        user: c("#dbe4ee"),
+        inline: c("#9a6700"),
+        good: c("#1a7f37"),
+        danger: c("#cf222e"),
+        animated: false,
+    }
+}
+
+impl Theme {
+    /// A light theme (dark text on a painted light background).
+    pub fn is_light(&self) -> bool {
+        match self.bg {
+            Color::Rgb(r, g, b) => (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000 > 140,
+            _ => false,
+        }
     }
 }
 
@@ -338,7 +373,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         TEST_DIR.with(|d| *d.borrow_mut() = Some(dir.path().to_path_buf()));
         assert!(get("ultra").animated);
-        assert_eq!(get("nope").name, "ultra");
+        assert_eq!(get("nope").name, "graphite", "unknown names fall back to the default");
+        assert!(!get("graphite").animated && !get("graphite").is_light());
+        assert!(get("paper").is_light() && names().contains(&"paper".to_string()));
         assert!(names().contains(&"terminal".to_string()));
         std::fs::write(dir.path().join("mine.toml"), "base = \"ocean\"\naccent = \"#ff0000\"\nrainbow = true\nacent = \"x\"\n").unwrap();
         let t = get("mine");

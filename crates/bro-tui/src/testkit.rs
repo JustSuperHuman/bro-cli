@@ -103,7 +103,8 @@ pub fn save_html(buf: &Buffer, path: &std::path::Path) {
                 st.push_str("font-weight:bold;");
             }
             if c.modifier.contains(Modifier::DIM) {
-                st.push_str("opacity:.6;");
+                // fade the text only (opacity would fade a painted background too)
+                fg = format!("color-mix(in srgb, {fg} 60%, transparent)");
             }
             if c.modifier.contains(Modifier::ITALIC) {
                 st.push_str("font-style:italic;");

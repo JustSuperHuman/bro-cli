@@ -168,7 +168,7 @@ fn palette_runs_actions_and_previews_themes() {
     assert_eq!(a.theme.name, "ocean", "live preview");
     let _ = shot(&mut a, "palette");
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
-    assert_eq!(a.theme.name, "ultra", "restored on esc");
+    assert_eq!(a.theme.name, crate::theme::DEFAULT, "restored on esc");
 }
 
 #[test]
@@ -498,4 +498,14 @@ fn launcher_works_with_the_mouse() {
     let _ = draw(&mut a);
     a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 0, row: 0, modifiers: KeyModifiers::NONE });
     assert!(matches!(a.overlay, Overlay::None));
+}
+
+#[test]
+fn themes_render_graphite_by_default_and_paper() {
+    let mut a = app(true);
+    assert_eq!(a.theme.name, "graphite");
+    let _ = shot(&mut a, "theme-graphite");
+    a.theme = crate::theme::get("paper");
+    let s = shot(&mut a, "theme-paper");
+    assert!(s.contains("bro-cli-v2"));
 }

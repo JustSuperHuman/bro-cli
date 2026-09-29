@@ -362,6 +362,24 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// A session colour in the current theme: default fg/bg follow a painted theme background, and ANSI white text
+/// is darkened on light themes.
+fn themed(c: vt100::Color, fg: bool, t: &crate::theme::Theme) -> Color {
+    let painted = !matches!(t.bg, Color::Reset);
+    match c {
+        vt100::Color::Default if painted => if fg { t.fg } else { t.bg },
+        vt100::Color::Idx(7 | 15) if fg && t.is_light() => t.fg,
+        vt100::Color::Rgb(r, g, b) if fg && t.is_light() && (r as u32 + g as u32 + b as u32) > 690 => t.fg,
+        // dark-mode CLIs shade blocks with dark greys / dark tints: flip those to light tints
+        vt100::Color::Idx(i @ 232..=243) if !fg && t.is_light() => Color::Indexed(255 - (i - 232)),
+        vt100::Color::Idx(0 | 8) if !fg && t.is_light() => crate::theme::mix(t.bg, t.fg, 0.08),
+        vt100::Color::Rgb(r, g, b) if !fg && t.is_light() && (r as u32 + g as u32 + b as u32) < 240 => {
+            crate::theme::mix(Color::Rgb(r, g, b), t.bg, 0.82)
+        }
+        other => color(other),
+    }
+}
+
 fn color(c: vt100::Color) -> Color {
     match c {
         vt100::Color::Default => Color::Reset,
@@ -486,7 +504,7 @@ impl Pane for Term {
                 if cell.inverse() {
                     m |= Modifier::REVERSED;
                 }
-                let style = Style::default().fg(color(cell.fgcolor())).bg(color(cell.bgcolor())).add_modifier(m);
+                let style = Style::default().fg(themed(cell.fgcolor(), true, cx.theme)).bg(themed(cell.bgcolor(), false, cx.theme)).add_modifier(m);
                 let s = cell.contents();
                 if let Some(bc) = buf.cell_mut(Position { x: area.x + col, y: area.y + row }) {
                     bc.set_symbol(if s.is_empty() { " " } else { s });

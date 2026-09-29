@@ -23,7 +23,7 @@ impl App {
         let area = f.area();
         let t = self.theme.clone();
         if !matches!(t.bg, ratatui::style::Color::Reset) {
-            f.render_widget(Block::default().style(Style::default().bg(t.bg)), area);
+            f.render_widget(Block::default().style(Style::default().bg(t.bg).fg(t.fg)), area);
         }
         let side_w = if self.sidebar && area.width >= 72 { (area.width / 4).clamp(30, 40) } else { 0 };
         self.body = Rect { x: area.x + side_w, width: area.width - side_w, ..area };
