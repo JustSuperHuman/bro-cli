@@ -24,6 +24,8 @@ bytes.workspace = true
 http.workspace = true
 async-stream.workspace = true
 tokio-stream.workspace = true
+dirs.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
