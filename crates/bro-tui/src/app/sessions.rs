@@ -150,7 +150,8 @@ impl App {
                 }
             }
             BridgeCommand::Create { req, reply } => {
-                let cwd = req.cwd.clone().filter(|c| c.is_dir()).or_else(dirs::home_dir).unwrap_or_default();
+                // no folder from the phone → the current project, like alt+n
+                let cwd = req.cwd.clone().filter(|c| c.is_dir()).or_else(|| self.current_project()).or_else(dirs::home_dir).unwrap_or_default();
                 match create_target(req.profile_id.as_deref()) {
                     Some((harness, profile_id)) => {
                         let spec = LaunchSpec { harness, profile_id, provider_id: None, model: None, cwd, resume: None, permission: Permission::Default, browser: BrowserMode::Off, extra_args: req.args.clone() };
@@ -163,7 +164,7 @@ impl App {
                         let here = self.cur;
                         let id = match req.shell.clone() {
                             Some(shell) => {
-                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: shell.clone(), name: req.title.clone(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
+                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
                                 let term = Term::new(meta, Spawn { program: shell, args: req.args.clone(), ..Spawn::default() }, self.svc.clone());
                                 self.new_tab(Box::new(term))
                             }

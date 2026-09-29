@@ -433,7 +433,8 @@ impl Pane for Term {
         }
         self.last_scan = Instant::now();
         self.scan();
-        let title = self.meta.name.clone().or_else(|| self.program_title());
+        // shells title their window with their own exe path — that's noise, keep bro's name for them
+        let title = self.meta.name.clone().or_else(|| self.program_title().filter(|t| !looks_like_exe_path(t))).or_else(|| Some(self.meta.label.clone()));
         if title.is_some() && title != self.title_sent {
             if let Some(t) = &title {
                 self.svc.bridge_title(&self.meta.sid, t);
@@ -549,5 +550,22 @@ impl Pane for Term {
     }
     fn as_term_ref(&self) -> Option<&Term> {
         Some(self)
+    }
+}
+
+/// "C:\Program Files\PowerShell\pwsh.exe", "/usr/bin/bash" — a program path, not a useful title.
+fn looks_like_exe_path(t: &str) -> bool {
+    let t = t.trim();
+    let lower = t.to_ascii_lowercase();
+    (lower.ends_with(".exe") || t.starts_with('/')) && !t.contains(' ') || lower.ends_with(".exe") && (t.contains(":\\") || t.contains(":/"))
+}
+
+#[cfg(test)]
+mod title_tests {
+    #[test]
+    fn exe_paths_are_not_titles() {
+        assert!(super::looks_like_exe_path(r"C:\Program Files\PowerShell\7\pwsh.exe"));
+        assert!(super::looks_like_exe_path("/usr/bin/bash"));
+        assert!(!super::looks_like_exe_path("✳ Fix the flaky test"));
     }
 }
