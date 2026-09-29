@@ -601,7 +601,7 @@ mod tests {
         // 20 rows = 4 bands of 6 → 3 band separators
         assert_eq!(s.matches('-').count(), 3);
         // body is only sixel data characters and controls
-        let body = &s[s.find("100;100;100").unwrap() + 11..s.len() - 2];
+        let body = &s[s.find("85;47;34").unwrap() + 8..s.len() - 2];
         assert!(body.chars().all(|c| ('?'..='~').contains(&c) || "#!$-0123456789".contains(c)), "{body:?}");
     }
 
