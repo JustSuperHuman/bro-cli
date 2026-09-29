@@ -309,6 +309,8 @@ impl App {
         let Some(past) = st.past.ready() else { return vec![] };
         let mut v: Vec<crate::continue_picker::Entry> = past
             .iter()
+        // show what we have now; a fresh scan lands a moment later and updates the open picker
+        self.svc.refresh_sessions();
             .enumerate()
             .filter_map(|(idx, s)| {
                 let pk = s.project.clone().or_else(|| s.cwd.as_ref().map(|c| self.svc.project_for(c)))?;
@@ -354,7 +356,7 @@ impl App {
         self.refresh_continue();
     }
 
-    fn refresh_continue(&mut self) {
+    pub(crate) fn refresh_continue(&mut self) {
         let entries = self.continue_entries();
         if let Overlay::Continue(p) = &mut self.overlay {
             p.set_entries(entries);

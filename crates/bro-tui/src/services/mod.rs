@@ -275,6 +275,15 @@ impl Services {
         workers::spawn_data(self);
     }
 
+    /// Re-scan earlier sessions in the background (the continue picker asks for this when it opens).
+    pub fn refresh_sessions(&self) {
+        if self.is_demo() {
+            return;
+        }
+        let svc = self.clone();
+        std::thread::spawn(move || workers::load_past(&svc));
+    }
+
     /// Fetch usage now (the background refresher also runs every 60 s).
     pub fn refresh_usage(&self) {
         if self.is_demo() {

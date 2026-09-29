@@ -538,7 +538,12 @@ impl App {
                     }
                 }
             }
-            Event::Services => {}
+            Event::Services => {
+                // new data (e.g. the re-scan the continue picker asked for): refresh its list in place
+                if matches!(self.overlay, Overlay::Continue(_)) {
+                    self.refresh_continue();
+                }
+            }
             Event::Launched(l) => self.launched(*l),
             Event::Bridge(c) => self.bridge_command(c),
             Event::BridgeStarted => {

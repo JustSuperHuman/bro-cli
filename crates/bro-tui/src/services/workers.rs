@@ -51,6 +51,11 @@ pub(super) fn load_data(svc: &Services) {
     svc.push_bridge_profiles();
     load_models(svc);
     // past sessions can take a while on a cold cache: publish separately
+    load_past(svc);
+}
+
+/// Re-scan earlier sessions (cheap once the on-disk caches are warm) and publish them.
+pub(super) fn load_past(svc: &Services) {
     let past = guard("sessions::list", || bro_core::sessions::list(&ListOpts { limit: 400, harnesses: vec![] }));
     svc.update(|st| st.past = avail(past, &mut st.issues));
 }
