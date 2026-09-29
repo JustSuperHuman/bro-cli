@@ -28,6 +28,8 @@ vt100.workspace = true
 notify.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
+png.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

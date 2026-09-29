@@ -140,6 +140,8 @@ pub struct Settings {
     pub nerd_font: bool,
     /// Sidebar usage block shows every profile (true) or just the Claude / Codex totals (false)
     pub usage_expanded: bool,
+    /// Harness logos as images: "auto" (detect the terminal), "sixel", "kitty", "iterm" or "text"
+    pub icons: String,
     pub bridge: BridgeSettings,
     pub proxy: ProxySettings,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
@@ -172,6 +174,7 @@ impl Default for Settings {
             shell: None,
             nerd_font: false,
             usage_expanded: false,
+            icons: "auto".into(),
             bridge: BridgeSettings::default(),
             proxy: ProxySettings::default(),
             keys: BTreeMap::new(),
