@@ -22,7 +22,18 @@ fn main() {
     let terminal = std::env::var_os("BRO_TERMINAL").map(PathBuf::from).filter(|p| present(p)).or_else(fork_terminal);
 
     let started = match &terminal {
-        Some(wt) if supports_app_mode(wt) => spawn(Command::new(wt).args(app_mode_args(&bro, &cwd, icon.as_deref(), &args))),
+        Some(wt) if supports_app_mode(wt) => {
+            let mut cmd = Command::new(wt);
+            cmd.args(app_mode_args(&bro, &cwd, icon.as_deref(), &args));
+            // the side-by-side build keeps its own phone-bridge data (like the fork's launch:next script)
+            if wt.file_name().is_some_and(|n| n.eq_ignore_ascii_case("wtdn.exe"))
+                && std::env::var_os("TERMINAL_WEB_DATA_ROOT").is_none()
+                && let Some(local) = dirs::data_local_dir()
+            {
+                cmd.env("TERMINAL_WEB_DATA_ROOT", local.join("TerminalWebNext"));
+            }
+            spawn(&mut cmd)
+        }
         _ => false,
     } || which("wt.exe").is_some_and(|wt| spawn(Command::new(wt).args(plain_wt_args(&bro, &cwd, &args))))
         || spawn(Command::new("conhost.exe").arg(&bro).args(&args).current_dir(&cwd));
@@ -37,10 +48,12 @@ fn find_bro() -> PathBuf {
     here.filter(|p| p.is_file()).or_else(|| which(&exe("bro"))).unwrap_or_else(|| PathBuf::from(exe("bro")))
 }
 
-/// The fork: its `wtd.exe` app alias, else the per-user `wt.exe` shim that forwards to it.
+/// The fork: the side-by-side build (`wtdn.exe`, where new fork features land first), else the everyday
+/// `wtd.exe` alias, else the per-user `wt.exe` shim that forwards to it.
 fn fork_terminal() -> Option<PathBuf> {
     let local = dirs::data_local_dir()?;
-    [local.join("Microsoft").join("WindowsApps").join("wtd.exe"), local.join("Programs").join("WindowsTerminalDevShim").join("wt.exe")]
+    let apps = local.join("Microsoft").join("WindowsApps");
+    [apps.join("wtdn.exe"), apps.join("wtd.exe"), local.join("Programs").join("WindowsTerminalDevShim").join("wt.exe")]
         .into_iter()
         .find(|p| present(p))
 }
