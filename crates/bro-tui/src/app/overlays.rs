@@ -69,6 +69,8 @@ pub struct ResumePicker {
     pub from: ResumeFrom,
     pub targets: Vec<ResumeTarget>,
     pub sel: usize,
+    /// row rects from the last draw (for clicks)
+    pub hits: Vec<Rect>,
 }
 
 /// What a confirmation does on `y`.
@@ -130,7 +132,8 @@ impl App {
     }
 }
 
-fn draw_resume(f: &mut Frame, area: Rect, p: &ResumePicker, t: &Theme) {
+fn draw_resume(f: &mut Frame, area: Rect, p: &mut ResumePicker, t: &Theme) {
+    p.hits.clear();
     let h = (p.targets.len() as u16 + 8).min(22);
     let title = match p.from {
         ResumeFrom::Past(_) => format!("{}resume in", ui::lead("history")),
@@ -168,6 +171,7 @@ fn draw_resume(f: &mut Frame, area: Rect, p: &ResumePicker, t: &Theme) {
             None => vec![],
         };
         ui::line_lr(f, Rect { y, height: 1, ..inner }, left, right);
+        p.hits.push(Rect { y, height: 1, ..inner });
     }
     ui::hint_line(f, inner, &[("⏎", "resume"), ("1-9", "pick + go"), ("↑↓", "move"), ("esc", "cancel")], t);
 }

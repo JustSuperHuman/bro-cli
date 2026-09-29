@@ -458,3 +458,44 @@ fn projects_are_opened_explicitly_and_new_sessions_start_in_the_current_one() {
     key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
     assert!(!a.rows().iter().any(|r| matches!(r, Row::Project { name, .. } if name == "fresh")));
 }
+
+#[test]
+fn launcher_works_with_the_mouse() {
+    use crate::launcher::{Focus, Hit, Item};
+    let mut a = app(true);
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::ALT);
+    let _ = draw(&mut a);
+    let click = |a: &mut App, want: &dyn Fn(&Hit) -> bool| {
+        let Overlay::Launcher(l) = &a.overlay else { panic!("launcher closed") };
+        let (r, _) = *l.hits.iter().find(|(_, h)| want(h)).expect("hit");
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+        let _ = draw(a);
+    };
+    // the codex tab
+    click(&mut a, &|h| *h == Hit::Harness(bro_core::Harness::Codex));
+    let Overlay::Launcher(l) = &a.overlay else { panic!() };
+    assert_eq!(l.harness, bro_core::Harness::Codex);
+    // the openrouter row: first click selects, second opens the model list
+    let row = {
+        let items = l.items();
+        let sel: Vec<&Item> = items.iter().filter(|i| !matches!(i, Item::Header(_))).collect();
+        sel.iter().position(|i| matches!(i, Item::Account(acc) if acc.label == "openrouter")).unwrap()
+    };
+    click(&mut a, &|h| *h == Hit::Row(row));
+    click(&mut a, &|h| *h == Hit::Row(row));
+    let Overlay::Launcher(l) = &a.overlay else { panic!() };
+    assert_eq!(l.focus, Focus::Models);
+    // permission toggle by click
+    click(&mut a, &|h| *h == Hit::Perm(bro_core::launch::Permission::Auto));
+    let Overlay::Launcher(l) = &a.overlay else { panic!() };
+    assert_eq!(l.permission, bro_core::launch::Permission::Auto);
+    // a model: click selects, clicking it again launches
+    click(&mut a, &|h| *h == Hit::Model(1));
+    click(&mut a, &|h| *h == Hit::Model(1));
+    assert!(matches!(a.overlay, Overlay::None), "launched");
+    // clicking outside the launcher closes it
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::ALT);
+    let _ = draw(&mut a);
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 0, row: 0, modifiers: KeyModifiers::NONE });
+    assert!(matches!(a.overlay, Overlay::None));
+}

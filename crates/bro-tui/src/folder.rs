@@ -19,6 +19,8 @@ pub struct FolderPicker {
     pub dirs: Vec<PathBuf>,
     /// the current list: (path, kind)
     view: Vec<(PathBuf, Kind)>,
+    /// row rects from the last draw: (rect, index into the list)
+    pub hits: Vec<(Rect, usize)>,
 }
 
 /// Why a row is listed.
@@ -40,7 +42,7 @@ pub enum Outcome {
 
 impl FolderPicker {
     pub fn new(dirs: Vec<PathBuf>) -> FolderPicker {
-        let mut p = FolderPicker { filter: String::new(), sel: 0, dirs, view: vec![] };
+        let mut p = FolderPicker { filter: String::new(), sel: 0, dirs, view: vec![], hits: vec![] };
         p.refresh();
         p
     }
@@ -88,6 +90,16 @@ impl FolderPicker {
     pub fn paste(&mut self, s: &str) {
         self.filter.push_str(s.trim());
         self.refresh();
+    }
+
+    /// Click a row: select it; clicking the selected row opens it.
+    pub fn click(&mut self, pos: ratatui::layout::Position) -> Outcome {
+        let Some(&(_, i)) = self.hits.iter().find(|(r, _)| r.contains(pos)) else { return Outcome::None };
+        if i == self.sel {
+            return self.view.get(i).map(|(p, _)| Outcome::Open(p.clone())).unwrap_or(Outcome::None);
+        }
+        self.sel = i;
+        Outcome::None
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
@@ -170,7 +182,8 @@ fn shorten_home(p: &Path) -> String {
     p.display().to_string()
 }
 
-pub fn draw(f: &mut Frame, screen: Rect, p: &FolderPicker, t: &Theme) {
+pub fn draw(f: &mut Frame, screen: Rect, p: &mut FolderPicker, t: &Theme) {
+    let mut hits = vec![];
     let inner = ui::popup(f, screen, 84, 22, "open project", t);
     let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     let mut spans = vec![Span::styled("› ", ui::bold_accent(t))];
@@ -182,7 +195,7 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &FolderPicker, t: &Theme) {
     spans.push(Span::styled("▏", ui::accent(t)));
     ui::line(f, Rect { height: 1, ..inner }, spans);
     let rows = inner.height.saturating_sub(3) as usize;
-    let view = p.view();
+    let view = p.view().to_vec();
     let start = p.sel.saturating_sub(rows.saturating_sub(1));
     for (k, (path, kind)) in view.iter().enumerate().skip(start).take(rows) {
         let y = inner.y + 2 + (k - start) as u16;
@@ -198,10 +211,12 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &FolderPicker, t: &Theme) {
         s.push(Span::styled(format!("{name}  "), if on { ui::bold_accent(t) } else { ui::bold() }));
         s.push(Span::styled(crate::util::short_path(path.parent().unwrap_or(path), 60), muted(t)));
         ui::line(f, Rect { y, height: 1, ..inner }, s);
+        hits.push((Rect { y, height: 1, ..inner }, k));
     }
     if view.is_empty() {
         ui::line(f, Rect { y: inner.y + 2, height: 1, ..inner }, vec![Span::styled("  nothing here — type a path (~/, C:\\, /…)", muted(t))]);
     }
+    p.hits = hits;
     ui::hint_line(f, inner, &[("⏎", "open project"), ("tab", "complete"), ("↑↓", "move"), ("esc", "cancel")], t);
 }
 

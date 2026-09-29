@@ -13,6 +13,44 @@ impl App {
         let pos = Position { x: m.column, y: m.row };
         self.hover = pos;
         if self.overlay.is_open() {
+            let left = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+            let wheel = matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp);
+            let down = matches!(m.kind, MouseEventKind::ScrollDown);
+            match &mut self.overlay {
+                Overlay::Launcher(l) if left => {
+                    match l.click(pos) {
+                        crate::launcher::Outcome::None => {}
+                        crate::launcher::Outcome::Close => self.overlay = Overlay::None,
+                        crate::launcher::Outcome::Launch(spec, place) => {
+                            self.overlay = Overlay::None;
+                            self.launch_spec(spec, place);
+                        }
+                    }
+                    return;
+                }
+                Overlay::Launcher(l) if wheel => {
+                    l.scroll(pos, down);
+                    return;
+                }
+                Overlay::Folder(p) if left => {
+                    if let crate::folder::Outcome::Open(dir) = p.click(pos) {
+                        self.overlay = Overlay::None;
+                        self.add_project(dir);
+                    }
+                    return;
+                }
+                Overlay::Resume(p) if left => {
+                    if let Some(i) = p.hits.iter().position(|r| r.contains(pos)) {
+                        if i == p.sel {
+                            self.resume_chosen();
+                        } else {
+                            p.sel = i;
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
             // clicks outside a light overlay close it; the launcher and dialogs stay
             if matches!(m.kind, MouseEventKind::Down(_)) && matches!(self.overlay, Overlay::Palette(_) | Overlay::Help(_)) {
                 if let Overlay::Palette(p) = &self.overlay {

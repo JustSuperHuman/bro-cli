@@ -389,7 +389,7 @@ impl App {
             return;
         }
         let sel = Self::resume_default(&targets);
-        self.overlay = Overlay::Resume(Box::new(super::overlays::ResumePicker { from: super::overlays::ResumeFrom::Past(s), targets, sel }));
+        self.overlay = Overlay::Resume(Box::new(super::overlays::ResumePicker { from: super::overlays::ResumeFrom::Past(s), targets, sel, hits: vec![] }));
     }
 
     /// Move a running Claude / Codex session to another login.
@@ -409,7 +409,7 @@ impl App {
         }
         let sel = Self::resume_default(&targets).max(usize::from(targets[0].current).min(targets.len() - 1));
         let from = super::overlays::ResumeFrom::Live { pane, harness, store, cwd, since, title };
-        self.overlay = Overlay::Resume(Box::new(super::overlays::ResumePicker { from, targets, sel }));
+        self.overlay = Overlay::Resume(Box::new(super::overlays::ResumePicker { from, targets, sel, hits: vec![] }));
     }
 
     /// Enter in the resume picker.

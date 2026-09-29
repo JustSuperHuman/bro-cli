@@ -1,7 +1,7 @@
 //! Drawing the launcher: harness tabs, the "run on" list (with the model list beside it only when needed),
 //! the project line, toggles and key hints.
 
-use super::{AccountKind, Focus, Item, Launcher};
+use super::{AccountKind, Focus, Hit, Item, Launcher};
 use crate::theme::Theme;
 use crate::ui::{self, fg, muted};
 use bro_core::Harness;
@@ -16,7 +16,14 @@ use ratatui::{
 };
 
 /// Draw the launcher centered on `screen`.
-pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
+pub fn draw(f: &mut Frame, screen: Rect, l: &mut Launcher, t: &Theme, time: f64) {
+    let mut hits = vec![];
+    let area = draw_inner(f, screen, l, t, time, &mut hits);
+    l.hits = hits;
+    l.area = area;
+}
+
+fn draw_inner(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64, hits: &mut Vec<(Rect, Hit)>) -> Rect {
     let r = ui::centered(screen, 100, 26);
     f.render_widget(Clear, r);
     let title = Line::from(vec![Span::raw(" "), Span::styled("new session", ui::bold_accent(t)), Span::raw(" ")]);
@@ -27,6 +34,7 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
 
     // 1. harness tabs
     let mut tabs = vec![];
+    let mut tx = inner.x;
     for h in Harness::ALL {
         let on = h == l.harness;
         let brand = ui::harness_color(Some(h), t);
@@ -38,6 +46,9 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
         } else {
             muted(t)
         };
+        let w = ui::width(&text) as u16;
+        hits.push((Rect { x: tx, y, width: w, height: 1 }, Hit::Harness(h)));
+        tx += w + 2;
         tabs.push(Span::styled(text, style));
         tabs.push(Span::raw("  "));
     }
@@ -53,9 +64,9 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
     let body = Rect { y, height: list_h, ..inner };
     let needs = l.needs_model();
     let left_w = if needs { body.width * 45 / 100 } else { body.width };
-    draw_run_on(f, Rect { width: left_w, ..body }, l, t);
+    draw_run_on(f, Rect { width: left_w, ..body }, l, t, hits);
     if needs {
-        draw_models(f, Rect { x: body.x + left_w + 1, width: body.width.saturating_sub(left_w + 1), ..body }, l, t);
+        draw_models(f, Rect { x: body.x + left_w + 1, width: body.width.saturating_sub(left_w + 1), ..body }, l, t, hits);
     }
     y += list_h;
 
@@ -80,9 +91,13 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
     ui::line(f, row(y), summary);
     y += 1;
     let mut toggles = vec![Span::styled("permissions ", muted(t))];
+    let mut hx = row(y).x + 12;
     for (p, name) in [(Permission::Default, "ask"), (Permission::Auto, "auto"), (Permission::Skip, "skip all")] {
         let on = l.permission == p;
         let c = if p == Permission::Skip { t.danger } else { t.accent };
+        let w = ui::width(name) as u16 + 2;
+        hits.push((Rect { x: hx, y, width: w, height: 1 }, Hit::Perm(p)));
+        hx += w;
         toggles.push(Span::styled(format!(" {name} "), if on { Style::default().fg(c).add_modifier(Modifier::BOLD | Modifier::REVERSED) } else { muted(t) }));
     }
     toggles.push(Span::styled(" ^e", fg(t.shine)));
@@ -92,6 +107,11 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
         BrowserMode::Edge => "edge",
         BrowserMode::Chrome => "chrome",
     };
+    hx += 3; // " ^e"
+    let bw = 12 + ui::width("chrome") as u16 + 3;
+    hits.push((Rect { x: hx, y, width: bw, height: 1 }, Hit::Browser));
+    hx += 12 + ui::width(b) as u16 + 3;
+    hits.push((Rect { x: hx, y, width: 30, height: 1 }, Hit::Place));
     toggles.push(Span::styled("    browser ", muted(t)));
     toggles.push(Span::styled(b, if l.browser == BrowserMode::Off { muted(t) } else { ui::bold_accent(t) }));
     toggles.push(Span::styled(" ^b", fg(t.shine)));
@@ -111,7 +131,9 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
         }
         hints.push(("esc", if l.focus == Focus::List { "close" } else { "back" }));
         ui::line(f, row(y), ui::hints(&hints, t));
+        hits.push((Rect { x: row(y).x, y, width: 3 + ui::width(enter) as u16, height: 1 }, Hit::Launch));
     }
+    r
 }
 
 /// A filter line: "› text▏" or a muted prompt.
@@ -133,7 +155,7 @@ fn window(cursor: usize, rows: usize) -> usize {
     cursor.saturating_sub(rows.saturating_sub(1))
 }
 
-fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
+fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
     let focused = l.focus == Focus::List;
     filter_line(f, Rect { height: 1, ..area }, &l.list_filter, "run on… (type to filter)", focused, t);
     let items = l.items();
@@ -143,6 +165,10 @@ fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
     for (k, item) in items.iter().enumerate().skip(start).take(rows) {
         let r = Rect { y: area.y + 1 + (k - start) as u16, height: 1, ..area };
         let on = cursor == Some(k);
+        if !matches!(item, Item::Header(_)) {
+            let sel_idx = items[..k].iter().filter(|i| !matches!(i, Item::Header(_))).count();
+            hits.push((r, Hit::Row(sel_idx)));
+        }
         let mark = match (on, focused) {
             (true, true) => Span::styled("▌", ui::accent(t)),
             (true, false) => Span::styled("›", muted(t)),
@@ -185,7 +211,7 @@ fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
     }
 }
 
-fn draw_models(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
+fn draw_models(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
     let focused = l.focus == Focus::Models;
     let models = l.models();
     let idx = l.models_view();
@@ -197,6 +223,7 @@ fn draw_models(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
         let m = &models[i];
         let r = Rect { y: area.y + 1 + (k - start) as u16, height: 1, ..area };
         let on = k == l.model_sel;
+        hits.push((r, Hit::Model(k)));
         let mark = match (on, focused) {
             (true, true) => Span::styled("▌", ui::accent(t)),
             (true, false) => Span::styled("›", muted(t)),

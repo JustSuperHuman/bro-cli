@@ -83,6 +83,20 @@ pub struct Data {
     pub keyed: Vec<String>,
 }
 
+/// Something clickable in the launcher (recorded while drawing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    Harness(Harness),
+    /// index into the selectable run-on rows
+    Row(usize),
+    /// index into the filtered models
+    Model(usize),
+    Perm(Permission),
+    Browser,
+    Place,
+    Launch,
+}
+
 /// What a key asks for.
 pub enum Outcome {
     None,
@@ -108,6 +122,9 @@ pub struct Launcher {
     pub permission: Permission,
     pub browser: BrowserMode,
     pub place: Place,
+    /// clickable regions from the last draw, and the popup's own rect
+    pub hits: Vec<(ratatui::layout::Rect, Hit)>,
+    pub area: ratatui::layout::Rect,
 }
 
 impl Launcher {
@@ -132,6 +149,8 @@ impl Launcher {
             permission,
             browser,
             place,
+            hits: vec![],
+            area: ratatui::layout::Rect::default(),
         }
     }
 
@@ -424,6 +443,59 @@ impl Launcher {
             Some(s) => Outcome::Launch(s, self.place),
             None => Outcome::None,
         }
+    }
+
+    /// A mouse click. Clicking the selected row again acts like Enter; clicking outside closes.
+    pub fn click(&mut self, pos: ratatui::layout::Position) -> Outcome {
+        if !self.area.contains(pos) {
+            return Outcome::Close;
+        }
+        let Some(&(_, hit)) = self.hits.iter().find(|(r, _)| r.contains(pos)) else { return Outcome::None };
+        match hit {
+            Hit::Harness(h) => {
+                while self.harness != h {
+                    self.set_harness(1);
+                }
+            }
+            Hit::Row(i) => {
+                if self.focus == Focus::List && self.list_sel == i {
+                    return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+                self.focus = Focus::List;
+                if self.list_sel != i {
+                    self.list_sel = i;
+                    self.reset_models();
+                }
+            }
+            Hit::Model(k) => {
+                if self.focus == Focus::Models && self.model_sel == k {
+                    return self.launch();
+                }
+                self.focus = Focus::Models;
+                self.model_sel = k;
+            }
+            Hit::Perm(p) => self.permission = p,
+            Hit::Browser => {
+                self.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+            }
+            Hit::Place => {
+                self.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+            }
+            Hit::Launch => return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        }
+        Outcome::None
+    }
+
+    /// Mouse wheel over the launcher: move in the list under the pointer.
+    pub fn scroll(&mut self, pos: ratatui::layout::Position, down: bool) {
+        if let Some(&(_, hit)) = self.hits.iter().find(|(r, _)| r.contains(pos)) {
+            match hit {
+                Hit::Model(_) => self.focus = Focus::Models,
+                Hit::Row(_) => self.focus = Focus::List,
+                _ => {}
+            }
+        }
+        self.move_sel(if down { 3 } else { -3 });
     }
 
     /// Handle a key. The launcher is modal: it takes every key.
