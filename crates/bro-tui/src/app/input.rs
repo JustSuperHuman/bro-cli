@@ -216,6 +216,18 @@ impl App {
                     self.side_expand();
                 }
             }
+            KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                if let Some(Row::Live { info, .. }) = rows.get(sel) {
+                    self.toggle_stack(info.pane);
+                    self.side_focus = true;
+                }
+            }
+            KeyCode::Char('+') => {
+                if let Some(Row::Live { info, .. }) = rows.get(sel) {
+                    self.toggle_stack(info.pane);
+                    self.side_focus = true;
+                }
+            }
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_row(sel),
             KeyCode::Char('f') => match rows.get(sel) {
                 Some(Row::Past { info }) => self.open_resume(info.idx),

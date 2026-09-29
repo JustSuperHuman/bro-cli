@@ -144,6 +144,9 @@ pub struct App {
     pub(crate) open_projects: crate::projects::OpenProjects,
     /// the project new sessions start in (last one you picked in the sidebar or worked in)
     pub(crate) cur_project: Option<std::path::PathBuf>,
+    /// sessions shown together (shift+click in the sidebar); 2+ = stacked view
+    pub(crate) stack: Vec<PaneId>,
+    pub(crate) stack_focus: Option<PaneId>,
     term_focused: bool,
     opts: Opts,
     _theme_watcher: Option<notify::RecommendedWatcher>,
@@ -197,6 +200,8 @@ impl App {
             persist: opts.load_recents,
             open_projects: if opts.load_recents { crate::projects::OpenProjects::load() } else { Default::default() },
             cur_project: None,
+            stack: vec![],
+            stack_focus: None,
             term_focused: true,
             opts,
             _theme_watcher: None,
@@ -234,7 +239,46 @@ impl App {
 
     /// The focused pane, if any tab is open.
     pub(crate) fn focused(&self) -> Option<PaneId> {
+        if self.stacked() {
+            return self.stack_focus.filter(|f| self.stack.contains(f)).or_else(|| self.stack.first().copied());
+        }
         self.tabs.get(self.cur).map(|t| t.focus)
+    }
+
+    /// Showing several sessions at once (shift+click in the sidebar).
+    pub(crate) fn stacked(&self) -> bool {
+        self.stack.len() >= 2
+    }
+
+    /// shift+click / shift+⏎ on a session: add it to the stacked view, or take it out again.
+    pub(crate) fn toggle_stack(&mut self, id: PaneId) {
+        if !self.panes.contains_key(&id) {
+            return;
+        }
+        if self.stack.is_empty()
+            && let Some(cur) = self.focused()
+            && cur != id
+            && self.panes.get(&cur).is_some_and(|p| p.is_terminal())
+        {
+            self.stack.push(cur);
+        }
+        if let Some(i) = self.stack.iter().position(|x| *x == id) {
+            self.stack.remove(i);
+            if self.stack_focus == Some(id) {
+                self.stack_focus = self.stack.last().copied();
+            }
+        } else {
+            self.stack.push(id);
+            self.stack_focus = Some(id);
+        }
+        if self.stack.len() < 2 {
+            let rest = self.stack.pop();
+            self.stack_focus = None;
+            if let Some(r) = rest.or(Some(id)).filter(|r| self.panes.contains_key(r)) {
+                self.focus_pane(r);
+            }
+        }
+        self.side_focus = false;
     }
 
     /// Open a pane at `place` relative to the focused pane; returns its id.
@@ -262,6 +306,16 @@ impl App {
 
     /// Close a pane: end its session (bridge, proxy route, staged files) and drop it from its tab.
     pub(crate) fn close(&mut self, id: PaneId) {
+        if self.stack.contains(&id) {
+            self.stack.retain(|x| *x != id);
+            if self.stack_focus == Some(id) {
+                self.stack_focus = self.stack.last().copied();
+            }
+            if self.stack.len() < 2 {
+                self.stack.clear();
+                self.stack_focus = None;
+            }
+        }
         if let Some(mut p) = self.panes.remove(&id) {
             if let Some(t) = p.as_term() {
                 t.kill();
@@ -306,8 +360,15 @@ impl App {
         }
     }
 
-    /// Switch to the tab holding `id` and focus it.
+    /// Switch to the tab holding `id` and focus it (inside a stack, just move the focus there).
     pub(crate) fn focus_pane(&mut self, id: PaneId) {
+        if self.stacked() && self.stack.contains(&id) {
+            self.stack_focus = Some(id);
+            self.done.remove(&id);
+            return;
+        }
+        self.stack.clear();
+        self.stack_focus = None;
         if let Some(i) = self.tabs.iter().position(|t| t.root.contains(id)) {
             self.cur = i;
             let t = &mut self.tabs[i];
@@ -321,6 +382,9 @@ impl App {
 
     /// Panes on screen now.
     pub(crate) fn visible(&self) -> Vec<PaneId> {
+        if self.stacked() {
+            return self.stack.clone();
+        }
         match self.tabs.get(self.cur) {
             Some(t) if t.zoom => vec![t.focus],
             Some(t) => t.root.leaf_ids(),

@@ -69,6 +69,12 @@ impl App {
                     let double = self.last_click.is_some_and(|(t, x, y)| t.elapsed() < Duration::from_millis(400) && x == m.column && y == m.row);
                     self.last_click = Some((Instant::now(), m.column, m.row));
                     match hit {
+                        SideHit::Row(i) if m.modifiers.contains(KeyModifiers::SHIFT) => {
+                            // shift+click a running session: show it alongside the others
+                            if let Some(crate::sidebar::Row::Live { info, .. }) = self.rows().get(i) {
+                                self.toggle_stack(info.pane);
+                            }
+                        }
                         SideHit::Row(i) => {
                             let is_past = matches!(self.rows().get(i), Some(crate::sidebar::Row::Past { .. }));
                             if is_past && !double {
@@ -104,7 +110,7 @@ impl App {
                 return;
             }
             // a split divider: start dragging
-            if let Some(t) = self.tabs.get(self.cur).filter(|t| !t.zoom) {
+            if let Some(t) = self.tabs.get(self.cur).filter(|t| !t.zoom && self.stack.len() < 2) {
                 let mut out = vec![];
                 t.root.borders(self.body_panes(), &mut vec![], &mut out);
                 for (area, dir, path) in out.into_iter().rev() {
@@ -162,7 +168,9 @@ impl App {
             self.sel = (inner.contains(pos) && (!wants || m.modifiers.contains(KeyModifiers::SHIFT))).then_some(Sel { pane: id, area: inner, a: pos, b: pos, active: false });
         }
         if let MouseEventKind::Down(_) = m.kind {
-            if let Some(t) = self.tabs.get_mut(self.cur) {
+            if self.stacked() {
+                self.stack_focus = Some(id);
+            } else if let Some(t) = self.tabs.get_mut(self.cur) {
                 t.focus = id;
             }
             self.side_focus = false;

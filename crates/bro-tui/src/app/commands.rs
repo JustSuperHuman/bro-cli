@@ -135,6 +135,7 @@ impl App {
     fn move_focus(&mut self, dx: i32, dy: i32) {
         let Some(from) = self.focused() else { return };
         match neighbor(&self.outer, from, dx, dy) {
+            Some(to) if self.stacked() => self.stack_focus = Some(to),
             Some(to) => self.tabs[self.cur].focus = to,
             // off the left edge: into the sidebar
             None if dx < 0 && self.sidebar => {
@@ -153,6 +154,9 @@ impl App {
 
     /// Focus a live session (switching tabs) and leave the sidebar.
     pub(crate) fn go_session(&mut self, id: PaneId) {
+        // picking one session shows just that one
+        self.stack.clear();
+        self.stack_focus = None;
         if let Some(t) = self.panes.get(&id).and_then(|p| p.as_term_ref()) {
             self.cur_project = Some(t.meta.project.root.clone());
         }

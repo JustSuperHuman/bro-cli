@@ -150,7 +150,7 @@ impl App {
                     return;
                 }
                 let left = vec![
-                    Span::styled(if is_focus { "▌" } else { " " }, ui::accent(t)),
+                    Span::styled(if is_focus { "▌" } else if self.stack.contains(&info.pane) { "▏" } else { " " }, ui::accent(t)),
                     Span::styled(num, muted(t)),
                     Span::styled(format!(" {dot} "), fg(dot_c).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{} ", ui::harness_glyph(info.harness)), fg(brand)),

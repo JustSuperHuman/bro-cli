@@ -48,15 +48,19 @@ impl App {
         let t = self.theme.clone();
         let time = self.start.elapsed().as_secs_f64();
         let body = self.body_panes();
-        let tab = &self.tabs[self.cur];
         let mut rects = vec![];
-        if tab.zoom {
-            rects.push((tab.focus, body));
+        let (focus, zoomed) = if self.stacked() {
+            rects = crate::layout::stack_rects(body, &self.stack);
+            (self.focused().unwrap_or(self.stack[0]), false)
         } else {
-            tab.root.rects(body, &mut rects);
-        }
-        let focus = tab.focus;
-        let zoomed = tab.zoom;
+            let tab = &self.tabs[self.cur];
+            if tab.zoom {
+                rects.push((tab.focus, body));
+            } else {
+                tab.root.rects(body, &mut rects);
+            }
+            (tab.focus, tab.zoom)
+        };
         self.outer = rects.clone();
         for (id, r) in rects {
             let Some(p) = self.panes.get(&id) else { continue };

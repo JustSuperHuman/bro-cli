@@ -190,6 +190,44 @@ pub fn neighbor(rects: &[(PaneId, Rect)], from: PaneId, dx: i32, dy: i32) -> Opt
         .map(|(id, _)| *id)
 }
 
+/// Lay `ids` out as a stack that uses the space well: 2 side by side (or over/under when the area is tall),
+/// 3 as one big + two stacked, 4+ as a grid shaped to the area (terminal cells are ~2.2x taller than wide).
+pub fn stack_rects(area: Rect, ids: &[PaneId]) -> Vec<(PaneId, Rect)> {
+    let n = ids.len();
+    if n == 0 {
+        return vec![];
+    }
+    let wide = area.width as f32 >= area.height as f32 * 2.2;
+    if n == 1 {
+        return vec![(ids[0], area)];
+    }
+    if n == 2 {
+        let (a, b) = split_rect(area, if wide { Dir::Right } else { Dir::Down }, 0.5);
+        return vec![(ids[0], a), (ids[1], b)];
+    }
+    if n == 3 {
+        let (big, rest) = split_rect(area, if wide { Dir::Right } else { Dir::Down }, 0.5);
+        let (b, c) = split_rect(rest, if wide { Dir::Down } else { Dir::Right }, 0.5);
+        return vec![(ids[0], big), (ids[1], b), (ids[2], c)];
+    }
+    // grid: columns from the area's shape, the last row's panes widen to fill it
+    let aspect = area.width as f32 / (area.height as f32 * 2.2).max(1.0);
+    let cols = ((n as f32 * aspect).sqrt().round() as usize).clamp(1, n);
+    let rows = n.div_ceil(cols);
+    let mut out = vec![];
+    for r in 0..rows {
+        let y0 = area.y + (area.height as usize * r / rows) as u16;
+        let y1 = area.y + (area.height as usize * (r + 1) / rows) as u16;
+        let in_row = if r + 1 == rows { n - cols * (rows - 1) } else { cols };
+        for c in 0..in_row {
+            let x0 = area.x + (area.width as usize * c / in_row) as u16;
+            let x1 = area.x + (area.width as usize * (c + 1) / in_row) as u16;
+            out.push((ids[r * cols + c], Rect { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +297,29 @@ mod tests {
         let mut out = vec![];
         n.borders(area(), &mut vec![], &mut out);
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn stacks_fill_the_area_without_overlap() {
+        let wide = Rect { x: 0, y: 0, width: 200, height: 50 };
+        let tall = Rect { x: 0, y: 0, width: 80, height: 60 };
+        let two = stack_rects(wide, &[1, 2]);
+        assert!(two[0].1.y == two[1].1.y && two[0].1.x < two[1].1.x, "wide: side by side");
+        let two = stack_rects(tall, &[1, 2]);
+        assert!(two[0].1.x == two[1].1.x && two[0].1.y < two[1].1.y, "tall: over/under");
+        let three = stack_rects(wide, &[1, 2, 3]);
+        assert_eq!(three[0].1.height, 50, "one big pane");
+        for n in 1..=9 {
+            let ids: Vec<PaneId> = (0..n).collect();
+            let rects = stack_rects(wide, &ids);
+            assert_eq!(rects.len(), n as usize);
+            let area: u32 = rects.iter().map(|(_, r)| r.width as u32 * r.height as u32).sum();
+            assert_eq!(area, 200 * 50, "n={n} covers the area exactly");
+            for (i, (_, a)) in rects.iter().enumerate() {
+                for (_, b) in &rects[i + 1..] {
+                    assert!(a.intersection(*b).is_empty(), "n={n} overlap");
+                }
+            }
+        }
     }
 }

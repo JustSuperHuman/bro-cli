@@ -509,3 +509,31 @@ fn themes_render_graphite_by_default_and_paper() {
     let s = shot(&mut a, "theme-paper");
     assert!(s.contains("bro-cli-v2"));
 }
+
+#[test]
+fn shift_click_stacks_sessions_and_a_plain_click_unstacks() {
+    use crate::sidebar::Row;
+    let mut a = app(true);
+    let _ = draw(&mut a);
+    let live: Vec<usize> = a.rows().iter().enumerate().filter(|(_, r)| matches!(r, Row::Live { .. })).map(|(i, _)| i).collect();
+    let click = |a: &mut App, i: usize, shift: bool| {
+        let _ = draw(a);
+        let (r, _) = *a.side_hits.iter().find(|(_, h)| matches!(h, SideHit::Row(x) if *x == i)).unwrap();
+        let modifiers = if shift { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 4, row: r.y, modifiers });
+    };
+    click(&mut a, live[0], false);
+    click(&mut a, live[3], true);
+    assert!(a.stacked(), "first session + the shift-clicked one");
+    click(&mut a, live[4], true);
+    assert_eq!(a.visible().len(), 3);
+    let s = shot(&mut a, "stacked");
+    assert_eq!(a.outer.len(), 3, "three panes drawn\n{s}");
+    // shift-click one again: out of the stack
+    click(&mut a, live[4], true);
+    assert_eq!(a.stack.len(), 2);
+    // a plain click shows just that session
+    click(&mut a, live[1], false);
+    assert!(!a.stacked());
+    assert_eq!(a.visible().len(), 1);
+}
