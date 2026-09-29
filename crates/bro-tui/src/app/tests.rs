@@ -253,7 +253,7 @@ fn mouse_clicks_sidebar_rows_and_drags_dividers() {
     // click the row of the blocked (justgains) session
     let rows = a.rows();
     let i = rows.iter().position(|r| matches!(r, crate::sidebar::Row::Live { info, .. } if info.activity == Some(Activity::Blocked))).unwrap();
-    let (r, _) = *a.side_hits.iter().find(|(_, h)| matches!(h, SideHit::Row(x) if *x == i)).unwrap();
+    let (r, _) = a.side_hits.iter().find(|(_, h)| matches!(h, SideHit::Row(x) if *x == i)).cloned().unwrap();
     a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 4, row: r.y, modifiers: KeyModifiers::NONE });
     assert_eq!(a.focused().and_then(|id| a.panes.get(&id)).and_then(|p| p.activity()), Some(Activity::Blocked));
     // back to the split tab; drag its divider
@@ -512,7 +512,7 @@ fn shift_click_stacks_sessions_and_a_plain_click_unstacks() {
     let live: Vec<usize> = a.rows().iter().enumerate().filter(|(_, r)| matches!(r, Row::Live { .. })).map(|(i, _)| i).collect();
     let click = |a: &mut App, i: usize, shift: bool| {
         let _ = draw(a);
-        let (r, _) = *a.side_hits.iter().find(|(_, h)| matches!(h, SideHit::Row(x) if *x == i)).unwrap();
+        let (r, _) = a.side_hits.iter().find(|(_, h)| matches!(h, SideHit::Row(x) if *x == i)).cloned().unwrap();
         let modifiers = if shift { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
         a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 4, row: r.y, modifiers });
     };
@@ -543,4 +543,19 @@ fn launcher_has_a_close_button() {
     let (r, _) = *l.hits.iter().find(|(_, h)| *h == Hit::Close).unwrap();
     a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
     assert!(matches!(a.overlay, Overlay::None));
+}
+
+#[test]
+fn projects_close_from_their_x_with_a_confirm_when_sessions_run() {
+    use crate::sidebar::Row;
+    let mut a = app(true);
+    let _ = draw(&mut a);
+    // a project with running sessions asks first, then closes them with it
+    let (r, root) = a.side_hits.iter().find_map(|(r, h)| if let SideHit::CloseProject(root, live) = h { (*live > 0).then(|| (*r, root.clone())) } else { None }).expect("project ×");
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
+    assert!(matches!(a.overlay, Overlay::Confirm(_)));
+    key(&mut a, KeyCode::Char('y'), KeyModifiers::NONE);
+    let key_ = a.svc.project_for(&root).key;
+    assert!(!a.rows().iter().any(|r| matches!(r, Row::Project { key, .. } if *key == key_)), "project gone");
+    assert!(!a.live_infos().iter().any(|l| l.project_key == key_), "its sessions closed");
 }

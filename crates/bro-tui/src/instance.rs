@@ -38,7 +38,15 @@ fn hand_off_via(file: &Path, dir: &Path) -> anyhow::Result<bool> {
     writeln!(s, "{}\topen\t{}", rec.token, dir.display())?;
     let mut reply = String::new();
     BufReader::new(s).read_line(&mut reply)?;
-    Ok(reply.trim() == "ok")
+    // "ok <window>": bring the running bro's terminal window to the front
+    let mut parts = reply.split_whitespace();
+    if parts.next() != Some("ok") {
+        return Ok(false);
+    }
+    if let Some(h) = parts.next().and_then(|h| h.parse::<isize>().ok()).filter(|h| *h != 0) {
+        window::bring_to_front(h);
+    }
+    Ok(true)
 }
 
 /// Removes the record when the running bro exits.
@@ -86,10 +94,64 @@ fn serve_via(file: PathBuf, tx: Sender<Event>) -> Option<Guard> {
                 continue;
             }
             let ok = tx.send(Event::OpenProject(PathBuf::from(dir))).is_ok();
-            let _ = writeln!(w, "{}", if ok { "ok" } else { "closing" });
+            if ok {
+                let _ = writeln!(w, "ok {}", window::terminal_window());
+            } else {
+                let _ = writeln!(w, "closing");
+            }
         }
     });
     Some(Guard { token, file })
+}
+
+/// The terminal window this bro runs in, and raising another bro's.
+mod window {
+    /// The top-level window hosting this console (Windows Terminal owns the pseudo-console window it gives
+    /// ConPTY apps; classic conhost returns its own window). 0 when there isn't a visible one.
+    #[cfg(windows)]
+    pub fn terminal_window() -> isize {
+        use windows_sys::Win32::System::Console::GetConsoleWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GA_ROOTOWNER, GetAncestor, IsWindowVisible};
+        // SAFETY: plain Win32 queries on handles the system gives us; null / invisible handles are filtered.
+        unsafe {
+            let h = GetConsoleWindow();
+            if h.is_null() {
+                return 0;
+            }
+            let root = GetAncestor(h, GA_ROOTOWNER);
+            let root = if root.is_null() { h } else { root };
+            if IsWindowVisible(root) == 0 { 0 } else { root as isize }
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn terminal_window() -> isize {
+        0
+    }
+
+    /// Restore (if minimised) and focus a window. Windows only lets the foreground process move the focus;
+    /// a tap of Alt is the documented way for the process the user just typed into to hand it over.
+    #[cfg(windows)]
+    pub fn bring_to_front(h: isize) {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, VK_MENU, keybd_event};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow};
+        let hwnd = h as windows_sys::Win32::Foundation::HWND;
+        // SAFETY: the handle came from the running bro; IsWindow guards against a stale one.
+        unsafe {
+            if IsWindow(hwnd) == 0 {
+                return;
+            }
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            keybd_event(VK_MENU as u8, 0, 0, 0);
+            keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
+            SetForegroundWindow(hwnd);
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn bring_to_front(_h: isize) {}
 }
 
 #[cfg(test)]

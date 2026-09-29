@@ -66,7 +66,7 @@ impl Sel {
 }
 
 /// Clickable things in the sidebar.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum SideHit {
     /// index into the current sidebar rows
     Row(usize),
@@ -74,6 +74,8 @@ pub(crate) enum SideHit {
     UsageToggle,
     /// the × on a running session's row
     Close(PaneId),
+    /// the × on a project row: (root, running sessions)
+    CloseProject(std::path::PathBuf, usize),
     /// the Claude usage total: shows / hides the Fable line
     Fable,
     Proxy,
@@ -560,7 +562,13 @@ impl App {
                 }
             },
             Event::OpenProject(dir) => {
-                // another `bro` was started in this folder
+                // another `bro` was started in this folder: open it, and ring the bell so this tab shows activity
+                if !cfg!(test) {
+                    use std::io::Write;
+                    let mut out = std::io::stdout();
+                    let _ = out.write_all(b"\x07");
+                    let _ = out.flush();
+                }
                 self.add_project(dir);
                 self.side_focus = false;
             }

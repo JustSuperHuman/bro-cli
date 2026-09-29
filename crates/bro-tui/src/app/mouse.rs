@@ -69,7 +69,7 @@ impl App {
             return;
         }
         // sidebar
-        if let Some(&(r, hit)) = self.side_hits.iter().find(|(r, _)| r.contains(pos)) {
+        if let Some((r, hit)) = self.side_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
             let _ = r;
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -87,6 +87,7 @@ impl App {
                             self.activate_row(i);
                         }
                         SideHit::Close(id) => self.ask_close(id),
+                        SideHit::CloseProject(root, live) => self.close_project(root, live),
                         SideHit::Fable => self.show_fable = !self.show_fable,
                         SideHit::Usage => self.open_view("usage"),
                         SideHit::UsageToggle => self.toggle_usage_details(),

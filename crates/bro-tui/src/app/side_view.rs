@@ -100,6 +100,9 @@ impl App {
                 f.buffer_mut().set_style(r, Style::default().bg(current_tint(&t)));
             }
             self.draw_row(f, r, row, selected, focus_pane, cur_key.as_deref(), &t, time);
+            if let Row::Project { root, live, .. } = row {
+                self.side_hits.push((Rect { x: r.right().saturating_sub(1), width: 1, height: 1, ..r }, SideHit::CloseProject(root.clone(), *live)));
+            }
             if let Row::Live { info, .. } = row
                 && self.renaming.as_ref().is_none_or(|(id, _)| *id != info.pane)
             {
@@ -146,6 +149,7 @@ impl App {
                 let name_style = if selected || current { ui::bold_accent(t) } else { Style::default().add_modifier(Modifier::BOLD) };
                 let bar = |c: bool| if c { Span::styled("▍", ui::accent(t)) } else { Span::raw(" ") };
                 let line1 = Rect { height: 1, ..r };
+                right.push(Span::styled(" ×", if selected { fg(t.danger) } else { fg(t.frame) }));
                 ui::line_lr(f, line1, vec![bar(current), Span::styled(format!("{arrow} "), ui::accent(t)), Span::styled(name.clone(), name_style)], right);
                 if r.height > 1 {
                     let line2 = Rect { y: r.y + 1, height: 1, ..r };

@@ -50,6 +50,7 @@ pub enum Act {
     Continue,
     SwitchLogin,
     OpenProject,
+    CloseProject,
     Quit,
 }
 
@@ -80,7 +81,7 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, OpenProject, Continue, SwitchLogin, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, OpenProject, CloseProject, Continue, SwitchLogin, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
@@ -132,6 +133,7 @@ impl Act {
             Continue => "continue".into(),
             SwitchLogin => "switch_login".into(),
             OpenProject => "open_project".into(),
+            CloseProject => "close_project".into(),
             Quit => "quit".into(),
         }
     }
@@ -184,6 +186,7 @@ impl Act {
             Continue => "continue an earlier session (search, resume in any login)".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
             OpenProject => "open a project".into(),
+            CloseProject => "close the current project (and its sessions)".into(),
             Quit => "quit bro".into(),
         }
     }
@@ -191,7 +194,7 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | OpenProject => Group::Sessions,
+            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | OpenProject | CloseProject => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Profiles | Proxy | Bridge | RefreshUsage => Group::Views,
@@ -273,6 +276,7 @@ impl Act {
             Continue => vec!["R"],
             SwitchLogin => vec!["P"],
             OpenProject => vec!["O"],
+            CloseProject => vec!["X"],
             Profiles => vec!["o"],
             Proxy => vec!["y"],
             Bridge => vec!["g"],

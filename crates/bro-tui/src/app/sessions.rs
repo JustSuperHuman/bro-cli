@@ -309,10 +309,26 @@ impl App {
     /// x on a project row: take it off the sidebar (the folder and its sessions are untouched).
     pub(crate) fn close_project(&mut self, root: std::path::PathBuf, live: usize) {
         if live > 0 {
-            self.toast(Kind::Info, "close its running sessions first (x on each)");
+            let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            self.overlay = Overlay::Confirm(super::overlays::Confirm {
+                text: format!("close {name} and its {live} running session{}?", if live == 1 { "" } else { "s" }),
+                detail: "the agents stop; their conversations stay resumable (continue session)".into(),
+                action: super::overlays::ConfirmAction::CloseProject(root),
+            });
             return;
         }
-        if self.open_projects.remove(&root) {
+        self.close_project_now(root);
+    }
+
+    /// Close a project's running sessions and take it off the sidebar.
+    pub(crate) fn close_project_now(&mut self, root: std::path::PathBuf) {
+        let key = self.svc.project_for(&root).key;
+        let panes: Vec<PaneId> = self.panes.iter().filter(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.project.key == key)).map(|(id, _)| *id).collect();
+        for id in panes {
+            self.close(id);
+        }
+        {
+            self.open_projects.remove(&root);
             self.open_projects.save(self.persist);
             if self.cur_project.as_ref() == Some(&root) {
                 self.cur_project = None;

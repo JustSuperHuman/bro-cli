@@ -78,6 +78,8 @@ pub struct ResumePicker {
 pub enum ConfirmAction {
     Quit,
     Close(PaneId),
+    /// take a project off the sidebar, ending its running sessions
+    CloseProject(std::path::PathBuf),
 }
 
 /// A yes/no question.
@@ -129,6 +131,7 @@ impl App {
             match c.action {
                 ConfirmAction::Quit => self.quit = true,
                 ConfirmAction::Close(id) => self.close(id),
+                ConfirmAction::CloseProject(root) => self.close_project_now(root),
             }
         }
     }

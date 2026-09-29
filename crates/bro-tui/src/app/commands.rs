@@ -100,6 +100,13 @@ impl App {
             }
             Act::UsageDetails => self.toggle_usage_details(),
             Act::Continue => self.open_continue(),
+            Act::CloseProject => {
+                if let Some(root) = self.current_project() {
+                    let key = self.svc.project_for(&root).key;
+                    let live = self.live_infos().iter().filter(|l| l.project_key == key).count();
+                    self.close_project(root, live);
+                }
+            }
             Act::OpenProject => self.open_folder(),
             Act::SwitchLogin => {
                 if let Some(id) = self.focused() {
