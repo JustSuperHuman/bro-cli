@@ -19,7 +19,7 @@ fn main() {
     let bro = find_bro();
     let cwd = std::env::current_dir().unwrap_or_else(|_| dirs::home_dir().unwrap_or_default());
     let icon = icon_file();
-    let terminal = std::env::var_os("BRO_TERMINAL").map(PathBuf::from).filter(|p| p.is_file()).or_else(fork_terminal);
+    let terminal = std::env::var_os("BRO_TERMINAL").map(PathBuf::from).filter(|p| present(p)).or_else(fork_terminal);
 
     let started = match &terminal {
         Some(wt) if supports_app_mode(wt) => spawn(Command::new(wt).args(app_mode_args(&bro, &cwd, icon.as_deref(), &args))),
@@ -42,7 +42,12 @@ fn fork_terminal() -> Option<PathBuf> {
     let local = dirs::data_local_dir()?;
     [local.join("Microsoft").join("WindowsApps").join("wtd.exe"), local.join("Programs").join("WindowsTerminalDevShim").join("wt.exe")]
         .into_iter()
-        .find(|p| p.exists())
+        .find(|p| present(p))
+}
+
+/// Exists — including app execution aliases (wtd.exe, wtdn.exe), which are reparse points `is_file` rejects.
+fn present(p: &Path) -> bool {
+    p.symlink_metadata().is_ok()
 }
 
 /// Only the fork understands `--app`; assume the shim is the fork, anything else (BRO_TERMINAL) is trusted.
