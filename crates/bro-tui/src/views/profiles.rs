@@ -53,6 +53,7 @@ impl ProfilesView {
                     sid: uuid::Uuid::new_v4().to_string(),
                     harness: Some(harness),
                     profile: Some(p.id.clone()),
+                    store: None,
                     model: None,
                     label: format!("login · {}", p.id),
                     name: None,

@@ -48,6 +48,7 @@ pub enum Act {
     RefreshUsage,
     UsageDetails,
     ShowArchived,
+    SwitchLogin,
     Quit,
 }
 
@@ -78,7 +79,7 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, ShowArchived, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, SwitchLogin, ShowArchived, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
@@ -128,6 +129,7 @@ impl Act {
             RefreshUsage => "refresh_usage".into(),
             UsageDetails => "usage_details".into(),
             ShowArchived => "show_archived".into(),
+            SwitchLogin => "switch_login".into(),
             Quit => "quit".into(),
         }
     }
@@ -178,6 +180,7 @@ impl Act {
             RefreshUsage => "refresh usage now".into(),
             UsageDetails => "sidebar usage: totals / every profile".into(),
             ShowArchived => "show / hide archived sessions".into(),
+            SwitchLogin => "move this session to another login (keeps the conversation)".into(),
             Quit => "quit bro".into(),
         }
     }
@@ -185,7 +188,7 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention | ShowArchived => Group::Sessions,
+            NewSession | NewShell | Rename | Close | Attention | ShowArchived | SwitchLogin => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Profiles | Proxy | Bridge | RefreshUsage => Group::Views,
@@ -211,8 +214,9 @@ impl Act {
             ResizeUp => vec!["alt+shift+up"],
             ResizeDown => vec!["alt+shift+down"],
             Jump(n) => vec![["alt+1", "alt+2", "alt+3", "alt+4", "alt+5", "alt+6", "alt+7", "alt+8", "alt+9"][(n.clamp(1, 9) - 1) as usize]],
-            NextSession => vec!["alt+j"],
-            PrevSession => vec!["alt+k"],
+            // ctrl+tab reaches bro once the terminal doesn't keep it for its own tabs
+            NextSession => vec!["alt+j", "ctrl+tab"],
+            PrevSession => vec!["alt+k", "ctrl+shift+tab"],
             NextProject => vec!["alt+J"],
             PrevProject => vec!["alt+K"],
             Attention => vec!["alt+a"],
@@ -221,6 +225,7 @@ impl Act {
             Palette => vec!["alt+p"],
             Usage => vec!["alt+u"],
             UsageDetails => vec!["alt+U"],
+            SwitchLogin => vec!["alt+L"],
             Profiles => vec!["alt+o"],
             Proxy => vec!["alt+y"],
             Bridge => vec!["alt+g"],
@@ -261,6 +266,7 @@ impl Act {
             Usage => vec!["u"],
             UsageDetails => vec!["U"],
             ShowArchived => vec!["A"],
+            SwitchLogin => vec!["P"],
             Profiles => vec!["o"],
             Proxy => vec!["y"],
             Bridge => vec!["g"],
@@ -298,6 +304,11 @@ impl Chord {
                 KeyCode::Char(c)
             }
             KeyCode::BackTab => {
+                m.remove(KeyModifiers::SHIFT);
+                KeyCode::BackTab
+            }
+            // shift+tab arrives as Tab+SHIFT on some paths (Windows console input): same chord as BackTab
+            KeyCode::Tab if m.contains(KeyModifiers::SHIFT) => {
                 m.remove(KeyModifiers::SHIFT);
                 KeyCode::BackTab
             }
@@ -597,5 +608,16 @@ mod tests {
             assert_eq!(Act::from_name(&a.name()), Some(a));
             assert!(!a.describe().is_empty());
         }
+    }
+
+    #[test]
+    fn ctrl_tab_cycles_sessions() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let km = Keymap::new("ctrl+space", &Default::default());
+        assert_eq!(km.direct(&KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL)), Some(Act::NextSession));
+        // Windows console input reports shift+tab as Tab+SHIFT, other terminals as BackTab
+        assert_eq!(km.direct(&KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Act::PrevSession));
+        assert_eq!(km.direct(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Act::PrevSession));
+        assert_eq!(km.direct(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)), None, "plain tab still goes to the agent");
     }
 }

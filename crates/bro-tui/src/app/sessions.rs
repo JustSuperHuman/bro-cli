@@ -2,7 +2,7 @@
 //! commands, and agent tracking (done-while-unseen, needs-you).
 
 use super::App;
-use super::overlays::{ForkPicker, Overlay};
+use super::overlays::Overlay;
 use crate::alerts::Kind;
 use crate::layout::PaneId;
 use crate::pane::{Activity, Place, Waker};
@@ -60,6 +60,7 @@ impl App {
             sid: uuid::Uuid::new_v4().to_string(),
             harness: Some(spec.harness),
             profile: spec.provider_id.clone().or(spec.profile_id.clone()),
+            store: transcript_store(&spec),
             model: spec.model.clone(),
             label,
             name,
@@ -104,7 +105,7 @@ impl App {
         let (prog, args) = crate::util::default_shell(settings.shell.as_deref());
         let cwd = cwd.or_else(|| self.focused_cwd()).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
         let name = std::path::Path::new(&prog).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| prog.clone());
-        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, model: None, label: name, name: None, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
+        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: name, name: None, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
         let term = Term::new(meta, Spawn { program: prog, args, ..Spawn::default() }, self.svc.clone());
         self.open(Box::new(term), place)
     }
@@ -162,7 +163,7 @@ impl App {
                         let here = self.cur;
                         let id = match req.shell.clone() {
                             Some(shell) => {
-                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, model: None, label: shell.clone(), name: req.title.clone(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
+                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: shell.clone(), name: req.title.clone(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
                                 let term = Term::new(meta, Spawn { program: shell, args: req.args.clone(), ..Spawn::default() }, self.svc.clone());
                                 self.new_tab(Box::new(term))
                             }
@@ -241,26 +242,104 @@ impl App {
         self.toast(Kind::Info, format!("resuming “{}”…", crate::ui::fit(&s.title, 40)));
     }
 
-    /// Open the fork picker for a past session.
-    pub(crate) fn open_fork(&mut self, idx: usize) {
+    /// The logins a session of `harness` can continue in: the current one first, then the rest by what's left.
+    pub(crate) fn resume_targets(&self, harness: Harness, current: Option<&str>) -> Vec<super::overlays::ResumeTarget> {
+        let st = self.svc.state();
+        let Some(ps) = st.profiles.ready() else { return vec![] };
+        let left_of = |id: &str| -> Option<f64> {
+            let p = ps.iter().find(|p| p.id == id)?;
+            let u = st.usage.get(id)?.usage.as_ref()?;
+            let d = bro_core::usage::headroom_detail(p, u);
+            [d.h5, d.wk].into_iter().flatten().reduce(f64::min)
+        };
+        let mut v: Vec<super::overlays::ResumeTarget> = ps
+            .iter()
+            .filter(|p| p.authenticated && if harness == Harness::Codex { p.is_codex() } else { p.is_claude() })
+            .map(|p| super::overlays::ResumeTarget {
+                profile_id: p.id.clone(),
+                name: p.name.clone(),
+                detail: [p.plan.clone().unwrap_or_default(), p.email.clone().unwrap_or_default()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "),
+                left: left_of(&p.id),
+                current: Some(p.id.as_str()) == current,
+            })
+            .collect();
+        v.sort_by(|a, b| b.current.cmp(&a.current).then(b.left.unwrap_or(-1.0).total_cmp(&a.left.unwrap_or(-1.0))));
+        v
+    }
+
+    /// Start on the current login unless it's nearly out (under 10% left) — then on the roomiest one.
+    pub(crate) fn resume_default(targets: &[super::overlays::ResumeTarget]) -> usize {
+        match targets.first() {
+            Some(t) if t.current && t.left.is_some_and(|l| l < 10.0) => targets.iter().position(|t| !t.current && t.left.is_none_or(|l| l >= 10.0)).unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// Enter / f on an earlier session: pick the login to continue in (straight in when there's only one).
+    pub(crate) fn open_resume(&mut self, idx: usize) {
         let Some(s) = self.past_session(idx) else { return };
         if matches!(s.harness, Harness::Pi | Harness::Omp) {
-            self.toast(Kind::Info, format!("{} sessions don't belong to a profile — enter resumes it", s.harness.label()));
+            self.resume(idx);
             return;
         }
-        let st = self.svc.state();
-        let targets: Vec<(String, String)> = st
-            .profiles
-            .ready()
-            .map(|ps| {
-                ps.iter()
-                    .filter(|p| p.authenticated && Some(&p.id) != s.profile_id.as_ref() && if s.harness == Harness::Codex { p.is_codex() } else { p.is_claude() })
-                    .map(|p| (p.id.clone(), [p.plan.clone().unwrap_or_default(), p.email.clone().unwrap_or_default()].join("  ")))
-                    .collect()
-            })
-            .unwrap_or_default();
-        drop(st);
-        self.overlay = Overlay::Fork(Box::new(ForkPicker { session: s, targets, sel: 0 }));
+        let targets = self.resume_targets(s.harness, s.profile_id.as_deref());
+        if targets.len() <= 1 {
+            self.resume(idx);
+            return;
+        }
+        let sel = Self::resume_default(&targets);
+        self.overlay = Overlay::Resume(Box::new(super::overlays::ResumePicker { from: super::overlays::ResumeFrom::Past(s), targets, sel }));
+    }
+
+    /// Move a running Claude / Codex session to another login.
+    pub(crate) fn open_switch(&mut self, pane: PaneId) {
+        let Some(t) = self.panes.get(&pane).and_then(|p| p.as_term_ref()) else { return };
+        let (Some(harness), Some(store)) = (t.meta.harness, t.meta.store.clone()) else {
+            self.toast(Kind::Info, "only Claude and Codex sessions can move to another login");
+            return;
+        };
+        let since = std::time::SystemTime::now() - t.meta.started.elapsed();
+        let title = t.meta.name.clone().unwrap_or_else(|| t.meta.label.clone());
+        let cwd = t.meta.cwd.clone();
+        let targets = self.resume_targets(harness, Some(&store));
+        if targets.len() <= 1 {
+            self.toast(Kind::Info, format!("no other {} login to move to — add one in profiles (alt+o)", harness.label()));
+            return;
+        }
+        let sel = Self::resume_default(&targets).max(usize::from(targets[0].current).min(targets.len() - 1));
+        let from = super::overlays::ResumeFrom::Live { pane, harness, store, cwd, since, title };
+        self.overlay = Overlay::Resume(Box::new(super::overlays::ResumePicker { from, targets, sel }));
+    }
+
+    /// Enter in the resume picker.
+    pub(crate) fn resume_chosen(&mut self) {
+        let Overlay::Resume(p) = std::mem::take(&mut self.overlay) else { return };
+        let Some(target) = p.targets.get(p.sel) else { return };
+        let (profile, current) = (target.profile_id.clone(), target.current);
+        match p.from {
+            super::overlays::ResumeFrom::Past(s) => {
+                if current {
+                    let idx = self.svc.state().past.ready().and_then(|v| v.iter().position(|x| x.id == s.id));
+                    if let Some(idx) = idx {
+                        self.resume(idx);
+                    }
+                } else {
+                    self.fork_into(s, profile);
+                }
+            }
+            super::overlays::ResumeFrom::Live { pane, harness, store, cwd, since, title } => {
+                if current {
+                    return;
+                }
+                self.close(pane);
+                let spec = LaunchSpec { harness, profile_id: Some(profile.clone()), provider_id: None, model: None, cwd: cwd.clone(), resume: None, permission: Permission::Default, browser: BrowserMode::Off, extra_args: vec![] };
+                let mut req = LaunchRequest::new(spec, Place::Tab);
+                req.name = Some(crate::ui::fit(&title, 28));
+                req.find_live = Some(crate::services::launch::FindLive { harness, store, cwd, since });
+                self.svc.launch(req);
+                self.toast(Kind::Info, format!("moving to {profile}\u{2026}"));
+            }
+        }
     }
 
     /// Stage `s` into `target` and resume it there as a fork.
@@ -271,7 +350,7 @@ impl App {
         req.name = Some(crate::ui::fit(&s.title, 28));
         req.stage = Some(s);
         self.svc.launch(req);
-        self.toast(Kind::Info, format!("forking into {target}…"));
+        self.toast(Kind::Info, format!("resuming in {target}\u{2026}"));
     }
 
     // ------------------------------------------------------------------ agents
@@ -332,6 +411,7 @@ impl App {
                 sid: format!("demo-{i}"),
                 harness: d.harness,
                 profile: d.profile.map(String::from),
+                store: d.profile.filter(|p| p.contains(':')).map(String::from),
                 model: d.model.map(String::from),
                 label: label.clone(),
                 name: None,
@@ -366,5 +446,18 @@ impl App {
         if let Some(t) = self.tabs.first_mut() {
             t.focus = t.root.leaf_ids()[0];
         }
+    }
+}
+
+/// Where a launch keeps its transcript: its own login when it's the harness's kind, else the machine's own.
+pub(crate) fn transcript_store(spec: &LaunchSpec) -> Option<String> {
+    let own = |family: &str| match &spec.profile_id {
+        Some(p) if p.starts_with(family) => p.clone(),
+        _ => format!("{family}local"),
+    };
+    match spec.harness {
+        Harness::Claude => Some(own("claude:")),
+        Harness::Codex => Some(own("codex:")),
+        Harness::Pi | Harness::Omp => None,
     }
 }

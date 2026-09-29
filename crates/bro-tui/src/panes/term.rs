@@ -44,6 +44,9 @@ pub struct Meta {
     pub sid: String,
     pub harness: Option<Harness>,
     pub profile: Option<String>,
+    /// The login whose folder holds this session's transcript ("claude:work", "codex:local"); None for
+    /// shells and pi/omp. Used to move a running session to another login.
+    pub store: Option<String>,
     pub model: Option<String>,
     /// "claude · work · opus"
     pub label: String,

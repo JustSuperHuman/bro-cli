@@ -389,3 +389,38 @@ fn clicking_the_x_on_a_sidebar_row_asks_to_close_that_session() {
         _ => assert!(!a.panes.contains_key(&id), "closed straight away or asked first"),
     }
 }
+
+#[test]
+fn resuming_offers_every_login_of_that_kind() {
+    use crate::sidebar::Row;
+    use super::overlays::{ResumeFrom, ResumePicker};
+    let mut a = app(true);
+    a.run_act(Act::FocusSidebar);
+    // an earlier claude session: Enter asks which login, current one first
+    let i = a.rows().iter().position(|r| matches!(r, Row::Past { info } if info.harness == bro_core::Harness::Claude)).unwrap();
+    a.side_sel = i;
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let Overlay::Resume(p) = &a.overlay else { panic!("resume picker") };
+    let p: &ResumePicker = p;
+    assert!(matches!(p.from, ResumeFrom::Past(_)));
+    assert!(p.targets[0].current);
+    assert!(p.targets.len() >= 3 && p.targets.iter().all(|t| t.profile_id.starts_with("claude:")));
+    let s = shot(&mut a, "resume-picker");
+    assert!(s.contains("resume in") && s.contains("current") && s.contains("% left"), "{s}");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    // a running claude session: f moves it to another login
+    let live = a.rows().iter().position(|r| matches!(r, Row::Live { info, .. } if info.harness == Some(bro_core::Harness::Claude))).unwrap();
+    a.side_sel = live;
+    key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+    let Overlay::Resume(p) = &a.overlay else { panic!("switch picker") };
+    assert!(matches!(p.from, ResumeFrom::Live { .. }));
+    assert!(!p.targets[p.sel].current, "starts on another login");
+}
+
+#[test]
+fn nearly_empty_login_preselects_the_roomiest_other() {
+    use super::overlays::ResumeTarget;
+    let t = |id: &str, left: f64, current: bool| ResumeTarget { profile_id: id.into(), name: id.into(), detail: String::new(), left: Some(left), current };
+    assert_eq!(App::resume_default(&[t("a", 50.0, true), t("b", 90.0, false)]), 0, "enough left: stay");
+    assert_eq!(App::resume_default(&[t("a", 4.0, true), t("b", 90.0, false), t("c", 30.0, false)]), 1);
+}

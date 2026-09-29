@@ -85,6 +85,8 @@ pub fn install_panic_hook() {
 pub fn restore_terminal() {
     use crossterm::{event, execute, terminal};
     TUI_ACTIVE.store(false, Ordering::SeqCst);
+    #[cfg(not(windows))]
+    let _ = execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
     let _ = terminal::disable_raw_mode();
     let _ = execute!(std::io::stdout(), event::DisableMouseCapture, event::DisableBracketedPaste, event::DisableFocusChange, terminal::LeaveAlternateScreen, crossterm::cursor::Show);
 }

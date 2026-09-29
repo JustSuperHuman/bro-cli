@@ -100,6 +100,11 @@ impl App {
             }
             Act::UsageDetails => self.toggle_usage_details(),
             Act::ShowArchived => self.toggle_show_archived(),
+            Act::SwitchLogin => {
+                if let Some(id) = self.focused() {
+                    self.open_switch(id);
+                }
+            }
             Act::RefreshUsage => {
                 self.svc.refresh_usage();
                 self.toast(Kind::Usage, "refreshing usage…");
@@ -351,7 +356,7 @@ impl App {
             Row::New => self.open_launcher(None, Place::Tab),
             Row::Project { key, live, collapsed, .. } => self.side.set_collapsed(key, *live > 0, !*collapsed),
             Row::Live { info, .. } => self.go_session(info.pane),
-            Row::Past { info } => self.resume(info.idx),
+            Row::Past { info } => self.open_resume(info.idx),
             Row::More { key, .. } => {
                 self.side.past_open.insert(key.clone());
             }

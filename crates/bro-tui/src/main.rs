@@ -78,6 +78,10 @@ fn run_tui(demo: bool) -> anyhow::Result<()> {
     terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, terminal::EnterAlternateScreen, event::EnableMouseCapture, event::EnableBracketedPaste, event::EnableFocusChange)?;
+    // kitty keyboard protocol where supported (Ghostty, kitty, WezTerm, foot…) so ctrl+tab and friends are
+    // distinguishable; Windows reads console key events directly and doesn't need it
+    #[cfg(not(windows))]
+    let _ = execute!(stdout, event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
     services::guard::TUI_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut term = match ratatui::Terminal::new(backend) {

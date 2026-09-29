@@ -303,6 +303,23 @@ pub fn list(opts: &ListOpts) -> Vec<SessionInfo> {
         .collect()
 }
 
+/// The session a running agent is writing: the newest transcript of `harness` in
+/// `profile_id` (None = the machine's own login) for `cwd`, touched at or after `since`.
+/// Used to move a live session to another login.
+pub fn latest_for(harness: Harness, profile_id: Option<&str>, cwd: &Path, since: SystemTime) -> Option<SessionInfo> {
+    let own = match harness {
+        Harness::Claude => Some("claude:local"),
+        Harness::Codex => Some("codex:local"),
+        _ => None,
+    };
+    let want = profile_id.or(own);
+    // a second of slack: filesystems round mtimes
+    let since = since.checked_sub(std::time::Duration::from_secs(1)).unwrap_or(since);
+    list(&ListOpts { limit: 80, harnesses: vec![harness] }).into_iter().find(|s| {
+        s.modified >= since && s.profile_id.as_deref() == want && s.cwd.as_deref().is_some_and(|c| crate::util::same_path(c, cwd))
+    })
+}
+
 /// Locate one session by id without listing everything (checks each login's session
 /// dir directly). Title may be empty for an abandoned start.
 pub fn find_by_id(harness: Harness, id: &str) -> Option<SessionInfo> {
@@ -434,6 +451,21 @@ mod tests {
         assert_eq!(found.title, "First prompt");
         assert!(find_by_id(Harness::Codex, cid).is_some());
         assert!(find_by_id(Harness::Claude, "nope").is_none());
+    }
+
+    #[test]
+    fn latest_for_finds_the_running_sessions_transcript() {
+        let _sb = sandbox();
+        let acct = paths::claude_accounts_dir().join("work");
+        let started = SystemTime::now();
+        let id = "44444444-4444-4444-8444-444444444444";
+        write_claude_session(&acct, "F--proj", id, &[json!({"type": "user", "cwd": r"F:\proj", "message": {"content": "doing the thing"}})]);
+        let hit = latest_for(Harness::Claude, Some("claude:work"), Path::new(r"F:\proj"), started).unwrap();
+        assert_eq!(hit.id, id);
+        assert!(latest_for(Harness::Claude, Some("claude:work"), Path::new(r"F:\other"), started).is_none(), "other folder");
+        assert!(latest_for(Harness::Claude, None, Path::new(r"F:\proj"), started).is_none(), "other login");
+        let later = started + std::time::Duration::from_secs(120);
+        assert!(latest_for(Harness::Claude, Some("claude:work"), Path::new(r"F:\proj"), later).is_none(), "older than the session");
     }
 
     #[test]

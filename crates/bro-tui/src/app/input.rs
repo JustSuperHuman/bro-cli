@@ -135,7 +135,7 @@ impl App {
                     self.overlay = Overlay::None;
                 }
             }
-            Overlay::Fork(_) => self.fork_key(k),
+            Overlay::Resume(_) => self.resume_key(k),
             Overlay::Confirm(_) => self.confirm_key(k),
         }
     }
@@ -210,7 +210,8 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_row(sel),
             KeyCode::Char('f') => match rows.get(sel) {
-                Some(Row::Past { info }) => self.open_fork(info.idx),
+                Some(Row::Past { info }) => self.open_resume(info.idx),
+                Some(Row::Live { info, .. }) => self.open_switch(info.pane),
                 _ => self.toast(Kind::Info, "f forks an earlier session into another profile"),
             },
             KeyCode::Char('r') => match rows.get(sel) {

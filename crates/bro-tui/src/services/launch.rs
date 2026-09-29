@@ -26,11 +26,23 @@ pub struct LaunchRequest {
     pub name: Option<String>,
     /// Remember this combo in the launcher's recents.
     pub remember: bool,
+    /// Moving a running session to another login: find its transcript first, then resume it in
+    /// `spec.profile_id` (staged as a fork when that's a different login).
+    pub find_live: Option<FindLive>,
+}
+
+/// Which transcript a running session is writing.
+pub struct FindLive {
+    pub harness: bro_core::Harness,
+    /// login whose folder holds it ("claude:work")
+    pub store: String,
+    pub cwd: std::path::PathBuf,
+    pub since: std::time::SystemTime,
 }
 
 impl LaunchRequest {
     pub fn new(spec: LaunchSpec, place: Place) -> LaunchRequest {
-        LaunchRequest { spec, place, stage: None, reply: None, name: None, remember: false }
+        LaunchRequest { spec, place, stage: None, reply: None, name: None, remember: false, find_live: None }
     }
 }
 
@@ -50,13 +62,24 @@ pub struct Launched {
 
 /// Build (and route) on this thread, then post `Event::Launched`.
 pub(super) fn run(svc: &Services, req: LaunchRequest) {
-    let LaunchRequest { spec, place, stage, reply, name, remember } = req;
+    let LaunchRequest { mut spec, place, mut stage, reply, name, remember, find_live } = req;
     let mut note = None;
     let mut route_id = None;
     let result = (|| -> Result<CommandSpec, String> {
         if svc.is_demo() {
             let label = label_for(&spec);
             return Ok(super::demo::shell_command(Some(spec.harness), &label, spec.cwd.clone()));
+        }
+        if let Some(f) = find_live {
+            let found = guard("sessions::latest_for", || bro_core::sessions::latest_for(f.harness, Some(&f.store), &f.cwd, f.since))
+                .ok()
+                .flatten()
+                .ok_or("couldn't find this session's transcript — it moves once the agent has answered at least once")?;
+            let same = spec.profile_id.as_deref() == Some(f.store.as_str());
+            spec.resume = Some(bro_core::launch::Resume { session_id: found.id.clone(), fork: !same });
+            if !same {
+                stage = Some(found);
+            }
         }
         let mut staged = vec![];
         if let Some(s) = &stage {

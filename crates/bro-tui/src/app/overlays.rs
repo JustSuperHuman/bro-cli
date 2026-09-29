@@ -1,4 +1,4 @@
-//! Modal overlays: launcher, palette, help, the fork-into-profile picker and yes/no confirmations.
+//! Modal overlays: launcher, palette, help, the resume-in-which-login picker and yes/no confirmations.
 
 use super::App;
 use crate::help::Help;
@@ -19,7 +19,7 @@ pub enum Overlay {
     Launcher(Box<Launcher>),
     Palette(Box<Palette>),
     Help(Help),
-    Fork(Box<ForkPicker>),
+    Resume(Box<ResumePicker>),
     Confirm(Confirm),
 }
 
@@ -29,11 +29,44 @@ impl Overlay {
     }
 }
 
-/// "Fork this past session into which profile?"
-pub struct ForkPicker {
-    pub session: SessionInfo,
-    /// (profile id, detail)
-    pub targets: Vec<(String, String)>,
+/// What's being resumed.
+pub enum ResumeFrom {
+    /// an earlier session from the sidebar
+    Past(SessionInfo),
+    /// a running session being moved to another login (closed, then resumed there)
+    Live { pane: PaneId, harness: bro_core::Harness, store: String, cwd: std::path::PathBuf, since: std::time::SystemTime, title: String },
+}
+
+impl ResumeFrom {
+    pub fn harness(&self) -> bro_core::Harness {
+        match self {
+            ResumeFrom::Past(s) => s.harness,
+            ResumeFrom::Live { harness, .. } => *harness,
+        }
+    }
+    pub fn title(&self) -> &str {
+        match self {
+            ResumeFrom::Past(s) => &s.title,
+            ResumeFrom::Live { title, .. } => title,
+        }
+    }
+}
+
+/// A login the session can continue in.
+pub struct ResumeTarget {
+    pub profile_id: String,
+    pub name: String,
+    pub detail: String,
+    /// % left of the tighter window
+    pub left: Option<f64>,
+    /// where the session lives now
+    pub current: bool,
+}
+
+/// "Resume this in which login?"
+pub struct ResumePicker {
+    pub from: ResumeFrom,
+    pub targets: Vec<ResumeTarget>,
     pub sel: usize,
 }
 
@@ -60,25 +93,26 @@ impl App {
             Overlay::Launcher(l) => launcher::view::draw(f, area, l, &t, time),
             Overlay::Palette(p) => p.draw(f, area, &t),
             Overlay::Help(h) => h.draw(f, area, &self.keymap, &t, time),
-            Overlay::Fork(p) => draw_fork(f, area, p, &t),
+            Overlay::Resume(p) => draw_resume(f, area, p, &t),
             Overlay::Confirm(c) => draw_confirm(f, area, c, &t),
         }
     }
 
-    /// Keys for the fork picker. Returns true when it should close.
-    pub(super) fn fork_key(&mut self, k: KeyEvent) {
-        let Overlay::Fork(p) = &mut self.overlay else { return };
+    /// Keys for the resume picker.
+    pub(super) fn resume_key(&mut self, k: KeyEvent) {
+        let Overlay::Resume(p) = &mut self.overlay else { return };
         match k.code {
             KeyCode::Esc => self.overlay = Overlay::None,
             KeyCode::Down | KeyCode::Char('j') => p.sel = (p.sel + 1).min(p.targets.len().saturating_sub(1)),
             KeyCode::Up | KeyCode::Char('k') => p.sel = p.sel.saturating_sub(1),
-            KeyCode::Enter => {
-                let target = p.targets.get(p.sel).map(|x| x.0.clone());
-                let Overlay::Fork(p) = std::mem::take(&mut self.overlay) else { return };
-                if let Some(target) = target {
-                    self.fork_into(p.session, target);
+            KeyCode::Char(c @ '1'..='9') => {
+                let i = c as usize - '1' as usize;
+                if i < p.targets.len() {
+                    p.sel = i;
+                    self.resume_chosen();
                 }
             }
+            KeyCode::Enter => self.resume_chosen(),
             _ => {}
         }
     }
@@ -94,32 +128,46 @@ impl App {
     }
 }
 
-fn draw_fork(f: &mut Frame, area: Rect, p: &ForkPicker, t: &Theme) {
-    let h = (p.targets.len() as u16 + 7).min(20);
-    let inner = ui::popup(f, area, 70, h, &format!("{}fork into profile", ui::lead("history")), t);
+fn draw_resume(f: &mut Frame, area: Rect, p: &ResumePicker, t: &Theme) {
+    let h = (p.targets.len() as u16 + 8).min(22);
+    let title = match p.from {
+        ResumeFrom::Past(_) => format!("{}resume in", ui::lead("history")),
+        ResumeFrom::Live { .. } => format!("{}move to another login", ui::lead("history")),
+    };
+    let inner = ui::popup(f, area, 72, h, &title, t);
     let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
-    let brand = ui::harness_color(Some(p.session.harness), t);
+    let brand = ui::harness_color(Some(p.from.harness()), t);
     ui::line(f, Rect { height: 1, ..inner }, vec![
-        Span::styled(format!("{} ", ui::harness_glyph(Some(p.session.harness))), fg(brand)),
-        Span::styled(ui::fit(&p.session.title, inner.width as usize - 4), ui::bold()),
+        Span::styled(format!("{} ", ui::harness_glyph(Some(p.from.harness()))), fg(brand)),
+        Span::styled(ui::fit(p.from.title(), inner.width as usize - 4), ui::bold()),
     ]);
-    ui::line(f, Rect { y: inner.y + 1, height: 1, ..inner }, vec![Span::styled(format!("  from {} — the copy is resumed with fork semantics and cleaned up on exit", p.session.profile_id.as_deref().unwrap_or("?")), muted(t))]);
-    for (i, (id, detail)) in p.targets.iter().enumerate() {
+    let note = match p.from {
+        ResumeFrom::Past(_) => "another login continues from a copy of the conversation",
+        ResumeFrom::Live { .. } => "the running session closes and continues in the login you pick",
+    };
+    ui::line(f, Rect { y: inner.y + 1, height: 1, ..inner }, vec![Span::styled(format!("  {note}"), muted(t))]);
+    for (i, tg) in p.targets.iter().enumerate() {
         let y = inner.y + 3 + i as u16;
         if y >= inner.bottom().saturating_sub(1) {
             break;
         }
         let on = i == p.sel;
-        ui::line(f, Rect { y, height: 1, ..inner }, vec![
-            Span::styled(if on { "▌ " } else { "  " }, ui::accent(t)),
-            Span::styled(ui::pad(id, 24), if on { ui::bold_accent(t) } else { ui::bold() }),
-            Span::styled(detail.clone(), muted(t)),
-        ]);
+        let mut left = vec![
+            Span::styled(if on { "▌" } else { " " }, ui::accent(t)),
+            Span::styled(format!("{} ", i + 1), muted(t)),
+            Span::styled(ui::pad(&tg.name, 14), if on { ui::bold_accent(t) } else { ui::bold() }),
+            Span::styled(tg.detail.clone(), muted(t)),
+        ];
+        if tg.current {
+            left.push(Span::styled("  current", fg(t.shine)));
+        }
+        let right = match tg.left {
+            Some(l) => vec![Span::styled(format!("{l:.0}% left "), fg(ui::left_color(l, t)))],
+            None => vec![],
+        };
+        ui::line_lr(f, Rect { y, height: 1, ..inner }, left, right);
     }
-    if p.targets.is_empty() {
-        ui::line(f, Rect { y: inner.y + 3, height: 1, ..inner }, vec![Span::styled("  no other logged-in profile of this kind", muted(t))]);
-    }
-    ui::hint_line(f, inner, &[("⏎", "fork + resume"), ("↑↓", "pick"), ("esc", "cancel")], t);
+    ui::hint_line(f, inner, &[("⏎", "resume"), ("1-9", "pick + go"), ("↑↓", "move"), ("esc", "cancel")], t);
 }
 
 fn draw_confirm(f: &mut Frame, area: Rect, c: &Confirm, t: &Theme) {
