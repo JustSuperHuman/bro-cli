@@ -11,6 +11,10 @@ build = "build.rs"
 name = "bro"
 path = "src/main.rs"
 
+[[bin]]
+name = "bro-app"
+path = "src/bin/bro-app.rs"
+
 [dependencies]
 bro-core.workspace = true
 bro-proxy.workspace = true
