@@ -157,7 +157,7 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static PAINTER: Mutex<Option<Painter>> = Mutex::new(None);
 
 /// Settle the icon mode for this run (call once, with a real terminal). No-op under tests.
-pub fn init(setting: &str) {
+pub fn init(setting: &str, light: bool) {
     if cfg!(test) {
         return;
     }
@@ -165,9 +165,20 @@ pub fn init(setting: &str) {
     if mode == Mode::Text {
         return;
     }
-    if let Some(p) = Painter::new(mode, cell_pixels()) {
+    if let Some(p) = Painter::new(mode, cell_pixels(), light) {
         *PAINTER.lock() = Some(p);
         ENABLED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The theme changed between dark and light: re-ink the marks (everything is repainted next frame).
+pub fn retint(light: bool) {
+    let mut guard = PAINTER.lock();
+    if let Some(p) = guard.as_ref()
+        && p.light != light
+        && let Some(n) = Painter::new(p.mode, p.cells, light)
+    {
+        *guard = Some(n);
     }
 }
 
@@ -235,6 +246,8 @@ struct Output {
 
 struct Painter {
     mode: Mode,
+    cells: (u16, u16),
+    light: bool,
     /// escape sequence per icon: the sixel / iTerm image, or the kitty upload
     images: HashMap<Icon, Vec<u8>>,
     kitty_uploaded: Vec<Icon>,
@@ -245,10 +258,10 @@ struct Painter {
 
 impl Painter {
     /// None if an image can't be built (the caller stays in text mode).
-    fn new(mode: Mode, (cw, ch): (u16, u16)) -> Option<Painter> {
+    fn new(mode: Mode, (cw, ch): (u16, u16), light: bool) -> Option<Painter> {
         let mut images = HashMap::new();
         for icon in Icon::ALL {
-            let img = Rgba::decode(icon.png())?.inked(INK);
+            let img = Rgba::decode(icon.png())?.inked(ink(icon, light));
             let seq = match mode {
                 Mode::Text => return None,
                 Mode::Sixel => sixel_mark(&img, (cw * ICON_CELLS) as u32, ch as u32).into_bytes(),
@@ -257,7 +270,7 @@ impl Painter {
             };
             images.insert(icon, seq);
         }
-        Some(Painter { mode, images, kitty_uploaded: vec![], prev: vec![], prev_area: None, out: Output::default() })
+        Some(Painter { mode, cells: (cw, ch), light, images, kitty_uploaded: vec![], prev: vec![], prev_area: None, out: Output::default() })
     }
 
     fn take(&mut self) -> Output {
@@ -331,8 +344,14 @@ impl Painter {
 
 // ------------------------------------------------------------------ images
 
-/// The marks are drawn white (bro's themes are dark).
-const INK: [u8; 3] = [255, 255, 255];
+/// Claude's mark in Anthropic's coral; OpenAI's in the theme's text colour (white on dark, ink on light).
+fn ink(icon: Icon, light: bool) -> [u8; 3] {
+    match (icon, light) {
+        (Icon::Claude, _) => [0xd9, 0x77, 0x57],
+        (Icon::Codex, false) => [0xff, 0xff, 0xff],
+        (Icon::Codex, true) => [0x1f, 0x23, 0x28],
+    }
+}
 
 struct Rgba {
     w: u32,
@@ -575,9 +594,9 @@ mod tests {
 
     #[test]
     fn sixel_framing() {
-        let img = Rgba::decode(CLAUDE_PNG).unwrap().inked(INK);
+        let img = Rgba::decode(CLAUDE_PNG).unwrap().inked(ink(Icon::Claude, false));
         let s = sixel_mark(&img, 20, 20);
-        assert!(s.starts_with("\x1bP0;1;0q\"1;1;20;20#0;2;100;100;100"), "{s:?}");
+        assert!(s.starts_with("\x1bP0;1;0q\"1;1;20;20#0;2;85;47;34"), "Claude coral, as sixel percentages: {s:?}");
         assert!(s.ends_with("\x1b\\"));
         // 20 rows = 4 bands of 6 → 3 band separators
         assert_eq!(s.matches('-').count(), 3);
@@ -604,7 +623,7 @@ mod tests {
 
     #[test]
     fn iterm_and_kitty_sequences() {
-        let img = Rgba::decode(CODEX_PNG).unwrap().inked(INK);
+        let img = Rgba::decode(CODEX_PNG).unwrap().inked(ink(Icon::Codex, false));
         let png = img.encode_png().unwrap();
         assert!(Rgba::decode(&png).is_some());
         let s = iterm_image(&png, 2, 1);
@@ -615,7 +634,7 @@ mod tests {
     }
 
     fn painter(mode: Mode) -> Painter {
-        Painter::new(mode, (10, 20)).unwrap()
+        Painter::new(mode, (10, 20), false).unwrap()
     }
 
     fn frame(w: u16, h: u16, marks: &[(u16, u16, &str)]) -> Buffer {

@@ -406,6 +406,7 @@ impl App {
 
     pub(crate) fn set_theme(&mut self, name: &str, save: bool) {
         self.theme = theme::get(name);
+        crate::icons::retint(self.theme.is_light());
         if save {
             let mut s = self.svc.settings();
             s.theme = name.to_string();
@@ -441,7 +442,7 @@ impl App {
     // ------------------------------------------------------------------ loop
 
     pub fn run(&mut self, term: &mut DefaultTerminal, rx: Receiver<Event>) -> anyhow::Result<()> {
-        crate::icons::init(&self.svc.settings().icons);
+        crate::icons::init(&self.svc.settings().icons, self.theme.is_light());
         loop {
             term.draw(|f| {
                 self.draw(f);
