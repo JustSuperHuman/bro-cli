@@ -88,7 +88,9 @@ fn icon_file() -> Option<PathBuf> {
 }
 
 fn spawn(cmd: &mut Command) -> bool {
-    cmd.spawn().is_ok()
+    // an app window shouldn't inherit a shell's colour opt-out (NO_COLOR makes crossterm, PowerShell and most
+    // CLIs drop every colour) — bro is started from here, not from that shell
+    cmd.env_remove("NO_COLOR").spawn().is_ok()
 }
 
 fn exe(name: &str) -> String {
