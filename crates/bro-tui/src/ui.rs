@@ -67,6 +67,10 @@ pub fn harness_color(h: Option<Harness>, t: &Theme) -> Color {
 
 /// Glyph for a harness (a shell prompt for plain shells).
 pub fn harness_glyph(h: Option<Harness>) -> &'static str {
+    // the real logo, when the terminal can show images (see icons.rs)
+    if let Some(m) = crate::icons::marker(h) {
+        return m;
+    }
     icon(match h {
         Some(Harness::Claude) => "claude",
         Some(Harness::Codex) => "codex",

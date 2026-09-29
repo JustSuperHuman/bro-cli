@@ -12,6 +12,7 @@ mod clip;
 mod folder;
 mod fuzzy;
 mod help;
+mod icons;
 mod keymap;
 mod launcher;
 mod layout;

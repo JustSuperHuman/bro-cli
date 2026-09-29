@@ -441,8 +441,13 @@ impl App {
     // ------------------------------------------------------------------ loop
 
     pub fn run(&mut self, term: &mut DefaultTerminal, rx: Receiver<Event>) -> anyhow::Result<()> {
+        crate::icons::init(&self.svc.settings().icons);
         loop {
-            term.draw(|f| self.draw(f))?;
+            term.draw(|f| {
+                self.draw(f);
+                crate::icons::place(f.buffer_mut());
+            })?;
+            crate::icons::flush(term)?;
             let timeout = self.next_deadline();
             let ev = match rx.recv_timeout(timeout) {
                 Ok(e) => e,

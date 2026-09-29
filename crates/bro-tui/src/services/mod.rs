@@ -136,6 +136,7 @@ pub fn fallback_settings() -> Settings {
         shell: None,
         nerd_font: true,
         usage_expanded: false,
+        icons: "auto".into(),
         bridge: BridgeSettings::default(),
         proxy: ProxySettings::default(),
         keys: BTreeMap::new(),

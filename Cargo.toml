@@ -52,6 +52,7 @@ crossterm = "0.29"
 portable-pty = "0.9"
 notify = "8"
 unicode-width = "0.2"
+png = "0.18"
 
 tempfile = "3"
 
