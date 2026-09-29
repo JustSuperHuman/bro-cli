@@ -69,6 +69,7 @@ fn main() -> ExitCode {
 /// Set up the terminal, start services, run the app, restore the terminal.
 fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     use crossterm::{event, execute, terminal};
+    enable_vt_output();
     // the folder bro was opened in (or `bro <folder>`) becomes the current project
     let dir = match dir {
         Some(d) => util::strip_verbatim(std::fs::canonicalize(&d).map_err(|_| anyhow::anyhow!("{} isn't a folder", d.display()))?),
@@ -127,4 +128,35 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
     let res = app.run(&mut term, rx);
     services::guard::restore_terminal();
     res
+}
+
+/// Make sure escape sequences (colours, sixel logos) are interpreted, not printed or dropped.
+///
+/// crossterm decides once whether to use ANSI or the legacy console API, by trying to switch the console
+/// into VT mode. When bro is the first program in a fresh console window (the bro-app window, a bare conhost)
+/// that can fail, and with no TERM set crossterm then falls back to the Win32 colour API — which has no RGB,
+/// so every colour comes out grey. Switch VT mode on ourselves and set TERM so crossterm always picks ANSI.
+fn enable_vt_output() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{
+            DISABLE_NEWLINE_AUTO_RETURN, ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE,
+            SetConsoleMode,
+        };
+        // SAFETY: plain console-mode calls on our own stdout handle.
+        unsafe {
+            let h = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut mode = 0;
+            if GetConsoleMode(h, &mut mode) != 0 {
+                let want = mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+                if SetConsoleMode(h, want | DISABLE_NEWLINE_AUTO_RETURN) == 0 {
+                    SetConsoleMode(h, want);
+                }
+            }
+        }
+    }
+    if std::env::var_os("TERM").is_none() {
+        // SAFETY: called at the very start of run_tui, before any other thread exists.
+        unsafe { std::env::set_var("TERM", "xterm-256color") };
+    }
 }
