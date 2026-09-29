@@ -120,6 +120,11 @@ impl App {
                 let st = if selected { ui::bold_accent(t) } else { fg(t.shine).add_modifier(Modifier::BOLD) };
                 ui::line_lr(f, r, vec![Span::styled("+ new session", st)], vec![Span::styled(format!("{key} "), muted(t))]);
             }
+            Row::Continue { count } => {
+                let key = self.keymap.primary(crate::keymap::Act::Continue);
+                let st = if selected { ui::bold_accent(t) } else { muted(t) };
+                ui::line_lr(f, r, vec![Span::styled("↻ continue session", st), Span::styled(format!("  {count}"), fg(t.frame))], vec![Span::styled(format!("{key} "), muted(t))]);
+            }
             Row::OpenFolder => {
                 let key = self.keymap.primary(crate::keymap::Act::OpenProject);
                 let st = if selected { ui::bold_accent(t) } else { muted(t) };
@@ -196,29 +201,6 @@ impl App {
                 }
                 let right = vec![Span::styled(format!(" {}", crate::util::short_dur(info.age_secs)), muted(t)), Span::styled(" ×", if selected { fg(t.danger) } else { fg(t.frame) })];
                 ui::line_lr(f, r, left, right);
-            }
-            Row::Past { info } => {
-                // an earlier session: dim, indented under the live ones, ⏎ resumes it
-                let brand = ui::harness_color(Some(info.harness), t);
-                let age = crate::util::short_dur(info.age_secs);
-                let title_w = w.saturating_sub(7 + ui::width(&age) + 1);
-                let mut st = if selected { ui::bold_accent(t) } else { muted(t) };
-                let mut right = vec![Span::styled(format!(" {age}"), muted(t))];
-                if info.archived {
-                    st = st.add_modifier(Modifier::CROSSED_OUT);
-                    right.insert(0, Span::styled(" archived", fg(t.frame)));
-                }
-                let title_w = title_w.saturating_sub(if info.archived { 9 } else { 0 });
-                ui::line_lr(
-                    f,
-                    r,
-                    vec![Span::raw("    "), Span::styled(format!("{} ", ui::harness_glyph(Some(info.harness))), fg(crate::theme::mix(brand, t.muted, 0.5))), Span::styled(ui::fit(&info.title, title_w), st)],
-                    right,
-                );
-            }
-            Row::More { hidden, .. } => {
-                let st = if selected { ui::bold_accent(t) } else { muted(t) };
-                ui::line(f, r, vec![Span::styled(format!("      … {hidden} more"), st)]);
             }
         }
     }

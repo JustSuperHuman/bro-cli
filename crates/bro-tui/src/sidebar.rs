@@ -2,7 +2,7 @@
 //! open "more" lists, filter) to the rows the sidebar draws and navigates. No I/O, no drawing.
 //!
 //! Order: the projects you opened (your order), then projects that only have running sessions. Earlier
-//! sessions are listed under their project; history alone never adds a project.
+//! sessions aren't rows: "continue session" opens a picker for them.
 
 use crate::pane::{Activity, PaneId};
 use bro_core::Harness;
@@ -30,19 +30,12 @@ pub struct LiveInfo {
     pub seq: u64,
 }
 
-/// A resumable past session.
+/// An earlier session, as the sidebar needs it: which project, and how long ago (for "last used").
 #[derive(Clone, Debug)]
 pub struct PastInfo {
-    /// index into the services' past-session list
-    pub idx: usize,
-    pub harness: Harness,
-    pub profile: Option<String>,
-    pub title: String,
     pub age_secs: u64,
     pub project_key: String,
     pub project_root: PathBuf,
-    /// shown only while "show archived" is on
-    pub archived: bool,
 }
 
 /// A project you've opened (from `OpenProjects`), resolved.
@@ -58,11 +51,7 @@ pub struct OpenInfo {
 pub struct SideState {
     /// folded projects (projects start open)
     pub collapsed: HashSet<String>,
-    /// projects showing all their earlier sessions instead of the first few
-    pub past_open: HashSet<String>,
     pub filter: String,
-    /// list archived earlier sessions too (dimmed)
-    pub show_archived: bool,
 }
 
 impl SideState {
@@ -80,13 +69,15 @@ impl SideState {
     }
 }
 
-/// One sidebar row.
+/// One sidebar row. Earlier sessions aren't listed — "continue session" opens a picker for them.
 #[derive(Clone, Debug)]
 pub enum Row {
     /// "+ new session" — always first
     New,
-    /// "+ open project" — right under it
+    /// "+ open project"
     OpenFolder,
+    /// "↻ continue session" (when there are earlier sessions)
+    Continue { count: usize },
     Project {
         key: String,
         name: String,
@@ -98,56 +89,45 @@ pub enum Row {
         last_age: Option<u64>,
     },
     Live { info: LiveInfo, n: Option<usize> },
-    /// A resumable earlier session, listed right under the project's live ones
-    Past { info: PastInfo },
-    /// "… N more" — shows the rest of a project's earlier sessions
-    More { key: String, hidden: usize },
 }
 
 impl Row {
     /// The project a row belongs to (empty for the action rows).
     pub fn project_key(&self) -> &str {
         match self {
-            Row::New | Row::OpenFolder => "",
-            Row::Project { key, .. } | Row::More { key, .. } => key,
+            Row::New | Row::OpenFolder | Row::Continue { .. } => "",
+            Row::Project { key, .. } => key,
             Row::Live { info, .. } => &info.project_key,
-            Row::Past { info } => &info.project_key,
         }
     }
 }
-
-/// Earlier sessions shown per open project before "… N more".
-pub const PAST_SHOWN: usize = 4;
-/// Earlier sessions shown once "more" is opened.
-pub const PAST_PER_PROJECT: usize = 25;
 
 struct Group<'a> {
     key: String,
     name: String,
     root: PathBuf,
     live: Vec<&'a LiveInfo>,
-    past: Vec<&'a PastInfo>,
+    /// newest earlier session's age
+    last_age: Option<u64>,
 }
 
 /// Opened projects in your order, then projects that only have running sessions (in launch order).
-/// Earlier sessions only attach to those — there are no "history-only" projects.
-fn groups<'a>(live: &'a [LiveInfo], past: &'a [PastInfo], open: &[OpenInfo]) -> Vec<Group<'a>> {
-    let mut order: Vec<Group> = open.iter().map(|o| Group { key: o.key.clone(), name: o.name.clone(), root: o.root.clone(), live: vec![], past: vec![] }).collect();
+fn groups<'a>(live: &'a [LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<Group<'a>> {
+    let mut order: Vec<Group> = open.iter().map(|o| Group { key: o.key.clone(), name: o.name.clone(), root: o.root.clone(), live: vec![], last_age: None }).collect();
     let mut at: HashMap<String, usize> = order.iter().enumerate().map(|(i, g)| (g.key.clone(), i)).collect();
     let mut live_sorted: Vec<&LiveInfo> = live.iter().collect();
     live_sorted.sort_by_key(|l| l.seq);
     for l in live_sorted {
         let i = *at.entry(l.project_key.clone()).or_insert_with(|| {
-            order.push(Group { key: l.project_key.clone(), name: l.project_name.clone(), root: l.project_root.clone(), live: vec![], past: vec![] });
+            order.push(Group { key: l.project_key.clone(), name: l.project_name.clone(), root: l.project_root.clone(), live: vec![], last_age: None });
             order.len() - 1
         });
         order[i].live.push(l);
     }
-    let mut past_sorted: Vec<&PastInfo> = past.iter().collect();
-    past_sorted.sort_by_key(|p| p.age_secs);
-    for p in past_sorted {
+    for p in past {
         if let Some(&i) = at.get(&p.project_key) {
-            order[i].past.push(p);
+            let g = &mut order[i];
+            g.last_age = Some(g.last_age.map_or(p.age_secs, |a| a.min(p.age_secs)));
         }
     }
     order
@@ -176,6 +156,9 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo], st: &SideS
     if q.is_empty() {
         rows.push(Row::New);
         rows.push(Row::OpenFolder);
+        if !past.is_empty() {
+            rows.push(Row::Continue { count: past.len() });
+        }
     }
     for g in groups(live, past, open) {
         let project_hit = !q.is_empty() && matches(&[&g.name], &q);
@@ -185,27 +168,17 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo], st: &SideS
             .copied()
             .filter(|l| q.is_empty() || project_hit || matches(&[l.name.as_deref().unwrap_or(""), l.harness.map(|h| h.label()).unwrap_or("shell"), l.profile.as_deref().unwrap_or(""), l.model.as_deref().unwrap_or("")], &q))
             .collect();
-        let past_rows: Vec<&PastInfo> = g.past.iter().copied().filter(|p| q.is_empty() || project_hit || matches(&[&p.title, p.harness.label(), p.profile.as_deref().unwrap_or("")], &q)).collect();
-        if !q.is_empty() && live_rows.is_empty() && past_rows.is_empty() && !project_hit {
+        if !q.is_empty() && live_rows.is_empty() && !project_hit {
             continue;
         }
         let collapsed = q.is_empty() && st.is_collapsed(&g.key);
         let attention = g.live.iter().any(|l| l.activity == Some(Activity::Blocked) || l.done);
-        let last_age = g.past.first().map(|p| p.age_secs);
-        rows.push(Row::Project { key: g.key.clone(), name: g.name.clone(), root: g.root.clone(), live: g.live.len(), collapsed, attention, last_age });
+        rows.push(Row::Project { key: g.key.clone(), name: g.name.clone(), root: g.root.clone(), live: g.live.len(), collapsed, attention, last_age: g.last_age });
         if collapsed {
             continue;
         }
         for l in live_rows {
             rows.push(Row::Live { info: l.clone(), n: numbering.get(&l.pane).copied().filter(|n| *n <= 9) });
-        }
-        let all = st.past_open.contains(&g.key) || !q.is_empty();
-        let shown = past_rows.len().min(if all { PAST_PER_PROJECT } else { PAST_SHOWN });
-        for p in &past_rows[..shown] {
-            rows.push(Row::Past { info: (*p).clone() });
-        }
-        if !all && past_rows.len() > shown {
-            rows.push(Row::More { key: g.key.clone(), hidden: past_rows.len() - shown });
         }
     }
     rows
@@ -232,8 +205,8 @@ mod tests {
         }
     }
 
-    fn past(idx: usize, project: &str, title: &str, age: u64) -> PastInfo {
-        PastInfo { idx, harness: Harness::Codex, profile: Some("codex:local".into()), title: title.into(), age_secs: age, project_key: project.into(), project_root: PathBuf::from(project), archived: false }
+    fn past(_idx: usize, project: &str, _title: &str, age: u64) -> PastInfo {
+        PastInfo { age_secs: age, project_key: project.into(), project_root: PathBuf::from(project) }
     }
 
     fn opened(keys: &[&str]) -> Vec<OpenInfo> {
@@ -245,42 +218,39 @@ mod tests {
             .map(|r| match r {
                 Row::New => "+".to_string(),
                 Row::OpenFolder => "o".to_string(),
+                Row::Continue { count } => format!("c{count}"),
                 Row::Project { name, .. } => format!("P:{name}"),
                 Row::Live { info, n } => format!("L{}#{}", info.pane, n.unwrap_or(0)),
-                Row::Past { info } => format!("p{}", info.idx),
-                Row::More { hidden, .. } => format!("M{hidden}"),
             })
             .collect::<Vec<_>>()
             .join(" ")
     }
 
     #[test]
-    fn opened_projects_first_history_only_projects_hidden() {
+    fn opened_projects_and_running_sessions_only() {
         let l = vec![live(10, "b", 2, None), live(11, "x", 1, Some(Activity::Blocked))];
         let p = vec![past(0, "c", "never opened", 900), past(1, "b", "fix it", 100), past(2, "a", "newer", 50)];
         let rows = build(&l, &p, &opened(&["a", "b"]), &SideState::default());
-        // a and b in your order, then x (only a running session), no "c"
-        assert_eq!(kinds(&rows), "+ o P:a p2 P:b L10#1 p1 P:x L11#2");
-        assert!(matches!(&rows[7], Row::Project { attention: true, .. }));
+        // earlier sessions aren't rows: one "continue" entry instead
+        assert_eq!(kinds(&rows), "+ o c3 P:a P:b L10#1 P:x L11#2");
+        assert!(matches!(&rows[3], Row::Project { last_age: Some(50), .. }));
+        assert!(matches!(&rows[6], Row::Project { attention: true, .. }));
         assert_eq!(live_order(&l, &p, &opened(&["a", "b"])), vec![10, 11]);
         assert_eq!(project_order(&l, &p, &opened(&["a", "b"])), vec!["a", "b", "x"]);
+        assert_eq!(kinds(&build(&l, &[], &opened(&["a"]), &SideState::default())), "+ o P:a P:x L11#1 P:b L10#2", "no continue row without history");
     }
 
     #[test]
-    fn collapse_more_and_filter() {
-        let l = vec![live(1, "a", 1, None)];
-        let p: Vec<PastInfo> = (0..6).map(|i| past(i, "a", "port the loop", i as u64)).chain([past(9, "b", "qr pairing", 5)]).collect();
+    fn collapse_and_filter() {
+        let l = vec![live(1, "a", 1, None), live(2, "b", 2, None)];
         let open = opened(&["a", "b"]);
         let mut st = SideState::default();
-        assert_eq!(kinds(&build(&l, &p, &open, &st)), "+ o P:a L1#1 p0 p1 p2 p3 M2 P:b p9");
-        st.past_open.insert("a".into());
-        assert_eq!(kinds(&build(&l, &p, &open, &st)), "+ o P:a L1#1 p0 p1 p2 p3 p4 p5 P:b p9");
         st.set_collapsed("a", true);
-        assert_eq!(kinds(&build(&l, &p, &open, &st)), "+ o P:a P:b p9");
-        st.filter = "QR".into();
-        assert_eq!(kinds(&build(&l, &p, &open, &st)), "P:b p9");
+        assert_eq!(kinds(&build(&l, &[], &open, &st)), "+ o P:a P:b L2#2");
+        st.filter = "b".into();
+        assert_eq!(kinds(&build(&l, &[], &open, &st)), "P:b L2#2");
         st.filter = "zzz".into();
-        assert!(build(&l, &p, &open, &st).is_empty());
+        assert!(build(&l, &[], &open, &st).is_empty());
     }
 
     #[test]

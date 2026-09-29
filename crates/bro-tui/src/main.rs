@@ -8,10 +8,12 @@ mod alerts;
 mod archive;
 mod app;
 mod cli;
+mod continue_picker;
 mod clip;
 mod folder;
 mod fuzzy;
 mod help;
+mod instance;
 mod icons;
 mod keymap;
 mod launcher;
@@ -50,7 +52,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Ok(cli::Command::Tui { demo }) => match run_tui(demo) {
+        Ok(cli::Command::Tui { demo, new, dir }) => match run_tui(demo, new, dir) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("bro: {e:#}");
@@ -65,8 +67,18 @@ fn main() -> ExitCode {
 }
 
 /// Set up the terminal, start services, run the app, restore the terminal.
-fn run_tui(demo: bool) -> anyhow::Result<()> {
+fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     use crossterm::{event, execute, terminal};
+    // the folder bro was opened in (or `bro <folder>`) becomes the current project
+    let dir = match dir {
+        Some(d) => util::strip_verbatim(std::fs::canonicalize(&d).map_err(|_| anyhow::anyhow!("{} isn't a folder", d.display()))?),
+        None => std::env::current_dir()?,
+    };
+    // already running? hand the folder over and get out of the way
+    if !demo && !new && instance::hand_off(&dir).unwrap_or(false) {
+        println!("bro is already running — opened {} there (bro --new for a second one)", dir.display());
+        return Ok(());
+    }
     services::guard::install_panic_hook();
     util::probe_local_offset();
     // demo mode never reads or writes your real settings
@@ -104,7 +116,11 @@ fn run_tui(demo: bool) -> anyhow::Result<()> {
         }
     });
 
+    let _instance = if demo { None } else { instance::serve(tx.clone()) };
     let mut app = app::App::new(svc, tx, app::Opts { demo, fixed_demo: false, load_recents: !demo });
+    if !demo {
+        app.start_in(dir);
+    }
     if let Some(p) = problem.filter(|p| !services::guard::is_unimplemented(p)) {
         app.toast(alerts::Kind::Error, format!("settings: {p} — using defaults"));
     }

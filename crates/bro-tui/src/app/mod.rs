@@ -559,6 +559,11 @@ impl App {
                     self.with_pane(id, |p, cx| p.key(key, cx));
                 }
             },
+            Event::OpenProject(dir) => {
+                // another `bro` was started in this folder
+                self.add_project(dir);
+                self.side_focus = false;
+            }
             Event::ThemeFilesChanged => {
                 if theme::is_custom(&self.theme.name) {
                     let name = self.theme.name.clone();
@@ -577,6 +582,10 @@ impl App {
             return;
         }
         if let Overlay::Folder(p) = &mut self.overlay {
+            p.paste(s);
+            return;
+        }
+        if let Overlay::Continue(p) = &mut self.overlay {
             p.paste(s);
             return;
         }

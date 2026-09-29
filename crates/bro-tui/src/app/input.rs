@@ -136,6 +136,16 @@ impl App {
                 }
             }
             Overlay::Resume(_) => self.resume_key(k),
+            Overlay::Continue(p) => match p.key(k) {
+                crate::continue_picker::Outcome::None => {}
+                crate::continue_picker::Outcome::Close => self.overlay = Overlay::None,
+                crate::continue_picker::Outcome::Resume(idx) => {
+                    self.overlay = Overlay::None;
+                    self.open_resume(idx);
+                }
+                crate::continue_picker::Outcome::Archive(id, on) => self.continue_archive(id, on),
+                crate::continue_picker::Outcome::Undo => self.undo_archive(),
+            },
             Overlay::Folder(p) => match p.key(k) {
                 crate::folder::Outcome::None => {}
                 crate::folder::Outcome::Close => self.overlay = Overlay::None,
@@ -230,15 +240,14 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_row(sel),
             KeyCode::Char('f') => match rows.get(sel) {
-                Some(Row::Past { info }) => self.open_resume(info.idx),
                 Some(Row::Live { info, .. }) => self.open_switch(info.pane),
-                _ => self.toast(Kind::Info, "f forks an earlier session into another profile"),
+                _ => self.toast(Kind::Info, "f moves a running session to another login"),
             },
             KeyCode::Char('r') => match rows.get(sel) {
                 Some(Row::Live { info, .. }) => self.start_rename(info.pane),
-                Some(Row::Past { info }) => self.resume(info.idx),
-                _ => {}
+                _ => self.open_continue(),
             },
+            KeyCode::Char('c') => self.open_continue(),
             KeyCode::Char('x') | KeyCode::Delete => match rows.get(sel) {
                 Some(Row::Live { info, .. }) => self.ask_close(info.pane),
                 Some(Row::Project { root, live, .. }) => self.close_project(root.clone(), *live),
@@ -254,9 +263,6 @@ impl App {
                 self.open_shell(dir, crate::pane::Place::Tab);
                 self.side_focus = false;
             }
-            KeyCode::Char('a') => self.archive_row(sel),
-            KeyCode::Char('u') => self.undo_archive(),
-            KeyCode::Char('A') => self.toggle_show_archived(),
             KeyCode::Char('/') => {
                 self.side_filtering = true;
                 self.side_sel = 0;

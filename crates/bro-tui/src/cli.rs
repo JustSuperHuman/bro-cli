@@ -5,7 +5,9 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// The TUI (`bro`, `bro --demo`).
-    Tui { demo: bool },
+    /// `new`: don't hand off to a running bro (`bro --new`)
+    /// `dir`: `bro <folder>` opens that folder (default: where you ran bro)
+    Tui { demo: bool, new: bool, dir: Option<std::path::PathBuf> },
     Version,
     Help,
     /// `bro proxy <upstream> …` — headless translating proxy.
@@ -17,6 +19,9 @@ pub const HELP: &str = "bro {version} — the agentic terminal workspace for Cla
 
 usage
   bro              open the workspace
+  bro [folder]     open the workspace with that folder (default: here) as the current project;
+                   if bro is already running, the folder opens there instead
+  bro --new        a separate bro even when one is running
   bro --demo       open with realistic fake data (screenshots; touches no accounts)
   bro proxy <upstream> [-m model] [--small-model m] [--port n]
                    run the translating proxy headless (upstream: pool, claude:<profile>,
@@ -33,16 +38,18 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     if args.first().map(String::as_str) == Some("proxy") {
         return crate::proxy_cmd::parse(&args[1..]).map(Command::Proxy);
     }
-    let mut demo = false;
+    let (mut demo, mut new, mut dir) = (false, false, None);
     for a in args {
         match a.as_str() {
             "-h" | "--help" | "help" => return Ok(Command::Help),
             "-V" | "--version" | "version" => return Ok(Command::Version),
             "--demo" | "demo" => demo = true,
+            "--new" | "-n" => new = true,
+            other if !other.starts_with('-') && dir.is_none() => dir = Some(std::path::PathBuf::from(other)),
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
-    Ok(Command::Tui { demo })
+    Ok(Command::Tui { demo, new, dir })
 }
 
 #[cfg(test)]
@@ -55,8 +62,10 @@ mod tests {
 
     #[test]
     fn parses() {
-        assert_eq!(p(&[]), Ok(Command::Tui { demo: false }));
-        assert_eq!(p(&["--demo"]), Ok(Command::Tui { demo: true }));
+        assert_eq!(p(&[]), Ok(Command::Tui { demo: false, new: false, dir: None }));
+        assert_eq!(p(&["--new"]), Ok(Command::Tui { demo: false, new: true, dir: None }));
+        assert_eq!(p(&["F:/x"]), Ok(Command::Tui { demo: false, new: false, dir: Some("F:/x".into()) }));
+        assert_eq!(p(&["--demo"]), Ok(Command::Tui { demo: true, new: false, dir: None }));
         assert_eq!(p(&["--version"]), Ok(Command::Version));
         assert_eq!(p(&["-h"]), Ok(Command::Help));
         assert!(p(&["--nope"]).is_err());

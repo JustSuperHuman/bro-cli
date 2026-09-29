@@ -39,6 +39,13 @@ impl App {
                     }
                     return;
                 }
+                Overlay::Continue(p) if left => {
+                    if let crate::continue_picker::Outcome::Resume(idx) = p.click(pos) {
+                        self.overlay = Overlay::None;
+                        self.open_resume(idx);
+                    }
+                    return;
+                }
                 Overlay::Resume(p) if left => {
                     if let Some(i) = p.hits.iter().position(|r| r.contains(pos)) {
                         if i == p.sel {
@@ -76,13 +83,8 @@ impl App {
                             }
                         }
                         SideHit::Row(i) => {
-                            let is_past = matches!(self.rows().get(i), Some(crate::sidebar::Row::Past { .. }));
-                            if is_past && !double {
-                                self.side_sel = i;
-                                self.side_focus = true;
-                            } else {
-                                self.activate_row(i);
-                            }
+                            let _ = double;
+                            self.activate_row(i);
                         }
                         SideHit::Close(id) => self.ask_close(id),
                         SideHit::Fable => self.show_fable = !self.show_fable,

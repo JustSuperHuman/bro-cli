@@ -99,7 +99,7 @@ impl App {
                 self.toast(Kind::Info, if n { "nerd font icons" } else { "plain icons (no nerd font)" });
             }
             Act::UsageDetails => self.toggle_usage_details(),
-            Act::ShowArchived => self.toggle_show_archived(),
+            Act::Continue => self.open_continue(),
             Act::OpenProject => self.open_folder(),
             Act::SwitchLogin => {
                 if let Some(id) = self.focused() {
@@ -282,51 +282,60 @@ impl App {
         self.svc.save_settings(s);
     }
 
-    /// "a" on a sidebar row: archive an earlier session (or restore an archived one), or every earlier
-    /// session of a project.
-    pub(crate) fn archive_row(&mut self, i: usize) {
-        let rows = self.rows();
-        let Some(r) = rows.get(i) else { return };
-        let past = self.svc.state().past.ready().cloned().unwrap_or_default();
-        let id_of = |idx: usize| past.get(idx).map(|s| s.id.clone());
-        let project_name = |key: &str| rows.iter().find_map(|r| match r {
-            Row::Project { key: k, name, .. } if k == key => Some(name.clone()),
-            _ => None,
+    /// "↻ continue session" / alt+r: earlier sessions, searchable, current project first.
+    pub(crate) fn open_continue(&mut self) {
+        let project = self.current_project().map(|r| {
+            let pk = self.svc.project_for(&r);
+            (pk.key, pk.name)
         });
-        match r {
-            Row::Past { info } if info.archived => {
-                if let Some(id) = id_of(info.idx) {
-                    self.archive.remove(&[id]);
-                    self.archive.save(self.persist);
-                    self.toast(Kind::Info, format!("restored \u{201c}{}\u{201d}", crate::ui::fit(&info.title, 40)));
-                }
-            }
-            Row::Past { info } => {
-                if let Some(id) = id_of(info.idx) {
-                    self.archive.add([id]);
-                    self.archive.save(self.persist);
-                    self.toast(Kind::Info, format!("archived \u{201c}{}\u{201d} \u{b7} u to undo", crate::ui::fit(&info.title, 40)));
-                }
-            }
-            Row::Project { key, .. } | Row::More { key, .. } => {
-                let name = project_name(key).unwrap_or_default();
-                let ids: Vec<String> = self.past_infos().into_iter().filter(|p| &p.project_key == key && !p.archived).filter_map(|p| id_of(p.idx)).collect();
-                let n = self.archive.add(ids);
-                self.archive.save(self.persist);
-                let msg = match n {
-                    0 => format!("nothing to archive in {name}"),
-                    n => format!("archived {n} earlier session{} in {name} \u{b7} u to undo", if n == 1 { "" } else { "s" }),
-                };
-                self.toast(Kind::Info, msg);
-            }
-            Row::Live { .. } => self.toast(Kind::Info, "a running session can't be archived \u{2014} close it first (x)"),
-            Row::New | Row::OpenFolder => {}
+        let entries = self.continue_entries();
+        if entries.is_empty() {
+            self.toast(Kind::Info, "no earlier sessions yet");
+            return;
         }
-        let n = self.rows().len();
-        self.side_sel = self.side_sel.min(n.saturating_sub(1));
+        self.overlay = Overlay::Continue(Box::new(crate::continue_picker::ContinuePicker::new(entries, project)));
     }
 
-    /// "u": undo the last archive.
+    /// Every earlier session (archived ones flagged), newest first.
+    pub(crate) fn continue_entries(&self) -> Vec<crate::continue_picker::Entry> {
+        let st = self.svc.state();
+        let Some(past) = st.past.ready() else { return vec![] };
+        let mut v: Vec<crate::continue_picker::Entry> = past
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| {
+                let pk = s.project.clone().or_else(|| s.cwd.as_ref().map(|c| self.svc.project_for(c)))?;
+                Some(crate::continue_picker::Entry {
+                    idx,
+                    id: s.id.clone(),
+                    harness: s.harness,
+                    title: s.title.clone(),
+                    login: s.profile_id.as_deref().map(|p| p.split(':').next_back().unwrap_or(p).to_string()),
+                    age_secs: crate::util::secs_since(s.modified),
+                    project_key: pk.key,
+                    project_name: pk.name,
+                    archived: self.archive.contains(&s.id),
+                })
+            })
+            .collect();
+        v.sort_by_key(|e| e.age_secs);
+        v
+    }
+
+    /// Archive / restore from the continue picker, then refresh its list.
+    pub(crate) fn continue_archive(&mut self, id: String, archive: bool) {
+        if archive {
+            self.archive.add([id]);
+            self.toast(Kind::Info, "archived \u{b7} ctrl+z undoes");
+        } else {
+            self.archive.remove(&[id]);
+            self.toast(Kind::Info, "restored");
+        }
+        self.archive.save(self.persist);
+        self.refresh_continue();
+    }
+
+    /// ctrl+z in the continue picker.
     pub(crate) fn undo_archive(&mut self) {
         match self.archive.undo() {
             0 => self.toast(Kind::Info, "nothing to undo"),
@@ -335,14 +344,14 @@ impl App {
                 self.toast(Kind::Info, format!("restored {n} session{}", if n == 1 { "" } else { "s" }));
             }
         }
+        self.refresh_continue();
     }
 
-    /// Show / hide archived sessions in the sidebar.
-    pub(crate) fn toggle_show_archived(&mut self) {
-        self.side.show_archived = !self.side.show_archived;
-        let n = self.archive.ids.len();
-        let msg = if self.side.show_archived { format!("showing {n} archived \u{b7} a restores one") } else { "archived sessions hidden".to_string() };
-        self.toast(Kind::Info, msg);
+    fn refresh_continue(&mut self) {
+        let entries = self.continue_entries();
+        if let Overlay::Continue(p) = &mut self.overlay {
+            p.set_entries(entries);
+        }
     }
 
     /// Enter on a sidebar row.
@@ -357,20 +366,14 @@ impl App {
                 self.side.set_collapsed(key, !*collapsed);
             }
             Row::OpenFolder => self.open_folder(),
+            Row::Continue { .. } => self.open_continue(),
             Row::Live { info, .. } => self.go_session(info.pane),
-            Row::Past { info } => self.open_resume(info.idx),
-            Row::More { key, .. } => {
-                self.side.past_open.insert(key.clone());
-            }
         }
     }
 
-    /// The project header row for `key`, as (index, has live sessions).
-    fn project_row(rows: &[Row], key: &str) -> Option<(usize, bool)> {
-        rows.iter().enumerate().find_map(|(i, r)| match r {
-            Row::Project { key: k, live, .. } if k == key => Some((i, *live > 0)),
-            _ => None,
-        })
+    /// The project header row for `key`.
+    fn project_row(rows: &[Row], key: &str) -> Option<usize> {
+        rows.iter().position(|r| matches!(r, Row::Project { key: k, .. } if k == key))
     }
 
     /// h / ←: fold the project (from any of its rows, landing on its header).
@@ -381,26 +384,18 @@ impl App {
         if key.is_empty() {
             return;
         }
-        // an opened "more" list shrinks back first
-        if matches!(r, Row::Past { .. }) && self.side.past_open.remove(&key) {
-            return;
-        }
-        if let Some((i, live)) = Self::project_row(&rows, &key) {
-            let _ = live;
+        if let Some(i) = Self::project_row(&rows, &key) {
             self.side.set_collapsed(&key, true);
             self.side_sel = i;
         }
     }
 
-    /// l / →: unfold a project, open "more", or step into the project.
+    /// l / →: unfold a project, or step into it.
     pub(crate) fn side_expand(&mut self) {
         let rows = self.rows();
         match rows.get(self.side_sel) {
             Some(Row::Project { key, collapsed: true, .. }) => self.side.set_collapsed(key, false),
-            Some(Row::More { key, .. }) => {
-                self.side.past_open.insert(key.clone());
-            }
-            Some(Row::Project { .. } | Row::New | Row::OpenFolder) => self.side_sel = (self.side_sel + 1).min(rows.len().saturating_sub(1)),
+            Some(Row::Project { .. } | Row::New | Row::OpenFolder | Row::Continue { .. }) => self.side_sel = (self.side_sel + 1).min(rows.len().saturating_sub(1)),
             _ => {}
         }
     }

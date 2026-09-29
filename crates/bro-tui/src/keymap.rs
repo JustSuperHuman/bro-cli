@@ -47,7 +47,7 @@ pub enum Act {
     ToggleIcons,
     RefreshUsage,
     UsageDetails,
-    ShowArchived,
+    Continue,
     SwitchLogin,
     OpenProject,
     Quit,
@@ -80,7 +80,7 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, OpenProject, SwitchLogin, ShowArchived, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, OpenProject, Continue, SwitchLogin, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
@@ -129,7 +129,7 @@ impl Act {
             ToggleIcons => "toggle_icons".into(),
             RefreshUsage => "refresh_usage".into(),
             UsageDetails => "usage_details".into(),
-            ShowArchived => "show_archived".into(),
+            Continue => "continue".into(),
             SwitchLogin => "switch_login".into(),
             OpenProject => "open_project".into(),
             Quit => "quit".into(),
@@ -181,7 +181,7 @@ impl Act {
             ToggleIcons => "toggle nerd font icons".into(),
             RefreshUsage => "refresh usage now".into(),
             UsageDetails => "sidebar usage: totals / every profile".into(),
-            ShowArchived => "show / hide archived sessions".into(),
+            Continue => "continue an earlier session (search, resume in any login)".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
             OpenProject => "open a project".into(),
             Quit => "quit bro".into(),
@@ -191,7 +191,7 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention | ShowArchived | SwitchLogin | OpenProject => Group::Sessions,
+            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | OpenProject => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Profiles | Proxy | Bridge | RefreshUsage => Group::Views,
@@ -229,6 +229,7 @@ impl Act {
             Usage => vec!["alt+u"],
             UsageDetails => vec!["alt+U"],
             SwitchLogin => vec!["alt+L"],
+            Continue => vec!["alt+r"],
             OpenProject => vec!["alt+O"],
             Profiles => vec!["alt+o"],
             Proxy => vec!["alt+y"],
@@ -269,7 +270,7 @@ impl Act {
             Palette => vec![":", "space"],
             Usage => vec!["u"],
             UsageDetails => vec!["U"],
-            ShowArchived => vec!["A"],
+            Continue => vec!["R"],
             SwitchLogin => vec!["P"],
             OpenProject => vec!["O"],
             Profiles => vec!["o"],

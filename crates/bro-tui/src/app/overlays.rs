@@ -21,6 +21,7 @@ pub enum Overlay {
     Help(Help),
     Resume(Box<ResumePicker>),
     Folder(Box<crate::folder::FolderPicker>),
+    Continue(Box<crate::continue_picker::ContinuePicker>),
     Confirm(Confirm),
 }
 
@@ -98,6 +99,7 @@ impl App {
             Overlay::Help(h) => h.draw(f, area, &self.keymap, &t, time),
             Overlay::Resume(p) => draw_resume(f, area, p, &t),
             Overlay::Folder(p) => crate::folder::draw(f, area, p, &t),
+            Overlay::Continue(p) => crate::continue_picker::draw(f, area, p, &t),
             Overlay::Confirm(c) => draw_confirm(f, area, c, &t),
         }
     }

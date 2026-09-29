@@ -211,14 +211,14 @@ impl App {
         let st = self.svc.state();
         let Some(past) = st.past.ready() else { return vec![] };
         past.iter()
-            .enumerate()
-            .filter_map(|(idx, s)| {
+            .filter_map(|s| {
+                // archived sessions don't count for the sidebar (continue picker shows them on request)
                 let archived = self.archive.contains(&s.id);
-                if archived && !self.side.show_archived {
+                if archived {
                     return None;
                 }
                 let pk = s.project.clone().or_else(|| s.cwd.as_ref().map(|c| self.svc.project_for(c)))?;
-                Some(PastInfo { idx, harness: s.harness, profile: s.profile_id.clone(), title: s.title.clone(), age_secs: crate::util::secs_since(s.modified), project_key: pk.key, project_root: pk.root, archived })
+                Some(PastInfo { age_secs: crate::util::secs_since(s.modified), project_key: pk.key, project_root: pk.root })
             })
             .collect()
     }
@@ -235,35 +235,34 @@ impl App {
             .collect()
     }
 
-    /// First run: open the folder bro started in (unless it's your home folder). Demo: the demo projects.
+    /// Demo: open the demo projects (a real run opens its start folder via [`App::start_in`]).
     pub(crate) fn seed_projects(&mut self) {
         if self.svc.is_demo() {
             let roots: Vec<std::path::PathBuf> = self.past_infos().into_iter().map(|p| p.project_root).collect();
             for r in crate::folder::dedup(roots) {
                 self.open_projects.add(r);
             }
-            return;
         }
-        if self.persist && self.open_projects.roots.is_empty()
-            && let Ok(cwd) = std::env::current_dir()
-            && dirs::home_dir().is_none_or(|h| h != cwd)
-        {
-            self.open_projects.add(self.svc.project_for(&cwd).root);
+    }
+
+    /// The folder bro was started in becomes (and stays) an open project, and the current one.
+    pub(crate) fn start_in(&mut self, dir: std::path::PathBuf) {
+        let root = self.svc.project_for(&dir).root;
+        if self.open_projects.add(root.clone()) {
             self.open_projects.save(self.persist);
         }
+        self.cur_project = Some(root);
     }
 
     /// The project a sidebar row belongs to.
     pub(crate) fn row_root(&self, rows: &[Row], r: &Row) -> Option<std::path::PathBuf> {
         match r {
-            Row::New | Row::OpenFolder => None,
+            Row::New | Row::OpenFolder | Row::Continue { .. } => {
+                let _ = rows;
+                None
+            }
             Row::Project { root, .. } => Some(root.clone()),
             Row::Live { info, .. } => Some(info.project_root.clone()),
-            Row::Past { info } => Some(info.project_root.clone()),
-            Row::More { key, .. } => rows.iter().find_map(|r| match r {
-                Row::Project { key: k, root, .. } if k == key => Some(root.clone()),
-                _ => None,
-            }),
         }
     }
 

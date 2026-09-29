@@ -33,6 +33,8 @@ pub enum Event {
     Clipboard(PaneId, Option<Vec<String>>, KeyEvent),
     /// A theme file changed on disk.
     ThemeFilesChanged,
+    /// Another `bro` was started in this folder: open it here as a project.
+    OpenProject(std::path::PathBuf),
 }
 
 /// Where a new pane goes.

@@ -185,6 +185,16 @@ pub fn probe_local_offset() {
     });
 }
 
+/// `canonicalize` on Windows returns `\\?\C:\x`; tools (and people) want `C:\x`.
+pub fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => std::path::PathBuf::from(rest),
+        _ => p,
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

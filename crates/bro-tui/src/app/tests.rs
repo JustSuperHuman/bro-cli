@@ -49,8 +49,6 @@ fn welcome_screen() {
 #[test]
 fn sidebar_with_three_projects() {
     let mut a = app(true);
-    // open one project's past sessions, and focus the sidebar on it
-    a.side.past_open.insert(a.rows().iter().find_map(|r| if let crate::sidebar::Row::Project { key, .. } = r { Some(key.clone()) } else { None }).unwrap());
     a.run_act(Act::FocusSidebar);
     let s = shot(&mut a, "sidebar-demo");
     for p in ["bro-cli-v2", "justgains", "terminal"] {
@@ -199,7 +197,8 @@ fn keyboard_navigation() {
     assert!(a.side_focus);
     key(&mut a, KeyCode::Char('g'), KeyModifiers::NONE);
     key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
-    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE); // past "+ new session" and "+ open project" onto the first project
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE); // past "+ new session", "+ open project", "continue" onto the first project
     key(&mut a, KeyCode::Char('h'), KeyModifiers::NONE);
     assert_eq!(a.side.collapsed.len(), 1);
     key(&mut a, KeyCode::Char('l'), KeyModifiers::NONE);
@@ -354,47 +353,38 @@ fn usage_block_collapses_to_claude_and_codex_totals() {
 }
 
 #[test]
-fn archive_hides_earlier_sessions_and_undo_restores() {
+fn earlier_sessions_live_in_the_continue_picker_not_the_sidebar() {
+    use crate::continue_picker::ContinuePicker;
     use crate::sidebar::Row;
     let mut a = app(true);
-    let past_rows = |a: &App| a.rows().iter().filter(|r| matches!(r, Row::Past { .. })).count();
-    let before = past_rows(&a);
+    // the sidebar only has running sessions, plus one "continue" entry
+    let rows = a.rows();
+    assert!(rows.iter().any(|r| matches!(r, Row::Continue { .. })));
+    let s = draw(&mut a);
+    assert!(s.contains("continue session") && !s.contains("port the oriel event loop"), "{s}");
+    // alt+r opens the picker for the current project
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::ALT);
+    let count = |a: &App| match &a.overlay {
+        Overlay::Continue(p) => {
+            let p: &ContinuePicker = p;
+            p.view().len()
+        }
+        _ => panic!("continue picker"),
+    };
+    let before = count(&a);
     assert!(before > 0);
-    a.run_act(Act::FocusSidebar);
-    let i = a.rows().iter().position(|r| matches!(r, Row::Past { .. })).unwrap();
-    a.side_sel = i;
-    key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
-    assert_eq!(past_rows(&a), before - 1, "archived one");
-    // a whole project
-    let p = a.rows().iter().position(|r| matches!(r, Row::Project { .. })).unwrap();
-    a.side_sel = p;
-    key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
-    assert!(past_rows(&a) < before - 1);
-    // show archived: they come back dimmed; u undoes the project batch
-    key(&mut a, KeyCode::Char('A'), KeyModifiers::NONE);
-    assert_eq!(past_rows(&a), before.min(past_rows(&a)).max(past_rows(&a)));
-    key(&mut a, KeyCode::Char('A'), KeyModifiers::NONE);
-    key(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);
-    key(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);
-    assert_eq!(past_rows(&a), before, "undo restores everything");
-    // running sessions aren't archivable
-    let live = a.rows().iter().position(|r| matches!(r, Row::Live { .. })).unwrap();
-    a.side_sel = live;
-    key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
-    assert_eq!(past_rows(&a), before);
-}
-
-#[test]
-fn clicking_the_x_on_a_sidebar_row_asks_to_close_that_session() {
-    let mut a = app(true);
-    let _ = draw(&mut a);
-    let (r, id) = a.side_hits.iter().find_map(|(r, h)| if let SideHit::Close(id) = h { Some((*r, *id)) } else { None }).expect("a close hit");
-    assert!(draw(&mut a).contains('×'));
-    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
-    match &a.overlay {
-        Overlay::Confirm(_) => {}
-        _ => assert!(!a.panes.contains_key(&id), "closed straight away or asked first"),
-    }
+    let s = shot(&mut a, "continue-picker");
+    assert!(s.contains("continue a session"), "{s}");
+    // del archives, ctrl+z brings it back
+    key(&mut a, KeyCode::Delete, KeyModifiers::NONE);
+    assert_eq!(count(&a), before - 1);
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(count(&a), before);
+    // tab: every project
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert!(count(&a) >= before);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::None));
 }
 
 #[test]
@@ -402,10 +392,12 @@ fn resuming_offers_every_login_of_that_kind() {
     use crate::sidebar::Row;
     use super::overlays::{ResumeFrom, ResumePicker};
     let mut a = app(true);
-    a.run_act(Act::FocusSidebar);
-    // an earlier claude session: Enter asks which login, current one first
-    let i = a.rows().iter().position(|r| matches!(r, Row::Past { info } if info.harness == bro_core::Harness::Claude)).unwrap();
-    a.side_sel = i;
+    // an earlier claude session from the continue picker: Enter asks which login, current one first
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::ALT);
+    let Overlay::Continue(c) = &mut a.overlay else { panic!("continue picker") };
+    c.all = true;
+    let pos = c.view().iter().position(|e| e.harness == bro_core::Harness::Claude && e.login.is_some()).unwrap();
+    c.sel = pos;
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     let Overlay::Resume(p) = &a.overlay else { panic!("resume picker") };
     let p: &ResumePicker = p;
@@ -415,6 +407,7 @@ fn resuming_offers_every_login_of_that_kind() {
     let s = shot(&mut a, "resume-picker");
     assert!(s.contains("resume in") && s.contains("current") && s.contains("% left"), "{s}");
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    a.run_act(Act::FocusSidebar);
     // a running claude session: f moves it to another login
     let live = a.rows().iter().position(|r| matches!(r, Row::Live { info, .. } if info.harness == Some(bro_core::Harness::Claude))).unwrap();
     a.side_sel = live;
