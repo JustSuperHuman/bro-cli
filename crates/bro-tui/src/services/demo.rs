@@ -303,7 +303,7 @@ pub fn shell_command(h: Option<Harness>, label: &str, cwd: PathBuf) -> CommandSp
         if sh.contains("cmd") {
             (sh, vec!["/k".into(), format!("type \"{f}\"")])
         } else {
-            (sh, vec!["-NoLogo".into(), "-NoExit".into(), "-Command".into(), format!("[Console]::Out.Write([IO.File]::ReadAllText('{}'))", f.replace('\'', "''"))])
+            (sh, vec!["-NoLogo".into(), "-NoExit".into(), "-Command".into(), format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Out.Write([IO.File]::ReadAllText('{}'))", f.replace('\'', "''"))])
         }
     } else {
         ("sh".into(), vec!["-c".into(), format!("cat '{}'; exec \"${{SHELL:-sh}}\"", f.replace('\'', "'\\''"))])

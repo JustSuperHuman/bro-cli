@@ -69,8 +69,8 @@ impl App {
                     let double = self.last_click.is_some_and(|(t, x, y)| t.elapsed() < Duration::from_millis(400) && x == m.column && y == m.row);
                     self.last_click = Some((Instant::now(), m.column, m.row));
                     match hit {
-                        SideHit::Row(i) if m.modifiers.contains(KeyModifiers::SHIFT) => {
-                            // shift+click a running session: show it alongside the others
+                        SideHit::Row(i) if m.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
+                            // ctrl+click (terminals keep shift+click for their own selection) or shift+click: show it alongside
                             if let Some(crate::sidebar::Row::Live { info, .. }) = self.rows().get(i) {
                                 self.toggle_stack(info.pane);
                             }

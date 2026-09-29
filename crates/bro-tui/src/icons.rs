@@ -83,6 +83,13 @@ impl Icon {
             _ => None,
         }
     }
+    /// How much of the icon slot the mark fills.
+    fn scale(self) -> f64 {
+        match self {
+            Icon::Claude => 0.74,
+            Icon::Codex => 0.62,
+        }
+    }
     fn png(self) -> &'static [u8] {
         match self {
             Icon::Claude => CLAUDE_PNG,
@@ -109,6 +116,10 @@ impl Icon {
 
 /// The icon mode for this run. `env` looks up an environment variable; `setting` is `Settings::icons`.
 pub fn detect(setting: &str, env: &dyn Fn(&str) -> Option<String>) -> Mode {
+    detect_on(setting, env, cfg!(windows))
+}
+
+fn detect_on(setting: &str, env: &dyn Fn(&str) -> Option<String>, windows: bool) -> Mode {
     let var = |k: &str| env(k).filter(|v| !v.is_empty());
     if let Some(m) = var("BRO_ICONS").as_deref().and_then(Mode::parse) {
         return m;
@@ -136,13 +147,18 @@ pub fn detect(setting: &str, env: &dyn Fn(&str) -> Option<String>) -> Mode {
     if var("WT_SESSION").is_some() || term.starts_with("foot") || var("KONSOLE_VERSION").is_some() || var("XTERM_VERSION").is_some() {
         return Mode::Sixel;
     }
+    // Windows Terminal and today's conhost both draw sixel; don't depend on WT_SESSION surviving the shell
+    // (PowerShell profiles, `start`, IDE launchers can drop it)
+    if windows {
+        return Mode::Sixel;
+    }
     Mode::Text
 }
 
 /// Cell size in pixels for sixel. Windows Terminal draws sixels as if every cell were 10×20 and scales them to the
 /// real cell, whatever the font; elsewhere ask the tty, and assume 10×20 if it won't say.
 fn cell_pixels() -> (u16, u16) {
-    if std::env::var_os("WT_SESSION").is_some() {
+    if cfg!(windows) || std::env::var_os("WT_SESSION").is_some() {
         return (10, 20);
     }
     match crossterm::terminal::window_size() {
@@ -261,7 +277,8 @@ impl Painter {
     fn new(mode: Mode, (cw, ch): (u16, u16), light: bool) -> Option<Painter> {
         let mut images = HashMap::new();
         for icon in Icon::ALL {
-            let img = Rgba::decode(icon.png())?.inked(ink(icon, light));
+            // drawn inside the 2-cell slot with a margin; OpenAI's mark is denser, so a little smaller
+            let img = Rgba::decode(icon.png())?.inked(ink(icon, light)).padded(icon.scale());
             let seq = match mode {
                 Mode::Text => return None,
                 Mode::Sixel => sixel_mark(&img, (cw * ICON_CELLS) as u32, ch as u32).into_bytes(),
@@ -396,6 +413,20 @@ impl Rgba {
     }
 
     /// Area-averaged scale to `tw`×`th`, in premultiplied alpha so transparent edges don't darken.
+    /// Centre the image on a transparent canvas so it fills `frac` of it.
+    fn padded(&self, frac: f64) -> Rgba {
+        let frac = frac.clamp(0.1, 1.0);
+        let (cw, ch) = ((self.w as f64 / frac).ceil() as u32, (self.h as f64 / frac).ceil() as u32);
+        let (ox, oy) = ((cw - self.w) / 2, (ch - self.h) / 2);
+        let mut px = vec![0u8; (cw * ch * 4) as usize];
+        for y in 0..self.h {
+            let src = ((y * self.w) * 4) as usize;
+            let dst = (((y + oy) * cw + ox) * 4) as usize;
+            px[dst..dst + (self.w * 4) as usize].copy_from_slice(&self.px[src..src + (self.w * 4) as usize]);
+        }
+        Rgba { w: cw, h: ch, px }
+    }
+
     fn resized(&self, tw: u32, th: u32) -> Rgba {
         let mut out = vec![0u8; (tw * th * 4) as usize];
         let (sx, sy) = (self.w as f64 / tw as f64, self.h as f64 / th as f64);
@@ -564,7 +595,9 @@ mod tests {
         assert_eq!(detect("auto", &env(&[("TERM_PROGRAM", "iTerm.app")])), Mode::Iterm);
         assert_eq!(detect("auto", &env(&[("TERM_PROGRAM", "WezTerm")])), Mode::Iterm);
         assert_eq!(detect("auto", &env(&[("TERM", "foot")])), Mode::Sixel);
-        assert_eq!(detect("auto", &env(&[])), Mode::Text);
+        assert_eq!(detect_on("auto", &env(&[]), false), Mode::Text);
+        assert_eq!(detect_on("auto", &env(&[]), true), Mode::Sixel, "Windows draws sixel even without WT_SESSION");
+        assert_eq!(detect_on("auto", &env(&[("TERM_PROGRAM", "vscode")]), true), Mode::Text);
         // nested in a bro pane, tmux, VS Code: text
         assert_eq!(detect("auto", &env(&[("WT_SESSION", "x"), ("BRO", "1")])), Mode::Text);
         assert_eq!(detect("auto", &env(&[("WT_SESSION", "x"), ("TMUX", "/tmp/t")])), Mode::Text);
@@ -715,5 +748,21 @@ mod tests {
         let mut b = frame(10, 2, &[(0, 1, "\u{10FF00} a")]);
         p.place(&mut b);
         assert!(p.take().bytes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod pad_tests {
+    use super::*;
+
+    #[test]
+    fn marks_are_padded_inside_their_slot() {
+        for icon in Icon::ALL {
+            let img = Rgba::decode(icon.png()).unwrap().padded(icon.scale()).resized(20, 20);
+            // the border rows / columns stay empty so the mark never touches the text next to it
+            let alpha = |x: u32, y: u32| img.px[((y * 20 + x) * 4 + 3) as usize];
+            assert!((0..20).all(|i| alpha(i, 0) < 40 && alpha(i, 19) < 40 && alpha(0, i) < 40 && alpha(19, i) < 40), "{icon:?}");
+        }
+        assert!(Icon::Codex.scale() < Icon::Claude.scale());
     }
 }
