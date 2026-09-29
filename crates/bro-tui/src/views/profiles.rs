@@ -57,6 +57,7 @@ impl ProfilesView {
                     model: None,
                     label: format!("login · {}", p.id),
                     name: None,
+                    renamed: false,
                     project: cx.svc.project_for(&c.cwd),
                     cwd: c.cwd.clone(),
                     started: std::time::Instant::now(),

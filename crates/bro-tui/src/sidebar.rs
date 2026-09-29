@@ -14,7 +14,7 @@ use std::path::PathBuf;
 pub struct LiveInfo {
     pub pane: PaneId,
     pub harness: Option<Harness>,
-    /// Your name for it, else the launch label's first part
+    /// What to call it: your name, else the agent's own title (Claude Code: the current task)
     pub name: Option<String>,
     pub profile: Option<String>,
     pub model: Option<String>,

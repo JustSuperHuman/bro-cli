@@ -165,6 +165,7 @@ impl App {
                 let name = text.trim().to_string();
                 if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
                     t.meta.name = (!name.is_empty()).then_some(name.clone());
+                    t.meta.renamed = t.meta.name.is_some();
                     let shown = t.display_name();
                     self.svc.bridge_title(&t.meta.sid, &shown);
                 }

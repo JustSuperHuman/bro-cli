@@ -50,8 +50,11 @@ pub struct Meta {
     pub model: Option<String>,
     /// "claude · work · opus"
     pub label: String,
-    /// A name you gave it (sidebar `r`, prefix `,`).
+    /// A name for it: yours (sidebar `r`, prefix `,`) when `renamed`, else a starting title (a resumed
+    /// session's first prompt) that the agent's own title replaces once it sets one.
     pub name: Option<String>,
+    /// `name` is one you typed
+    pub renamed: bool,
     pub cwd: PathBuf,
     pub project: ProjectKey,
     pub started: Instant,
@@ -301,7 +304,22 @@ impl Term {
 
     /// The name shown everywhere: your rename, else the launch label.
     pub fn display_name(&self) -> String {
-        self.meta.name.clone().unwrap_or_else(|| self.meta.label.clone())
+        self.display_title().unwrap_or_else(|| self.meta.label.clone())
+    }
+
+    /// What to call this session: your name for it, else the title the program set (Claude Code keeps it
+    /// on the current task), else its starting title. None = fall back to login · model.
+    pub fn display_title(&self) -> Option<String> {
+        if self.meta.renamed {
+            return self.meta.name.clone();
+        }
+        self.agent_title().or_else(|| self.meta.name.clone())
+    }
+
+    /// The program's window title (OSC 0/2), cleaned: spinner / status glyphs off the front, and nothing
+    /// that's just the program's own name or path.
+    pub fn agent_title(&self) -> Option<String> {
+        clean_title(&self.program_title()?)
     }
 
     /// The program's own window title (OSC 0/2), e.g. Claude Code's task summary.
@@ -415,8 +433,8 @@ impl Pane for Term {
         let brand = crate::ui::harness_color(self.meta.harness, t);
         let cwd = crate::util::short_path(&self.meta.cwd, 32);
         let mut spans = vec![Span::raw(" "), Span::styled(format!("{} ", crate::ui::harness_glyph(self.meta.harness)), Style::default().fg(brand))];
-        if let Some(n) = &self.meta.name {
-            spans.push(Span::styled(format!("{n} · "), Style::default().add_modifier(Modifier::BOLD)));
+        if let Some(n) = self.display_title() {
+            spans.push(Span::styled(format!("{n}  "), Style::default().add_modifier(Modifier::BOLD)));
         }
         // "claude · work · opus-5" → "work · opus-5": the logo already says which agent
         let label = match self.meta.harness {
@@ -457,7 +475,7 @@ impl Pane for Term {
         self.last_scan = Instant::now();
         self.scan();
         // shells title their window with their own exe path — that's noise, keep bro's name for them
-        let title = self.meta.name.clone().or_else(|| self.program_title().filter(|t| !looks_like_exe_path(t))).or_else(|| Some(self.meta.label.clone()));
+        let title = Some(self.display_name());
         if title.is_some() && title != self.title_sent {
             if let Some(t) = &title {
                 self.svc.bridge_title(&self.meta.sid, t);
@@ -576,6 +594,21 @@ impl Pane for Term {
     }
 }
 
+/// A window title worth showing: leading spinner / status glyphs ("✳ ", "⠂ ") stripped; a bare program name
+/// or path (what shells and freshly started agents set) is not.
+fn clean_title(raw: &str) -> Option<String> {
+    let t = raw.trim().trim_start_matches(|c: char| !c.is_alphanumeric() && c != '(' && c != '[' && c != '"' && c != '\'' && c != '~' && c != '/').trim();
+    if t.is_empty() || looks_like_exe_path(raw.trim()) || looks_like_exe_path(t) {
+        return None;
+    }
+    const GENERIC: [&str; 12] = ["claude", "claude code", "codex", "openai codex", "pi", "omp", "pwsh", "powershell", "windows powershell", "cmd", "bash", "zsh"];
+    let lower = t.to_lowercase();
+    if GENERIC.contains(&lower.as_str()) || lower.starts_with("administrator:") {
+        return None;
+    }
+    Some(t.to_string())
+}
+
 /// "C:\Program Files\PowerShell\pwsh.exe", "/usr/bin/bash" — a program path, not a useful title.
 fn looks_like_exe_path(t: &str) -> bool {
     let t = t.trim();
@@ -585,6 +618,16 @@ fn looks_like_exe_path(t: &str) -> bool {
 
 #[cfg(test)]
 mod title_tests {
+    #[test]
+    fn titles_are_cleaned() {
+        assert_eq!(super::clean_title("✳ Fix the flaky workout timer").as_deref(), Some("Fix the flaky workout timer"));
+        assert_eq!(super::clean_title("⠂ Refactor launcher").as_deref(), Some("Refactor launcher"));
+        assert_eq!(super::clean_title("✳ Claude Code"), None);
+        assert_eq!(super::clean_title(r"C:\Program Files\PowerShell\7\pwsh.exe"), None);
+        assert_eq!(super::clean_title("codex"), None);
+        assert_eq!(super::clean_title("  "), None);
+    }
+
     #[test]
     fn exe_paths_are_not_titles() {
         assert!(super::looks_like_exe_path(r"C:\Program Files\PowerShell\7\pwsh.exe"));

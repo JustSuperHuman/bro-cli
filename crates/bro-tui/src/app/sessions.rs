@@ -64,6 +64,7 @@ impl App {
             model: spec.model.clone(),
             label,
             name,
+            renamed: false,
             project: self.svc.project_for(&cwd),
             cwd,
             started: Instant::now(),
@@ -105,7 +106,7 @@ impl App {
         let (prog, args) = crate::util::default_shell(settings.shell.as_deref());
         let cwd = cwd.or_else(|| self.focused_cwd()).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
         let name = std::path::Path::new(&prog).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| prog.clone());
-        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: name, name: None, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
+        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: name, name: None, renamed: false, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
         let term = Term::new(meta, Spawn { program: prog, args, ..Spawn::default() }, self.svc.clone());
         self.open(Box::new(term), place)
     }
@@ -142,6 +143,7 @@ impl App {
             BridgeCommand::Rename { id, title } => {
                 if let Some(t) = self.term_id(&id).and_then(|pid| self.panes.get_mut(&pid)).and_then(|p| p.as_term()) {
                     t.meta.name = (!title.trim().is_empty()).then(|| title.trim().to_string());
+                    t.meta.renamed = t.meta.name.is_some();
                 }
             }
             BridgeCommand::Focus { id } => {
@@ -164,7 +166,7 @@ impl App {
                         let here = self.cur;
                         let id = match req.shell.clone() {
                             Some(shell) => {
-                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
+                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: false, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
                                 let term = Term::new(meta, Spawn { program: shell, args: req.args.clone(), ..Spawn::default() }, self.svc.clone());
                                 self.new_tab(Box::new(term))
                             }
@@ -191,7 +193,7 @@ impl App {
                 Some(LiveInfo {
                     pane: *id,
                     harness: t.meta.harness,
-                    name: t.meta.name.clone(),
+                    name: t.display_title(),
                     profile: t.meta.profile.clone(),
                     model: t.meta.model.clone(),
                     project_key: t.meta.project.key.clone(),
@@ -531,6 +533,7 @@ impl App {
                 model: d.model.map(String::from),
                 label: label.clone(),
                 name: None,
+                renamed: false,
                 project: self.svc.project_for(&cwd),
                 cwd: cwd.clone(),
                 started: Instant::now() - std::time::Duration::from_secs([420, 1_900, 60, 5_400, 12_000][i % 5]),
