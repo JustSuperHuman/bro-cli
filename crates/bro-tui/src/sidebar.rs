@@ -85,7 +85,7 @@ impl SideState {
 pub enum Row {
     /// "+ new session" — always first
     New,
-    /// "+ open folder" — right under it
+    /// "+ open project" — right under it
     OpenFolder,
     Project {
         key: String,

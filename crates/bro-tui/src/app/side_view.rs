@@ -104,7 +104,7 @@ impl App {
             Row::OpenFolder => {
                 let key = self.keymap.primary(crate::keymap::Act::OpenProject);
                 let st = if selected { ui::bold_accent(t) } else { muted(t) };
-                ui::line_lr(f, r, vec![Span::styled("+ open folder", st)], vec![Span::styled(format!("{key} "), muted(t))]);
+                ui::line_lr(f, r, vec![Span::styled("+ open project", st)], vec![Span::styled(format!("{key} "), muted(t))]);
             }
             Row::Project { key, name, root, live, collapsed, attention, last_age, .. } => {
                 // the current project (where new sessions start) gets a bar

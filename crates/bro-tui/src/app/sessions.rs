@@ -282,7 +282,7 @@ impl App {
             .or_else(|| self.open_projects.roots.first().cloned())
     }
 
-    /// "+ open folder" / o: pick a folder to add to the sidebar.
+    /// "+ open project" / o: pick a folder to open as a project.
     pub(crate) fn open_folder(&mut self) {
         let mut cands: Vec<std::path::PathBuf> = self.past_infos().into_iter().map(|p| p.project_root).collect();
         cands.extend(crate::recents::dirs(&self.recents));

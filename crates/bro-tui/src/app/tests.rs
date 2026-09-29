@@ -198,7 +198,7 @@ fn keyboard_navigation() {
     assert!(a.side_focus);
     key(&mut a, KeyCode::Char('g'), KeyModifiers::NONE);
     key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
-    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE); // past "+ new session" and "+ open folder" onto the first project
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE); // past "+ new session" and "+ open project" onto the first project
     key(&mut a, KeyCode::Char('h'), KeyModifiers::NONE);
     assert_eq!(a.side.collapsed.len(), 1);
     key(&mut a, KeyCode::Char('l'), KeyModifiers::NONE);

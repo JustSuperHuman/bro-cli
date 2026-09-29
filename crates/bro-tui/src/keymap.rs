@@ -183,7 +183,7 @@ impl Act {
             UsageDetails => "sidebar usage: totals / every profile".into(),
             ShowArchived => "show / hide archived sessions".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
-            OpenProject => "open a folder as a project".into(),
+            OpenProject => "open a project".into(),
             Quit => "quit bro".into(),
         }
     }
