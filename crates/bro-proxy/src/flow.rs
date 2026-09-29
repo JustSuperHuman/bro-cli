@@ -292,7 +292,11 @@ async fn translated(
     let mut custom = HashSet::new();
     let mut include_usage = false;
     let hub: MessagesRequest = match inbound {
-        Dialect::Anthropic => serde_json::from_value(json)
+        Dialect::Anthropic => serde_json::from_value({
+            let mut json = json;
+            crate::anthropic::hoist_system_messages(&mut json);
+            json
+        })
             .map_err(|e| ProxyError::invalid(format!("invalid Anthropic Messages request: {e}")))?,
         Dialect::Chat => {
             let req: ChatRequest = serde_json::from_value(json).map_err(|e| {

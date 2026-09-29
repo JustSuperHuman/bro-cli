@@ -510,4 +510,6 @@ impl App {
 }
 
 #[cfg(test)]
+mod e2e;
+#[cfg(test)]
 pub(crate) mod tests;

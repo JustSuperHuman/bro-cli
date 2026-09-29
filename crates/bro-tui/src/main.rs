@@ -15,6 +15,7 @@ mod launcher;
 mod layout;
 mod palette;
 mod pane;
+mod proxy_cmd;
 mod panes;
 mod recents;
 mod services;
@@ -38,6 +39,13 @@ fn main() -> ExitCode {
             println!("bro {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        Ok(cli::Command::Proxy(args)) => match proxy_cmd::run(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro proxy: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(cli::Command::Tui { demo }) => match run_tui(demo) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

@@ -21,7 +21,7 @@ pub fn which(prog: &str) -> Option<PathBuf> {
     }
     let path = std::env::var_os("PATH")?;
     let exts: &[&str] = if cfg!(windows) && p.extension().is_none() { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
-    for dir in std::env::split_paths(&path) {
+    for dir in path_dirs(&path) {
         for e in exts {
             let c = dir.join(format!("{prog}{e}"));
             if c.is_file() {
@@ -30,6 +30,16 @@ pub fn which(prog: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// PATH entries. On Windows split on `;` by hand and strip quotes: a single stray `"` makes
+/// `std::env::split_paths` treat the whole rest of PATH as one entry.
+fn path_dirs(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    if cfg!(windows) {
+        path.to_string_lossy().split(';').map(|s| s.trim().trim_matches('"')).filter(|s| !s.is_empty()).map(PathBuf::from).collect()
+    } else {
+        std::env::split_paths(path).collect()
+    }
 }
 
 /// The user's shell: `Settings.shell` if set, else pwsh / powershell / cmd on Windows, `$SHELL` elsewhere.
@@ -192,6 +202,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn path_with_a_stray_quote() {
+        let d = path_dirs(std::ffi::OsStr::new(r#"C:\a;"C:\b;C:\c;;C:\d"#));
+        assert_eq!(d, vec![PathBuf::from(r"C:\a"), PathBuf::from(r"C:\b"), PathBuf::from(r"C:\c"), PathBuf::from(r"C:\d")]);
+    }
+
+    #[test]
     fn short_paths() {
         let p = Path::new("/very/long/path/to/some/project-dir");
         let s = short_path(p, 24);
@@ -199,3 +216,4 @@ mod tests {
         assert!(s.ends_with("project-dir"), "{s}");
     }
 }
+

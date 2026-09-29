@@ -8,6 +8,8 @@ pub enum Command {
     Tui { demo: bool },
     Version,
     Help,
+    /// `bro proxy <upstream> …` — headless translating proxy.
+    Proxy(crate::proxy_cmd::ProxyArgs),
 }
 
 /// Usage text (`{version}` is substituted).
@@ -16,6 +18,9 @@ pub const HELP: &str = "bro {version} — the agentic terminal workspace for Cla
 usage
   bro              open the workspace
   bro --demo       open with realistic fake data (screenshots; touches no accounts)
+  bro proxy <upstream> [-m model] [--small-model m] [--port n]
+                   run the translating proxy headless (upstream: pool, claude:<profile>,
+                   codex:<profile> or a provider id) and print harness env vars
   bro --version    print the version
   bro --help       this help
 
@@ -25,6 +30,9 @@ inside
 
 /// Parse arguments (without the program name).
 pub fn parse(args: &[String]) -> Result<Command, String> {
+    if args.first().map(String::as_str) == Some("proxy") {
+        return crate::proxy_cmd::parse(&args[1..]).map(Command::Proxy);
+    }
     let mut demo = false;
     for a in args {
         match a.as_str() {

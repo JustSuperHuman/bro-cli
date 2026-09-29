@@ -8,6 +8,40 @@ pub use types::*;
 
 use serde_json::Value;
 
+/// Newer Claude Code builds put `{"role":"system"}` entries inside `messages` (e.g. mid-
+/// conversation reminders). The hub types only model user/assistant turns, so hoist those
+/// entries into the top-level `system` blocks, in order. Passthrough requests are not touched.
+pub fn hoist_system_messages(req: &mut Value) {
+    let Some(messages) = req.get_mut("messages").and_then(Value::as_array_mut) else { return };
+    if !messages.iter().any(|m| m.get("role").and_then(Value::as_str) == Some("system")) {
+        return;
+    }
+    let mut hoisted = Vec::new();
+    messages.retain(|m| {
+        if m.get("role").and_then(Value::as_str) != Some("system") {
+            return true;
+        }
+        match m.get("content") {
+            Some(Value::String(t)) => hoisted.push(serde_json::json!({"type": "text", "text": t})),
+            Some(Value::Array(blocks)) => hoisted.extend(
+                blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("text")).cloned(),
+            ),
+            _ => {}
+        }
+        false
+    });
+    if hoisted.is_empty() {
+        return;
+    }
+    let mut system = match req.get_mut("system").map(Value::take) {
+        Some(Value::String(t)) if !t.is_empty() => vec![serde_json::json!({"type": "text", "text": t})],
+        Some(Value::Array(blocks)) => blocks,
+        _ => Vec::new(),
+    };
+    system.extend(hoisted);
+    req["system"] = Value::Array(system);
+}
+
 /// Folds Anthropic stream events into a complete [`MessagesResponse`].
 #[derive(Debug, Default)]
 pub struct Accumulator {
@@ -274,5 +308,32 @@ mod tests {
     fn bad_tool_json_is_preserved() {
         assert_eq!(parse_tool_input(""), json!({}));
         assert_eq!(parse_tool_input("{\"a\":1"), json!({"_raw": "{\"a\":1"}));
+    }
+}
+
+#[cfg(test)]
+mod hoist_tests {
+    use super::hoist_system_messages;
+    use serde_json::json;
+
+    #[test]
+    fn hoists_inline_system_messages_into_system_blocks() {
+        let mut req = json!({
+            "model": "m",
+            "max_tokens": 16,
+            "system": "base",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "reminder"},
+                {"role": "assistant", "content": "yo"},
+                {"role": "system", "content": [{"type": "text", "text": "late"}]}
+            ]
+        });
+        hoist_system_messages(&mut req);
+        assert_eq!(req["messages"].as_array().unwrap().len(), 2);
+        let texts: Vec<_> = req["system"].as_array().unwrap().iter().map(|b| b["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, ["base", "reminder", "late"]);
+        let req2: super::MessagesRequest = serde_json::from_value(req).unwrap();
+        assert_eq!(req2.messages.len(), 2);
     }
 }

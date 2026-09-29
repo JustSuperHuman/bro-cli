@@ -278,6 +278,12 @@ impl Term {
         self.svc.bridge_resize(&self.meta.sid, cols, rows);
     }
 
+    /// (rows, cols) of the pty.
+    #[cfg(test)]
+    pub fn size(&self) -> (u16, u16) {
+        self.size
+    }
+
     /// Kill the program (bridge kill, close).
     pub fn kill(&mut self) {
         if let Some(l) = &mut self.live {
