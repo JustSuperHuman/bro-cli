@@ -66,7 +66,8 @@ fn sidebar_with_three_projects() {
     assert!(s.contains("proxy") && s.contains("port 3458"), "{s}");
     assert!(s.contains("phone") && s.contains("port 10001") && s.contains("3 connected"), "{s}");
     a.usage_expanded = false;
-    assert!(s.contains("claude · work · opus-5"), "pane title\n{s}");
+    assert!(s.contains("work · opus-5") && !s.contains("claude · work"), "pane title without the agent word
+{s}");
     // the live sessions are numbered for alt+1..9
     let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos(), &a.open_infos());
     assert_eq!(order.len(), 5);
@@ -334,7 +335,7 @@ fn launched_sessions_open_panes_and_report_errors() {
     assert_eq!(a.recents.len(), 1);
     // spawning a missing program shows the error in the pane instead of crashing
     let s = draw(&mut a);
-    assert!(s.contains("codex · local · gpt-5.2"), "{s}");
+    assert!(s.contains("local · gpt-5.2"), "{s}");
     assert!(s.contains("couldn't start") || s.contains("definitely-not"), "{s}");
 }
 
@@ -536,4 +537,17 @@ fn shift_click_stacks_sessions_and_a_plain_click_unstacks() {
     click(&mut a, live[1], false);
     assert!(!a.stacked());
     assert_eq!(a.visible().len(), 1);
+}
+
+#[test]
+fn launcher_has_a_close_button() {
+    use crate::launcher::Hit;
+    let mut a = app(true);
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::ALT);
+    let s = draw(&mut a);
+    assert!(s.contains(" × "), "{s}");
+    let Overlay::Launcher(l) = &a.overlay else { panic!() };
+    let (r, _) = *l.hits.iter().find(|(_, h)| *h == Hit::Close).unwrap();
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+    assert!(matches!(a.overlay, Overlay::None));
 }

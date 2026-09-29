@@ -40,6 +40,7 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("help", "\u{F02D7}", "?"),
     ("key", "\u{F0306}", "⌘"),
     ("history", "\u{F02DA}", "↺"),
+    ("branch", "\u{E725}", "⎇"),
 ];
 
 /// The icon for `name` (Nerd Font glyph or its fallback, per [`NERD`]).

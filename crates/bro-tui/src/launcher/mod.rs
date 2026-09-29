@@ -95,6 +95,8 @@ pub enum Hit {
     Browser,
     Place,
     Launch,
+    /// the × in the corner
+    Close,
 }
 
 /// What a key asks for.
@@ -482,6 +484,7 @@ impl Launcher {
                 self.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
             }
             Hit::Launch => return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Hit::Close => return Outcome::Close,
         }
         Outcome::None
     }

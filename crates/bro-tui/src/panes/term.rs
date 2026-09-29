@@ -418,7 +418,12 @@ impl Pane for Term {
         if let Some(n) = &self.meta.name {
             spans.push(Span::styled(format!("{n} · "), Style::default().add_modifier(Modifier::BOLD)));
         }
-        spans.push(Span::styled(self.meta.label.clone(), Style::default().fg(brand).add_modifier(Modifier::BOLD)));
+        // "claude · work · opus-5" → "work · opus-5": the logo already says which agent
+        let label = match self.meta.harness {
+            Some(h) => self.meta.label.strip_prefix(&format!("{} · ", h.label())).unwrap_or(&self.meta.label).to_string(),
+            None => self.meta.label.clone(),
+        };
+        spans.push(Span::styled(label, Style::default().fg(brand).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(format!(" — {cwd} "), Style::default().fg(t.muted)));
         let mut right = vec![];
         if self.scroll > 0 {

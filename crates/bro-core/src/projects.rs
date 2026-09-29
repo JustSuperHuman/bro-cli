@@ -78,6 +78,41 @@ fn display_name(root: &Path) -> String {
     if s.is_empty() { "/".into() } else { s.to_string() }
 }
 
+/// The checked-out branch of the repo at `root` (short commit id when detached; None outside git).
+/// Reads `.git/HEAD` directly (worktrees' `.git` files included); cached for a few seconds, so it's cheap
+/// enough to call while drawing.
+pub fn git_branch(root: &Path) -> Option<String> {
+    type BranchCache = Mutex<HashMap<PathBuf, (std::time::Instant, Option<String>)>>;
+    static CACHE: OnceLock<BranchCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((at, b)) = cache.lock().get(root)
+        && at.elapsed() < std::time::Duration::from_secs(4)
+    {
+        return b.clone();
+    }
+    let b = read_branch(root);
+    cache.lock().insert(root.to_path_buf(), (std::time::Instant::now(), b.clone()));
+    b
+}
+
+fn read_branch(root: &Path) -> Option<String> {
+    let dot = root.join(".git");
+    let git_dir = if dot.is_dir() {
+        dot
+    } else {
+        // a worktree / submodule: ".git" is a file saying "gitdir: <path>"
+        let text = std::fs::read_to_string(&dot).ok()?;
+        let p = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        if p.is_absolute() { p } else { root.join(p) }
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    match head.strip_prefix("ref:") {
+        Some(r) => Some(r.trim().trim_start_matches("refs/heads/").to_string()),
+        None => Some(head.chars().take(7).collect()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +155,26 @@ mod tests {
         } else {
             assert_eq!(key_for_root(Path::new("/")).name, "/");
         }
+    }
+
+    #[test]
+    fn branch_from_head_detached_and_worktree_file() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("r");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/feature/x
+").unwrap();
+        assert_eq!(read_branch(&repo).as_deref(), Some("feature/x"));
+        std::fs::write(repo.join(".git").join("HEAD"), "0123456789abcdef
+").unwrap();
+        assert_eq!(read_branch(&repo).as_deref(), Some("0123456"));
+        let wt = d.path().join("wt");
+        std::fs::create_dir_all(repo.join(".git").join("worktrees").join("wt")).unwrap();
+        std::fs::write(repo.join(".git").join("worktrees").join("wt").join("HEAD"), "ref: refs/heads/wip
+").unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}", repo.join(".git").join("worktrees").join("wt").display())).unwrap();
+        assert_eq!(read_branch(&wt).as_deref(), Some("wip"));
+        assert_eq!(read_branch(d.path()), None);
     }
 }

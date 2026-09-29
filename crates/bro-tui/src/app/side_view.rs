@@ -58,37 +58,56 @@ impl App {
         }
         let rows = self.rows();
         self.side_sel = self.side_sel.min(rows.len().saturating_sub(1));
-        let room = list.bottom().saturating_sub(y) as usize;
+        let room = list.bottom().saturating_sub(y);
         if rows.is_empty() {
             ui::line(f, Rect { y: y + 1, height: 1, ..list }, vec![Span::styled(" nothing matches", muted(&t))]);
             return;
         }
-        // keep the selection in view
+        // rows have heights (projects: a gap line + two lines); scroll so the selection stays in view
+        let lines: Vec<(u16, u16)> = row_lines(&rows);
+        let total = |a: usize, b: usize| lines[a..=b].iter().map(|(g, h)| g + h).sum::<u16>();
         if self.side_focus {
             if self.side_sel < self.side_scroll {
                 self.side_scroll = self.side_sel;
-            } else if room > 0 && self.side_sel >= self.side_scroll + room {
-                self.side_scroll = self.side_sel + 1 - room;
+            }
+            while self.side_scroll < self.side_sel && total(self.side_scroll, self.side_sel) > room {
+                self.side_scroll += 1;
             }
         }
-        self.side_scroll = self.side_scroll.min(rows.len().saturating_sub(room.max(1)));
+        let mut last_start = rows.len();
+        let mut acc = 0;
+        while last_start > 0 && acc + lines[last_start - 1].0 + lines[last_start - 1].1 <= room {
+            last_start -= 1;
+            acc += lines[last_start].0 + lines[last_start].1;
+        }
+        self.side_scroll = self.side_scroll.min(last_start);
         let focus_pane = self.focused();
         let cur_key = self.current_project().map(|r| self.svc.project_for(&r).key);
-        for (i, row) in rows.iter().enumerate().skip(self.side_scroll).take(room) {
-            let r = Rect { y, height: 1, ..list };
+        for (i, row) in rows.iter().enumerate().skip(self.side_scroll) {
+            let (gap, h) = lines[i];
+            // no gap above the first row on screen
+            let gap = if i == self.side_scroll { 0 } else { gap };
+            if y + gap + h > list.bottom() {
+                break;
+            }
+            y += gap;
+            let r = Rect { y, height: h, ..list };
             let selected = focused && i == self.side_sel;
+            let current = matches!(row, Row::Live { info, .. } if focus_pane == Some(info.pane) && !self.side_focus);
             if selected {
                 f.buffer_mut().set_style(r, Style::default().bg(crate::theme::mix(t.user, ratatui::style::Color::Rgb(20, 20, 24), 0.35)));
+            } else if current {
+                f.buffer_mut().set_style(r, Style::default().bg(current_tint(&t)));
             }
             self.draw_row(f, r, row, selected, focus_pane, cur_key.as_deref(), &t, time);
             if let Row::Live { info, .. } = row
                 && self.renaming.as_ref().is_none_or(|(id, _)| *id != info.pane)
             {
                 // the × cell wins over the row (hits are searched in order)
-                self.side_hits.push((Rect { x: r.right().saturating_sub(1), width: 1, ..r }, SideHit::Close(info.pane)));
+                self.side_hits.push((Rect { x: r.right().saturating_sub(1), width: 1, height: 1, ..r }, SideHit::Close(info.pane)));
             }
             self.side_hits.push((r, SideHit::Row(i)));
-            y += 1;
+            y += h;
         }
     }
 
@@ -107,24 +126,36 @@ impl App {
                 ui::line_lr(f, r, vec![Span::styled("+ open project", st)], vec![Span::styled(format!("{key} "), muted(t))]);
             }
             Row::Project { key, name, root, live, collapsed, attention, last_age, .. } => {
-                // the current project (where new sessions start) gets a bar
+                // the current project (where new sessions start) gets a bar down both lines
                 let current = cur_key == Some(key.as_str());
                 let arrow = if *collapsed { "▸" } else { "▾" };
-                let active = *live > 0;
-                let parent_w = w.saturating_sub(ui::width(name) + 10).min(16);
-                let parent = if parent_w >= 6 { root.parent().map(|p| crate::util::short_path(p, parent_w)).unwrap_or_default() } else { String::new() };
                 let mut right = vec![];
                 if *attention {
                     right.push(Span::styled("● ", fg(t.danger)));
                 }
-                if active {
+                if *live > 0 {
                     right.push(Span::styled(format!("{live} live "), fg(t.shine)));
                 } else if let Some(age) = last_age {
                     right.push(Span::styled(format!("{} ", crate::util::short_dur(*age)), muted(t)));
                 }
                 let name_style = if selected || current { ui::bold_accent(t) } else { Style::default().add_modifier(Modifier::BOLD) };
-                let lead = if current { Span::styled("▍", ui::accent(t)) } else { Span::raw(" ") };
-                ui::line_lr(f, r, vec![lead, Span::styled(format!("{arrow} "), ui::accent(t)), Span::styled(format!("{name} "), name_style), Span::styled(parent, muted(t))], right);
+                let bar = |c: bool| if c { Span::styled("▍", ui::accent(t)) } else { Span::raw(" ") };
+                let line1 = Rect { height: 1, ..r };
+                ui::line_lr(f, line1, vec![bar(current), Span::styled(format!("{arrow} "), ui::accent(t)), Span::styled(name.clone(), name_style)], right);
+                if r.height > 1 {
+                    let line2 = Rect { y: r.y + 1, height: 1, ..r };
+                    let branch = bro_core::projects::git_branch(root);
+                    let branch_w = branch.as_ref().map(|b| ui::width(b) + 3).unwrap_or(0);
+                    let path_w = w.saturating_sub(4 + branch_w).max(8);
+                    let mut spans = vec![bar(current), Span::raw("  "), Span::styled(crate::util::short_path(root, path_w), muted(t))];
+                    let mut rside = vec![];
+                    if let Some(b) = branch {
+                        rside.push(Span::styled(format!("{} ", ui::icon("branch")), fg(t.frame)));
+                        rside.push(Span::styled(format!("{} ", ui::fit(&b, 18)), fg(crate::theme::mix(t.shine, t.muted, 0.45))));
+                    }
+                    spans.push(Span::raw(""));
+                    ui::line_lr(f, line2, spans, rside);
+                }
             }
             Row::Live { info, n } => {
                 let brand = ui::harness_color(info.harness, t);
@@ -134,30 +165,35 @@ impl App {
                 };
                 let is_focus = focus_pane == Some(info.pane);
                 let num = n.map(|n| n.to_string()).unwrap_or_else(|| " ".into());
-                let what = match (&info.name, info.harness) {
-                    (Some(n), _) => n.clone(),
-                    (None, Some(h)) => h.label().to_string(),
-                    (None, None) => "shell".into(),
-                };
                 let who = info.profile.as_deref().map(|p| p.split(':').next_back().unwrap_or(p).to_string()).unwrap_or_default();
                 let model = info.model.as_deref().map(|m| crate::services::launch::short_model(m.rsplit('/').next().unwrap_or(m))).unwrap_or_default();
                 let detail = [who, model].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-                let name_style = if is_focus || selected { Style::default().fg(brand).add_modifier(Modifier::BOLD) } else { Style::default().fg(brand) };
+                // the logo already says which agent it is: lead with your name for it, else login · model
+                let (primary, secondary) = match (&info.name, info.harness) {
+                    (Some(name), _) => (name.clone(), detail),
+                    (None, Some(_)) if !detail.is_empty() => (detail, String::new()),
+                    (None, Some(h)) => (h.label().to_string(), String::new()),
+                    (None, None) => ("shell".to_string(), String::new()),
+                };
                 if let Some((id, text)) = &self.renaming
                     && *id == info.pane
                 {
                     ui::line(f, r, vec![Span::styled("   ✎ ", ui::accent(t)), Span::styled(format!("{text}▏"), ui::bold_accent(t).add_modifier(Modifier::UNDERLINED)), Span::styled("  ⏎ ok · esc", muted(t))]);
                     return;
                 }
-                let left = vec![
-                    Span::styled(if is_focus { "▌" } else if self.stack.contains(&info.pane) { "▏" } else { " " }, ui::accent(t)),
-                    Span::styled(num, muted(t)),
+                let stacked = self.stack.contains(&info.pane);
+                let (bar, bar_style) = if is_focus { ("▌", ui::accent(t)) } else if stacked { ("▏", ui::accent(t)) } else { (" ", muted(t)) };
+                let primary_style = if is_focus || selected { Style::default().fg(brand).add_modifier(Modifier::BOLD) } else { Style::default().fg(brand) };
+                let mut left = vec![
+                    Span::styled(bar, bar_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(num, if is_focus { ui::bold_accent(t) } else { muted(t) }),
                     Span::styled(format!(" {dot} "), fg(dot_c).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{} ", ui::harness_glyph(info.harness)), fg(brand)),
-                    Span::styled(format!("{what} "), name_style),
-                    Span::styled(detail, muted(t)),
+                    Span::styled(primary, primary_style),
                 ];
-                // age, then a clickable × that closes the session
+                if !secondary.is_empty() {
+                    left.push(Span::styled(format!("  {secondary}"), muted(t)));
+                }
                 let right = vec![Span::styled(format!(" {}", crate::util::short_dur(info.age_secs)), muted(t)), Span::styled(" ×", if selected { fg(t.danger) } else { fg(t.frame) })];
                 ui::line_lr(f, r, left, right);
             }
@@ -374,5 +410,29 @@ fn footer_height(usage: u16, expanded: bool, avail: u16) -> u16 {
         status
     } else {
         0
+    }
+}
+
+/// (gap above, own height) per sidebar row: projects get a blank line above (except the first) and two lines.
+fn row_lines(rows: &[Row]) -> Vec<(u16, u16)> {
+    let mut seen_project = false;
+    rows.iter()
+        .map(|r| match r {
+            Row::Project { .. } => {
+                let gap = u16::from(seen_project);
+                seen_project = true;
+                (gap, 2)
+            }
+            _ => (0, 1),
+        })
+        .collect()
+}
+
+/// Background of the session you're in: a quiet tint of the accent.
+fn current_tint(t: &Theme) -> ratatui::style::Color {
+    if t.is_light() {
+        crate::theme::mix(t.accent, t.bg, 0.9)
+    } else {
+        crate::theme::mix(t.accent, ratatui::style::Color::Rgb(18, 18, 22), 0.84)
     }
 }

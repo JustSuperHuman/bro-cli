@@ -28,6 +28,10 @@ fn draw_inner(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64, 
     f.render_widget(Clear, r);
     let title = Line::from(vec![Span::raw(" "), Span::styled("new session", ui::bold_accent(t)), Span::raw(" ")]);
     let inner = ui::frame_ex(f, r, title, None, None, true, t);
+    // a close button in the top-right corner (esc does the same)
+    let close = Rect { x: r.right().saturating_sub(5), y: r.y, width: 3, height: 1 };
+    ui::line(f, close, vec![Span::styled(" × ", fg(t.danger).add_modifier(Modifier::BOLD))]);
+    hits.push((close, Hit::Close));
     let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     let row = |y: u16| Rect { y, height: 1, ..inner };
     let mut y = inner.y;
