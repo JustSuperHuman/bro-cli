@@ -39,7 +39,10 @@ fn welcome_screen() {
     assert!(s.contains("██████╗"), "logo\n{s}");
     assert!(s.contains("to launch your first agent"), "{s}");
     assert!(s.contains("alt+n"), "{s}");
-    assert!(s.contains("↺ 4 past"), "past sessions grouped by project even with nothing live
+    assert!(s.contains("+ new session"), "{s}");
+    assert!(s.contains("bro-cli-v2") && s.contains("justgains"), "past sessions grouped by project even with nothing live
+{s}");
+    assert!(!s.contains("↺"), "no past-count glyphs
 {s}");
 }
 
@@ -53,8 +56,10 @@ fn sidebar_with_three_projects() {
     for p in ["bro-cli-v2", "justgains", "terminal"] {
         assert!(s.contains(p), "project {p} missing\n{s}");
     }
-    assert!(s.contains("past"), "{s}");
-    assert!(s.contains("usage"), "{s}");
+    assert!(s.contains("+ new session"), "{s}");
+    assert!(s.contains("usage left"), "{s}");
+    assert!(s.contains("+ new") && s.contains("alt+n"), "tab bar new button
+{s}");
     assert!(s.contains("proxy") && s.contains(":3458"), "{s}");
     assert!(s.contains("bridge") && s.contains(":10001"), "{s}");
     assert!(s.contains("claude · work · opus-5"), "pane title\n{s}");
@@ -184,6 +189,7 @@ fn keyboard_navigation() {
     key(&mut a, KeyCode::Char('b'), KeyModifiers::ALT);
     assert!(a.side_focus);
     key(&mut a, KeyCode::Char('g'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE); // past "+ new session" onto the first project
     key(&mut a, KeyCode::Char('h'), KeyModifiers::NONE);
     assert_eq!(a.side.collapsed.len(), 1);
     key(&mut a, KeyCode::Char('l'), KeyModifiers::NONE);
@@ -321,4 +327,18 @@ fn launched_sessions_open_panes_and_report_errors() {
     let s = draw(&mut a);
     assert!(s.contains("codex · local · gpt-5.2"), "{s}");
     assert!(s.contains("couldn't start") || s.contains("definitely-not"), "{s}");
+}
+
+#[test]
+fn usage_block_collapses_to_claude_and_codex_totals() {
+    let mut a = app(true);
+    assert!(!a.usage_expanded);
+    let s = shot(&mut a, "usage-collapsed");
+    let foot: Vec<&str> = s.lines().skip_while(|l| !l.contains("usage left")).take(4).collect();
+    let foot = foot.join("\n");
+    assert!(foot.contains("claude") && foot.contains("codex"), "totals\n{s}");
+    assert!(!foot.contains("personal"), "no per-profile rows when collapsed\n{s}");
+    a.usage_expanded = true; // (toggle_usage_details also saves; tests don't touch settings)
+    let s = shot(&mut a, "usage-expanded");
+    assert!(s.contains("personal") && s.contains("team"), "every profile\n{s}");
 }

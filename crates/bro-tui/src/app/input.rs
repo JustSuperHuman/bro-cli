@@ -211,7 +211,7 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_row(sel),
             KeyCode::Char('f') => match rows.get(sel) {
                 Some(Row::Past { info }) => self.open_fork(info.idx),
-                _ => self.toast(Kind::Info, "f forks a past session (↺) into another profile"),
+                _ => self.toast(Kind::Info, "f forks an earlier session into another profile"),
             },
             KeyCode::Char('r') => match rows.get(sel) {
                 Some(Row::Live { info, .. }) => self.start_rename(info.pane),

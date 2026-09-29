@@ -215,13 +215,6 @@ pub fn pct_color(pct: f32, t: &Theme) -> Color {
     }
 }
 
-/// A compact segmented meter "▰▰▰▱▱" (`n` segments).
-pub fn meter(pct: f32, n: usize, t: &Theme) -> Vec<Span<'static>> {
-    let filled = ((pct.clamp(0.0, 100.0) / 100.0) * n as f32).round() as usize;
-    let c = pct_color(pct, t);
-    vec![Span::styled("▰".repeat(filled), fg(c)), Span::styled("▱".repeat(n - filled.min(n)), fg(t.frame))]
-}
-
 /// A smooth bar using eighth-blocks, `w` columns wide.
 pub fn bar(pct: f32, w: usize, t: &Theme) -> Vec<Span<'static>> {
     const PARTS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
@@ -300,12 +293,28 @@ pub fn logo(f: &mut Frame, area: Rect, t: &Theme, time: f64) -> u16 {
     LOGO.len() as u16
 }
 
-/// Title text with a drifting rainbow (animated themes) or the accent colour.
-pub fn title_spans(text: &str, t: &Theme, time: f64) -> Vec<Span<'static>> {
-    if !t.animated {
-        return vec![Span::styled(text.to_string(), bold_accent(t))];
+/// Title text in the accent colour (the rainbow is kept for the welcome logo only).
+pub fn title_spans(text: &str, t: &Theme, _time: f64) -> Vec<Span<'static>> {
+    vec![Span::styled(text.to_string(), bold_accent(t))]
+}
+
+/// Colour for a "% left" figure: red at 20 or below, amber at 50 or below, else green (v1 `leftFigure`).
+pub fn left_color(left: f64, t: &Theme) -> Color {
+    // a fixed amber: some palettes use the same pink for "inline" and "danger"
+    const AMBER: Color = Color::Rgb(0xff, 0xb8, 0x6c);
+    if left <= 20.0 {
+        t.danger
+    } else if left <= 50.0 {
+        AMBER
+    } else {
+        t.good
     }
-    text.chars().enumerate().map(|(i, c)| Span::styled(c.to_string(), Style::default().fg(crate::theme::rainbow(i, time)).add_modifier(Modifier::BOLD))).collect()
+}
+
+/// A fuel-gauge meter of what's left (`n` segments), coloured like [`left_color`].
+pub fn left_meter(left: f64, n: usize, t: &Theme) -> Vec<Span<'static>> {
+    let filled = ((left.clamp(0.0, 100.0) / 100.0) * n as f64).round() as usize;
+    vec![Span::styled("▰".repeat(filled), fg(left_color(left, t))), Span::styled("▱".repeat(n - filled.min(n)), fg(t.frame))]
 }
 
 #[cfg(test)]

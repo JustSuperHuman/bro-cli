@@ -153,11 +153,6 @@ fn terminal() -> Theme {
     }
 }
 
-/// Rainbow colour for character i at time t (seconds) — the ultra theme's drifting title.
-pub fn rainbow(i: usize, t: f64) -> Color {
-    rainbow_at(i as f64 * 0.07 - t * 0.6, 0.55)
-}
-
 /// A point on the rainbow (0..1 wraps) at saturation `s`.
 pub fn rainbow_at(pos: f64, s: f64) -> Color {
     let h = pos.rem_euclid(1.0) * 6.0;

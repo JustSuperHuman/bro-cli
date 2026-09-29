@@ -138,6 +138,8 @@ pub struct Settings {
     pub prefix: String,
     pub shell: Option<String>,
     pub nerd_font: bool,
+    /// Sidebar usage block shows every profile (true) or just the Claude / Codex totals (false)
+    pub usage_expanded: bool,
     pub bridge: BridgeSettings,
     pub proxy: ProxySettings,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
@@ -169,6 +171,7 @@ impl Default for Settings {
             prefix: "ctrl+space".into(),
             shell: None,
             nerd_font: false,
+            usage_expanded: false,
             bridge: BridgeSettings::default(),
             proxy: ProxySettings::default(),
             keys: BTreeMap::new(),

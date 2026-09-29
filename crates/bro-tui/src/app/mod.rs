@@ -73,9 +73,9 @@ pub(crate) enum SideHit {
     /// index into the current sidebar rows
     Row(usize),
     Usage,
+    UsageToggle,
     Proxy,
     Bridge,
-    Launch,
 }
 
 /// Startup options.
@@ -114,6 +114,8 @@ pub struct App {
     side_hits: Vec<(Rect, SideHit)>,
     pane_close: Vec<(Rect, PaneId)>,
     tab_hits: Vec<(Rect, usize)>,
+    /// the tab bar's "+ new" button
+    new_tab_hit: Option<Rect>,
     drag: Option<(Vec<bool>, Dir, Rect)>,
     sel: Option<Sel>,
     copy_pending: bool,
@@ -122,6 +124,8 @@ pub struct App {
     // sidebar
     pub(crate) sidebar: bool,
     pub(crate) side_focus: bool,
+    /// sidebar usage block: every profile (true) or the Claude / Codex totals
+    pub(crate) usage_expanded: bool,
     pub(crate) side_sel: usize,
     pub(crate) side: SideState,
     pub(crate) side_filtering: bool,
@@ -164,6 +168,7 @@ impl App {
             side_hits: vec![],
             pane_close: vec![],
             tab_hits: vec![],
+            new_tab_hit: None,
             drag: None,
             sel: None,
             copy_pending: false,
@@ -171,6 +176,7 @@ impl App {
             last_click: None,
             sidebar: true,
             side_focus: false,
+            usage_expanded: settings.usage_expanded,
             side_sel: 0,
             side: SideState::default(),
             side_filtering: false,
@@ -410,7 +416,8 @@ impl App {
     fn next_deadline(&self) -> Duration {
         let mut d = Duration::from_secs(30);
         let spinning = self.panes.values().any(|p| p.activity() == Some(Activity::Working));
-        if self.theme.animated || spinning {
+        // the rainbow only plays on the welcome logo
+        if (self.theme.animated && self.tabs.is_empty()) || spinning {
             d = d.min(Duration::from_millis(125));
         }
         if let Some(t) = self.toasts.next_expiry() {

@@ -1,5 +1,5 @@
 //! The sidebar model: a pure function from live sessions + past sessions + UI state (collapsed projects,
-//! open "past" groups, filter) to the rows the sidebar draws and navigates. No I/O, no drawing.
+//! open "more" lists, filter) to the rows the sidebar draws and navigates. No I/O, no drawing.
 //!
 //! Order: projects with live sessions first (in the order their first session started, so rows don't jump),
 //! then projects that only have past sessions, most recent first.
@@ -47,36 +47,72 @@ pub struct PastInfo {
 /// Sidebar UI state.
 #[derive(Clone, Debug, Default)]
 pub struct SideState {
-    /// project keys whose sessions are hidden
+    /// projects *with live sessions* you collapsed (they start open)
     pub collapsed: HashSet<String>,
-    /// project keys whose "past" group is open
+    /// projects *without live sessions* you opened (they start closed)
+    pub expanded: HashSet<String>,
+    /// projects showing all their earlier sessions instead of the first few
     pub past_open: HashSet<String>,
     pub filter: String,
+}
+
+impl SideState {
+    /// Is this project folded? Projects with live sessions start open, the rest start closed.
+    pub fn is_collapsed(&self, key: &str, has_live: bool) -> bool {
+        if has_live { self.collapsed.contains(key) } else { !self.expanded.contains(key) }
+    }
+
+    /// Fold or unfold a project.
+    pub fn set_collapsed(&mut self, key: &str, has_live: bool, fold: bool) {
+        // `collapsed` records folds of live projects, `expanded` records unfolds of the rest
+        let (set, insert) = if has_live { (&mut self.collapsed, fold) } else { (&mut self.expanded, !fold) };
+        if insert {
+            set.insert(key.to_string());
+        } else {
+            set.remove(key);
+        }
+    }
 }
 
 /// One sidebar row.
 #[derive(Clone, Debug)]
 pub enum Row {
-    Project { key: String, name: String, root: PathBuf, live: usize, past: usize, collapsed: bool, attention: bool },
+    /// "+ new session" — always first
+    New,
+    Project {
+        key: String,
+        name: String,
+        root: PathBuf,
+        live: usize,
+        collapsed: bool,
+        attention: bool,
+        /// seconds since the newest earlier session
+        last_age: Option<u64>,
+    },
     Live { info: LiveInfo, n: Option<usize> },
-    PastHeader { key: String, count: usize, open: bool },
+    /// A resumable earlier session, listed right under the project's live ones
     Past { info: PastInfo },
+    /// "… N more" — shows the rest of a project's earlier sessions
+    More { key: String, hidden: usize },
 }
 
 impl Row {
-    /// The project a row belongs to.
+    /// The project a row belongs to (empty for [`Row::New`]).
     pub fn project_key(&self) -> &str {
         match self {
-            Row::Project { key, .. } | Row::PastHeader { key, .. } => key,
+            Row::New => "",
+            Row::Project { key, .. } | Row::More { key, .. } => key,
             Row::Live { info, .. } => &info.project_key,
             Row::Past { info } => &info.project_key,
         }
     }
 }
 
-/// Past-session rows shown per open project group.
-pub const PAST_PER_PROJECT: usize = 8;
-/// Projects shown that only have past sessions.
+/// Earlier sessions shown per open project before "… N more".
+pub const PAST_SHOWN: usize = 4;
+/// Earlier sessions shown once "more" is opened.
+pub const PAST_PER_PROJECT: usize = 25;
+/// Projects shown that only have earlier sessions.
 pub const PAST_PROJECTS: usize = 12;
 
 struct Group<'a> {
@@ -139,6 +175,9 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], st: &SideState) -> Vec<Row> {
     let q = st.filter.trim().to_lowercase();
     let numbering: HashMap<PaneId, usize> = live_order(live, past).into_iter().enumerate().map(|(i, p)| (p, i + 1)).collect();
     let mut rows = vec![];
+    if q.is_empty() {
+        rows.push(Row::New);
+    }
     for g in groups(live, past) {
         let project_hit = !q.is_empty() && matches(&[&g.name], &q);
         let live_rows: Vec<&LiveInfo> = g
@@ -151,23 +190,23 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], st: &SideState) -> Vec<Row> {
         if !q.is_empty() && live_rows.is_empty() && past_rows.is_empty() && !project_hit {
             continue;
         }
-        let collapsed = q.is_empty() && st.collapsed.contains(&g.key);
+        let collapsed = q.is_empty() && st.is_collapsed(&g.key, !g.live.is_empty());
         let attention = g.live.iter().any(|l| l.activity == Some(Activity::Blocked) || l.done);
-        rows.push(Row::Project { key: g.key.clone(), name: g.name.clone(), root: g.root.clone(), live: g.live.len(), past: g.past.len(), collapsed, attention });
+        let last_age = g.past.first().map(|p| p.age_secs);
+        rows.push(Row::Project { key: g.key.clone(), name: g.name.clone(), root: g.root.clone(), live: g.live.len(), collapsed, attention, last_age });
         if collapsed {
             continue;
         }
         for l in live_rows {
             rows.push(Row::Live { info: l.clone(), n: numbering.get(&l.pane).copied().filter(|n| *n <= 9) });
         }
-        if !past_rows.is_empty() {
-            let open = st.past_open.contains(&g.key) || !q.is_empty();
-            rows.push(Row::PastHeader { key: g.key.clone(), count: past_rows.len(), open });
-            if open {
-                for p in past_rows.into_iter().take(PAST_PER_PROJECT) {
-                    rows.push(Row::Past { info: p.clone() });
-                }
-            }
+        let all = st.past_open.contains(&g.key) || !q.is_empty();
+        let shown = past_rows.len().min(if all { PAST_PER_PROJECT } else { PAST_SHOWN });
+        for p in &past_rows[..shown] {
+            rows.push(Row::Past { info: (*p).clone() });
+        }
+        if !all && past_rows.len() > shown {
+            rows.push(Row::More { key: g.key.clone(), hidden: past_rows.len() - shown });
         }
     }
     rows
@@ -201,59 +240,52 @@ mod tests {
     fn kinds(rows: &[Row]) -> String {
         rows.iter()
             .map(|r| match r {
+                Row::New => "+".to_string(),
                 Row::Project { name, .. } => format!("P:{name}"),
                 Row::Live { info, n } => format!("L{}#{}", info.pane, n.unwrap_or(0)),
-                Row::PastHeader { count, open, .. } => format!("H{count}{}", if *open { "o" } else { "" }),
                 Row::Past { info } => format!("p{}", info.idx),
+                Row::More { hidden, .. } => format!("M{hidden}"),
             })
             .collect::<Vec<_>>()
             .join(" ")
     }
 
     #[test]
-    fn groups_live_first_then_recent_past() {
+    fn live_projects_open_past_only_projects_closed() {
         let l = vec![live(10, "b", 2, None), live(11, "a", 1, Some(Activity::Blocked)), live(12, "b", 3, None)];
         let p = vec![past(0, "c", "old", 900), past(1, "b", "fix it", 100), past(2, "d", "newer", 50), past(3, "b", "other", 10)];
         let rows = build(&l, &p, &SideState::default());
-        assert_eq!(kinds(&rows), "P:a L11#1 P:b L10#2 L12#3 H2 P:d H1 P:c H1");
-        assert!(matches!(&rows[0], Row::Project { attention: true, live: 1, .. }));
+        assert_eq!(kinds(&rows), "+ P:a L11#1 P:b L10#2 L12#3 p3 p1 P:d P:c");
+        assert!(matches!(&rows[1], Row::Project { attention: true, live: 1, .. }));
+        assert!(matches!(&rows[8], Row::Project { collapsed: true, last_age: Some(50), .. }));
         assert_eq!(live_order(&l, &p), vec![11, 10, 12]);
         assert_eq!(project_order(&l, &p), vec!["a", "b", "d", "c"]);
     }
 
     #[test]
-    fn collapse_open_and_filter() {
-        let l = vec![live(1, "a", 1, None), live(2, "b", 2, None)];
-        let p = vec![past(0, "a", "port the loop", 10), past(1, "a", "fix tests", 20), past(2, "b", "qr pairing", 5)];
+    fn collapse_expand_more_and_filter() {
+        let l = vec![live(1, "a", 1, None)];
+        let p: Vec<PastInfo> = (0..6).map(|i| past(i, "a", "port the loop", i as u64)).chain([past(9, "b", "qr pairing", 5)]).collect();
         let mut st = SideState::default();
-        st.collapsed.insert("b".into());
+        assert_eq!(kinds(&build(&l, &p, &st)), "+ P:a L1#1 p0 p1 p2 p3 M2 P:b");
         st.past_open.insert("a".into());
-        assert_eq!(kinds(&build(&l, &p, &st)), "P:a L1#1 H2o p0 p1 P:b");
-        // numbering ignores collapse: b's session is still #2
-        st.collapsed.clear();
-        assert_eq!(kinds(&build(&l, &p, &st)), "P:a L1#1 H2o p0 p1 P:b L2#2 H1");
-        // filter: only matching past sessions, groups auto-open, collapse ignored
-        st.collapsed.insert("a".into());
+        assert_eq!(kinds(&build(&l, &p, &st)), "+ P:a L1#1 p0 p1 p2 p3 p4 p5 P:b");
+        st.set_collapsed("a", true, true);
+        st.set_collapsed("b", false, false);
+        assert_eq!(kinds(&build(&l, &p, &st)), "+ P:a P:b p9");
+        assert!(st.is_collapsed("a", true) && !st.is_collapsed("b", false));
+        // filter: no "new" row, matches only, collapse ignored
         st.filter = "QR".into();
-        assert_eq!(kinds(&build(&l, &p, &st)), "P:b H1o p2");
-        // filter on a project name shows all of it
-        st.filter = "a".into();
-        let rows = build(&l, &p, &st);
-        assert!(kinds(&rows).starts_with("P:a L1#1 H2o p0 p1"), "{}", kinds(&rows));
+        assert_eq!(kinds(&build(&l, &p, &st)), "P:b p9");
         st.filter = "zzz".into();
         assert!(build(&l, &p, &st).is_empty());
     }
 
     #[test]
-    fn numbering_stops_at_nine_and_past_is_capped() {
+    fn numbering_stops_at_nine() {
         let l: Vec<LiveInfo> = (0..11).map(|i| live(i, "a", i, None)).collect();
-        let p: Vec<PastInfo> = (0..20).map(|i| past(i, "a", "t", i as u64)).collect();
-        let mut st = SideState::default();
-        st.past_open.insert("a".into());
-        let rows = build(&l, &p, &st);
+        let rows = build(&l, &[], &SideState::default());
         let numbered = rows.iter().filter(|r| matches!(r, Row::Live { n: Some(_), .. })).count();
         assert_eq!(numbered, 9);
-        assert_eq!(rows.iter().filter(|r| matches!(r, Row::Past { .. })).count(), PAST_PER_PROJECT);
-        assert!(rows.iter().any(|r| matches!(r, Row::PastHeader { count: 20, .. })));
     }
 }

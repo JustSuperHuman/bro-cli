@@ -148,6 +148,69 @@ pub fn headroom(profile: &crate::profiles::Profile, usage: &Usage) -> Headroom {
     Headroom { now: now as f32, week: week as f32, capped: d.h5_estimated }
 }
 
+/// One app's headroom across all of its logins (v1 `appHeadroom`): per window, the
+/// average % left over the *distinct* identities that report it, so two profiles signed
+/// in as the same account count once and no figure passes 100.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppSummary {
+    /// Signed-in logins of this app (including ones still loading / unavailable)
+    pub logins: usize,
+    /// Logins whose usage hasn't arrived yet
+    pub loading: usize,
+    /// Logins whose usage couldn't be read
+    pub unavailable: usize,
+    pub h5: Option<f64>,
+    pub wk: Option<f64>,
+    pub fable_5h: Option<f64>,
+    pub fable_wk: Option<f64>,
+    /// Some 5h figure was cut down by the week (render with "≈")
+    pub h5_estimated: bool,
+}
+
+/// A login's usage state for [`app_summary`].
+pub enum LoginUsage<'a> {
+    Loading,
+    Unavailable,
+    Ready(&'a Usage),
+}
+
+/// v1 `appHeadroom` for one family (all Claude or all Codex profiles).
+pub fn app_summary<'a>(logins: impl IntoIterator<Item = (&'a Profile, LoginUsage<'a>)>) -> AppSummary {
+    let mut out = AppSummary::default();
+    let mut seen = std::collections::HashSet::new();
+    let mut rooms = Vec::new();
+    for (profile, state) in logins {
+        out.logins += 1;
+        let usage = match state {
+            LoginUsage::Loading => {
+                out.loading += 1;
+                continue;
+            }
+            LoginUsage::Unavailable => {
+                out.unavailable += 1;
+                continue;
+            }
+            LoginUsage::Ready(u) => u,
+        };
+        if let Some(id) = profile.identity.as_deref()
+            && !seen.insert(id.to_string())
+        {
+            continue;
+        }
+        rooms.push(headroom_detail(profile, usage));
+    }
+    let avg = |get: fn(&HeadroomDetail) -> Option<f64>| {
+        let vals: Vec<f64> = rooms.iter().filter_map(get).collect();
+        (!vals.is_empty()).then(|| (vals.iter().sum::<f64>() / vals.len() as f64).round())
+    };
+    out.h5 = avg(|r| r.h5);
+    out.wk = avg(|r| r.wk);
+    out.fable_5h = avg(|r| r.fable_5h);
+    out.fable_wk = avg(|r| r.fable_wk);
+    out.h5_estimated = rooms.iter().any(|r| r.h5_estimated || r.fable_5h_estimated);
+    out
+}
+
 /// What a login can still deliver as (week, now) in weekly points (v1 `capacityOf`).
 pub fn capacity_of(room: &HeadroomDetail, ratio: Option<f64>) -> Option<(f64, f64)> {
     match (room.wk, room.h5) {
@@ -211,6 +274,33 @@ mod tests {
     use crate::profiles::{ProfileKind, describe};
     use crate::util::test_env::sandbox;
     use serde_json::json;
+
+    #[test]
+    fn app_summary_averages_distinct_identities() {
+        let mk = |id: &str, ident: Option<&str>| Profile {
+            id: id.into(),
+            kind: ProfileKind::CodexProfile,
+            name: id.into(),
+            dir: std::path::PathBuf::from(id),
+            authenticated: true,
+            plan: None,
+            tier: None,
+            identity: ident.map(Into::into),
+            email: None,
+        };
+        let (a, b, c, d) = (mk("a", Some("same")), mk("b", Some("same")), mk("c", Some("other")), mk("d", None));
+        let (ua, ub, uc) = (usage(Some(40.0), Some(20.0), None), usage(Some(0.0), Some(0.0), None), usage(Some(80.0), Some(60.0), None));
+        let s = app_summary([
+            (&a, LoginUsage::Ready(&ua)),
+            (&b, LoginUsage::Ready(&ub)), // same identity as a: ignored
+            (&c, LoginUsage::Ready(&uc)),
+            (&d, LoginUsage::Loading),
+        ]);
+        assert_eq!((s.logins, s.loading, s.unavailable), (4, 1, 0));
+        assert_eq!(s.h5, Some(40.0)); // (60 + 20) / 2 left
+        assert_eq!(s.wk, Some(60.0)); // (80 + 40) / 2 left
+        assert_eq!(s.fable_5h, None);
+    }
 
     fn w(used: f32) -> Option<Window> {
         Some(Window { used_pct: used, resets_at: None, window_mins: None })

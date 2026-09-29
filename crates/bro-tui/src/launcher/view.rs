@@ -111,7 +111,9 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, time: f64) {
         let style = if on { ui::bold_accent(t) } else if a.ready { Style::default() } else { muted(t) };
         let mut right = vec![];
         if let Some(p) = a.five_hour {
-            right.push(Span::styled(format!("{p:.0}% "), fg(ui::pct_color(p, t))));
+            // shown as what's left, like the sidebar
+            let left = (100.0 - p as f64).clamp(0.0, 100.0);
+            right.push(Span::styled(format!("{left:.0}% left "), fg(ui::left_color(left, t))));
         }
         let left = vec![marker(on, l.col == Col::Account, t), Span::styled(glyph.0, fg(glyph.1)), Span::styled(format!("{} ", a.label), style), Span::styled(a.detail.clone(), muted(t))];
         ui::line_lr(f, cell(1, k - a_start), left, right);

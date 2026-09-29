@@ -14,9 +14,9 @@ use ratatui::{
 };
 
 impl App {
-    /// Where panes go: the body minus the tab bar (shown when there's more than one tab).
+    /// Where panes go: the body minus the tab bar (always shown once there's a tab).
     pub(super) fn body_panes(&self) -> Rect {
-        if self.tabs.len() > 1 && self.body.height > 3 { Rect { y: self.body.y + 1, height: self.body.height - 1, ..self.body } } else { self.body }
+        if !self.tabs.is_empty() && self.body.height > 3 { Rect { y: self.body.y + 1, height: self.body.height - 1, ..self.body } } else { self.body }
     }
 
     pub(crate) fn draw(&mut self, f: &mut Frame) {
@@ -32,13 +32,14 @@ impl App {
             self.draw_sidebar(f, Rect { width: side_w, ..area });
         }
         self.tab_hits.clear();
+        self.new_tab_hit = None;
         self.pane_close.clear();
         self.outer.clear();
         self.inner.clear();
         if self.tabs.is_empty() {
             self.draw_welcome(f, self.body);
         } else {
-            if self.tabs.len() > 1 {
+            if self.body.height > 3 {
                 self.draw_tab_bar(f, Rect { height: 1, ..self.body });
             }
             self.draw_panes(f);
@@ -52,6 +53,10 @@ impl App {
         let t = self.theme.clone();
         let label_of = |app: &App, i: usize| ui::fit(&app.tab_label(i), 20);
         // scroll so the current tab is visible
+        let new_key = self.keymap.primary(crate::keymap::Act::NewSession);
+        let new_label = format!(" + new  {new_key} ");
+        let new_w = ui::width(&new_label) as u16;
+        let r = Rect { width: r.width.saturating_sub(new_w + 1), ..r };
         let widths: Vec<u16> = (0..self.tabs.len()).map(|i| ui::width(&label_of(self, i)) as u16 + 8).collect();
         let mut start = 0;
         while start < self.cur && widths[start..=self.cur].iter().sum::<u16>() + 4 > r.width {
@@ -93,6 +98,11 @@ impl App {
             self.tab_hits.push((cell, i));
             x += text_w + 1;
         }
+        // "+ new" right after the last tab: the obvious way to start another session
+        let cell = Rect { x: x.min(r.right() + 1), y: r.y, width: new_w, height: 1 };
+        let key_style = muted(&t);
+        ui::line(f, cell, vec![Span::styled(" + new ", fg(t.shine).add_modifier(Modifier::BOLD)), Span::styled(format!(" {new_key} "), key_style)]);
+        self.new_tab_hit = Some(cell);
     }
 
     fn draw_panes(&mut self, f: &mut Frame) {

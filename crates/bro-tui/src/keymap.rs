@@ -46,6 +46,7 @@ pub enum Act {
     Themes,
     ToggleIcons,
     RefreshUsage,
+    UsageDetails,
     Quit,
 }
 
@@ -80,7 +81,7 @@ impl Act {
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, Profiles, Proxy, Bridge, RefreshUsage]);
+        v.extend([Usage, UsageDetails, Profiles, Proxy, Bridge, RefreshUsage]);
         v.extend([Palette, Help, Themes, ToggleIcons, Quit]);
         v
     }
@@ -124,6 +125,7 @@ impl Act {
             Themes => "themes".into(),
             ToggleIcons => "toggle_icons".into(),
             RefreshUsage => "refresh_usage".into(),
+            UsageDetails => "usage_details".into(),
             Quit => "quit".into(),
         }
     }
@@ -172,6 +174,7 @@ impl Act {
             Themes => "pick a theme (live preview)".into(),
             ToggleIcons => "toggle nerd font icons".into(),
             RefreshUsage => "refresh usage now".into(),
+            UsageDetails => "sidebar usage: totals / every profile".into(),
             Quit => "quit bro".into(),
         }
     }
@@ -182,7 +185,7 @@ impl Act {
             NewSession | NewShell | Rename | Close | Attention => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | Profiles | Proxy | Bridge | RefreshUsage => Group::Views,
+            Usage | UsageDetails | Profiles | Proxy | Bridge | RefreshUsage => Group::Views,
             Palette | Help | Themes | ToggleIcons | Quit => Group::App,
         }
     }
@@ -214,6 +217,7 @@ impl Act {
             FocusSidebar => vec!["alt+b"],
             Palette => vec!["alt+p"],
             Usage => vec!["alt+u"],
+            UsageDetails => vec!["alt+U"],
             Profiles => vec!["alt+o"],
             Proxy => vec!["alt+y"],
             Bridge => vec!["alt+g"],
@@ -252,6 +256,7 @@ impl Act {
             FocusSidebar => vec!["b"],
             Palette => vec![":", "space"],
             Usage => vec!["u"],
+            UsageDetails => vec!["U"],
             Profiles => vec!["o"],
             Proxy => vec!["y"],
             Bridge => vec!["g"],

@@ -98,6 +98,7 @@ impl App {
                 self.svc.save_settings(s);
                 self.toast(Kind::Info, if n { "nerd font icons" } else { "plain icons (no nerd font)" });
             }
+            Act::UsageDetails => self.toggle_usage_details(),
             Act::RefreshUsage => {
                 self.svc.refresh_usage();
                 self.toast(Kind::Usage, "refreshing usage…");
@@ -192,7 +193,8 @@ impl App {
                     Row::Project { root, .. } => root.clone(),
                     Row::Live { info, .. } => info.project_root.clone(),
                     Row::Past { info } => info.project_root.clone(),
-                    Row::PastHeader { key, .. } => self.rows().iter().find_map(|r| if let Row::Project { key: k, root, .. } = r { (k == key).then(|| root.clone()) } else { None })?,
+                    Row::More { key, .. } => self.rows().iter().find_map(|r| if let Row::Project { key: k, root, .. } = r { (k == key).then(|| root.clone()) } else { None })?,
+                    Row::New => return self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.root.clone()),
                 });
             }
         self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.root.clone())
@@ -268,65 +270,65 @@ impl App {
         }
     }
 
+    /// Sidebar usage: Claude / Codex totals ⇄ every profile (remembered in v2.toml).
+    pub(crate) fn toggle_usage_details(&mut self) {
+        self.usage_expanded = !self.usage_expanded;
+        let mut s = self.svc.settings();
+        s.usage_expanded = self.usage_expanded;
+        self.svc.save_settings(s);
+    }
+
     /// Enter on a sidebar row.
     pub(crate) fn activate_row(&mut self, i: usize) {
         let rows = self.rows();
         let Some(r) = rows.get(i) else { return };
         self.side_sel = i;
         match r {
-            Row::Project { key, .. } => {
-                if !self.side.collapsed.remove(key) {
-                    self.side.collapsed.insert(key.clone());
-                }
-            }
+            Row::New => self.open_launcher(None, Place::Tab),
+            Row::Project { key, live, collapsed, .. } => self.side.set_collapsed(key, *live > 0, !*collapsed),
             Row::Live { info, .. } => self.go_session(info.pane),
-            Row::PastHeader { key, .. } => {
-                if !self.side.past_open.remove(key) {
-                    self.side.past_open.insert(key.clone());
-                }
-            }
             Row::Past { info } => self.resume(info.idx),
+            Row::More { key, .. } => {
+                self.side.past_open.insert(key.clone());
+            }
         }
     }
 
-    /// h / ←: collapse, or hop to the parent project row.
+    /// The project header row for `key`, as (index, has live sessions).
+    fn project_row(rows: &[Row], key: &str) -> Option<(usize, bool)> {
+        rows.iter().enumerate().find_map(|(i, r)| match r {
+            Row::Project { key: k, live, .. } if k == key => Some((i, *live > 0)),
+            _ => None,
+        })
+    }
+
+    /// h / ←: fold the project (from any of its rows, landing on its header).
     pub(crate) fn side_collapse(&mut self) {
         let rows = self.rows();
         let Some(r) = rows.get(self.side_sel) else { return };
-        match r {
-            Row::Project { key, .. } => {
-                self.side.collapsed.insert(key.clone());
-            }
-            Row::PastHeader { key, open: true, .. } => {
-                self.side.past_open.remove(key);
-            }
-            Row::Past { info } => {
-                let key = info.project_key.clone();
-                self.side.past_open.remove(&key);
-                if let Some(i) = self.rows().iter().position(|r| matches!(r, Row::PastHeader { key: k, .. } if *k == key)) {
-                    self.side_sel = i;
-                }
-            }
-            other => {
-                let key = other.project_key().to_string();
-                if let Some(i) = rows.iter().position(|r| matches!(r, Row::Project { key: k, .. } if *k == key)) {
-                    self.side_sel = i;
-                }
-            }
+        let key = r.project_key().to_string();
+        if key.is_empty() {
+            return;
+        }
+        // an opened "more" list shrinks back first
+        if matches!(r, Row::Past { .. }) && self.side.past_open.remove(&key) {
+            return;
+        }
+        if let Some((i, live)) = Self::project_row(&rows, &key) {
+            self.side.set_collapsed(&key, live, true);
+            self.side_sel = i;
         }
     }
 
-    /// l / →: expand.
+    /// l / →: unfold a project, open "more", or step into the project.
     pub(crate) fn side_expand(&mut self) {
         let rows = self.rows();
         match rows.get(self.side_sel) {
-            Some(Row::Project { key, collapsed: true, .. }) => {
-                self.side.collapsed.remove(key);
-            }
-            Some(Row::PastHeader { key, open: false, .. }) => {
+            Some(Row::Project { key, live, collapsed: true, .. }) => self.side.set_collapsed(key, *live > 0, false),
+            Some(Row::More { key, .. }) => {
                 self.side.past_open.insert(key.clone());
             }
-            Some(Row::Project { .. } | Row::PastHeader { .. }) => self.side_sel = (self.side_sel + 1).min(rows.len().saturating_sub(1)),
+            Some(Row::Project { .. } | Row::New) => self.side_sel = (self.side_sel + 1).min(rows.len().saturating_sub(1)),
             _ => {}
         }
     }

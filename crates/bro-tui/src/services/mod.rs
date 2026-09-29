@@ -132,6 +132,7 @@ pub fn fallback_settings() -> Settings {
         prefix: "ctrl+space".into(),
         shell: None,
         nerd_font: true,
+        usage_expanded: false,
         bridge: BridgeSettings::default(),
         proxy: ProxySettings::default(),
         keys: BTreeMap::new(),
