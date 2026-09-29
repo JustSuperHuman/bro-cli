@@ -42,6 +42,8 @@ pub struct PastInfo {
     pub project_key: String,
     pub project_name: String,
     pub project_root: PathBuf,
+    /// shown only while "show archived" is on
+    pub archived: bool,
 }
 
 /// Sidebar UI state.
@@ -54,6 +56,8 @@ pub struct SideState {
     /// projects showing all their earlier sessions instead of the first few
     pub past_open: HashSet<String>,
     pub filter: String,
+    /// list archived earlier sessions too (dimmed)
+    pub show_archived: bool,
 }
 
 impl SideState {
@@ -234,7 +238,7 @@ mod tests {
     }
 
     fn past(idx: usize, project: &str, title: &str, age: u64) -> PastInfo {
-        PastInfo { idx, harness: Harness::Codex, profile: Some("codex:local".into()), title: title.into(), age_secs: age, project_key: project.into(), project_name: project.into(), project_root: PathBuf::from(project) }
+        PastInfo { idx, harness: Harness::Codex, profile: Some("codex:local".into()), title: title.into(), age_secs: age, project_key: project.into(), project_name: project.into(), project_root: PathBuf::from(project), archived: false }
     }
 
     fn kinds(rows: &[Row]) -> String {

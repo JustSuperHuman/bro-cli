@@ -58,10 +58,9 @@ fn sidebar_with_three_projects() {
     }
     assert!(s.contains("+ new session"), "{s}");
     assert!(s.contains("usage left"), "{s}");
-    assert!(s.contains("+ new") && s.contains("alt+n"), "tab bar new button
-{s}");
-    assert!(s.contains("proxy") && s.contains(":3458"), "{s}");
-    assert!(s.contains("bridge") && s.contains(":10001"), "{s}");
+    assert!(!s.contains("+ new  alt+n"), "no tab bar\n{s}");
+    assert!(s.contains("proxy") && s.contains("port 3458"), "{s}");
+    assert!(s.contains("phone") && s.contains("port 10001") && s.contains("3 connected"), "{s}");
     assert!(s.contains("claude · work · opus-5"), "pane title\n{s}");
     // the live sessions are numbered for alt+1..9
     let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos());
@@ -74,15 +73,19 @@ fn launcher_open() {
     key(&mut a, KeyCode::Char('n'), KeyModifiers::ALT);
     assert!(matches!(a.overlay, Overlay::Launcher(_)));
     let s = shot(&mut a, "launcher");
-    assert!(s.contains("HARNESS") && s.contains("ACCOUNT") && s.contains("MODEL") && s.contains("PROJECT"), "{s}");
-    assert!(s.contains("pool") && s.contains("openrouter"), "{s}");
-    // typing filters the focused column; tab moves on
-    for c in "codex".chars() {
+    assert!(s.contains("your logins") && s.contains("providers") && s.contains("pool") && s.contains("openrouter"), "{s}");
+    assert!(!s.contains("model…"), "no model list for your own login\n{s}");
+    // → codex tab, then openrouter shows its model list beside the run-on list
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert!(draw(&mut a).contains("team"));
+    for c in "openrouter".chars() {
         key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
     }
-    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
-    let s = draw(&mut a);
-    assert!(s.contains("team"), "{s}");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let s = shot(&mut a, "launcher-openrouter");
+    assert!(s.contains("moonshotai/kimi-k2.7-code") && s.contains("262k"), "{s}");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(matches!(a.overlay, Overlay::None));
 }
@@ -341,4 +344,48 @@ fn usage_block_collapses_to_claude_and_codex_totals() {
     a.usage_expanded = true; // (toggle_usage_details also saves; tests don't touch settings)
     let s = shot(&mut a, "usage-expanded");
     assert!(s.contains("personal") && s.contains("team"), "every profile\n{s}");
+}
+
+#[test]
+fn archive_hides_earlier_sessions_and_undo_restores() {
+    use crate::sidebar::Row;
+    let mut a = app(true);
+    let past_rows = |a: &App| a.rows().iter().filter(|r| matches!(r, Row::Past { .. })).count();
+    let before = past_rows(&a);
+    assert!(before > 0);
+    a.run_act(Act::FocusSidebar);
+    let i = a.rows().iter().position(|r| matches!(r, Row::Past { .. })).unwrap();
+    a.side_sel = i;
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+    assert_eq!(past_rows(&a), before - 1, "archived one");
+    // a whole project
+    let p = a.rows().iter().position(|r| matches!(r, Row::Project { .. })).unwrap();
+    a.side_sel = p;
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+    assert!(past_rows(&a) < before - 1);
+    // show archived: they come back dimmed; u undoes the project batch
+    key(&mut a, KeyCode::Char('A'), KeyModifiers::NONE);
+    assert_eq!(past_rows(&a), before.min(past_rows(&a)).max(past_rows(&a)));
+    key(&mut a, KeyCode::Char('A'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);
+    assert_eq!(past_rows(&a), before, "undo restores everything");
+    // running sessions aren't archivable
+    let live = a.rows().iter().position(|r| matches!(r, Row::Live { .. })).unwrap();
+    a.side_sel = live;
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+    assert_eq!(past_rows(&a), before);
+}
+
+#[test]
+fn clicking_the_x_on_a_sidebar_row_asks_to_close_that_session() {
+    let mut a = app(true);
+    let _ = draw(&mut a);
+    let (r, id) = a.side_hits.iter().find_map(|(r, h)| if let SideHit::Close(id) = h { Some((*r, *id)) } else { None }).expect("a close hit");
+    assert!(draw(&mut a).contains('×'));
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
+    match &a.overlay {
+        Overlay::Confirm(_) => {}
+        _ => assert!(!a.panes.contains_key(&id), "closed straight away or asked first"),
+    }
 }

@@ -5,6 +5,7 @@
 //! Core derived from z4-oriel (MIT).
 
 mod alerts;
+mod archive;
 mod app;
 mod cli;
 mod clip;

@@ -8,6 +8,18 @@ use crate::{Harness, paths};
 /// Vars that would point Claude Code at some other backend than the one chosen.
 const BACKEND_VARS: [&str; 4] = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_DISABLE_1M_CONTEXT"];
 
+/// Claude Code's model slots. On a third-party backend every slot is pinned to the chosen
+/// model, so its background (haiku) and subagent requests don't ask for Claude models the
+/// backend doesn't serve.
+pub(crate) const MODEL_VARS: [&str; 6] = [
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+];
+
 /// v1 `permissionArgs`.
 pub(crate) fn permission_args(p: Permission) -> Vec<String> {
     match p {
@@ -27,7 +39,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         Some(p) if p.kind == ProfileKind::ClaudeAccount => cmd.set_env("CLAUDE_CONFIG_DIR", p.dir.to_string_lossy()),
         _ => cmd.remove_env("CLAUDE_CONFIG_DIR"),
     }
-    for var in BACKEND_VARS {
+    for var in BACKEND_VARS.iter().chain(&MODEL_VARS) {
         cmd.remove_env(var);
     }
 
@@ -64,6 +76,12 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         Target::Upstream(up) => {
             who = up.clone();
             wire_proxy(&mut cmd, up, spec, ctx)?;
+        }
+    }
+
+    if third_party && let Some(m) = spec.model.as_deref().filter(|m| !m.is_empty()) {
+        for var in MODEL_VARS {
+            cmd.set_env(var, m.to_string());
         }
     }
 

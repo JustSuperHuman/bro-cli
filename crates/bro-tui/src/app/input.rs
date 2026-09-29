@@ -232,6 +232,9 @@ impl App {
                 self.open_shell(dir, crate::pane::Place::Tab);
                 self.side_focus = false;
             }
+            KeyCode::Char('a') => self.archive_row(sel),
+            KeyCode::Char('u') => self.undo_archive(),
+            KeyCode::Char('A') => self.toggle_show_archived(),
             KeyCode::Char('/') => {
                 self.side_filtering = true;
                 self.side_sel = 0;

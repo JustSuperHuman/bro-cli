@@ -211,8 +211,12 @@ impl App {
         past.iter()
             .enumerate()
             .filter_map(|(idx, s)| {
+                let archived = self.archive.contains(&s.id);
+                if archived && !self.side.show_archived {
+                    return None;
+                }
                 let pk = s.project.clone().or_else(|| s.cwd.as_ref().map(|c| self.svc.project_for(c)))?;
-                Some(PastInfo { idx, harness: s.harness, profile: s.profile_id.clone(), title: s.title.clone(), age_secs: crate::util::secs_since(s.modified), project_key: pk.key, project_name: pk.name, project_root: pk.root })
+                Some(PastInfo { idx, harness: s.harness, profile: s.profile_id.clone(), title: s.title.clone(), age_secs: crate::util::secs_since(s.modified), project_key: pk.key, project_name: pk.name, project_root: pk.root, archived })
             })
             .collect()
     }

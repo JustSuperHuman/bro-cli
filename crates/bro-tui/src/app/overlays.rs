@@ -151,5 +151,10 @@ pub(super) fn launcher_data(app: &App) -> launcher::Data {
         installed,
         dirs,
         recents: app.recents.clone(),
+        models: st.models.clone(),
+        keyed: {
+            let cfg = st.config.clone().unwrap_or_default();
+            st.providers.ready().map(|ps| ps.iter().filter(|p| app.svc.is_demo() || p.no_key || cfg.key_for(&p.id, p.key_env.as_deref()).is_some()).map(|p| p.id.clone()).collect()).unwrap_or_default()
+        },
     }
 }

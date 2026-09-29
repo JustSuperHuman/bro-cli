@@ -4,7 +4,7 @@
 use super::App;
 use crate::alerts::Kind;
 use crate::pane::Cx;
-use crate::ui::{self, fg, muted};
+use crate::ui::{self, fg};
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -14,9 +14,9 @@ use ratatui::{
 };
 
 impl App {
-    /// Where panes go: the body minus the tab bar (always shown once there's a tab).
+    /// Where panes go: the whole body (sessions are switched from the sidebar, there's no tab bar).
     pub(super) fn body_panes(&self) -> Rect {
-        if !self.tabs.is_empty() && self.body.height > 3 { Rect { y: self.body.y + 1, height: self.body.height - 1, ..self.body } } else { self.body }
+        self.body
     }
 
     pub(crate) fn draw(&mut self, f: &mut Frame) {
@@ -31,78 +31,17 @@ impl App {
         if side_w > 0 {
             self.draw_sidebar(f, Rect { width: side_w, ..area });
         }
-        self.tab_hits.clear();
-        self.new_tab_hit = None;
         self.pane_close.clear();
         self.outer.clear();
         self.inner.clear();
         if self.tabs.is_empty() {
             self.draw_welcome(f, self.body);
         } else {
-            if self.body.height > 3 {
-                self.draw_tab_bar(f, Rect { height: 1, ..self.body });
-            }
             self.draw_panes(f);
         }
         self.draw_selection(f);
         self.draw_toasts(f, area);
         self.draw_overlay(f, area);
-    }
-
-    fn draw_tab_bar(&mut self, f: &mut Frame, r: Rect) {
-        let t = self.theme.clone();
-        let label_of = |app: &App, i: usize| ui::fit(&app.tab_label(i), 20);
-        // scroll so the current tab is visible
-        let new_key = self.keymap.primary(crate::keymap::Act::NewSession);
-        let new_label = format!(" + new  {new_key} ");
-        let new_w = ui::width(&new_label) as u16;
-        let r = Rect { width: r.width.saturating_sub(new_w + 1), ..r };
-        let widths: Vec<u16> = (0..self.tabs.len()).map(|i| ui::width(&label_of(self, i)) as u16 + 8).collect();
-        let mut start = 0;
-        while start < self.cur && widths[start..=self.cur].iter().sum::<u16>() + 4 > r.width {
-            start += 1;
-        }
-        let mut x = r.x + 1;
-        if start > 0 {
-            ui::line(f, Rect { x, y: r.y, width: 2, height: 1 }, vec![Span::styled("‹ ", muted(&t))]);
-            x += 2;
-        }
-        for i in start..self.tabs.len() {
-            let tab = &self.tabs[i];
-            let p = self.panes.get(&tab.focus);
-            let term = p.and_then(|p| p.as_term_ref());
-            let glyph = match term {
-                Some(tm) => ui::harness_glyph(tm.meta.harness).to_string(),
-                None => ui::icon(p.map(|p| p.icon()).unwrap_or("window")).to_string(),
-            };
-            let brand = term.map(|tm| ui::harness_color(tm.meta.harness, &t)).unwrap_or(t.shine);
-            let n = tab.root.leaf_ids().len();
-            let label = label_of(self, i);
-            let extra = if n > 1 { format!(" ⊞{n}") } else { String::new() };
-            let on = i == self.cur;
-            let text_w = ui::width(&format!(" {glyph} {label}{extra} ")) as u16;
-            if x + text_w > r.right() {
-                ui::line(f, Rect { x, y: r.y, width: r.right().saturating_sub(x), height: 1 }, vec![Span::styled(" …", muted(&t))]);
-                break;
-            }
-            let base = if on { Style::default().fg(t.accent).add_modifier(Modifier::BOLD | Modifier::REVERSED) } else { muted(&t) };
-            let spans = vec![
-                Span::styled(" ", base),
-                Span::styled(format!("{glyph} "), if on { base } else { fg(brand) }),
-                Span::styled(label, base),
-                Span::styled(extra, base),
-                Span::styled(" ", base),
-            ];
-            let cell = Rect { x, y: r.y, width: text_w, height: 1 };
-            ui::line(f, cell, spans);
-            self.tab_hits.push((cell, i));
-            x += text_w + 1;
-        }
-        // "+ new" right after the last tab: the obvious way to start another session
-        let cell = Rect { x: x.min(r.right() + 1), y: r.y, width: new_w, height: 1 };
-        let key_style = muted(&t);
-        ui::line(f, cell, vec![Span::styled(" + new ", fg(t.shine).add_modifier(Modifier::BOLD)), Span::styled(format!(" {new_key} "), key_style)]);
-        self.new_tab_hit = Some(cell);
     }
 
     fn draw_panes(&mut self, f: &mut Frame) {

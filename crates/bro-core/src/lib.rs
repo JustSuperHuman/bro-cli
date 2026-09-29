@@ -20,6 +20,7 @@ pub mod projects;
 pub mod usage;
 pub mod launch;
 pub mod browser;
+pub mod catalogue;
 
 use serde::{Deserialize, Serialize};
 

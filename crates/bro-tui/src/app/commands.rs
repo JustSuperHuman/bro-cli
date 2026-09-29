@@ -99,6 +99,7 @@ impl App {
                 self.toast(Kind::Info, if n { "nerd font icons" } else { "plain icons (no nerd font)" });
             }
             Act::UsageDetails => self.toggle_usage_details(),
+            Act::ShowArchived => self.toggle_show_archived(),
             Act::RefreshUsage => {
                 self.svc.refresh_usage();
                 self.toast(Kind::Usage, "refreshing usage…");
@@ -276,6 +277,69 @@ impl App {
         let mut s = self.svc.settings();
         s.usage_expanded = self.usage_expanded;
         self.svc.save_settings(s);
+    }
+
+    /// "a" on a sidebar row: archive an earlier session (or restore an archived one), or every earlier
+    /// session of a project.
+    pub(crate) fn archive_row(&mut self, i: usize) {
+        let rows = self.rows();
+        let Some(r) = rows.get(i) else { return };
+        let past = self.svc.state().past.ready().cloned().unwrap_or_default();
+        let id_of = |idx: usize| past.get(idx).map(|s| s.id.clone());
+        let project_name = |key: &str| rows.iter().find_map(|r| match r {
+            Row::Project { key: k, name, .. } if k == key => Some(name.clone()),
+            _ => None,
+        });
+        match r {
+            Row::Past { info } if info.archived => {
+                if let Some(id) = id_of(info.idx) {
+                    self.archive.remove(&[id]);
+                    self.archive.save(self.persist);
+                    self.toast(Kind::Info, format!("restored \u{201c}{}\u{201d}", crate::ui::fit(&info.title, 40)));
+                }
+            }
+            Row::Past { info } => {
+                if let Some(id) = id_of(info.idx) {
+                    self.archive.add([id]);
+                    self.archive.save(self.persist);
+                    self.toast(Kind::Info, format!("archived \u{201c}{}\u{201d} \u{b7} u to undo", crate::ui::fit(&info.title, 40)));
+                }
+            }
+            Row::Project { key, .. } | Row::More { key, .. } => {
+                let name = project_name(key).unwrap_or_default();
+                let ids: Vec<String> = self.past_infos().into_iter().filter(|p| &p.project_key == key && !p.archived).filter_map(|p| id_of(p.idx)).collect();
+                let n = self.archive.add(ids);
+                self.archive.save(self.persist);
+                let msg = match n {
+                    0 => format!("nothing to archive in {name}"),
+                    n => format!("archived {n} earlier session{} in {name} \u{b7} u to undo", if n == 1 { "" } else { "s" }),
+                };
+                self.toast(Kind::Info, msg);
+            }
+            Row::Live { .. } => self.toast(Kind::Info, "a running session can't be archived \u{2014} close it first (x)"),
+            Row::New => {}
+        }
+        let n = self.rows().len();
+        self.side_sel = self.side_sel.min(n.saturating_sub(1));
+    }
+
+    /// "u": undo the last archive.
+    pub(crate) fn undo_archive(&mut self) {
+        match self.archive.undo() {
+            0 => self.toast(Kind::Info, "nothing to undo"),
+            n => {
+                self.archive.save(self.persist);
+                self.toast(Kind::Info, format!("restored {n} session{}", if n == 1 { "" } else { "s" }));
+            }
+        }
+    }
+
+    /// Show / hide archived sessions in the sidebar.
+    pub(crate) fn toggle_show_archived(&mut self) {
+        self.side.show_archived = !self.side.show_archived;
+        let n = self.archive.ids.len();
+        let msg = if self.side.show_archived { format!("showing {n} archived \u{b7} a restores one") } else { "archived sessions hidden".to_string() };
+        self.toast(Kind::Info, msg);
     }
 
     /// Enter on a sidebar row.

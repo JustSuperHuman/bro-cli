@@ -94,6 +94,9 @@ pub struct State {
     pub config: Option<Config>,
     pub profiles: Avail<Vec<Profile>>,
     pub providers: Avail<Vec<Provider>>,
+    /// pickable models per provider id, plus "codex" (ChatGPT) and "claude" (Anthropic) for cross-login
+    /// launches; OpenRouter is the live catalogue
+    pub models: BTreeMap<String, Vec<bro_core::catalogue::ModelRow>>,
     pub past: Avail<Vec<SessionInfo>>,
     pub usage: BTreeMap<String, UsageEntry>,
     pub usage_at: Option<Instant>,
@@ -179,6 +182,7 @@ impl Services {
             config: None,
             profiles: Avail::Loading,
             providers: Avail::Loading,
+            models: BTreeMap::new(),
             past: Avail::Loading,
             usage: BTreeMap::new(),
             usage_at: None,

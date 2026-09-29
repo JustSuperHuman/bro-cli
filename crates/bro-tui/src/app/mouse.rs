@@ -40,6 +40,7 @@ impl App {
                                 self.activate_row(i);
                             }
                         }
+                        SideHit::Close(id) => self.ask_close(id),
                         SideHit::Usage => self.open_view("usage"),
                         SideHit::UsageToggle => self.toggle_usage_details(),
                         SideHit::Proxy => self.open_view("proxy"),
@@ -59,15 +60,6 @@ impl App {
             return;
         }
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-            if self.new_tab_hit.is_some_and(|r| r.contains(pos)) {
-                self.open_launcher(None, crate::pane::Place::Tab);
-                return;
-            }
-            if let Some(&(_, i)) = self.tab_hits.iter().find(|(r, _)| r.contains(pos)) {
-                self.cur = i;
-                self.side_focus = false;
-                return;
-            }
             if let Some(&(_, id)) = self.pane_close.iter().find(|(r, _)| r.contains(pos)) {
                 self.ask_close(id);
                 return;

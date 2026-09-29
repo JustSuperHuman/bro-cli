@@ -1,205 +1,256 @@
-//! Drawing the launcher modal.
+//! Drawing the launcher: harness tabs, the "run on" list (with the model list beside it only when needed),
+//! the project line, toggles and key hints.
 
-use super::{AccountKind, Col, Launcher};
+use super::{AccountKind, Focus, Item, Launcher};
 use crate::theme::Theme;
 use crate::ui::{self, fg, muted};
+use bro_core::Harness;
 use bro_core::browser::BrowserMode;
 use bro_core::launch::Permission;
 use ratatui::{
     Frame,
     layout::Rect,
     style::{Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::Clear,
 };
 
 /// Draw the launcher centered on `screen`.
-pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, time: f64) {
-    let recents = l.recents_view();
-    let rec_rows = recents.len().min(4) as u16;
-    let h = 19 + if rec_rows > 0 { rec_rows + 2 } else { 0 };
-    let r = ui::centered(screen, 104, h);
+pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
+    let r = ui::centered(screen, 100, 26);
     f.render_widget(Clear, r);
-    let title = ratatui::text::Line::from({
-        let mut s = vec![Span::raw(" "), Span::styled(ui::lead("rocket"), ui::bold_accent(t))];
-        s.extend(ui::title_spans("launch an agent", t, time));
-        s.push(Span::raw(" "));
-        s
-    });
-    let status = ratatui::text::Line::from(Span::styled(format!(" {} ", l.place.label()), muted(t)));
-    let inner = ui::frame_ex(f, r, title, Some(status), None, true, t);
+    let title = Line::from(vec![Span::raw(" "), Span::styled("new session", ui::bold_accent(t)), Span::raw(" ")]);
+    let inner = ui::frame_ex(f, r, title, None, None, true, t);
     let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
-    let mut y = inner.y;
     let row = |y: u16| Rect { y, height: 1, ..inner };
+    let mut y = inner.y;
 
-    // filter line
-    let q = &l.filters[l.col as usize];
-    let mut spans = vec![Span::styled("› ", ui::bold_accent(t))];
-    if q.is_empty() {
-        spans.push(Span::styled(format!("type to filter {}", l.col.label()), muted(t)));
-    } else {
-        spans.push(Span::styled(q.clone(), ui::bold()));
+    // 1. harness tabs
+    let mut tabs = vec![];
+    for h in Harness::ALL {
+        let on = h == l.harness;
+        let brand = ui::harness_color(Some(h), t);
+        let text = format!(" {} {} ", ui::harness_glyph(Some(h)), h.label());
+        let style = if on {
+            Style::default().fg(ratatui::style::Color::Black).bg(brand).add_modifier(Modifier::BOLD)
+        } else if l.installed(h) {
+            fg(brand)
+        } else {
+            muted(t)
+        };
+        tabs.push(Span::styled(text, style));
+        tabs.push(Span::raw("  "));
     }
-    spans.push(Span::styled("▏", ui::accent(t)));
-    ui::line_lr(f, row(y), spans, vec![Span::styled(format!("{} ", l.col.label()), fg(t.shine).add_modifier(Modifier::BOLD))]);
-    y += 2;
-
-    // recents
-    if rec_rows > 0 {
-        header(f, row(y), &[("RECENT", inner.width)], l.col == Col::Recent, t);
-        y += 1;
-        let start = l.sel[0].saturating_sub(rec_rows as usize - 1);
-        for (k, &i) in recents.iter().enumerate().skip(start).take(rec_rows as usize) {
-            let rc = &l.data.recents[i];
-            let on = l.col == Col::Recent && k == l.sel[0];
-            let who = rc.provider_id.clone().or_else(|| rc.profile_id.as_ref().map(|p| p.split(':').next_back().unwrap_or(p).to_string())).unwrap_or_default();
-            let model = rc.model.as_deref().map(crate::services::launch::short_model).unwrap_or_else(|| "default".into());
-            let brand = ui::harness_color(Some(rc.harness), t);
-            let left = vec![
-                Span::styled(if on { "▌" } else { " " }, ui::accent(t)),
-                Span::styled(format!("{} ", ui::harness_glyph(Some(rc.harness))), fg(brand)),
-                Span::styled(format!("{} · {who} · {model}", rc.harness.label()), if on { ui::bold_accent(t) } else { ui::bold() }),
-                Span::styled(format!("   {}", crate::util::short_path(&rc.cwd, 40)), muted(t)),
-            ];
-            let right = vec![Span::styled(format!("{} ", crate::util::short_dur((crate::util::now_secs() - rc.at).max(0) as u64)), muted(t))];
-            ui::line_lr(f, row(y), left, right);
-            y += 1;
-        }
-        y += 1;
-    }
-
-    // the four columns
-    let w = inner.width;
-    let wh = 12u16;
-    let wa = (w.saturating_sub(wh) * 34 / 100).max(18);
-    let wm = (w.saturating_sub(wh) * 28 / 100).max(14);
-    let wd = w.saturating_sub(wh + wa + wm);
-    let xs = [inner.x, inner.x + wh, inner.x + wh + wa, inner.x + wh + wa + wm];
-    let widths = [wh, wa, wm, wd];
-    let cols = [Col::Harness, Col::Account, Col::Model, Col::Dir];
-    for (i, c) in cols.iter().enumerate() {
-        header(f, Rect { x: xs[i], width: widths[i], y, height: 1 }, &[(&c.label().to_uppercase(), widths[i])], l.col == *c, t);
+    ui::line_lr(f, row(y), tabs, vec![Span::styled("← → agent ", muted(t))]);
+    y += 1;
+    if !l.installed(l.harness) {
+        ui::line(f, row(y), vec![Span::styled(format!("  {} isn't on your PATH — install it first", l.harness.label()), fg(t.danger))]);
     }
     y += 1;
-    let list_h = 8u16;
-    let cell = |i: usize, k: usize| Rect { x: xs[i], y: y + k as u16, width: widths[i].saturating_sub(1), height: 1 };
 
-    // harness
-    let hs = l.harnesses();
-    let hidx = crate::fuzzy::filter(&l.filters[1], &hs, |h| h.label().to_string());
-    for (k, &i) in hidx.iter().enumerate().take(list_h as usize) {
-        let h = hs[i];
-        let on = k == l.sel[1];
-        let brand = ui::harness_color(Some(h), t);
-        let style = if on { Style::default().fg(brand).add_modifier(Modifier::BOLD) } else if l.installed(h) { Style::default() } else { muted(t) };
-        let spans = vec![marker(on, l.col == Col::Harness, t), Span::styled(format!("{} ", ui::harness_glyph(Some(h))), fg(brand)), Span::styled(h.label().to_string(), style)];
-        ui::line(f, cell(0, k), spans);
-    }
-
-    // accounts
-    let (accts, aidx) = l.accounts_view();
-    let a_start = l.sel[2].saturating_sub(list_h as usize - 1);
-    for (k, &i) in aidx.iter().enumerate().skip(a_start).take(list_h as usize) {
-        let a = &accts[i];
-        let on = k == l.sel[2];
-        let glyph = match a.kind {
-            AccountKind::Pool => ("⇄ ", t.shine),
-            AccountKind::Provider(_) => ("◇ ", t.muted),
-            AccountKind::Profile(_) if a.ready => ("● ", t.good),
-            AccountKind::Profile(_) => ("○ ", t.danger),
-        };
-        let style = if on { ui::bold_accent(t) } else if a.ready { Style::default() } else { muted(t) };
-        let mut right = vec![];
-        if let Some(p) = a.five_hour {
-            // shown as what's left, like the sidebar
-            let left = (100.0 - p as f64).clamp(0.0, 100.0);
-            right.push(Span::styled(format!("{left:.0}% left "), fg(ui::left_color(left, t))));
+    // 2. lists
+    let list_h = inner.height.saturating_sub(9);
+    let body = Rect { y, height: list_h, ..inner };
+    if l.focus == Focus::Dirs {
+        draw_dirs(f, body, l, t);
+    } else {
+        let needs = l.needs_model();
+        let left_w = if needs { body.width * 45 / 100 } else { body.width };
+        let left = Rect { width: left_w, ..body };
+        draw_run_on(f, left, l, t);
+        let right = Rect { x: body.x + left_w + 1, width: body.width.saturating_sub(left_w + 1), ..body };
+        if needs {
+            draw_models(f, right, l, t);
         }
-        let left = vec![marker(on, l.col == Col::Account, t), Span::styled(glyph.0, fg(glyph.1)), Span::styled(format!("{} ", a.label), style), Span::styled(a.detail.clone(), muted(t))];
-        ui::line_lr(f, cell(1, k - a_start), left, right);
     }
-    if aidx.is_empty() {
-        ui::line(f, cell(1, 0), vec![Span::styled("  nothing matches", muted(t))]);
-    }
+    y += list_h;
 
-    // models
-    let (models, midx) = l.models_view();
-    let m_start = l.sel[3].saturating_sub(list_h as usize - 1);
-    for (k, &i) in midx.iter().enumerate().skip(m_start).take(list_h as usize) {
-        let m = &models[i];
-        let on = k == l.sel[3];
-        let style = if on { ui::bold_accent(t) } else if m.id.is_none() { muted(t) } else { Style::default() };
-        ui::line(f, cell(2, k - m_start), vec![marker(on, l.col == Col::Model, t), Span::styled(m.label.clone(), style)]);
-    }
-
-    // dirs
-    let dirs = l.dirs_view();
-    let d_start = l.sel[4].saturating_sub(list_h as usize - 1);
-    for (k, d) in dirs.iter().enumerate().skip(d_start).take(list_h as usize) {
-        let on = k == l.sel[4];
-        let name = d.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| d.path.to_string_lossy().to_string());
-        let style = if on { ui::bold_accent(t) } else { Style::default() };
-        let mut spans = vec![marker(on, l.col == Col::Dir, t)];
-        if d.typed {
-            spans.push(Span::styled("↳ ", fg(t.shine)));
-        }
-        spans.push(Span::styled(format!("{name} "), style));
-        spans.push(Span::styled(crate::util::short_path(d.path.parent().unwrap_or(&d.path), 30), muted(t)));
-        ui::line(f, cell(3, k - d_start), spans);
-    }
-    y += list_h + 1;
-
-    // summary + toggles
+    // 3. project + summary + toggles
     ui::rule(f, row(y), "", t);
+    y += 1;
+    ui::line_lr(
+        f,
+        row(y),
+        vec![Span::styled("in ", muted(t)), Span::styled(crate::util::short_path(&l.dir, 70), ui::bold())],
+        vec![Span::styled("^d", fg(t.shine).add_modifier(Modifier::BOLD)), Span::styled(" change project ", muted(t))],
+    );
     y += 1;
     let summary = match l.spec() {
         Some(s) => {
             let brand = ui::harness_color(Some(s.harness), t);
-            vec![
-                Span::styled(format!("{} ", ui::harness_glyph(Some(s.harness))), fg(brand)),
-                Span::styled(crate::services::launch::label_for(&s), Style::default().fg(brand).add_modifier(Modifier::BOLD)),
-                Span::styled("  →  ", muted(t)),
-                Span::styled(crate::util::short_path(&s.cwd, 50), ui::bold()),
-            ]
+            vec![Span::styled("→ ", muted(t)), Span::styled(crate::services::launch::label_for(&s), Style::default().fg(brand).add_modifier(Modifier::BOLD))]
         }
-        None => vec![Span::styled("pick an account and a project", muted(t))],
+        None if l.needs_model() => vec![Span::styled("→ pick a model", fg(t.shine))],
+        None => vec![Span::styled("→ pick where to run", muted(t))],
     };
     ui::line(f, row(y), summary);
     y += 1;
-    let mut toggles = vec![Span::styled("perm ", muted(t))];
-    for (p, name) in [(Permission::Default, "default"), (Permission::Auto, "auto"), (Permission::Skip, "skip")] {
+    let mut toggles = vec![Span::styled("permissions ", muted(t))];
+    for (p, name) in [(Permission::Default, "ask"), (Permission::Auto, "auto"), (Permission::Skip, "skip all")] {
         let on = l.permission == p;
         let c = if p == Permission::Skip { t.danger } else { t.accent };
         toggles.push(Span::styled(format!(" {name} "), if on { Style::default().fg(c).add_modifier(Modifier::BOLD | Modifier::REVERSED) } else { muted(t) }));
     }
+    toggles.push(Span::styled(" ^e", fg(t.shine)));
     let b = match l.browser {
         BrowserMode::Off => "off",
-        BrowserMode::Auto => "auto",
+        BrowserMode::Auto => "on",
         BrowserMode::Edge => "edge",
         BrowserMode::Chrome => "chrome",
     };
     toggles.push(Span::styled("    browser ", muted(t)));
     toggles.push(Span::styled(b, if l.browser == BrowserMode::Off { muted(t) } else { ui::bold_accent(t) }));
-    toggles.push(Span::styled("    open in ", muted(t)));
-    toggles.push(Span::styled(l.place.label(), ui::bold_accent(t)));
+    toggles.push(Span::styled(" ^b", fg(t.shine)));
+    toggles.push(Span::styled("    opens as ", muted(t)));
+    toggles.push(Span::styled(if l.place == crate::pane::Place::Tab { "new session" } else { "split" }, ui::bold_accent(t)));
+    toggles.push(Span::styled(" ^s", fg(t.shine)));
     ui::line(f, row(y), toggles);
     y += 2;
     if y < r.bottom().saturating_sub(1) {
-        let hints = ui::hints(&[("⏎", "launch"), ("tab ←→", "column"), ("↑↓", "pick"), ("type", "filter"), ("^e", "permission"), ("^b", "browser"), ("^s", "tab/split"), ("esc", "close")], t);
-        ui::line(f, row(y), hints);
+        let enter = match l.focus {
+            Focus::Dirs => "use this folder",
+            Focus::List if l.needs_model() => "pick a model",
+            _ => "launch",
+        };
+        let mut hints = vec![("⏎", enter), ("↑↓", "move"), ("type", "filter")];
+        if l.needs_model() && l.focus != Focus::Dirs {
+            hints.push(("tab", "list ⇄ models"));
+        }
+        hints.push(("esc", if l.focus == Focus::List { "close" } else { "back" }));
+        ui::line(f, row(y), ui::hints(&hints, t));
     }
 }
 
-fn marker(on: bool, col_focused: bool, t: &Theme) -> Span<'static> {
-    match (on, col_focused) {
-        (true, true) => Span::styled("▌", ui::accent(t)),
-        (true, false) => Span::styled("›", muted(t)),
-        _ => Span::raw(" "),
+/// A filter line: "› text▏" or a muted prompt.
+fn filter_line(f: &mut Frame, r: Rect, q: &str, prompt: &str, focused: bool, t: &Theme) {
+    let mut spans = vec![Span::styled("› ", if focused { ui::bold_accent(t) } else { muted(t) })];
+    if q.is_empty() {
+        spans.push(Span::styled(prompt.to_string(), muted(t)));
+    } else {
+        spans.push(Span::styled(q.to_string(), ui::bold()));
     }
-}
-
-fn header(f: &mut Frame, r: Rect, items: &[(&str, u16)], focused: bool, t: &Theme) {
-    let style = if focused { fg(t.accent).add_modifier(Modifier::BOLD) } else { muted(t).add_modifier(Modifier::BOLD) };
-    let spans: Vec<Span> = items.iter().map(|(s, w)| Span::styled(ui::pad(&format!(" {s}"), *w as usize), style)).collect();
+    if focused {
+        spans.push(Span::styled("▏", ui::accent(t)));
+    }
     ui::line(f, r, spans);
+}
+
+/// Scroll so `cursor` stays visible in `rows` lines.
+fn window(cursor: usize, rows: usize) -> usize {
+    cursor.saturating_sub(rows.saturating_sub(1))
+}
+
+fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
+    let focused = l.focus == Focus::List;
+    filter_line(f, Rect { height: 1, ..area }, &l.list_filter, "run on… (type to filter)", focused, t);
+    let items = l.items();
+    let rows = area.height.saturating_sub(1) as usize;
+    let cursor = l.cursor_row(&items);
+    let start = window(cursor.unwrap_or(0), rows);
+    for (k, item) in items.iter().enumerate().skip(start).take(rows) {
+        let r = Rect { y: area.y + 1 + (k - start) as u16, height: 1, ..area };
+        let on = cursor == Some(k);
+        let mark = match (on, focused) {
+            (true, true) => Span::styled("▌", ui::accent(t)),
+            (true, false) => Span::styled("›", muted(t)),
+            _ => Span::raw(" "),
+        };
+        match item {
+            Item::Header(h) => ui::line(f, r, vec![Span::styled(format!(" {h}"), muted(t).add_modifier(Modifier::BOLD))]),
+            Item::Recent(i) => {
+                let rc = &l.data.recents[*i];
+                let who = rc.provider_id.clone().or_else(|| rc.profile_id.as_ref().map(|p| p.split(':').next_back().unwrap_or(p).to_string())).unwrap_or_else(|| "own login".into());
+                let model = rc.model.as_deref().map(|m| crate::services::launch::short_model(m.rsplit('/').next().unwrap_or(m)));
+                let style = if on { ui::bold_accent(t) } else { Style::default() };
+                let mut spans = vec![mark, Span::styled(" ↻ ", fg(t.shine)), Span::styled(who, style)];
+                if let Some(m) = model {
+                    spans.push(Span::styled(format!(" · {m}"), muted(t)));
+                }
+                let age = crate::util::short_dur((crate::util::now_secs() - rc.at).max(0) as u64);
+                ui::line_lr(f, r, spans, vec![Span::styled(format!("{age} "), muted(t))]);
+            }
+            Item::Account(a) => {
+                let glyph = match a.kind {
+                    AccountKind::Pool => ("⇄ ", t.shine),
+                    AccountKind::Provider(_) => ("◇ ", if a.ready { t.shine } else { t.muted }),
+                    AccountKind::Native => ("● ", t.good),
+                    AccountKind::Profile(_) if a.ready => ("● ", t.good),
+                    AccountKind::Profile(_) => ("○ ", t.danger),
+                };
+                let style = if on { ui::bold_accent(t) } else if a.ready { Style::default() } else { muted(t) };
+                let right = match a.left {
+                    Some(left) => vec![Span::styled(format!("{left:.0}% left "), fg(ui::left_color(left, t)))],
+                    None => vec![],
+                };
+                let left = vec![mark, Span::raw(" "), Span::styled(glyph.0, fg(glyph.1)), Span::styled(format!("{} ", a.label), style), Span::styled(a.detail.clone(), muted(t))];
+                ui::line_lr(f, r, left, right);
+            }
+        }
+    }
+    if items.is_empty() {
+        ui::line(f, Rect { y: area.y + 1, height: 1, ..area }, vec![Span::styled("   nothing matches", muted(t))]);
+    }
+}
+
+fn draw_models(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
+    let focused = l.focus == Focus::Models;
+    let models = l.models();
+    let idx = l.models_view();
+    let prompt = format!("model… {} to pick from", models.len());
+    filter_line(f, Rect { height: 1, ..area }, &l.model_filter, &prompt, focused, t);
+    let rows = area.height.saturating_sub(1) as usize;
+    let start = window(l.model_sel, rows);
+    for (k, &i) in idx.iter().enumerate().skip(start).take(rows) {
+        let m = &models[i];
+        let r = Rect { y: area.y + 1 + (k - start) as u16, height: 1, ..area };
+        let on = k == l.model_sel;
+        let mark = match (on, focused) {
+            (true, true) => Span::styled("▌", ui::accent(t)),
+            (true, false) => Span::styled("›", muted(t)),
+            _ => Span::raw(" "),
+        };
+        let mut right = vec![];
+        if let Some(c) = m.context {
+            right.push(Span::styled(format!("{} ", short_ctx(c)), muted(t)));
+        }
+        if let Some((a, b)) = m.pricing {
+            right.push(Span::styled(format!("${}/{} ", short_price(a), short_price(b)), muted(t)));
+        }
+        let style = if on { ui::bold_accent(t) } else { Style::default() };
+        ui::line_lr(f, r, vec![mark, Span::raw(" "), Span::styled(m.id.clone(), style)], right);
+    }
+    if idx.is_empty() {
+        let msg = if models.is_empty() { "   no models known for this" } else { "   nothing matches" };
+        ui::line(f, Rect { y: area.y + 1, height: 1, ..area }, vec![Span::styled(msg, muted(t))]);
+    }
+}
+
+fn draw_dirs(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
+    filter_line(f, Rect { height: 1, ..area }, &l.dir_filter, "project folder… (type to filter, or a path like ~/code/x)", true, t);
+    let dirs = l.dirs_view();
+    let rows = area.height.saturating_sub(1) as usize;
+    let start = window(l.dir_sel, rows);
+    for (k, (p, typed)) in dirs.iter().enumerate().skip(start).take(rows) {
+        let r = Rect { y: area.y + 1 + (k - start) as u16, height: 1, ..area };
+        let on = k == l.dir_sel;
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string_lossy().to_string());
+        let mut spans = vec![if on { Span::styled("▌ ", ui::accent(t)) } else { Span::raw("  ") }];
+        if *typed {
+            spans.push(Span::styled("↳ ", fg(t.shine)));
+        }
+        spans.push(Span::styled(format!("{name}  "), if on { ui::bold_accent(t) } else { ui::bold() }));
+        spans.push(Span::styled(crate::util::short_path(p.parent().unwrap_or(p), 60), muted(t)));
+        ui::line(f, r, spans);
+    }
+}
+
+/// 262144 → "262k", 1048576 → "1M".
+fn short_ctx(c: u64) -> String {
+    if c >= 1_000_000 { format!("{}M", c / 1_000_000) } else { format!("{}k", c / 1000) }
+}
+
+/// 0.6 → "0.6", 2.5 → "2.5", 10.0 → "10".
+fn short_price(p: f64) -> String {
+    let s = format!("{p:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }

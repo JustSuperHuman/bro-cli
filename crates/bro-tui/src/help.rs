@@ -37,7 +37,7 @@ pub fn lines(km: &Keymap) -> Vec<Line> {
         v.push(Line::Gap);
     }
     let sheet: &[(&str, &[(&str, &str)])] = &[
-        ("sidebar (alt+b)", &[("j k ↑ ↓", "move"), ("h l ← →", "collapse / expand"), ("⏎", "open session · resume past session"), ("f", "fork a past session into another profile"), ("n", "launch in this project"), ("r", "rename a live session"), ("x", "close a live session"), ("/", "filter"), ("esc", "back to the pane")]),
+        ("sidebar (alt+b)", &[("j k ↑ ↓", "move"), ("h l ← →", "collapse / expand"), ("⏎", "open session · resume past session"), ("f", "fork a past session into another profile"), ("n", "launch in this project"), ("r", "rename a live session"), ("x", "close a live session"), ("a", "archive an earlier session \u{b7} on a project: all of them"), ("u", "undo archive"), ("A", "show archived (a restores)"), ("/", "filter"), ("esc", "back to the pane")]),
         ("launcher (alt+n)", &[("type", "filter the column"), ("tab ← →", "next column"), ("↑ ↓", "pick"), ("ctrl+e", "permission: default → auto → skip"), ("ctrl+b", "browser"), ("ctrl+s", "new tab / split"), ("⏎", "launch")]),
         ("terminal", &[("drag", "select text — copied when you let go"), ("alt+v", "paste a screenshot / copied files as paths"), ("wheel", "scroll back (when the program doesn't use the mouse)"), ("shift+drag", "select even when the program uses the mouse")]),
         ("mouse", &[("click", "sidebar rows, panes"), ("drag a divider", "resize"), ("× on a frame", "close the pane")]),

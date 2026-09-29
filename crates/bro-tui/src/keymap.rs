@@ -47,6 +47,7 @@ pub enum Act {
     ToggleIcons,
     RefreshUsage,
     UsageDetails,
+    ShowArchived,
     Quit,
 }
 
@@ -77,7 +78,7 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, ShowArchived, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
@@ -126,6 +127,7 @@ impl Act {
             ToggleIcons => "toggle_icons".into(),
             RefreshUsage => "refresh_usage".into(),
             UsageDetails => "usage_details".into(),
+            ShowArchived => "show_archived".into(),
             Quit => "quit".into(),
         }
     }
@@ -175,6 +177,7 @@ impl Act {
             ToggleIcons => "toggle nerd font icons".into(),
             RefreshUsage => "refresh usage now".into(),
             UsageDetails => "sidebar usage: totals / every profile".into(),
+            ShowArchived => "show / hide archived sessions".into(),
             Quit => "quit bro".into(),
         }
     }
@@ -182,7 +185,7 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention => Group::Sessions,
+            NewSession | NewShell | Rename | Close | Attention | ShowArchived => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Profiles | Proxy | Bridge | RefreshUsage => Group::Views,
@@ -257,6 +260,7 @@ impl Act {
             Palette => vec![":", "space"],
             Usage => vec!["u"],
             UsageDetails => vec!["U"],
+            ShowArchived => vec!["A"],
             Profiles => vec!["o"],
             Proxy => vec!["y"],
             Bridge => vec!["g"],

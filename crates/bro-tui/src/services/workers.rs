@@ -49,9 +49,42 @@ pub(super) fn load_data(svc: &Services) {
         st.providers = avail(providers, &mut st.issues);
     });
     svc.push_bridge_profiles();
+    load_models(svc);
     // past sessions can take a while on a cold cache: publish separately
     let past = guard("sessions::list", || bro_core::sessions::list(&ListOpts { limit: 400, harnesses: vec![] }));
     svc.update(|st| st.past = avail(past, &mut st.issues));
+}
+
+/// Model lists for the launcher; then, off the critical path, refresh the OpenRouter catalogue when it's
+/// older than six hours and publish again.
+pub(super) fn load_models(svc: &Services) {
+    let publish = |svc: &Services| {
+        let providers = svc.state().providers.ready().cloned().unwrap_or_default();
+        let models = guard("catalogue", || {
+            use bro_core::catalogue;
+            let mut m = std::collections::BTreeMap::new();
+            for p in &providers {
+                m.insert(p.id.clone(), catalogue::provider_models(p));
+            }
+            m.insert("codex".to_string(), catalogue::codex_models(&bro_core::paths::codex_local_dir()));
+            let claude = providers.iter().find(|p| p.id == "anthropic").map(catalogue::provider_models).unwrap_or_default();
+            m.insert("claude".to_string(), claude);
+            m
+        });
+        if let Ok(m) = models {
+            svc.update(|st| st.models = m);
+        }
+    };
+    publish(svc);
+    let stale = guard("catalogue::openrouter_cached", || bro_core::catalogue::openrouter_cached().is_none_or(|(_, age)| age > 6 * 3600)).unwrap_or(false);
+    if stale {
+        let svc = svc.clone();
+        std::thread::spawn(move || {
+            if guard_res("catalogue::refresh_openrouter", bro_core::catalogue::refresh_openrouter).is_ok() {
+                publish(&svc);
+            }
+        });
+    }
 }
 
 fn note(st: &mut super::State, e: &str) {

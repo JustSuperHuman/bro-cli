@@ -47,16 +47,6 @@ pub enum Place {
     Tab,
 }
 
-impl Place {
-    pub fn label(self) -> &'static str {
-        match self {
-            Place::Split => "split",
-            Place::SplitRight => "split right",
-            Place::SplitDown => "split down",
-            Place::Tab => "new tab",
-        }
-    }
-}
 
 /// What a pane can ask the app to do.
 pub enum Action {

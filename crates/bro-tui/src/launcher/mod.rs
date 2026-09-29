@@ -1,8 +1,14 @@
-//! The launcher: a centered modal to start an agent session. Columns harness × account (profiles, key-based
-//! providers, the Claude pool) × model × project dir, each fuzzy-filterable; recent combos on top; permission
-//! mode, browser and placement toggles. Enter builds a `LaunchSpec`.
+//! The launcher: start an agent session in three decisions.
 //!
-//! This file is the model + key handling (pure, testable); `view.rs` draws it.
+//! 1. **Harness** — tabs across the top (←/→): claude, codex, pi, omp.
+//! 2. **Run on** — one list: recent combos for this harness, then its own logins (no model to pick — the CLI
+//!    uses its default and `/model` works inside), then other logins it can use through bro-proxy, then API
+//!    providers (OpenRouter's live catalogue, DeepSeek, …).
+//! 3. **Model** — only when the choice needs one (providers, cross-family logins): a second, filterable list.
+//!
+//! The project is a line of its own (ctrl+d to change). Enter on a row that needs a model moves to the model
+//! list; Enter there (or on anything else) launches. This file is the model + keys (pure, testable);
+//! `view.rs` draws it.
 
 pub mod view;
 
@@ -11,6 +17,7 @@ use crate::pane::Place;
 use crate::recents::Recent;
 use bro_core::Harness;
 use bro_core::browser::BrowserMode;
+use bro_core::catalogue::ModelRow;
 use bro_core::launch::{LaunchSpec, Permission};
 use bro_core::profiles::{Profile, ProfileKind};
 use bro_core::providers::{Provider, ProviderMode};
@@ -18,55 +25,47 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// A column of the launcher.
+/// Which list has the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Col {
-    Recent = 0,
-    Harness = 1,
-    Account = 2,
-    Model = 3,
-    Dir = 4,
-}
-
-impl Col {
-    const ALL: [Col; 5] = [Col::Recent, Col::Harness, Col::Account, Col::Model, Col::Dir];
-    pub fn label(self) -> &'static str {
-        ["recent", "harness", "account", "model", "project"][self as usize]
-    }
+pub enum Focus {
+    /// the "run on" list
+    List,
+    Models,
+    Dirs,
 }
 
 /// Who a session runs as.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AccountKind {
+    /// a Claude / Codex login ("claude:work")
     Profile(String),
+    /// an API provider from the catalogue ("openrouter")
     Provider(String),
+    /// the Claude account pool
     Pool,
+    /// pi / omp with their own configured login
+    Native,
 }
 
-/// One entry of the account column.
+/// A "run on" entry.
 #[derive(Clone, Debug)]
 pub struct Account {
     pub kind: AccountKind,
     pub label: String,
     pub detail: String,
-    /// logged in / has what it needs
+    /// logged in / has a key
     pub ready: bool,
-    /// 5h usage %, for profiles we have meters for
-    pub five_hour: Option<f32>,
+    /// % left of the 5h window, for logins we have meters for
+    pub left: Option<f64>,
 }
 
-/// One entry of the model column (`id` None = the account's default).
+/// One row of the "run on" list.
 #[derive(Clone, Debug)]
-pub struct ModelChoice {
-    pub id: Option<String>,
-    pub label: String,
-}
-
-/// One entry of the project column.
-#[derive(Clone, Debug)]
-pub struct DirChoice {
-    pub path: PathBuf,
-    pub typed: bool,
+pub enum Item {
+    Header(&'static str),
+    /// index into `Data::recents`
+    Recent(usize),
+    Account(Account),
 }
 
 /// Snapshot of what the launcher offers (taken from services when it opens).
@@ -78,297 +77,426 @@ pub struct Data {
     pub usage: BTreeMap<String, f32>,
     /// harness → installed on PATH
     pub installed: Vec<(Harness, bool)>,
-    /// candidate dirs, best first (selected project, live projects, recents, past)
+    /// candidate project dirs, best first
     pub dirs: Vec<PathBuf>,
     pub recents: Vec<Recent>,
+    /// provider id (plus "codex", "claude") → models
+    pub models: BTreeMap<String, Vec<ModelRow>>,
+    /// provider ids with a key configured (or that need none)
+    pub keyed: Vec<String>,
 }
 
-/// What Enter asks for.
+/// What a key asks for.
 pub enum Outcome {
     None,
     Close,
     Launch(LaunchSpec, Place),
 }
 
+/// Recent combos shown per harness.
+const RECENTS_SHOWN: usize = 4;
+
 /// The launcher state.
 pub struct Launcher {
     pub data: Data,
-    pub col: Col,
-    pub filters: [String; 5],
-    /// cursor per column, as an index into that column's *filtered* list
-    pub sel: [usize; 5],
+    pub harness: Harness,
+    pub focus: Focus,
+    pub list_filter: String,
+    pub model_filter: String,
+    pub dir_filter: String,
+    /// index into the *selectable* rows of the run-on list
+    pub list_sel: usize,
+    /// index into the filtered models
+    pub model_sel: usize,
+    /// index into the dir choices
+    pub dir_sel: usize,
+    pub dir: PathBuf,
     pub permission: Permission,
     pub browser: BrowserMode,
     pub place: Place,
 }
 
 impl Launcher {
-    /// Open, preselecting the most recent combo (but `cwd` if given).
+    /// Open on the most recent harness, in `cwd` (else the most recent project).
     pub fn new(data: Data, cwd: Option<PathBuf>, place: Place) -> Launcher {
-        let mut l = Launcher { data, col: Col::Harness, filters: Default::default(), sel: [0; 5], permission: Permission::Default, browser: BrowserMode::Off, place };
-        if let Some(r) = l.data.recents.first().cloned() {
-            l.apply_recent(&r);
+        let recent = data.recents.first().cloned();
+        let harness = recent.as_ref().map(|r| r.harness).unwrap_or(Harness::Claude);
+        let dir = cwd
+            .or_else(|| recent.as_ref().map(|r| r.cwd.clone()))
+            .or_else(|| data.dirs.first().cloned())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let (permission, browser) = recent.map(|r| (r.permission, r.browser)).unwrap_or_default();
+        Launcher {
+            data,
+            harness,
+            focus: Focus::List,
+            list_filter: String::new(),
+            model_filter: String::new(),
+            dir_filter: String::new(),
+            list_sel: 0,
+            model_sel: 0,
+            dir_sel: 0,
+            dir,
+            permission,
+            browser,
+            place,
         }
-        if let Some(c) = cwd {
-            l.data.dirs.retain(|d| d != &c);
-            l.data.dirs.insert(0, c);
-            l.sel[Col::Dir as usize] = 0;
-        }
-        l
-    }
-
-    fn apply_recent(&mut self, r: &Recent) {
-        if let Some(i) = self.harnesses().iter().position(|h| *h == r.harness) {
-            self.sel[Col::Harness as usize] = i;
-        }
-        let want = match (&r.provider_id, &r.profile_id) {
-            (Some(p), _) if p == "pool" => Some(AccountKind::Pool),
-            (Some(p), _) => Some(AccountKind::Provider(p.clone())),
-            (None, Some(p)) => Some(AccountKind::Profile(p.clone())),
-            _ => None,
-        };
-        if let Some(w) = want
-            && let Some(i) = self.accounts().iter().position(|a| a.kind == w) {
-                self.sel[Col::Account as usize] = i;
-            }
-        if let Some(i) = self.models().iter().position(|m| m.id == r.model) {
-            self.sel[Col::Model as usize] = i;
-        }
-        if let Some(i) = self.data.dirs.iter().position(|d| *d == r.cwd) {
-            self.sel[Col::Dir as usize] = i;
-        }
-        self.permission = r.permission;
-        self.browser = r.browser;
-    }
-
-    // ------------------------------------------------------------------ columns
-
-    /// All harnesses (installed first is not enforced: order is fixed for muscle memory).
-    pub fn harnesses(&self) -> Vec<Harness> {
-        Harness::ALL.to_vec()
     }
 
     pub fn installed(&self, h: Harness) -> bool {
         self.data.installed.iter().find(|x| x.0 == h).map(|x| x.1).unwrap_or(true)
     }
 
-    fn filtered<T>(&self, col: Col, items: &[T], text: impl Fn(&T) -> String) -> Vec<usize> {
-        fuzzy::filter(&self.filters[col as usize], items, text)
-    }
+    // ------------------------------------------------------------------ the run-on list
 
-    /// The selected harness.
-    pub fn harness(&self) -> Harness {
-        let hs = self.harnesses();
-        let idx = self.filtered(Col::Harness, &hs, |h| h.label().to_string());
-        idx.get(self.sel[Col::Harness as usize]).map(|&i| hs[i]).unwrap_or(Harness::Claude)
-    }
-
-    /// Accounts that make sense for the selected harness: its own logins first, then the pool, then providers.
-    pub fn accounts(&self) -> Vec<Account> {
-        let h = self.harness();
-        let d = &self.data;
-        let prof = |p: &Profile, via: &str| Account {
+    fn profile_account(&self, p: &Profile, via_proxy: bool) -> Account {
+        let family = if p.is_claude() { "claude" } else { "chatgpt" };
+        let mut detail = vec![];
+        if via_proxy {
+            detail.push(family.to_string());
+        }
+        if let Some(plan) = &p.plan {
+            detail.push(plan.clone());
+        }
+        if !p.authenticated {
+            detail.push("not logged in".into());
+        }
+        Account {
             kind: AccountKind::Profile(p.id.clone()),
             label: p.name.clone(),
-            detail: [p.plan.clone().unwrap_or_default(), via.to_string()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "),
+            detail: detail.join(" · "),
             ready: p.authenticated,
-            five_hour: d.usage.get(&p.id).copied(),
-        };
-        let claude: Vec<&Profile> = d.profiles.iter().filter(|p| p.is_claude()).collect();
-        let codex: Vec<&Profile> = d.profiles.iter().filter(|p| p.is_codex()).collect();
-        let pool_n = d.profiles.iter().filter(|p| p.kind == ProfileKind::ClaudeAccount && p.authenticated).count();
-        let pool = Account { kind: AccountKind::Pool, label: "pool".into(), detail: format!("{pool_n} claude accounts · failover"), ready: pool_n > 0, five_hour: None };
-        let providers = d.providers.iter().filter(|p| p.mode != ProviderMode::Native).map(|p| {
-            let direct = matches!((h, p.mode), (Harness::Claude, ProviderMode::Anthropic) | (Harness::Codex, ProviderMode::Openai) | (Harness::Pi, _) | (Harness::Omp, _));
-            Account { kind: AccountKind::Provider(p.id.clone()), label: p.id.clone(), detail: if direct { p.name.clone() } else { format!("{} · via proxy", p.name) }, ready: true, five_hour: None }
-        });
-        let mut v = vec![];
-        match h {
-            Harness::Claude => {
-                v.extend(claude.iter().map(|p| prof(p, "")));
-                v.push(pool);
-                v.extend(codex.iter().map(|p| prof(p, "chatgpt via proxy")));
-                v.extend(providers);
-            }
-            Harness::Codex => {
-                v.extend(codex.iter().map(|p| prof(p, "")));
-                v.extend(claude.iter().map(|p| prof(p, "claude via proxy")));
-                v.push(pool);
-                v.extend(providers);
-            }
-            Harness::Pi | Harness::Omp => {
-                v.extend(providers);
-                v.push(pool);
-                v.extend(claude.iter().map(|p| prof(p, "via proxy")));
-                v.extend(codex.iter().map(|p| prof(p, "via proxy")));
-            }
+            left: self.data.usage.get(&p.id).map(|u| (100.0 - *u as f64).clamp(0.0, 100.0)),
         }
-        v
     }
 
-    /// Filtered account list.
-    pub fn accounts_view(&self) -> (Vec<Account>, Vec<usize>) {
-        let a = self.accounts();
-        let idx = self.filtered(Col::Account, &a, |x| format!("{} {}", x.label, x.detail));
-        (a, idx)
+    fn pool_account(&self) -> Option<Account> {
+        let n = self.data.profiles.iter().filter(|p| p.kind == ProfileKind::ClaudeAccount && p.authenticated).count();
+        (n > 0).then(|| Account { kind: AccountKind::Pool, label: "pool".into(), detail: format!("{n} claude accounts · failover"), ready: true, left: None })
     }
 
-    pub fn account(&self) -> Option<Account> {
-        let (a, idx) = self.accounts_view();
-        idx.get(self.sel[Col::Account as usize]).map(|&i| a[i].clone())
+    fn provider_account(&self, p: &Provider) -> Account {
+        let n = self.data.models.get(&p.id).map(Vec::len).unwrap_or(p.models.len());
+        let keyed = p.no_key || self.data.keyed.iter().any(|k| k == &p.id);
+        let mut detail = format!("{n} model{}", if n == 1 { "" } else { "s" });
+        if !keyed {
+            detail.push_str(" · no key");
+        }
+        Account { kind: AccountKind::Provider(p.id.clone()), label: p.id.clone(), detail, ready: keyed, left: None }
     }
 
-    /// Models for the selected account (first is always "default").
-    pub fn models(&self) -> Vec<ModelChoice> {
-        let d = &self.data;
-        let from = |pid: &str| -> Vec<ModelChoice> {
-            d.providers.iter().find(|p| p.id == pid).map(|p| p.models.iter().filter(|m| !m.id.is_empty()).map(|m| ModelChoice { id: Some(m.id.clone()), label: m.name.clone().unwrap_or_else(|| m.id.clone()) }).collect()).unwrap_or_default()
+    /// The full run-on list for the current harness (headers included), filtered.
+    pub fn items(&self) -> Vec<Item> {
+        let h = self.harness;
+        let claude: Vec<&Profile> = self.data.profiles.iter().filter(|p| p.is_claude()).collect();
+        let codex: Vec<&Profile> = self.data.profiles.iter().filter(|p| p.is_codex()).collect();
+        let mut groups: Vec<(&'static str, Vec<Item>)> = vec![];
+
+        let recents: Vec<Item> = self.recents_for(h).into_iter().map(Item::Recent).collect();
+        groups.push(("recent", recents));
+
+        let (own, via): (Vec<Account>, Vec<Account>) = match h {
+            Harness::Claude => (
+                claude.iter().map(|p| self.profile_account(p, false)).chain(self.pool_account()).collect(),
+                codex.iter().map(|p| self.profile_account(p, true)).collect(),
+            ),
+            Harness::Codex => (
+                codex.iter().map(|p| self.profile_account(p, false)).collect(),
+                claude.iter().map(|p| self.profile_account(p, true)).chain(self.pool_account()).collect(),
+            ),
+            Harness::Pi | Harness::Omp => (
+                vec![Account { kind: AccountKind::Native, label: format!("{}'s own login", h.label()), detail: "whatever it's configured with".into(), ready: true, left: None }],
+                claude.iter().chain(codex.iter()).map(|p| self.profile_account(p, true)).chain(self.pool_account()).collect(),
+            ),
         };
-        let fixed = |ids: &[(&str, &str)]| ids.iter().map(|(id, n)| ModelChoice { id: Some(id.to_string()), label: n.to_string() }).collect::<Vec<_>>();
-        let mut v = vec![ModelChoice { id: None, label: "default".into() }];
-        let mut rest = match self.account().map(|a| a.kind) {
-            Some(AccountKind::Provider(p)) => from(&p),
-            Some(AccountKind::Profile(p)) if p.starts_with("codex:") => {
-                let m = from("openai");
-                if m.is_empty() { fixed(&[("gpt-5.2-codex", "GPT-5.2 Codex"), ("gpt-5.2", "GPT-5.2")]) } else { m }
-            }
-            Some(_) => {
-                let m = from("anthropic");
-                if m.is_empty() { fixed(&[("claude-opus-5", "Claude Opus 5"), ("claude-sonnet-5", "Claude Sonnet 5"), ("claude-haiku-4-5-20251001", "Claude Haiku 4.5")]) } else { m }
-            }
-            None => vec![],
-        };
-        let mut seen = std::collections::HashSet::new();
-        rest.retain(|m| seen.insert(m.id.clone()));
-        v.extend(rest);
-        v
-    }
+        groups.push(("your logins", own.into_iter().map(Item::Account).collect()));
+        groups.push(("other logins · via proxy", via.into_iter().map(Item::Account).collect()));
+        let providers = self.data.providers.iter().filter(|p| p.mode != ProviderMode::Native).map(|p| Item::Account(self.provider_account(p))).collect();
+        groups.push(("providers", providers));
 
-    pub fn models_view(&self) -> (Vec<ModelChoice>, Vec<usize>) {
-        let m = self.models();
-        let idx = self.filtered(Col::Model, &m, |x| format!("{} {}", x.label, x.id.clone().unwrap_or_default()));
-        (m, idx)
-    }
-
-    pub fn model(&self) -> Option<ModelChoice> {
-        let (m, idx) = self.models_view();
-        idx.get(self.sel[Col::Model as usize]).map(|&i| m[i].clone())
-    }
-
-    /// Project dirs; a typed path becomes the first entry.
-    pub fn dirs_view(&self) -> Vec<DirChoice> {
-        let f = self.filters[Col::Dir as usize].trim();
+        let q = self.list_filter.trim();
         let mut out = vec![];
-        if looks_like_path(f) {
-            out.push(DirChoice { path: expand(f), typed: true });
+        for (name, items) in groups {
+            let keep: Vec<Item> = if q.is_empty() {
+                items
+            } else {
+                let idx = fuzzy::filter(q, &items, |i| self.item_text(i));
+                idx.into_iter().map(|i| items[i].clone()).collect()
+            };
+            if !keep.is_empty() {
+                out.push(Item::Header(name));
+                out.extend(keep);
+            }
         }
-        let idx = fuzzy::filter(if looks_like_path(f) { "" } else { f }, &self.data.dirs, |p| p.to_string_lossy().to_string());
-        out.extend(idx.into_iter().map(|i| DirChoice { path: self.data.dirs[i].clone(), typed: false }));
         out
     }
 
-    pub fn dir(&self) -> Option<PathBuf> {
-        self.dirs_view().get(self.sel[Col::Dir as usize]).map(|d| d.path.clone())
-    }
-
-    pub fn recents_view(&self) -> Vec<usize> {
-        self.filtered(Col::Recent, &self.data.recents, |r| format!("{} {} {} {} {}", r.harness.label(), r.profile_id.clone().unwrap_or_default(), r.provider_id.clone().unwrap_or_default(), r.model.clone().unwrap_or_default(), r.cwd.display()))
-    }
-
-    fn len(&self, col: Col) -> usize {
-        match col {
-            Col::Recent => self.recents_view().len(),
-            Col::Harness => self.filtered(Col::Harness, &self.harnesses(), |h| h.label().to_string()).len(),
-            Col::Account => self.accounts_view().1.len(),
-            Col::Model => self.models_view().1.len(),
-            Col::Dir => self.dirs_view().len(),
+    fn item_text(&self, i: &Item) -> String {
+        match i {
+            Item::Header(_) => String::new(),
+            Item::Recent(r) => {
+                let r = &self.data.recents[*r];
+                format!("{} {} {}", r.profile_id.clone().unwrap_or_default(), r.provider_id.clone().unwrap_or_default(), r.model.clone().unwrap_or_default())
+            }
+            Item::Account(a) => format!("{} {}", a.label, a.detail),
         }
     }
 
-    /// The spec Enter would launch (None when something required is missing).
-    pub fn spec(&self) -> Option<LaunchSpec> {
-        if self.col == Col::Recent {
-            let r = &self.data.recents[*self.recents_view().get(self.sel[0])?];
-            return Some(LaunchSpec { harness: r.harness, profile_id: r.profile_id.clone(), provider_id: r.provider_id.clone(), model: r.model.clone(), cwd: r.cwd.clone(), resume: None, permission: r.permission, browser: r.browser, extra_args: vec![] });
+    /// Recent combos for a harness, newest first, one per (login/provider, model).
+    fn recents_for(&self, h: Harness) -> Vec<usize> {
+        let mut out: Vec<usize> = vec![];
+        for (i, r) in self.data.recents.iter().enumerate() {
+            if r.harness != h {
+                continue;
+            }
+            let dup = out.iter().any(|&j| {
+                let o = &self.data.recents[j];
+                o.profile_id == r.profile_id && o.provider_id == r.provider_id && o.model == r.model
+            });
+            if !dup {
+                out.push(i);
+            }
+            if out.len() == RECENTS_SHOWN {
+                break;
+            }
         }
-        let acct = self.account()?;
-        let (profile_id, provider_id) = match acct.kind {
-            AccountKind::Profile(p) => (Some(p), None),
-            AccountKind::Provider(p) => (None, Some(p)),
-            AccountKind::Pool => (None, Some("pool".to_string())),
+        out
+    }
+
+    /// Positions (in `items()`) of the rows the cursor can land on.
+    fn selectable(items: &[Item]) -> Vec<usize> {
+        items.iter().enumerate().filter(|(_, i)| !matches!(i, Item::Header(_))).map(|(k, _)| k).collect()
+    }
+
+    /// The row under the cursor.
+    pub fn current(&self) -> Option<Item> {
+        let items = self.items();
+        let sel = Self::selectable(&items);
+        sel.get(self.list_sel).map(|&k| items[k].clone())
+    }
+
+    /// Position of the cursor in `items()` (for drawing).
+    pub fn cursor_row(&self, items: &[Item]) -> Option<usize> {
+        Self::selectable(items).get(self.list_sel).copied()
+    }
+
+    /// Does the current row need a model picked?
+    pub fn needs_model(&self) -> bool {
+        match self.current() {
+            Some(Item::Account(a)) => match &a.kind {
+                AccountKind::Provider(_) => true,
+                AccountKind::Profile(p) => !matches!((self.harness, p.starts_with("claude:")), (Harness::Claude, true) | (Harness::Codex, false)),
+                AccountKind::Pool => self.harness != Harness::Claude,
+                AccountKind::Native => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Models for the current row (empty when none is needed).
+    pub fn models(&self) -> &[ModelRow] {
+        if !self.needs_model() {
+            return &[];
+        }
+        let key = match self.current() {
+            Some(Item::Account(a)) => match a.kind {
+                AccountKind::Provider(p) => p,
+                AccountKind::Profile(p) if p.starts_with("codex:") => "codex".into(),
+                _ => "claude".into(),
+            },
+            _ => return &[],
         };
-        Some(LaunchSpec {
-            harness: self.harness(),
+        self.data.models.get(&key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Filtered model indices.
+    pub fn models_view(&self) -> Vec<usize> {
+        fuzzy::filter(&self.model_filter, self.models(), |m| format!("{} {}", m.id, m.name))
+    }
+
+    pub fn model(&self) -> Option<ModelRow> {
+        let idx = self.models_view();
+        idx.get(self.model_sel).map(|&i| self.models()[i].clone())
+    }
+
+    /// Project dirs; a typed path becomes the first entry.
+    pub fn dirs_view(&self) -> Vec<(PathBuf, bool)> {
+        let f = self.dir_filter.trim();
+        let mut out = vec![];
+        if looks_like_path(f) {
+            out.push((expand(f), true));
+        }
+        let idx = fuzzy::filter(if looks_like_path(f) { "" } else { f }, &self.data.dirs, |p| p.to_string_lossy().to_string());
+        out.extend(idx.into_iter().map(|i| (self.data.dirs[i].clone(), false)));
+        out
+    }
+
+    /// The spec Enter would launch (None when a model is still needed or nothing is selected).
+    pub fn spec(&self) -> Option<LaunchSpec> {
+        let base = |profile_id: Option<String>, provider_id: Option<String>, model: Option<String>| LaunchSpec {
+            harness: self.harness,
             profile_id,
             provider_id,
-            model: self.model().and_then(|m| m.id),
-            cwd: self.dir()?,
+            model,
+            cwd: self.dir.clone(),
             resume: None,
             permission: self.permission,
             browser: self.browser,
             extra_args: vec![],
-        })
+        };
+        match self.current()? {
+            Item::Header(_) => None,
+            Item::Recent(i) => {
+                let r = &self.data.recents[i];
+                Some(base(r.profile_id.clone(), r.provider_id.clone(), r.model.clone()))
+            }
+            Item::Account(a) => {
+                let model = if self.needs_model() { Some(self.model()?.id) } else { None };
+                Some(match a.kind {
+                    AccountKind::Profile(p) => base(Some(p), None, model),
+                    AccountKind::Provider(p) => base(None, Some(p), model),
+                    AccountKind::Pool => base(None, Some("pool".into()), model),
+                    AccountKind::Native => base(None, None, model),
+                })
+            }
+        }
     }
 
     // ------------------------------------------------------------------ keys
 
-    fn cols(&self) -> Vec<Col> {
-        Col::ALL.iter().copied().filter(|c| *c != Col::Recent || !self.data.recents.is_empty()).collect()
+    fn set_harness(&mut self, d: i32) {
+        let all = Harness::ALL;
+        let i = all.iter().position(|h| *h == self.harness).unwrap_or(0) as i32;
+        self.harness = all[(i + d).rem_euclid(all.len() as i32) as usize];
+        self.list_filter.clear();
+        self.list_sel = 0;
+        self.reset_models();
+        if self.focus == Focus::Models {
+            self.focus = Focus::List;
+        }
     }
 
-    fn move_col(&mut self, d: i32) {
-        let cols = self.cols();
-        let i = cols.iter().position(|c| *c == self.col).unwrap_or(0) as i32;
-        self.col = cols[(i + d).rem_euclid(cols.len() as i32) as usize];
+    /// New row under the cursor: forget the model choice, but start on the last model used with it.
+    fn reset_models(&mut self) {
+        self.model_filter.clear();
+        self.model_sel = 0;
+        let Some(Item::Account(a)) = self.current() else { return };
+        let (profile, provider) = match &a.kind {
+            AccountKind::Profile(p) => (Some(p.clone()), None),
+            AccountKind::Provider(p) => (None, Some(p.clone())),
+            AccountKind::Pool => (None, Some("pool".to_string())),
+            AccountKind::Native => (None, None),
+        };
+        let last = self.data.recents.iter().find(|r| r.profile_id == profile && r.provider_id == provider && r.model.is_some()).and_then(|r| r.model.clone());
+        if let Some(m) = last
+            && let Some(k) = self.models_view().iter().position(|&i| self.models()[i].id == m)
+        {
+            self.model_sel = k;
+        }
     }
 
     fn move_sel(&mut self, d: i32) {
-        let n = self.len(self.col);
-        let c = self.col as usize;
-        if n == 0 {
-            self.sel[c] = 0;
-            return;
+        match self.focus {
+            Focus::List => {
+                let n = Self::selectable(&self.items()).len();
+                if n > 0 {
+                    let before = self.list_sel;
+                    self.list_sel = (self.list_sel as i32 + d).clamp(0, n as i32 - 1) as usize;
+                    if self.list_sel != before {
+                        self.reset_models();
+                    }
+                }
+            }
+            Focus::Models => {
+                let n = self.models_view().len();
+                if n > 0 {
+                    self.model_sel = (self.model_sel as i32 + d).clamp(0, n as i32 - 1) as usize;
+                }
+            }
+            Focus::Dirs => {
+                let n = self.dirs_view().len();
+                if n > 0 {
+                    self.dir_sel = (self.dir_sel as i32 + d).clamp(0, n as i32 - 1) as usize;
+                }
+            }
         }
-        self.sel[c] = (self.sel[c] as i32 + d).clamp(0, n as i32 - 1) as usize;
-        self.clamp_after(self.col);
     }
 
-    /// Changing a column resets the ones that depend on it.
-    fn clamp_after(&mut self, col: Col) {
-        if col == Col::Harness {
-            self.sel[Col::Account as usize] = 0;
-            self.filters[Col::Account as usize].clear();
+    fn filter_mut(&mut self) -> &mut String {
+        match self.focus {
+            Focus::List => &mut self.list_filter,
+            Focus::Models => &mut self.model_filter,
+            Focus::Dirs => &mut self.dir_filter,
         }
-        if matches!(col, Col::Harness | Col::Account) {
-            self.sel[Col::Model as usize] = 0;
-            self.filters[Col::Model as usize].clear();
+    }
+
+    fn filter_changed(&mut self) {
+        match self.focus {
+            Focus::List => {
+                self.list_sel = 0;
+                self.reset_models();
+            }
+            Focus::Models => self.model_sel = 0,
+            Focus::Dirs => self.dir_sel = 0,
+        }
+    }
+
+    /// Paste into the focused filter.
+    pub fn paste(&mut self, s: &str) {
+        self.filter_mut().push_str(s.trim());
+        self.filter_changed();
+    }
+
+    fn launch(&self) -> Outcome {
+        match self.spec() {
+            Some(s) => Outcome::Launch(s, self.place),
+            None => Outcome::None,
         }
     }
 
     /// Handle a key. The launcher is modal: it takes every key.
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let c = self.col as usize;
         match k.code {
-            KeyCode::Esc if !self.filters[c].is_empty() => {
-                self.filters[c].clear();
-                self.sel[c] = 0;
+            KeyCode::Esc => {
+                if !self.filter_mut().is_empty() {
+                    self.filter_mut().clear();
+                    self.filter_changed();
+                } else if self.focus != Focus::List {
+                    self.focus = Focus::List;
+                } else {
+                    return Outcome::Close;
+                }
             }
-            KeyCode::Esc => return Outcome::Close,
-            KeyCode::Enter => {
-                return match self.spec() {
-                    Some(s) => Outcome::Launch(s, self.place),
-                    None => Outcome::None,
-                };
+            KeyCode::Enter => match self.focus {
+                Focus::Dirs => {
+                    if let Some((p, _)) = self.dirs_view().get(self.dir_sel) {
+                        self.dir = p.clone();
+                    }
+                    self.dir_filter.clear();
+                    self.focus = Focus::List;
+                }
+                Focus::List if self.needs_model() => {
+                    self.focus = Focus::Models;
+                }
+                _ => return self.launch(),
+            },
+            KeyCode::Tab | KeyCode::BackTab if self.focus != Focus::Dirs => {
+                self.focus = if self.focus == Focus::List && self.needs_model() { Focus::Models } else { Focus::List };
             }
-            KeyCode::Tab | KeyCode::Right => self.move_col(1),
-            KeyCode::BackTab | KeyCode::Left => self.move_col(-1),
+            KeyCode::Right if self.focus != Focus::Dirs => self.set_harness(1),
+            KeyCode::Left if self.focus != Focus::Dirs => self.set_harness(-1),
             KeyCode::Down => self.move_sel(1),
             KeyCode::Up => self.move_sel(-1),
             KeyCode::PageDown => self.move_sel(8),
             KeyCode::PageUp => self.move_sel(-8),
             KeyCode::Char('n' | 'j') if ctrl => self.move_sel(1),
             KeyCode::Char('p' | 'k') if ctrl => self.move_sel(-1),
+            KeyCode::Char('d') if ctrl => {
+                self.focus = if self.focus == Focus::Dirs { Focus::List } else { Focus::Dirs };
+                self.dir_sel = 0;
+            }
             KeyCode::Char('e') if ctrl => {
                 self.permission = match self.permission {
                     Permission::Default => Permission::Auto,
@@ -386,18 +514,16 @@ impl Launcher {
             }
             KeyCode::Char('s') if ctrl => self.place = if self.place == Place::Tab { Place::Split } else { Place::Tab },
             KeyCode::Char('u') if ctrl => {
-                self.filters[c].clear();
-                self.sel[c] = 0;
+                self.filter_mut().clear();
+                self.filter_changed();
             }
             KeyCode::Backspace => {
-                self.filters[c].pop();
-                self.sel[c] = 0;
-                self.clamp_after(self.col);
+                self.filter_mut().pop();
+                self.filter_changed();
             }
             KeyCode::Char(ch) if !ctrl => {
-                self.filters[c].push(ch);
-                self.sel[c] = 0;
-                self.clamp_after(self.col);
+                self.filter_mut().push(ch);
+                self.filter_changed();
             }
             _ => {}
         }
@@ -435,114 +561,4 @@ fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::{Services, fallback_settings};
-
-    fn data() -> Data {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let svc = Services::offline(fallback_settings(), tx);
-        let st = svc.state();
-        Data {
-            profiles: st.profiles.ready().cloned().unwrap_or_default(),
-            providers: st.providers.ready().cloned().unwrap_or_default(),
-            usage: BTreeMap::new(),
-            installed: vec![],
-            dirs: vec![PathBuf::from("/code/bro"), PathBuf::from("/code/justgains"), PathBuf::from("/code/terminal")],
-            recents: vec![],
-        }
-    }
-
-    fn key(l: &mut Launcher, code: KeyCode) -> Outcome {
-        l.key(KeyEvent::new(code, KeyModifiers::NONE))
-    }
-    fn typ(l: &mut Launcher, s: &str) {
-        for c in s.chars() {
-            key(l, KeyCode::Char(c));
-        }
-    }
-
-    #[test]
-    fn filtering_each_column() {
-        let mut l = Launcher::new(data(), None, Place::Tab);
-        assert_eq!(l.col, Col::Harness, "no recents: start on harness");
-        typ(&mut l, "cod");
-        assert_eq!(l.harness(), Harness::Codex);
-        key(&mut l, KeyCode::Tab);
-        assert_eq!(l.col, Col::Account);
-        // codex: its own profiles first
-        assert_eq!(l.account().unwrap().kind, AccountKind::Profile("codex:local".into()));
-        typ(&mut l, "team");
-        assert_eq!(l.account().unwrap().kind, AccountKind::Profile("codex:team".into()));
-        key(&mut l, KeyCode::Tab);
-        typ(&mut l, "mini");
-        assert_eq!(l.model().unwrap().id.as_deref(), Some("gpt-5-mini"));
-        key(&mut l, KeyCode::Tab);
-        typ(&mut l, "just");
-        assert_eq!(l.dir(), Some(PathBuf::from("/code/justgains")));
-        match key(&mut l, KeyCode::Enter) {
-            Outcome::Launch(s, Place::Tab) => {
-                assert_eq!(s.harness, Harness::Codex);
-                assert_eq!(s.profile_id.as_deref(), Some("codex:team"));
-                assert_eq!(s.model.as_deref(), Some("gpt-5-mini"));
-                assert_eq!(s.cwd, PathBuf::from("/code/justgains"));
-            }
-            _ => panic!("expected a launch"),
-        }
-    }
-
-    #[test]
-    fn typed_paths_pool_and_toggles() {
-        let mut l = Launcher::new(data(), Some(PathBuf::from("/code/terminal")), Place::Tab);
-        assert_eq!(l.dir(), Some(PathBuf::from("/code/terminal")), "cwd preselected");
-        // claude → pool
-        key(&mut l, KeyCode::Tab);
-        typ(&mut l, "pool");
-        let s = l.spec().unwrap();
-        assert_eq!(s.provider_id.as_deref(), Some("pool"));
-        assert!(s.profile_id.is_none());
-        // a typed path wins
-        key(&mut l, KeyCode::Tab);
-        key(&mut l, KeyCode::Tab);
-        typ(&mut l, "~/new-thing");
-        assert!(l.dirs_view()[0].typed);
-        assert!(l.dir().unwrap().ends_with("new-thing"));
-        l.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        l.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        assert_eq!(l.permission, Permission::Skip);
-        l.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        assert_eq!(l.place, Place::Split);
-        // esc clears the filter first, then closes
-        assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::None));
-        assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::Close));
-    }
-
-    #[test]
-    fn recents_preselect_and_relaunch() {
-        let mut d = data();
-        d.recents = vec![Recent { harness: Harness::Pi, profile_id: None, provider_id: Some("openrouter".into()), model: Some("qwen/qwen3-coder".into()), cwd: PathBuf::from("/code/justgains"), permission: Permission::Auto, browser: BrowserMode::Off, at: 1 }];
-        let mut l = Launcher::new(d, None, Place::Tab);
-        assert_eq!(l.harness(), Harness::Pi);
-        assert_eq!(l.account().unwrap().kind, AccountKind::Provider("openrouter".into()));
-        assert_eq!(l.model().unwrap().id.as_deref(), Some("qwen/qwen3-coder"));
-        assert_eq!(l.dir(), Some(PathBuf::from("/code/justgains")));
-        assert_eq!(l.permission, Permission::Auto);
-        key(&mut l, KeyCode::BackTab);
-        assert_eq!(l.col, Col::Recent);
-        let s = l.spec().unwrap();
-        assert_eq!(s.provider_id.as_deref(), Some("openrouter"));
-        // changing harness resets account + model
-        key(&mut l, KeyCode::Tab);
-        key(&mut l, KeyCode::Up);
-        key(&mut l, KeyCode::Up);
-        assert_eq!(l.sel[Col::Account as usize], 0);
-        assert!(l.model().unwrap().id.is_none());
-    }
-
-    #[test]
-    fn paths_and_dedup() {
-        assert!(looks_like_path("~/x") && looks_like_path("C:\\x") && looks_like_path("/x") && !looks_like_path("bro"));
-        let d = dedup_dirs(vec![vec![PathBuf::from("/a"), PathBuf::from("/b")], vec![PathBuf::from("/a"), PathBuf::from("/c")]]);
-        assert_eq!(d, vec![PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/c")]);
-    }
-}
+mod tests;

@@ -36,8 +36,6 @@ pub use overlays::Overlay;
 
 /// One tab: a split tree of panes.
 pub(crate) struct Tab {
-    /// A name you gave it; None = named after its focused pane.
-    pub name: Option<String>,
     pub root: Node,
     pub focus: PaneId,
     pub zoom: bool,
@@ -74,6 +72,8 @@ pub(crate) enum SideHit {
     Row(usize),
     Usage,
     UsageToggle,
+    /// the × on a running session's row
+    Close(PaneId),
     Proxy,
     Bridge,
 }
@@ -113,9 +113,6 @@ pub struct App {
     body: Rect,
     side_hits: Vec<(Rect, SideHit)>,
     pane_close: Vec<(Rect, PaneId)>,
-    tab_hits: Vec<(Rect, usize)>,
-    /// the tab bar's "+ new" button
-    new_tab_hit: Option<Rect>,
     drag: Option<(Vec<bool>, Dir, Rect)>,
     sel: Option<Sel>,
     copy_pending: bool,
@@ -135,6 +132,10 @@ pub struct App {
     agent_state: HashMap<PaneId, Activity>,
     pub(crate) done: HashSet<PaneId>,
     pub(crate) recents: Vec<Recent>,
+    /// archived earlier sessions (hidden from the sidebar)
+    pub(crate) archive: crate::archive::Archive,
+    /// write ~/.bro files (off in demo and tests)
+    pub(crate) persist: bool,
     term_focused: bool,
     opts: Opts,
     _theme_watcher: Option<notify::RecommendedWatcher>,
@@ -167,8 +168,6 @@ impl App {
             body: Rect::default(),
             side_hits: vec![],
             pane_close: vec![],
-            tab_hits: vec![],
-            new_tab_hit: None,
             drag: None,
             sel: None,
             copy_pending: false,
@@ -185,6 +184,8 @@ impl App {
             agent_state: HashMap::new(),
             done: HashSet::new(),
             recents: if opts.load_recents { crate::recents::load() } else { vec![] },
+            archive: if opts.load_recents { crate::archive::Archive::load() } else { Default::default() },
+            persist: opts.load_recents,
             term_focused: true,
             opts,
             _theme_watcher: None,
@@ -214,7 +215,7 @@ impl App {
 
     pub(crate) fn new_tab(&mut self, p: Box<dyn Pane>) -> PaneId {
         let id = self.add(p);
-        self.tabs.push(Tab { name: None, root: Node::Leaf(id), focus: id, zoom: false });
+        self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoom: false });
         self.cur = self.tabs.len() - 1;
         id
     }
@@ -313,12 +314,6 @@ impl App {
             Some(t) => t.root.leaf_ids(),
             None => vec![],
         }
-    }
-
-    /// A tab's label: its name, else its focused pane's title.
-    pub(crate) fn tab_label(&self, i: usize) -> String {
-        let t = &self.tabs[i];
-        t.name.clone().unwrap_or_else(|| self.panes.get(&t.focus).map(|p| p.title()).unwrap_or_default())
     }
 
     pub(crate) fn toast(&mut self, kind: Kind, s: impl Into<String>) {
@@ -496,8 +491,7 @@ impl App {
 
     fn paste(&mut self, s: &str) {
         if let Overlay::Launcher(l) = &mut self.overlay {
-            let c = l.col as usize;
-            l.filters[c].push_str(s.trim());
+            l.paste(s);
             return;
         }
         if let Some(id) = self.focused() {

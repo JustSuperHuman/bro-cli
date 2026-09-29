@@ -96,6 +96,19 @@ fn claude_anthropic_provider_direct() {
     assert!(!removes(&c, "ANTHROPIC_BASE_URL"));
     assert!(c.route.is_none());
     assert_eq!(c.label, "claude · zai · glm-5.3");
+    // every Claude Code model slot is pinned, so haiku/subagent calls stay on glm
+    for k in claude::MODEL_VARS {
+        assert_eq!(env(&c, k), Some("glm-5.3"), "{k}");
+    }
+}
+
+#[test]
+fn claude_native_login_leaves_model_slots_alone() {
+    let _sb = setup();
+    let c = build(&spec(Harness::Claude, Some("claude:work"), None, None), &ctx()).unwrap();
+    for k in claude::MODEL_VARS {
+        assert!(removes(&c, k) && env(&c, k).is_none(), "{k}");
+    }
 }
 
 #[test]

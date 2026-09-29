@@ -94,6 +94,7 @@ pub fn fill(st: &mut State) {
         provider("zai", "Z.ai", ProviderMode::Anthropic, "https://api.z.ai/api/anthropic", vec![model("glm-4.6", "GLM 4.6"), model("glm-4.5-air", "GLM 4.5 Air")]),
         provider("deepseek", "DeepSeek", ProviderMode::Openai, "https://api.deepseek.com/v1", vec![model("deepseek-chat", "DeepSeek V3.2")]),
     ]);
+    st.models = demo_models(st.providers.ready().map(Vec::as_slice).unwrap_or(&[]));
     st.past = Avail::Ready(vec![
         past(Harness::Claude, Some("claude:work"), "bro-cli-v2", "port the oriel event loop and split tree", 1_800),
         past(Harness::Codex, Some("codex:local"), "bro-cli-v2", "anthropic <-> responses streaming fixtures", 7_200),
@@ -309,4 +310,27 @@ pub fn shell_command(h: Option<Harness>, label: &str, cwd: PathBuf) -> CommandSp
     };
     let cwd = if cwd.is_dir() { cwd } else { dirs::home_dir().unwrap_or_else(std::env::temp_dir) };
     CommandSpec { program, args, env: vec![], env_remove: vec![], cwd, label: label.into(), route: None, cleanup: vec![] }
+}
+
+/// Launcher model lists for the demo (never reads the real OpenRouter cache).
+pub fn demo_models(providers: &[Provider]) -> std::collections::BTreeMap<String, Vec<bro_core::catalogue::ModelRow>> {
+    use bro_core::catalogue::ModelRow;
+    let row = |id: &str, name: &str, ctx: Option<u64>, price: Option<(f64, f64)>| ModelRow { id: id.into(), name: name.into(), context: ctx, pricing: price, reasoning: false, created: None };
+    let mut m: std::collections::BTreeMap<String, Vec<ModelRow>> =
+        providers.iter().map(|p| (p.id.clone(), p.models.iter().map(|x| row(&x.id, x.name.as_deref().unwrap_or(&x.id), None, None)).collect())).collect();
+    m.insert(
+        "openrouter".into(),
+        vec![
+            row("moonshotai/kimi-k2.7-code", "MoonshotAI: Kimi K2.7 Code", Some(262_144), Some((0.6, 2.5))),
+            row("qwen/qwen3-coder", "Qwen: Qwen3 Coder", Some(262_144), Some((0.22, 0.95))),
+            row("x-ai/grok-code-fast-1", "xAI: Grok Code Fast 1", Some(256_000), Some((0.2, 1.5))),
+            row("deepseek/deepseek-v4", "DeepSeek: V4", Some(1_048_576), Some((0.58, 1.73))),
+            row("z-ai/glm-5.3", "Z.AI: GLM 5.3", Some(200_000), Some((0.6, 2.2))),
+            row("google/gemini-3-pro", "Google: Gemini 3 Pro", Some(1_048_576), Some((1.25, 10.0))),
+        ],
+    );
+    m.insert("codex".into(), vec![row("gpt-5.2-codex", "GPT-5.2 Codex", None, None), row("gpt-5.2", "GPT-5.2", None, None), row("gpt-5-mini", "GPT-5 mini", None, None)]);
+    let claude = m.get("anthropic").cloned().unwrap_or_default();
+    m.insert("claude".into(), claude);
+    m
 }

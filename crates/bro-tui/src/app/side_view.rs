@@ -36,7 +36,7 @@ impl App {
         let focused = self.side_focus && !self.overlay.is_open();
         let title = Line::from(vec![Span::raw(" "), Span::styled("bro", ui::bold_accent(&t)), Span::raw(" ")]);
         let clock = Line::from(Span::styled(format!(" {} ", crate::util::clock()), muted(&t)));
-        let sub = if focused { "⏎ open · h/l fold · / filter · ? keys" } else { "alt+b browse" };
+        let sub = if focused { "? keys" } else { "alt+b" };
         let inner = ui::frame_ex(f, area, title, Some(clock), Some(sub), focused, &t);
         let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(1), ..inner };
 
@@ -78,6 +78,12 @@ impl App {
                 f.buffer_mut().set_style(r, Style::default().bg(crate::theme::mix(t.user, ratatui::style::Color::Rgb(20, 20, 24), 0.35)));
             }
             self.draw_row(f, r, row, selected, focus_pane, &t, time);
+            if let Row::Live { info, .. } = row
+                && self.renaming.as_ref().is_none_or(|(id, _)| *id != info.pane)
+            {
+                // the × cell wins over the row (hits are searched in order)
+                self.side_hits.push((Rect { x: r.right().saturating_sub(1), width: 1, ..r }, SideHit::Close(info.pane)));
+            }
             self.side_hits.push((r, SideHit::Row(i)));
             y += 1;
         }
@@ -144,7 +150,8 @@ impl App {
                     Span::styled(format!("{what} "), name_style),
                     Span::styled(detail, muted(t)),
                 ];
-                let right = vec![Span::styled(format!(" {}", crate::util::short_dur(info.age_secs)), muted(t))];
+                // age, then a clickable × that closes the session
+                let right = vec![Span::styled(format!(" {}", crate::util::short_dur(info.age_secs)), muted(t)), Span::styled(" ×", if selected { fg(t.danger) } else { fg(t.frame) })];
                 ui::line_lr(f, r, left, right);
             }
             Row::Past { info } => {
@@ -152,12 +159,18 @@ impl App {
                 let brand = ui::harness_color(Some(info.harness), t);
                 let age = crate::util::short_dur(info.age_secs);
                 let title_w = w.saturating_sub(7 + ui::width(&age) + 1);
-                let st = if selected { ui::bold_accent(t) } else { muted(t) };
+                let mut st = if selected { ui::bold_accent(t) } else { muted(t) };
+                let mut right = vec![Span::styled(format!(" {age}"), muted(t))];
+                if info.archived {
+                    st = st.add_modifier(Modifier::CROSSED_OUT);
+                    right.insert(0, Span::styled(" archived", fg(t.frame)));
+                }
+                let title_w = title_w.saturating_sub(if info.archived { 9 } else { 0 });
                 ui::line_lr(
                     f,
                     r,
                     vec![Span::raw("    "), Span::styled(format!("{} ", ui::harness_glyph(Some(info.harness))), fg(crate::theme::mix(brand, t.muted, 0.5))), Span::styled(ui::fit(&info.title, title_w), st)],
-                    vec![Span::styled(format!(" {age}"), muted(t))],
+                    right,
                 );
             }
             Row::More { hidden, .. } => {
@@ -277,28 +290,41 @@ impl App {
                 y += 1;
             }
         }
-        // proxy + bridge, pinned to the bottom
+        // proxy + phone bridge, pinned to the bottom, in plain words (click either for details)
         let st = self.svc.state();
         let pr = row(area.bottom() - 2);
+        let label = |icon: &str, name: &str| Span::styled(format!("{} {:<8}", ui::icon(icon), name), muted(t));
         let proxy = match &st.proxy.status {
             Avail::Ready(i) => {
-                let last = st.proxy.events.back().map(|e| format!(" · {}", crate::util::short_dur(((crate::util::now_ms() - e.at_ms).max(0) / 1000) as u64))).unwrap_or_default();
-                vec![Span::styled(format!("{} proxy ", ui::icon("proxy")), muted(t)), Span::styled("● ", fg(t.good)), Span::styled(format!(":{}", i.port), ui::bold()), Span::styled(format!(" · {} rt{last}", st.proxy.routes.len()), muted(t))]
+                let n = st.proxy.routes.len();
+                let use_ = match n {
+                    0 => "idle".to_string(),
+                    1 => "1 session".to_string(),
+                    n => format!("{n} sessions"),
+                };
+                vec![label("proxy", "proxy"), Span::styled("● ", fg(t.good)), Span::styled(use_, if n > 0 { fg(t.shine) } else { muted(t) }), Span::styled(format!(" · port {}", i.port), muted(t))]
             }
-            Avail::Loading => vec![Span::styled(format!("{} proxy ", ui::icon("proxy")), muted(t)), Span::styled("◌ starting", muted(t))],
-            Avail::Unavailable(_) => vec![Span::styled(format!("{} proxy ", ui::icon("proxy")), muted(t)), Span::styled("○ off", fg(t.danger))],
+            Avail::Loading => vec![label("proxy", "proxy"), Span::styled("◌ starting", muted(t))],
+            Avail::Unavailable(_) => vec![label("proxy", "proxy"), Span::styled("○ off", fg(t.danger))],
         };
         ui::line(f, pr, proxy);
         let br = row(area.bottom() - 1);
         let bridge = match &st.bridge.status {
-            Avail::Ready(s) if s.running => vec![
-                Span::styled(format!("{} bridge ", ui::icon("bridge")), muted(t)),
-                Span::styled("● ", fg(t.good)),
-                Span::styled(format!(":{}", s.port), ui::bold()),
-                Span::styled(format!(" · {} dev", s.clients), if s.clients > 0 { fg(t.shine) } else { muted(t) }),
-            ],
-            Avail::Loading if st.bridge.enabled => vec![Span::styled(format!("{} bridge ", ui::icon("bridge")), muted(t)), Span::styled("◌ starting", muted(t))],
-            _ => vec![Span::styled(format!("{} bridge ", ui::icon("bridge")), muted(t)), Span::styled("○ off", fg(t.danger))],
+            Avail::Ready(s) if s.running => {
+                let who = match s.clients {
+                    0 => "no phones".to_string(),
+                    1 => "1 connected".to_string(),
+                    n => format!("{n} connected"),
+                };
+                vec![
+                    label("bridge", "phone"),
+                    Span::styled("● ", fg(t.good)),
+                    Span::styled(who, if s.clients > 0 { fg(t.shine) } else { muted(t) }),
+                    Span::styled(format!(" · port {}", s.port), muted(t)),
+                ]
+            }
+            Avail::Loading if st.bridge.enabled => vec![label("bridge", "phone"), Span::styled("◌ starting", muted(t))],
+            _ => vec![label("bridge", "phone"), Span::styled("○ off", fg(t.danger))],
         };
         ui::line(f, br, bridge);
         drop(st);
