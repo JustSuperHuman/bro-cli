@@ -71,13 +71,14 @@ impl App {
         }
         self.side_scroll = self.side_scroll.min(rows.len().saturating_sub(room.max(1)));
         let focus_pane = self.focused();
+        let cur_key = self.current_project().map(|r| self.svc.project_for(&r).key);
         for (i, row) in rows.iter().enumerate().skip(self.side_scroll).take(room) {
             let r = Rect { y, height: 1, ..list };
             let selected = focused && i == self.side_sel;
             if selected {
                 f.buffer_mut().set_style(r, Style::default().bg(crate::theme::mix(t.user, ratatui::style::Color::Rgb(20, 20, 24), 0.35)));
             }
-            self.draw_row(f, r, row, selected, focus_pane, &t, time);
+            self.draw_row(f, r, row, selected, focus_pane, cur_key.as_deref(), &t, time);
             if let Row::Live { info, .. } = row
                 && self.renaming.as_ref().is_none_or(|(id, _)| *id != info.pane)
             {
@@ -90,7 +91,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_row(&self, f: &mut Frame, r: Rect, row: &Row, selected: bool, focus_pane: Option<crate::layout::PaneId>, t: &Theme, time: f64) {
+    fn draw_row(&self, f: &mut Frame, r: Rect, row: &Row, selected: bool, focus_pane: Option<crate::layout::PaneId>, cur_key: Option<&str>, t: &Theme, time: f64) {
         let w = r.width as usize;
         match row {
             Row::New => {
@@ -98,7 +99,14 @@ impl App {
                 let st = if selected { ui::bold_accent(t) } else { fg(t.shine).add_modifier(Modifier::BOLD) };
                 ui::line_lr(f, r, vec![Span::styled("+ new session", st)], vec![Span::styled(format!("{key} "), muted(t))]);
             }
-            Row::Project { name, root, live, collapsed, attention, last_age, .. } => {
+            Row::OpenFolder => {
+                let key = self.keymap.primary(crate::keymap::Act::OpenProject);
+                let st = if selected { ui::bold_accent(t) } else { muted(t) };
+                ui::line_lr(f, r, vec![Span::styled("+ open folder", st)], vec![Span::styled(format!("{key} "), muted(t))]);
+            }
+            Row::Project { key, name, root, live, collapsed, attention, last_age, .. } => {
+                // the current project (where new sessions start) gets a bar
+                let current = cur_key == Some(key.as_str());
                 let arrow = if *collapsed { "▸" } else { "▾" };
                 let active = *live > 0;
                 let parent_w = w.saturating_sub(ui::width(name) + 10).min(16);
@@ -112,12 +120,9 @@ impl App {
                 } else if let Some(age) = last_age {
                     right.push(Span::styled(format!("{} ", crate::util::short_dur(*age)), muted(t)));
                 }
-                let name_style = match (selected, active) {
-                    (true, _) => ui::bold_accent(t),
-                    (false, true) => Style::default().add_modifier(Modifier::BOLD),
-                    (false, false) => Style::default(),
-                };
-                ui::line_lr(f, r, vec![Span::styled(format!("{arrow} "), ui::accent(t)), Span::styled(format!("{name} "), name_style), Span::styled(parent, muted(t))], right);
+                let name_style = if selected || current { ui::bold_accent(t) } else { Style::default().add_modifier(Modifier::BOLD) };
+                let lead = if current { Span::styled("▍", ui::accent(t)) } else { Span::raw(" ") };
+                ui::line_lr(f, r, vec![lead, Span::styled(format!("{arrow} "), ui::accent(t)), Span::styled(format!("{name} "), name_style), Span::styled(parent, muted(t))], right);
             }
             Row::Live { info, n } => {
                 let brand = ui::harness_color(info.harness, t);

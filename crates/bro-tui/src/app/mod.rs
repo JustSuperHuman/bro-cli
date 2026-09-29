@@ -136,6 +136,10 @@ pub struct App {
     pub(crate) archive: crate::archive::Archive,
     /// write ~/.bro files (off in demo and tests)
     pub(crate) persist: bool,
+    /// the projects in the sidebar (you open them; ~/.bro/v2-projects.json)
+    pub(crate) open_projects: crate::projects::OpenProjects,
+    /// the project new sessions start in (last one you picked in the sidebar or worked in)
+    pub(crate) cur_project: Option<std::path::PathBuf>,
     term_focused: bool,
     opts: Opts,
     _theme_watcher: Option<notify::RecommendedWatcher>,
@@ -186,10 +190,13 @@ impl App {
             recents: if opts.load_recents { crate::recents::load() } else { vec![] },
             archive: if opts.load_recents { crate::archive::Archive::load() } else { Default::default() },
             persist: opts.load_recents,
+            open_projects: if opts.load_recents { crate::projects::OpenProjects::load() } else { Default::default() },
+            cur_project: None,
             term_focused: true,
             opts,
             _theme_watcher: None,
         };
+        app.seed_projects();
         let t2 = tx.clone();
         app._theme_watcher = theme::watch(move || {
             let _ = t2.send(Event::ThemeFilesChanged);
@@ -492,6 +499,10 @@ impl App {
     fn paste(&mut self, s: &str) {
         if let Overlay::Launcher(l) = &mut self.overlay {
             l.paste(s);
+            return;
+        }
+        if let Overlay::Folder(p) = &mut self.overlay {
+            p.paste(s);
             return;
         }
         if let Some(id) = self.focused() {

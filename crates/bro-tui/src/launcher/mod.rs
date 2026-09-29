@@ -6,8 +6,8 @@
 //!    providers (OpenRouter's live catalogue, DeepSeek, …).
 //! 3. **Model** — only when the choice needs one (providers, cross-family logins): a second, filterable list.
 //!
-//! The project is a line of its own (ctrl+d to change). Enter on a row that needs a model moves to the model
-//! list; Enter there (or on anything else) launches. This file is the model + keys (pure, testable);
+//! Sessions start in the current project (the one selected in the sidebar). Enter on a row that needs a
+//! model moves to the model list; Enter there (or on anything else) launches. This file is the model + keys (pure, testable);
 //! `view.rs` draws it.
 
 pub mod view;
@@ -23,7 +23,7 @@ use bro_core::profiles::{Profile, ProfileKind};
 use bro_core::providers::{Provider, ProviderMode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Which list has the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -31,7 +31,6 @@ pub enum Focus {
     /// the "run on" list
     List,
     Models,
-    Dirs,
 }
 
 /// Who a session runs as.
@@ -77,8 +76,6 @@ pub struct Data {
     pub usage: BTreeMap<String, f32>,
     /// harness → installed on PATH
     pub installed: Vec<(Harness, bool)>,
-    /// candidate project dirs, best first
-    pub dirs: Vec<PathBuf>,
     pub recents: Vec<Recent>,
     /// provider id (plus "codex", "claude") → models
     pub models: BTreeMap<String, Vec<ModelRow>>,
@@ -103,13 +100,10 @@ pub struct Launcher {
     pub focus: Focus,
     pub list_filter: String,
     pub model_filter: String,
-    pub dir_filter: String,
     /// index into the *selectable* rows of the run-on list
     pub list_sel: usize,
     /// index into the filtered models
     pub model_sel: usize,
-    /// index into the dir choices
-    pub dir_sel: usize,
     pub dir: PathBuf,
     pub permission: Permission,
     pub browser: BrowserMode,
@@ -117,13 +111,12 @@ pub struct Launcher {
 }
 
 impl Launcher {
-    /// Open on the most recent harness, in `cwd` (else the most recent project).
+    /// Open on the most recent harness, in `cwd` (the current project; else the most recent one).
     pub fn new(data: Data, cwd: Option<PathBuf>, place: Place) -> Launcher {
         let recent = data.recents.first().cloned();
         let harness = recent.as_ref().map(|r| r.harness).unwrap_or(Harness::Claude);
         let dir = cwd
             .or_else(|| recent.as_ref().map(|r| r.cwd.clone()))
-            .or_else(|| data.dirs.first().cloned())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
         let (permission, browser) = recent.map(|r| (r.permission, r.browser)).unwrap_or_default();
@@ -133,10 +126,8 @@ impl Launcher {
             focus: Focus::List,
             list_filter: String::new(),
             model_filter: String::new(),
-            dir_filter: String::new(),
             list_sel: 0,
             model_sel: 0,
-            dir_sel: 0,
             dir,
             permission,
             browser,
@@ -320,18 +311,6 @@ impl Launcher {
         idx.get(self.model_sel).map(|&i| self.models()[i].clone())
     }
 
-    /// Project dirs; a typed path becomes the first entry.
-    pub fn dirs_view(&self) -> Vec<(PathBuf, bool)> {
-        let f = self.dir_filter.trim();
-        let mut out = vec![];
-        if looks_like_path(f) {
-            out.push((expand(f), true));
-        }
-        let idx = fuzzy::filter(if looks_like_path(f) { "" } else { f }, &self.data.dirs, |p| p.to_string_lossy().to_string());
-        out.extend(idx.into_iter().map(|i| (self.data.dirs[i].clone(), false)));
-        out
-    }
-
     /// The spec Enter would launch (None when a model is still needed or nothing is selected).
     pub fn spec(&self) -> Option<LaunchSpec> {
         let base = |profile_id: Option<String>, provider_id: Option<String>, model: Option<String>| LaunchSpec {
@@ -414,12 +393,6 @@ impl Launcher {
                     self.model_sel = (self.model_sel as i32 + d).clamp(0, n as i32 - 1) as usize;
                 }
             }
-            Focus::Dirs => {
-                let n = self.dirs_view().len();
-                if n > 0 {
-                    self.dir_sel = (self.dir_sel as i32 + d).clamp(0, n as i32 - 1) as usize;
-                }
-            }
         }
     }
 
@@ -427,7 +400,6 @@ impl Launcher {
         match self.focus {
             Focus::List => &mut self.list_filter,
             Focus::Models => &mut self.model_filter,
-            Focus::Dirs => &mut self.dir_filter,
         }
     }
 
@@ -438,7 +410,6 @@ impl Launcher {
                 self.reset_models();
             }
             Focus::Models => self.model_sel = 0,
-            Focus::Dirs => self.dir_sel = 0,
         }
     }
 
@@ -470,33 +441,22 @@ impl Launcher {
                 }
             }
             KeyCode::Enter => match self.focus {
-                Focus::Dirs => {
-                    if let Some((p, _)) = self.dirs_view().get(self.dir_sel) {
-                        self.dir = p.clone();
-                    }
-                    self.dir_filter.clear();
-                    self.focus = Focus::List;
-                }
                 Focus::List if self.needs_model() => {
                     self.focus = Focus::Models;
                 }
                 _ => return self.launch(),
             },
-            KeyCode::Tab | KeyCode::BackTab if self.focus != Focus::Dirs => {
+            KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = if self.focus == Focus::List && self.needs_model() { Focus::Models } else { Focus::List };
             }
-            KeyCode::Right if self.focus != Focus::Dirs => self.set_harness(1),
-            KeyCode::Left if self.focus != Focus::Dirs => self.set_harness(-1),
+            KeyCode::Right => self.set_harness(1),
+            KeyCode::Left => self.set_harness(-1),
             KeyCode::Down => self.move_sel(1),
             KeyCode::Up => self.move_sel(-1),
             KeyCode::PageDown => self.move_sel(8),
             KeyCode::PageUp => self.move_sel(-8),
             KeyCode::Char('n' | 'j') if ctrl => self.move_sel(1),
             KeyCode::Char('p' | 'k') if ctrl => self.move_sel(-1),
-            KeyCode::Char('d') if ctrl => {
-                self.focus = if self.focus == Focus::Dirs { Focus::List } else { Focus::Dirs };
-                self.dir_sel = 0;
-            }
             KeyCode::Char('e') if ctrl => {
                 self.permission = match self.permission {
                     Permission::Default => Permission::Auto,
@@ -529,35 +489,6 @@ impl Launcher {
         }
         Outcome::None
     }
-}
-
-/// True for input that is clearly a path ("~/x", "C:\x", "/x", "./x").
-pub fn looks_like_path(s: &str) -> bool {
-    let b = s.as_bytes();
-    s.starts_with('~') || s.starts_with('/') || s.starts_with('.') || s.starts_with('\\') || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
-}
-
-/// Expand a leading `~`.
-pub fn expand(s: &str) -> PathBuf {
-    match s.strip_prefix('~') {
-        Some(rest) => dirs::home_dir().unwrap_or_default().join(rest.trim_start_matches(['/', '\\'])),
-        None => PathBuf::from(s),
-    }
-}
-
-/// The candidate dirs, deduplicated, in the given priority order.
-pub fn dedup_dirs(groups: Vec<Vec<PathBuf>>) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = vec![];
-    for p in groups.into_iter().flatten() {
-        if !out.iter().any(|o| same_path(o, &p)) {
-            out.push(p);
-        }
-    }
-    out
-}
-
-fn same_path(a: &Path, b: &Path) -> bool {
-    if cfg!(windows) { a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase() } else { a == b }
 }
 
 #[cfg(test)]

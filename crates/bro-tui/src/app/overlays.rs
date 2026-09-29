@@ -20,6 +20,7 @@ pub enum Overlay {
     Palette(Box<Palette>),
     Help(Help),
     Resume(Box<ResumePicker>),
+    Folder(Box<crate::folder::FolderPicker>),
     Confirm(Confirm),
 }
 
@@ -94,6 +95,7 @@ impl App {
             Overlay::Palette(p) => p.draw(f, area, &t),
             Overlay::Help(h) => h.draw(f, area, &self.keymap, &t, time),
             Overlay::Resume(p) => draw_resume(f, area, p, &t),
+            Overlay::Folder(p) => crate::folder::draw(f, area, p, &t),
             Overlay::Confirm(c) => draw_confirm(f, area, c, &t),
         }
     }
@@ -182,22 +184,12 @@ fn draw_confirm(f: &mut Frame, area: Rect, c: &Confirm, t: &Theme) {
 /// Build launcher data from services + app state (dirs: the preferred cwd first).
 pub(super) fn launcher_data(app: &App) -> launcher::Data {
     let st = app.svc.state();
-    let mut live_dirs = vec![];
-    for p in app.panes.values() {
-        if let Some(t) = p.as_term_ref() {
-            live_dirs.push(t.meta.project.root.clone());
-        }
-    }
-    let past_dirs: Vec<_> = st.past.ready().map(|v| v.iter().filter_map(|s| s.project.as_ref().map(|p| p.root.clone()).or_else(|| s.cwd.clone())).collect()).unwrap_or_default();
-    let here = std::env::current_dir().ok().into_iter().collect::<Vec<_>>();
-    let dirs = launcher::dedup_dirs(vec![live_dirs, crate::recents::dirs(&app.recents), past_dirs, here]);
     let installed = bro_core::Harness::ALL.iter().map(|h| (*h, app.svc.is_demo() || cfg!(test) || crate::util::which(h.label()).is_some())).collect();
     launcher::Data {
         profiles: st.profiles.ready().cloned().unwrap_or_default(),
         providers: st.providers.ready().cloned().unwrap_or_default(),
         usage: st.usage.iter().filter_map(|(k, e)| e.usage.as_ref().and_then(|u| u.five_hour.as_ref()).map(|w| (k.clone(), w.used_pct))).collect(),
         installed,
-        dirs,
         recents: app.recents.clone(),
         models: st.models.clone(),
         keyed: {

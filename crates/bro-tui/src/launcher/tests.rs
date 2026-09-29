@@ -10,7 +10,6 @@ fn data() -> Data {
         providers: st.providers.ready().cloned().unwrap_or_default(),
         usage: BTreeMap::new(),
         installed: vec![],
-        dirs: vec![PathBuf::from("/code/bro"), PathBuf::from("/code/justgains"), PathBuf::from("/code/terminal")],
         recents: vec![],
         models: st.models.clone(),
         keyed: vec!["openrouter".into(), "openai".into()],
@@ -113,19 +112,9 @@ fn recents_relaunch_and_remember_the_model() {
 }
 
 #[test]
-fn project_picker_toggles_and_esc_steps_back() {
+fn toggles_and_esc() {
     let mut l = Launcher::new(data(), Some(PathBuf::from("/code/bro")), Place::Tab);
-    ctrl(&mut l, 'd');
-    assert_eq!(l.focus, Focus::Dirs);
-    typ(&mut l, "just");
-    key(&mut l, KeyCode::Enter);
-    assert_eq!(l.dir, PathBuf::from("/code/justgains"));
-    assert_eq!(l.focus, Focus::List);
-    ctrl(&mut l, 'd');
-    typ(&mut l, "~/new-thing");
-    assert!(l.dirs_view()[0].1, "typed path first");
-    key(&mut l, KeyCode::Enter);
-    assert!(l.dir.ends_with("new-thing"));
+    assert_eq!(l.dir, PathBuf::from("/code/bro"), "starts in the current project");
     ctrl(&mut l, 'e');
     ctrl(&mut l, 'e');
     assert_eq!(l.permission, Permission::Skip);
@@ -134,11 +123,4 @@ fn project_picker_toggles_and_esc_steps_back() {
     typ(&mut l, "zz");
     assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::None), "esc clears the filter first");
     assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::Close));
-}
-
-#[test]
-fn paths_and_dedup() {
-    assert!(looks_like_path("~/x") && looks_like_path("C:\\x") && looks_like_path("/x") && !looks_like_path("bro"));
-    let d = dedup_dirs(vec![vec![PathBuf::from("/a"), PathBuf::from("/b")], vec![PathBuf::from("/a"), PathBuf::from("/c")]]);
-    assert_eq!(d, vec![PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/c")]);
 }

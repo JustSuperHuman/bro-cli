@@ -136,6 +136,14 @@ impl App {
                 }
             }
             Overlay::Resume(_) => self.resume_key(k),
+            Overlay::Folder(p) => match p.key(k) {
+                crate::folder::Outcome::None => {}
+                crate::folder::Outcome::Close => self.overlay = Overlay::None,
+                crate::folder::Outcome::Open(dir) => {
+                    self.overlay = Overlay::None;
+                    self.add_project(dir);
+                }
+            },
             Overlay::Confirm(_) => self.confirm_key(k),
         }
     }
@@ -219,11 +227,12 @@ impl App {
                 Some(Row::Past { info }) => self.resume(info.idx),
                 _ => {}
             },
-            KeyCode::Char('x') | KeyCode::Delete => {
-                if let Some(Row::Live { info, .. }) = rows.get(sel) {
-                    self.ask_close(info.pane);
-                }
-            }
+            KeyCode::Char('x') | KeyCode::Delete => match rows.get(sel) {
+                Some(Row::Live { info, .. }) => self.ask_close(info.pane),
+                Some(Row::Project { root, live, .. }) => self.close_project(root.clone(), *live),
+                _ => {}
+            },
+            KeyCode::Char('o') => self.open_folder(),
             KeyCode::Char('n') => {
                 let dir = self.preferred_dir();
                 self.open_launcher(dir, crate::pane::Place::Tab);
@@ -253,6 +262,10 @@ impl App {
                     self.side_focus = false;
                 }
             _ => {}
+        }
+        let rows = self.rows();
+        if let Some(root) = rows.get(self.side_sel).and_then(|r| self.row_root(&rows, r)) {
+            self.cur_project = Some(root);
         }
     }
 }

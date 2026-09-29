@@ -217,14 +217,114 @@ impl App {
                     return None;
                 }
                 let pk = s.project.clone().or_else(|| s.cwd.as_ref().map(|c| self.svc.project_for(c)))?;
-                Some(PastInfo { idx, harness: s.harness, profile: s.profile_id.clone(), title: s.title.clone(), age_secs: crate::util::secs_since(s.modified), project_key: pk.key, project_name: pk.name, project_root: pk.root, archived })
+                Some(PastInfo { idx, harness: s.harness, profile: s.profile_id.clone(), title: s.title.clone(), age_secs: crate::util::secs_since(s.modified), project_key: pk.key, project_root: pk.root, archived })
             })
             .collect()
     }
 
+    /// The opened projects, resolved to project keys.
+    pub(crate) fn open_infos(&self) -> Vec<sidebar::OpenInfo> {
+        self.open_projects
+            .roots
+            .iter()
+            .map(|r| {
+                let pk = self.svc.project_for(r);
+                sidebar::OpenInfo { key: pk.key, name: pk.name, root: pk.root }
+            })
+            .collect()
+    }
+
+    /// First run: open the folder bro started in (unless it's your home folder). Demo: the demo projects.
+    pub(crate) fn seed_projects(&mut self) {
+        if self.svc.is_demo() {
+            let roots: Vec<std::path::PathBuf> = self.past_infos().into_iter().map(|p| p.project_root).collect();
+            for r in crate::folder::dedup(roots) {
+                self.open_projects.add(r);
+            }
+            return;
+        }
+        if self.persist && self.open_projects.roots.is_empty()
+            && let Ok(cwd) = std::env::current_dir()
+            && dirs::home_dir().is_none_or(|h| h != cwd)
+        {
+            self.open_projects.add(self.svc.project_for(&cwd).root);
+            self.open_projects.save(self.persist);
+        }
+    }
+
+    /// The project a sidebar row belongs to.
+    pub(crate) fn row_root(&self, rows: &[Row], r: &Row) -> Option<std::path::PathBuf> {
+        match r {
+            Row::New | Row::OpenFolder => None,
+            Row::Project { root, .. } => Some(root.clone()),
+            Row::Live { info, .. } => Some(info.project_root.clone()),
+            Row::Past { info } => Some(info.project_root.clone()),
+            Row::More { key, .. } => rows.iter().find_map(|r| match r {
+                Row::Project { key: k, root, .. } if k == key => Some(root.clone()),
+                _ => None,
+            }),
+        }
+    }
+
+    /// Where new sessions start: the sidebar selection while you browse it, else the project you last picked
+    /// or worked in, else the focused session's, else the first opened project.
+    pub(crate) fn current_project(&self) -> Option<std::path::PathBuf> {
+        if self.side_focus {
+            let rows = self.rows();
+            if let Some(root) = rows.get(self.side_sel).and_then(|r| self.row_root(&rows, r)) {
+                return Some(root);
+            }
+        }
+        self.cur_project
+            .clone()
+            .or_else(|| self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.root.clone()))
+            .or_else(|| self.open_projects.roots.first().cloned())
+    }
+
+    /// "+ open folder" / o: pick a folder to add to the sidebar.
+    pub(crate) fn open_folder(&mut self) {
+        let mut cands: Vec<std::path::PathBuf> = self.past_infos().into_iter().map(|p| p.project_root).collect();
+        cands.extend(crate::recents::dirs(&self.recents));
+        cands.extend(std::env::current_dir().ok());
+        let cands: Vec<_> = crate::folder::dedup(cands).into_iter().filter(|p| !self.open_projects.contains(p)).collect();
+        self.overlay = Overlay::Folder(Box::new(crate::folder::FolderPicker::new(cands)));
+    }
+
+    /// Add a folder as a project (its git root when inside a repo) and make it current.
+    pub(crate) fn add_project(&mut self, dir: std::path::PathBuf) {
+        let root = self.svc.project_for(&dir).root;
+        let added = self.open_projects.add(root.clone());
+        self.open_projects.save(self.persist);
+        self.side.set_collapsed(&self.svc.project_for(&root).key, false);
+        self.cur_project = Some(root.clone());
+        let rows = self.rows();
+        if let Some(i) = rows.iter().position(|r| matches!(r, Row::Project { root: r, .. } if *r == root)) {
+            self.side_sel = i;
+            self.side_focus = true;
+        }
+        let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        self.toast(Kind::Info, if added { format!("opened {name} \u{b7} alt+n starts a session in it") } else { format!("{name} is already open") });
+    }
+
+    /// x on a project row: take it off the sidebar (the folder and its sessions are untouched).
+    pub(crate) fn close_project(&mut self, root: std::path::PathBuf, live: usize) {
+        if live > 0 {
+            self.toast(Kind::Info, "close its running sessions first (x on each)");
+            return;
+        }
+        if self.open_projects.remove(&root) {
+            self.open_projects.save(self.persist);
+            if self.cur_project.as_ref() == Some(&root) {
+                self.cur_project = None;
+            }
+            let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            self.toast(Kind::Info, format!("closed {name} \u{b7} o opens it again"));
+        }
+    }
+
     /// The sidebar rows right now.
     pub(crate) fn rows(&self) -> Vec<Row> {
-        sidebar::build(&self.live_infos(), &self.past_infos(), &self.side)
+        sidebar::build(&self.live_infos(), &self.past_infos(), &self.open_infos(), &self.side)
     }
 
     fn past_session(&self, idx: usize) -> Option<SessionInfo> {
@@ -383,7 +483,7 @@ impl App {
 
     /// The session that most needs you: blocked first, then finished-unseen.
     pub(crate) fn attention_target(&self) -> Option<PaneId> {
-        let order = sidebar::live_order(&self.live_infos(), &self.past_infos());
+        let order = sidebar::live_order(&self.live_infos(), &self.past_infos(), &self.open_infos());
         let cur = self.focused();
         let pick = |want: &dyn Fn(PaneId) -> bool| order.iter().copied().filter(|id| Some(*id) != cur).find(|id| want(*id));
         pick(&|id| self.panes.get(&id).and_then(|p| p.activity()) == Some(Activity::Blocked)).or_else(|| pick(&|id| self.done.contains(&id)))

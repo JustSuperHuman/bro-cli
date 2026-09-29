@@ -63,7 +63,7 @@ fn sidebar_with_three_projects() {
     assert!(s.contains("phone") && s.contains("port 10001") && s.contains("3 connected"), "{s}");
     assert!(s.contains("claude · work · opus-5"), "pane title\n{s}");
     // the live sessions are numbered for alt+1..9
-    let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos());
+    let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos(), &a.open_infos());
     assert_eq!(order.len(), 5);
 }
 
@@ -170,7 +170,7 @@ fn palette_runs_actions_and_previews_themes() {
 fn keyboard_navigation() {
     let mut a = app(true);
     let _ = draw(&mut a);
-    let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos());
+    let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos(), &a.open_infos());
     // alt+3 jumps to live session 3 (sidebar order)
     key(&mut a, KeyCode::Char('3'), KeyModifiers::ALT);
     assert_eq!(a.focused(), Some(order[2]));
@@ -192,7 +192,8 @@ fn keyboard_navigation() {
     key(&mut a, KeyCode::Char('b'), KeyModifiers::ALT);
     assert!(a.side_focus);
     key(&mut a, KeyCode::Char('g'), KeyModifiers::NONE);
-    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE); // past "+ new session" onto the first project
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE); // past "+ new session" and "+ open folder" onto the first project
     key(&mut a, KeyCode::Char('h'), KeyModifiers::NONE);
     assert_eq!(a.side.collapsed.len(), 1);
     key(&mut a, KeyCode::Char('l'), KeyModifiers::NONE);
@@ -292,7 +293,7 @@ fn bridge_commands_drive_sessions() {
     let mut a = app(true);
     let _ = draw(&mut a);
     let sid = |a: &App, id: PaneId| a.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()).unwrap();
-    let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos());
+    let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos(), &a.open_infos());
     let target = order[3];
     a.bridge_command(bro_bridge::BridgeCommand::Rename { id: sid(&a, target), title: "from phone".into() });
     assert!(a.live_infos().iter().any(|l| l.name.as_deref() == Some("from phone")));
@@ -423,4 +424,32 @@ fn nearly_empty_login_preselects_the_roomiest_other() {
     let t = |id: &str, left: f64, current: bool| ResumeTarget { profile_id: id.into(), name: id.into(), detail: String::new(), left: Some(left), current };
     assert_eq!(App::resume_default(&[t("a", 50.0, true), t("b", 90.0, false)]), 0, "enough left: stay");
     assert_eq!(App::resume_default(&[t("a", 4.0, true), t("b", 90.0, false), t("c", 30.0, false)]), 1);
+}
+
+#[test]
+fn projects_are_opened_explicitly_and_new_sessions_start_in_the_current_one() {
+    use crate::sidebar::Row;
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("fresh");
+    std::fs::create_dir_all(&project).unwrap();
+    // o opens the folder picker; a typed path opens that folder
+    a.run_act(Act::FocusSidebar);
+    key(&mut a, KeyCode::Char('o'), KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::Folder(_)));
+    a.paste(&project.to_string_lossy());
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::None));
+    assert!(a.open_projects.contains(&a.svc.project_for(&project).root));
+    assert!(a.rows().iter().any(|r| matches!(r, Row::Project { name, .. } if name == "fresh")));
+    // it's current: the launcher starts there
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::ALT);
+    let Overlay::Launcher(l) = &a.overlay else { panic!("launcher") };
+    assert_eq!(l.dir, a.svc.project_for(&project).root);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    // x on the project takes it off the list
+    a.side_focus = true;
+    a.side_sel = a.rows().iter().position(|r| matches!(r, Row::Project { name, .. } if name == "fresh")).unwrap();
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(!a.rows().iter().any(|r| matches!(r, Row::Project { name, .. } if name == "fresh")));
 }

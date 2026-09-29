@@ -51,17 +51,11 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
     // 2. lists
     let list_h = inner.height.saturating_sub(9);
     let body = Rect { y, height: list_h, ..inner };
-    if l.focus == Focus::Dirs {
-        draw_dirs(f, body, l, t);
-    } else {
-        let needs = l.needs_model();
-        let left_w = if needs { body.width * 45 / 100 } else { body.width };
-        let left = Rect { width: left_w, ..body };
-        draw_run_on(f, left, l, t);
-        let right = Rect { x: body.x + left_w + 1, width: body.width.saturating_sub(left_w + 1), ..body };
-        if needs {
-            draw_models(f, right, l, t);
-        }
+    let needs = l.needs_model();
+    let left_w = if needs { body.width * 45 / 100 } else { body.width };
+    draw_run_on(f, Rect { width: left_w, ..body }, l, t);
+    if needs {
+        draw_models(f, Rect { x: body.x + left_w + 1, width: body.width.saturating_sub(left_w + 1), ..body }, l, t);
     }
     y += list_h;
 
@@ -72,7 +66,7 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
         f,
         row(y),
         vec![Span::styled("in ", muted(t)), Span::styled(crate::util::short_path(&l.dir, 70), ui::bold())],
-        vec![Span::styled("^d", fg(t.shine).add_modifier(Modifier::BOLD)), Span::styled(" change project ", muted(t))],
+        vec![Span::styled("pick another project in the sidebar ", muted(t))],
     );
     y += 1;
     let summary = match l.spec() {
@@ -108,12 +102,11 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64) {
     y += 2;
     if y < r.bottom().saturating_sub(1) {
         let enter = match l.focus {
-            Focus::Dirs => "use this folder",
             Focus::List if l.needs_model() => "pick a model",
             _ => "launch",
         };
         let mut hints = vec![("⏎", enter), ("↑↓", "move"), ("type", "filter")];
-        if l.needs_model() && l.focus != Focus::Dirs {
+        if l.needs_model() {
             hints.push(("tab", "list ⇄ models"));
         }
         hints.push(("esc", if l.focus == Focus::List { "close" } else { "back" }));
@@ -222,25 +215,6 @@ fn draw_models(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
     if idx.is_empty() {
         let msg = if models.is_empty() { "   no models known for this" } else { "   nothing matches" };
         ui::line(f, Rect { y: area.y + 1, height: 1, ..area }, vec![Span::styled(msg, muted(t))]);
-    }
-}
-
-fn draw_dirs(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
-    filter_line(f, Rect { height: 1, ..area }, &l.dir_filter, "project folder… (type to filter, or a path like ~/code/x)", true, t);
-    let dirs = l.dirs_view();
-    let rows = area.height.saturating_sub(1) as usize;
-    let start = window(l.dir_sel, rows);
-    for (k, (p, typed)) in dirs.iter().enumerate().skip(start).take(rows) {
-        let r = Rect { y: area.y + 1 + (k - start) as u16, height: 1, ..area };
-        let on = k == l.dir_sel;
-        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string_lossy().to_string());
-        let mut spans = vec![if on { Span::styled("▌ ", ui::accent(t)) } else { Span::raw("  ") }];
-        if *typed {
-            spans.push(Span::styled("↳ ", fg(t.shine)));
-        }
-        spans.push(Span::styled(format!("{name}  "), if on { ui::bold_accent(t) } else { ui::bold() }));
-        spans.push(Span::styled(crate::util::short_path(p.parent().unwrap_or(p), 60), muted(t)));
-        ui::line(f, r, spans);
     }
 }
 

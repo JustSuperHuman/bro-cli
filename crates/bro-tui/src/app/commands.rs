@@ -48,7 +48,7 @@ impl App {
             Act::ResizeUp => self.resize(Dir::Down, -0.05),
             Act::ResizeDown => self.resize(Dir::Down, 0.05),
             Act::Jump(n) => {
-                let order = sidebar::live_order(&self.live_infos(), &self.past_infos());
+                let order = sidebar::live_order(&self.live_infos(), &self.past_infos(), &self.open_infos());
                 match order.get(n as usize - 1) {
                     Some(&id) => self.go_session(id),
                     None => self.toast(Kind::Info, format!("no live session {n}")),
@@ -100,6 +100,7 @@ impl App {
             }
             Act::UsageDetails => self.toggle_usage_details(),
             Act::ShowArchived => self.toggle_show_archived(),
+            Act::OpenProject => self.open_folder(),
             Act::SwitchLogin => {
                 if let Some(id) = self.focused() {
                     self.open_switch(id);
@@ -152,12 +153,15 @@ impl App {
 
     /// Focus a live session (switching tabs) and leave the sidebar.
     pub(crate) fn go_session(&mut self, id: PaneId) {
+        if let Some(t) = self.panes.get(&id).and_then(|p| p.as_term_ref()) {
+            self.cur_project = Some(t.meta.project.root.clone());
+        }
         self.focus_pane(id);
         self.side_focus = false;
     }
 
     fn cycle_session(&mut self, d: i32) {
-        let order = sidebar::live_order(&self.live_infos(), &self.past_infos());
+        let order = sidebar::live_order(&self.live_infos(), &self.past_infos(), &self.open_infos());
         if order.is_empty() {
             return;
         }
@@ -171,7 +175,7 @@ impl App {
 
     fn cycle_project(&mut self, d: i32) {
         let live = self.live_infos();
-        let order = sidebar::live_order(&live, &self.past_infos());
+        let order = sidebar::live_order(&live, &self.past_infos(), &self.open_infos());
         let mut projects: Vec<(String, PaneId)> = vec![];
         for id in &order {
             let key = live.iter().find(|l| l.pane == *id).map(|l| l.project_key.clone()).unwrap_or_default();
@@ -191,19 +195,9 @@ impl App {
         self.go_session(projects[next].1);
     }
 
-    /// The directory the launcher should default to: the selected sidebar project, else the focused session's.
+    /// The directory new sessions start in: the current project.
     pub(crate) fn preferred_dir(&self) -> Option<PathBuf> {
-        if self.side_focus
-            && let Some(r) = self.rows().get(self.side_sel) {
-                return Some(match r {
-                    Row::Project { root, .. } => root.clone(),
-                    Row::Live { info, .. } => info.project_root.clone(),
-                    Row::Past { info } => info.project_root.clone(),
-                    Row::More { key, .. } => self.rows().iter().find_map(|r| if let Row::Project { key: k, root, .. } = r { (k == key).then(|| root.clone()) } else { None })?,
-                    Row::New => return self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.root.clone()),
-                });
-            }
-        self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.root.clone())
+        self.current_project()
     }
 
     pub(crate) fn open_launcher(&mut self, cwd: Option<PathBuf>, place: Place) {
@@ -322,7 +316,7 @@ impl App {
                 self.toast(Kind::Info, msg);
             }
             Row::Live { .. } => self.toast(Kind::Info, "a running session can't be archived \u{2014} close it first (x)"),
-            Row::New => {}
+            Row::New | Row::OpenFolder => {}
         }
         let n = self.rows().len();
         self.side_sel = self.side_sel.min(n.saturating_sub(1));
@@ -354,7 +348,11 @@ impl App {
         self.side_sel = i;
         match r {
             Row::New => self.open_launcher(None, Place::Tab),
-            Row::Project { key, live, collapsed, .. } => self.side.set_collapsed(key, *live > 0, !*collapsed),
+            Row::Project { key, root, collapsed, .. } => {
+                self.cur_project = Some(root.clone());
+                self.side.set_collapsed(key, !*collapsed);
+            }
+            Row::OpenFolder => self.open_folder(),
             Row::Live { info, .. } => self.go_session(info.pane),
             Row::Past { info } => self.open_resume(info.idx),
             Row::More { key, .. } => {
@@ -384,7 +382,8 @@ impl App {
             return;
         }
         if let Some((i, live)) = Self::project_row(&rows, &key) {
-            self.side.set_collapsed(&key, live, true);
+            let _ = live;
+            self.side.set_collapsed(&key, true);
             self.side_sel = i;
         }
     }
@@ -393,11 +392,11 @@ impl App {
     pub(crate) fn side_expand(&mut self) {
         let rows = self.rows();
         match rows.get(self.side_sel) {
-            Some(Row::Project { key, live, collapsed: true, .. }) => self.side.set_collapsed(key, *live > 0, false),
+            Some(Row::Project { key, collapsed: true, .. }) => self.side.set_collapsed(key, false),
             Some(Row::More { key, .. }) => {
                 self.side.past_open.insert(key.clone());
             }
-            Some(Row::Project { .. } | Row::New) => self.side_sel = (self.side_sel + 1).min(rows.len().saturating_sub(1)),
+            Some(Row::Project { .. } | Row::New | Row::OpenFolder) => self.side_sel = (self.side_sel + 1).min(rows.len().saturating_sub(1)),
             _ => {}
         }
     }

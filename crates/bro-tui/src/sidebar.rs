@@ -1,8 +1,8 @@
 //! The sidebar model: a pure function from live sessions + past sessions + UI state (collapsed projects,
 //! open "more" lists, filter) to the rows the sidebar draws and navigates. No I/O, no drawing.
 //!
-//! Order: projects with live sessions first (in the order their first session started, so rows don't jump),
-//! then projects that only have past sessions, most recent first.
+//! Order: the projects you opened (your order), then projects that only have running sessions. Earlier
+//! sessions are listed under their project; history alone never adds a project.
 
 use crate::pane::{Activity, PaneId};
 use bro_core::Harness;
@@ -40,19 +40,24 @@ pub struct PastInfo {
     pub title: String,
     pub age_secs: u64,
     pub project_key: String,
-    pub project_name: String,
     pub project_root: PathBuf,
     /// shown only while "show archived" is on
     pub archived: bool,
 }
 
+/// A project you've opened (from `OpenProjects`), resolved.
+#[derive(Clone, Debug)]
+pub struct OpenInfo {
+    pub key: String,
+    pub name: String,
+    pub root: PathBuf,
+}
+
 /// Sidebar UI state.
 #[derive(Clone, Debug, Default)]
 pub struct SideState {
-    /// projects *with live sessions* you collapsed (they start open)
+    /// folded projects (projects start open)
     pub collapsed: HashSet<String>,
-    /// projects *without live sessions* you opened (they start closed)
-    pub expanded: HashSet<String>,
     /// projects showing all their earlier sessions instead of the first few
     pub past_open: HashSet<String>,
     pub filter: String,
@@ -61,19 +66,16 @@ pub struct SideState {
 }
 
 impl SideState {
-    /// Is this project folded? Projects with live sessions start open, the rest start closed.
-    pub fn is_collapsed(&self, key: &str, has_live: bool) -> bool {
-        if has_live { self.collapsed.contains(key) } else { !self.expanded.contains(key) }
+    pub fn is_collapsed(&self, key: &str) -> bool {
+        self.collapsed.contains(key)
     }
 
     /// Fold or unfold a project.
-    pub fn set_collapsed(&mut self, key: &str, has_live: bool, fold: bool) {
-        // `collapsed` records folds of live projects, `expanded` records unfolds of the rest
-        let (set, insert) = if has_live { (&mut self.collapsed, fold) } else { (&mut self.expanded, !fold) };
-        if insert {
-            set.insert(key.to_string());
+    pub fn set_collapsed(&mut self, key: &str, fold: bool) {
+        if fold {
+            self.collapsed.insert(key.to_string());
         } else {
-            set.remove(key);
+            self.collapsed.remove(key);
         }
     }
 }
@@ -83,6 +85,8 @@ impl SideState {
 pub enum Row {
     /// "+ new session" — always first
     New,
+    /// "+ open folder" — right under it
+    OpenFolder,
     Project {
         key: String,
         name: String,
@@ -101,10 +105,10 @@ pub enum Row {
 }
 
 impl Row {
-    /// The project a row belongs to (empty for [`Row::New`]).
+    /// The project a row belongs to (empty for the action rows).
     pub fn project_key(&self) -> &str {
         match self {
-            Row::New => "",
+            Row::New | Row::OpenFolder => "",
             Row::Project { key, .. } | Row::More { key, .. } => key,
             Row::Live { info, .. } => &info.project_key,
             Row::Past { info } => &info.project_key,
@@ -116,8 +120,6 @@ impl Row {
 pub const PAST_SHOWN: usize = 4;
 /// Earlier sessions shown once "more" is opened.
 pub const PAST_PER_PROJECT: usize = 25;
-/// Projects shown that only have earlier sessions.
-pub const PAST_PROJECTS: usize = 12;
 
 struct Group<'a> {
     key: String,
@@ -127,9 +129,11 @@ struct Group<'a> {
     past: Vec<&'a PastInfo>,
 }
 
-fn groups<'a>(live: &'a [LiveInfo], past: &'a [PastInfo]) -> Vec<Group<'a>> {
-    let mut order: Vec<Group> = vec![];
-    let mut at: HashMap<String, usize> = HashMap::new();
+/// Opened projects in your order, then projects that only have running sessions (in launch order).
+/// Earlier sessions only attach to those — there are no "history-only" projects.
+fn groups<'a>(live: &'a [LiveInfo], past: &'a [PastInfo], open: &[OpenInfo]) -> Vec<Group<'a>> {
+    let mut order: Vec<Group> = open.iter().map(|o| Group { key: o.key.clone(), name: o.name.clone(), root: o.root.clone(), live: vec![], past: vec![] }).collect();
+    let mut at: HashMap<String, usize> = order.iter().enumerate().map(|(i, g)| (g.key.clone(), i)).collect();
     let mut live_sorted: Vec<&LiveInfo> = live.iter().collect();
     live_sorted.sort_by_key(|l| l.seq);
     for l in live_sorted {
@@ -139,35 +143,25 @@ fn groups<'a>(live: &'a [LiveInfo], past: &'a [PastInfo]) -> Vec<Group<'a>> {
         });
         order[i].live.push(l);
     }
-    let with_live = order.len();
     let mut past_sorted: Vec<&PastInfo> = past.iter().collect();
     past_sorted.sort_by_key(|p| p.age_secs);
     for p in past_sorted {
-        let i = match at.get(&p.project_key) {
-            Some(&i) => i,
-            None => {
-                if order.len() - with_live >= PAST_PROJECTS {
-                    continue;
-                }
-                order.push(Group { key: p.project_key.clone(), name: p.project_name.clone(), root: p.project_root.clone(), live: vec![], past: vec![] });
-                at.insert(p.project_key.clone(), order.len() - 1);
-                order.len() - 1
-            }
-        };
-        order[i].past.push(p);
+        if let Some(&i) = at.get(&p.project_key) {
+            order[i].past.push(p);
+        }
     }
     order
 }
 
 /// Live sessions in sidebar order (for alt+1..9 and next/prev), ignoring collapse and filter.
-pub fn live_order(live: &[LiveInfo], past: &[PastInfo]) -> Vec<PaneId> {
-    groups(live, past).iter().flat_map(|g| g.live.iter().map(|l| l.pane)).collect()
+pub fn live_order(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<PaneId> {
+    groups(live, past, open).iter().flat_map(|g| g.live.iter().map(|l| l.pane)).collect()
 }
 
 /// Project keys in sidebar order.
 #[cfg(test)]
-pub fn project_order(live: &[LiveInfo], past: &[PastInfo]) -> Vec<String> {
-    groups(live, past).into_iter().map(|g| g.key).collect()
+pub fn project_order(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<String> {
+    groups(live, past, open).into_iter().map(|g| g.key).collect()
 }
 
 fn matches(hay: &[&str], q: &str) -> bool {
@@ -175,14 +169,15 @@ fn matches(hay: &[&str], q: &str) -> bool {
 }
 
 /// The rows to draw.
-pub fn build(live: &[LiveInfo], past: &[PastInfo], st: &SideState) -> Vec<Row> {
+pub fn build(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo], st: &SideState) -> Vec<Row> {
     let q = st.filter.trim().to_lowercase();
-    let numbering: HashMap<PaneId, usize> = live_order(live, past).into_iter().enumerate().map(|(i, p)| (p, i + 1)).collect();
+    let numbering: HashMap<PaneId, usize> = live_order(live, past, open).into_iter().enumerate().map(|(i, p)| (p, i + 1)).collect();
     let mut rows = vec![];
     if q.is_empty() {
         rows.push(Row::New);
+        rows.push(Row::OpenFolder);
     }
-    for g in groups(live, past) {
+    for g in groups(live, past, open) {
         let project_hit = !q.is_empty() && matches(&[&g.name], &q);
         let live_rows: Vec<&LiveInfo> = g
             .live
@@ -194,7 +189,7 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], st: &SideState) -> Vec<Row> {
         if !q.is_empty() && live_rows.is_empty() && past_rows.is_empty() && !project_hit {
             continue;
         }
-        let collapsed = q.is_empty() && st.is_collapsed(&g.key, !g.live.is_empty());
+        let collapsed = q.is_empty() && st.is_collapsed(&g.key);
         let attention = g.live.iter().any(|l| l.activity == Some(Activity::Blocked) || l.done);
         let last_age = g.past.first().map(|p| p.age_secs);
         rows.push(Row::Project { key: g.key.clone(), name: g.name.clone(), root: g.root.clone(), live: g.live.len(), collapsed, attention, last_age });
@@ -238,13 +233,18 @@ mod tests {
     }
 
     fn past(idx: usize, project: &str, title: &str, age: u64) -> PastInfo {
-        PastInfo { idx, harness: Harness::Codex, profile: Some("codex:local".into()), title: title.into(), age_secs: age, project_key: project.into(), project_name: project.into(), project_root: PathBuf::from(project), archived: false }
+        PastInfo { idx, harness: Harness::Codex, profile: Some("codex:local".into()), title: title.into(), age_secs: age, project_key: project.into(), project_root: PathBuf::from(project), archived: false }
+    }
+
+    fn opened(keys: &[&str]) -> Vec<OpenInfo> {
+        keys.iter().map(|k| OpenInfo { key: k.to_string(), name: k.to_string(), root: PathBuf::from(k) }).collect()
     }
 
     fn kinds(rows: &[Row]) -> String {
         rows.iter()
             .map(|r| match r {
                 Row::New => "+".to_string(),
+                Row::OpenFolder => "o".to_string(),
                 Row::Project { name, .. } => format!("P:{name}"),
                 Row::Live { info, n } => format!("L{}#{}", info.pane, n.unwrap_or(0)),
                 Row::Past { info } => format!("p{}", info.idx),
@@ -255,40 +255,38 @@ mod tests {
     }
 
     #[test]
-    fn live_projects_open_past_only_projects_closed() {
-        let l = vec![live(10, "b", 2, None), live(11, "a", 1, Some(Activity::Blocked)), live(12, "b", 3, None)];
-        let p = vec![past(0, "c", "old", 900), past(1, "b", "fix it", 100), past(2, "d", "newer", 50), past(3, "b", "other", 10)];
-        let rows = build(&l, &p, &SideState::default());
-        assert_eq!(kinds(&rows), "+ P:a L11#1 P:b L10#2 L12#3 p3 p1 P:d P:c");
-        assert!(matches!(&rows[1], Row::Project { attention: true, live: 1, .. }));
-        assert!(matches!(&rows[8], Row::Project { collapsed: true, last_age: Some(50), .. }));
-        assert_eq!(live_order(&l, &p), vec![11, 10, 12]);
-        assert_eq!(project_order(&l, &p), vec!["a", "b", "d", "c"]);
+    fn opened_projects_first_history_only_projects_hidden() {
+        let l = vec![live(10, "b", 2, None), live(11, "x", 1, Some(Activity::Blocked))];
+        let p = vec![past(0, "c", "never opened", 900), past(1, "b", "fix it", 100), past(2, "a", "newer", 50)];
+        let rows = build(&l, &p, &opened(&["a", "b"]), &SideState::default());
+        // a and b in your order, then x (only a running session), no "c"
+        assert_eq!(kinds(&rows), "+ o P:a p2 P:b L10#1 p1 P:x L11#2");
+        assert!(matches!(&rows[7], Row::Project { attention: true, .. }));
+        assert_eq!(live_order(&l, &p, &opened(&["a", "b"])), vec![10, 11]);
+        assert_eq!(project_order(&l, &p, &opened(&["a", "b"])), vec!["a", "b", "x"]);
     }
 
     #[test]
-    fn collapse_expand_more_and_filter() {
+    fn collapse_more_and_filter() {
         let l = vec![live(1, "a", 1, None)];
         let p: Vec<PastInfo> = (0..6).map(|i| past(i, "a", "port the loop", i as u64)).chain([past(9, "b", "qr pairing", 5)]).collect();
+        let open = opened(&["a", "b"]);
         let mut st = SideState::default();
-        assert_eq!(kinds(&build(&l, &p, &st)), "+ P:a L1#1 p0 p1 p2 p3 M2 P:b");
+        assert_eq!(kinds(&build(&l, &p, &open, &st)), "+ o P:a L1#1 p0 p1 p2 p3 M2 P:b p9");
         st.past_open.insert("a".into());
-        assert_eq!(kinds(&build(&l, &p, &st)), "+ P:a L1#1 p0 p1 p2 p3 p4 p5 P:b");
-        st.set_collapsed("a", true, true);
-        st.set_collapsed("b", false, false);
-        assert_eq!(kinds(&build(&l, &p, &st)), "+ P:a P:b p9");
-        assert!(st.is_collapsed("a", true) && !st.is_collapsed("b", false));
-        // filter: no "new" row, matches only, collapse ignored
+        assert_eq!(kinds(&build(&l, &p, &open, &st)), "+ o P:a L1#1 p0 p1 p2 p3 p4 p5 P:b p9");
+        st.set_collapsed("a", true);
+        assert_eq!(kinds(&build(&l, &p, &open, &st)), "+ o P:a P:b p9");
         st.filter = "QR".into();
-        assert_eq!(kinds(&build(&l, &p, &st)), "P:b p9");
+        assert_eq!(kinds(&build(&l, &p, &open, &st)), "P:b p9");
         st.filter = "zzz".into();
-        assert!(build(&l, &p, &st).is_empty());
+        assert!(build(&l, &p, &open, &st).is_empty());
     }
 
     #[test]
     fn numbering_stops_at_nine() {
         let l: Vec<LiveInfo> = (0..11).map(|i| live(i, "a", i, None)).collect();
-        let rows = build(&l, &[], &SideState::default());
+        let rows = build(&l, &[], &[], &SideState::default());
         let numbered = rows.iter().filter(|r| matches!(r, Row::Live { n: Some(_), .. })).count();
         assert_eq!(numbered, 9);
     }
