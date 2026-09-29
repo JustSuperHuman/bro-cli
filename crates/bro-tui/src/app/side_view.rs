@@ -27,6 +27,8 @@ struct UsageLine {
     note: Option<String>,
     /// countdown to the tighter window's reset (expanded view)
     resets_at: Option<i64>,
+    /// the Claude total with a Fable line folded under it: Some(open)
+    fable: Option<bool>,
 }
 
 impl App {
@@ -42,7 +44,7 @@ impl App {
 
         // footer first (fixed height), rows get the rest
         let usage = self.usage_lines();
-        let foot_h = footer_height(usage.len() as u16, inner.height);
+        let foot_h = footer_height(usage.len() as u16, self.usage_expanded, inner.height);
         let list = Rect { height: inner.height.saturating_sub(foot_h), ..inner };
         if foot_h > 0 {
             self.draw_footer(f, Rect { y: inner.bottom() - foot_h, height: foot_h, ..inner }, &usage, &t);
@@ -213,14 +215,20 @@ impl App {
                     None
                 };
                 let h = if claude { bro_core::Harness::Claude } else { bro_core::Harness::Codex };
-                Some(UsageLine { harness: Some(h), label: h.label().into(), h5: s.h5, wk: s.wk, approx: s.h5_estimated, note, resets_at: None })
+                Some(UsageLine { harness: Some(h), label: h.label().into(), h5: s.h5, wk: s.wk, approx: s.h5_estimated, note, resets_at: None, fable: None })
             };
             let mut v: Vec<UsageLine> = [total(true), total(false)].into_iter().flatten().collect();
             // Fable has its own allowance: show it under Claude when any account has it
             let claude: Vec<_> = signed_in.iter().filter(|p| p.is_claude()).map(|p| (*p, state_of(&p.id))).collect();
             let s = bro_core::usage::app_summary(claude);
             if s.fable_wk.is_some() {
-                v.insert(1, UsageLine { harness: None, label: "fable".into(), h5: s.fable_5h, wk: s.fable_wk, approx: false, note: None, resets_at: None });
+                // folded under the Claude line; clicking it (or alt+U twice) shows it
+                if let Some(c) = v.first_mut().filter(|l| l.harness == Some(bro_core::Harness::Claude)) {
+                    c.fable = Some(self.show_fable);
+                }
+                if self.show_fable {
+                    v.insert(1, UsageLine { harness: None, label: "fable".into(), h5: s.fable_5h, wk: s.fable_wk, approx: false, note: None, resets_at: None, fable: None });
+                }
             }
             return v;
         }
@@ -238,7 +246,7 @@ impl App {
                     None if e.is_some_and(|e| e.error.is_some()) => (None, None, false, None, Some("unavailable".to_string())),
                     None => (None, None, false, None, Some("…".to_string())),
                 };
-                UsageLine { harness: Some(h), label: p.name.clone(), h5, wk, approx, note, resets_at }
+                UsageLine { harness: Some(h), label: p.name.clone(), h5, wk, approx, note, resets_at, fable: None }
             })
             .collect()
     }
@@ -260,15 +268,21 @@ impl App {
             y += 1;
             let name_w = usage.iter().map(|u| ui::width(&u.label)).max().unwrap_or(6).clamp(5, 10);
             let meter_n = (area.width as usize).saturating_sub(name_w + 3 + 12).clamp(0, 8);
+            let status_rows = if self.usage_expanded { 2 } else { 0 };
             for u in usage {
-                if y + 2 >= area.bottom() {
+                if y + status_rows >= area.bottom() {
                     break;
                 }
                 let r = row(y);
                 let brand = u.harness.map(|h| ui::harness_color(Some(h), t)).unwrap_or(t.muted);
                 let glyph = u.harness.map(|h| ui::harness_glyph(Some(h))).unwrap_or(" ");
                 let name_style = if u.harness.is_some() { ui::bold() } else { muted(t) };
-                let mut left = vec![Span::styled(format!("{glyph} "), fg(brand)), Span::styled(ui::pad(&u.label, name_w), name_style), Span::raw(" ")];
+                let label = match u.fable {
+                    Some(open) => format!("{} {}", u.label, if open { "▾" } else { "▸" }),
+                    None if u.harness.is_none() => format!(" {}", u.label),
+                    None => u.label.clone(),
+                };
+                let mut left = vec![Span::styled(format!("{glyph} "), fg(brand)), Span::styled(ui::pad(&label, name_w + 2), name_style), Span::raw(" ")];
                 let mut right = vec![];
                 match &u.note {
                     Some(n) if u.h5.is_none() && u.wk.is_none() => right.push(Span::styled(format!("{n} "), muted(t))),
@@ -291,11 +305,15 @@ impl App {
                     }
                 }
                 ui::line_lr(f, r, left, right);
-                self.side_hits.push((r, SideHit::Usage));
+                self.side_hits.push((r, if u.fable.is_some() { SideHit::Fable } else { SideHit::Usage }));
                 y += 1;
             }
         }
-        // proxy + phone bridge, pinned to the bottom, in plain words (click either for details)
+        // proxy + phone bridge, pinned to the bottom, in plain words (click either for details) —
+        // only with the usage block expanded
+        if !self.usage_expanded {
+            return;
+        }
         let st = self.svc.state();
         let pr = row(area.bottom() - 2);
         let label = |icon: &str, name: &str| Span::styled(format!("{} {:<8}", ui::icon(icon), name), muted(t));
@@ -346,13 +364,14 @@ fn figure(v: Option<f64>, approx: bool, t: &Theme) -> Vec<Span<'static>> {
     }
 }
 
-/// Footer rows: header + usage lines + proxy + bridge, or just proxy + bridge when space is short.
-fn footer_height(usage: u16, avail: u16) -> u16 {
-    let full = if usage > 0 { 1 + usage + 2 } else { 2 };
+/// Footer rows: header + usage lines (+ proxy + bridge when expanded), or less when space is short.
+fn footer_height(usage: u16, expanded: bool, avail: u16) -> u16 {
+    let status = if expanded { 2 } else { 0 };
+    let full = if usage > 0 { 1 + usage + status } else { status };
     if avail >= full + 8 {
         full
     } else if avail >= 12 {
-        2
+        status
     } else {
         0
     }

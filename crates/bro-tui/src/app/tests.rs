@@ -59,8 +59,13 @@ fn sidebar_with_three_projects() {
     assert!(s.contains("+ new session"), "{s}");
     assert!(s.contains("usage left"), "{s}");
     assert!(!s.contains("+ new  alt+n"), "no tab bar\n{s}");
+    assert!(!s.contains("port 3458"), "proxy line hidden while usage is collapsed
+{s}");
+    a.usage_expanded = true;
+    let s = draw(&mut a);
     assert!(s.contains("proxy") && s.contains("port 3458"), "{s}");
     assert!(s.contains("phone") && s.contains("port 10001") && s.contains("3 connected"), "{s}");
+    a.usage_expanded = false;
     assert!(s.contains("claude · work · opus-5"), "pane title\n{s}");
     // the live sessions are numbered for alt+1..9
     let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos(), &a.open_infos());

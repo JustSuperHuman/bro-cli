@@ -74,6 +74,8 @@ pub(crate) enum SideHit {
     UsageToggle,
     /// the × on a running session's row
     Close(PaneId),
+    /// the Claude usage total: shows / hides the Fable line
+    Fable,
     Proxy,
     Bridge,
 }
@@ -123,6 +125,8 @@ pub struct App {
     pub(crate) side_focus: bool,
     /// sidebar usage block: every profile (true) or the Claude / Codex totals
     pub(crate) usage_expanded: bool,
+    /// the Fable line under the Claude usage total
+    pub(crate) show_fable: bool,
     pub(crate) side_sel: usize,
     pub(crate) side: SideState,
     pub(crate) side_filtering: bool,
@@ -180,6 +184,7 @@ impl App {
             sidebar: true,
             side_focus: false,
             usage_expanded: settings.usage_expanded,
+            show_fable: false,
             side_sel: 0,
             side: SideState::default(),
             side_filtering: false,

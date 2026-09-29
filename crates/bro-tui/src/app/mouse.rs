@@ -41,6 +41,7 @@ impl App {
                             }
                         }
                         SideHit::Close(id) => self.ask_close(id),
+                        SideHit::Fable => self.show_fable = !self.show_fable,
                         SideHit::Usage => self.open_view("usage"),
                         SideHit::UsageToggle => self.toggle_usage_details(),
                         SideHit::Proxy => self.open_view("proxy"),
