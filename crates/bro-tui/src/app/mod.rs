@@ -71,15 +71,22 @@ pub(crate) enum SideHit {
     /// index into the current sidebar rows
     Row(usize),
     Usage,
+    /// Start a session from a harness total or a specific usage account.
+    LaunchUsage(bro_core::Harness, Option<String>),
     UsageToggle,
     /// the × on a running session's row
     Close(PaneId),
     /// the × on a project row: (root, running sessions)
     CloseProject(std::path::PathBuf, usize),
-    /// the Claude usage total: shows / hides the Fable line
+    /// the disclosure arrow beside the Claude usage total
     Fable,
     Proxy,
     Bridge,
+    /// the new-session strip's icons: claude / codex, or a terminal (None)
+    Quick(Option<bro_core::Harness>),
+    /// the new-session strip's "+" and key hint: the launcher
+    Launcher,
+    TileAll,
 }
 
 /// Startup options.
@@ -102,6 +109,7 @@ pub struct App {
     /// launch order per pane (sidebar grouping)
     seqs: HashMap<PaneId, u64>,
     pub(crate) theme: Theme,
+    project_colors: HashMap<String, usize>,
     pub(crate) keymap: Keymap,
     pub(crate) svc: Services,
     tx: Sender<Event>,
@@ -118,10 +126,22 @@ pub struct App {
     side_hits: Vec<(Rect, SideHit)>,
     pane_close: Vec<(Rect, PaneId)>,
     drag: Option<(Vec<bool>, Dir, Rect)>,
+    side_area: Rect,
+    side_drag: bool,
+    sidebar_width: Option<u16>,
+    side_edge_click: Option<Instant>,
     sel: Option<Sel>,
     copy_pending: bool,
+    /// Cancel a delayed clipboard read when the user changes the input target.
+    clipboard_request: Option<Instant>,
     hover: Position,
     last_click: Option<(Instant, u16, u16)>,
+    /// The confirmation dialog's buttons as last drawn: (area, is_yes).
+    confirm_hits: Vec<(Rect, bool)>,
+    /// The last left click bro kept for itself on a pane, for double-click to full screen.
+    last_pane_click: Option<(Instant, PaneId, Position)>,
+    /// Open only on release at the same cell, so dragging a link still selects text.
+    link_press: Option<(PaneId, Position, String)>,
     // sidebar
     pub(crate) sidebar: bool,
     pub(crate) side_focus: bool,
@@ -146,9 +166,16 @@ pub struct App {
     pub(crate) open_projects: crate::projects::OpenProjects,
     /// the project new sessions start in (last one you picked in the sidebar or worked in)
     pub(crate) cur_project: Option<std::path::PathBuf>,
+    /// the pane focus was on when `cur_project` last followed it
+    last_focus: Option<PaneId>,
     /// sessions shown together (shift+click in the sidebar); 2+ = stacked view
     pub(crate) stack: Vec<PaneId>,
     pub(crate) stack_focus: Option<PaneId>,
+    /// Keep newly opened sessions in the all-sessions grid.
+    tile_all: bool,
+    /// The grid shows only this project's sessions (click a project in the sidebar).
+    pub(crate) tile_project: Option<String>,
+    stack_zoom: bool,
     term_focused: bool,
     opts: Opts,
     _theme_watcher: Option<notify::RecommendedWatcher>,
@@ -167,6 +194,7 @@ impl App {
             next_id: 1,
             seqs: HashMap::new(),
             theme,
+            project_colors: HashMap::new(),
             keymap,
             svc,
             tx: tx.clone(),
@@ -182,10 +210,18 @@ impl App {
             side_hits: vec![],
             pane_close: vec![],
             drag: None,
+            side_area: Rect::default(),
+            side_drag: false,
+            sidebar_width: settings.sidebar_width,
+            side_edge_click: None,
             sel: None,
             copy_pending: false,
+            clipboard_request: None,
             hover: Position { x: u16::MAX, y: u16::MAX },
             last_click: None,
+            last_pane_click: None,
+            confirm_hits: vec![],
+            link_press: None,
             sidebar: true,
             side_focus: false,
             usage_expanded: settings.usage_expanded,
@@ -202,8 +238,12 @@ impl App {
             persist: opts.load_recents,
             open_projects: if opts.load_recents { crate::projects::OpenProjects::load() } else { Default::default() },
             cur_project: None,
+            last_focus: None,
             stack: vec![],
             stack_focus: None,
+            tile_all: false,
+            tile_project: None,
+            stack_zoom: false,
             term_focused: true,
             opts,
             _theme_watcher: None,
@@ -236,6 +276,7 @@ impl App {
         let id = self.add(p);
         self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoom: false });
         self.cur = self.tabs.len() - 1;
+        self.include_in_tiles(id);
         id
     }
 
@@ -252,11 +293,91 @@ impl App {
         self.stack.len() >= 2
     }
 
+    fn clear_stack(&mut self) {
+        self.stack.clear();
+        self.stack_focus = None;
+        self.stack_zoom = false;
+        self.tile_all = false;
+        self.tile_project = None;
+    }
+
+    /// Live sessions in sidebar order: all of them, or one project's.
+    fn tile_ids(&self, project: Option<&str>) -> Vec<PaneId> {
+        let live = self.live_infos();
+        let ids = crate::sidebar::live_order(&live, &self.past_infos(), &self.open_infos());
+        match project {
+            Some(key) => ids.into_iter().filter(|id| live.iter().any(|l| l.pane == *id && l.project_key == key)).collect(),
+            None => ids,
+        }
+    }
+
+    fn include_in_tiles(&mut self, id: PaneId) {
+        if self.tile_all && self.panes.get(&id).is_some_and(|p| p.is_terminal()) {
+            let mut ids = self.tile_ids(self.tile_project.as_deref());
+            if !ids.contains(&id) {
+                // a session in another project: widen the grid so it shows
+                self.tile_project = None;
+                ids = self.tile_ids(None);
+            }
+            self.stack = ids;
+            self.stack_focus = Some(id);
+            self.stack_zoom = false;
+        } else {
+            self.clear_stack();
+        }
+    }
+
+    fn toggle_tiles(&mut self) {
+        let focus = self.focused();
+        if self.tile_all && self.tile_project.is_none() {
+            self.clear_stack();
+            if let Some(id) = focus {
+                self.focus_pane(id);
+            }
+        } else {
+            // from one session or one project's grid: every session
+            let ids = self.tile_ids(None);
+            if ids.len() < 2 {
+                self.toast(Kind::Info, "open two sessions to tile them");
+                return;
+            }
+            self.stack_focus = focus.filter(|id| ids.contains(id)).or_else(|| ids.first().copied());
+            self.stack = ids;
+            self.tile_all = true;
+            self.tile_project = None;
+            self.stack_zoom = false;
+        }
+        self.side_focus = false;
+    }
+
+    /// Click / ⏎ on a project: tile only its sessions; again: back to every session.
+    pub(crate) fn toggle_project_tiles(&mut self, key: &str) {
+        if self.tile_project.as_deref() == Some(key) {
+            self.toggle_tiles();
+            return;
+        }
+        let ids = self.tile_ids(Some(key));
+        let Some(&first) = ids.first() else { return };
+        let focus = self.focused().filter(|id| ids.contains(id)).unwrap_or(first);
+        self.clear_stack();
+        self.focus_pane(focus);
+        if ids.len() >= 2 {
+            self.stack = ids;
+            self.stack_focus = Some(focus);
+            self.tile_all = true;
+        }
+        self.tile_project = Some(key.to_string());
+        self.side_focus = false;
+    }
+
     /// shift+click / shift+⏎ on a session: add it to the stacked view, or take it out again.
     pub(crate) fn toggle_stack(&mut self, id: PaneId) {
         if !self.panes.contains_key(&id) {
             return;
         }
+        self.tile_all = false;
+        self.tile_project = None;
+        self.stack_zoom = false;
         if self.stack.is_empty()
             && let Some(cur) = self.focused()
             && cur != id
@@ -297,25 +418,31 @@ impl App {
             }
         };
         let id = self.add(p);
+        // The focused tile may belong to a different tab from the last single-session view.
+        if let Some(i) = self.tabs.iter().position(|t| t.root.contains(from)) {
+            self.cur = i;
+        }
         let tab = &mut self.tabs[self.cur];
         if !tab.root.split(from, id, dir) {
             tab.root = Node::Split { dir, ratio: 0.5, a: Box::new(tab.root.clone()), b: Box::new(Node::Leaf(id)) };
         }
         tab.focus = id;
         tab.zoom = false;
+        self.include_in_tiles(id);
         id
     }
 
     /// Close a pane: end its session (bridge, proxy route, staged files) and drop it from its tab.
     pub(crate) fn close(&mut self, id: PaneId) {
+        let mut remaining = None;
         if self.stack.contains(&id) {
             self.stack.retain(|x| *x != id);
             if self.stack_focus == Some(id) {
                 self.stack_focus = self.stack.last().copied();
             }
             if self.stack.len() < 2 {
-                self.stack.clear();
-                self.stack_focus = None;
+                remaining = self.stack.first().copied();
+                self.clear_stack();
             }
         }
         if let Some(mut p) = self.panes.remove(&id) {
@@ -360,6 +487,9 @@ impl App {
                 self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
             }
         }
+        if let Some(id) = remaining {
+            self.focus_pane(id);
+        }
     }
 
     /// Switch to the tab holding `id` and focus it (inside a stack, just move the focus there).
@@ -369,8 +499,7 @@ impl App {
             self.done.remove(&id);
             return;
         }
-        self.stack.clear();
-        self.stack_focus = None;
+        self.clear_stack();
         if let Some(i) = self.tabs.iter().position(|t| t.root.contains(id)) {
             self.cur = i;
             let t = &mut self.tabs[i];
@@ -385,7 +514,7 @@ impl App {
     /// Panes on screen now.
     pub(crate) fn visible(&self) -> Vec<PaneId> {
         if self.stacked() {
-            return self.stack.clone();
+            return if self.stack_zoom { self.focused().into_iter().collect() } else { self.stack.clone() };
         }
         match self.tabs.get(self.cur) {
             Some(t) if t.zoom => vec![t.focus],
@@ -398,11 +527,8 @@ impl App {
         self.toasts.push(kind, s);
     }
 
-    /// A toast, plus a desktop notification when the terminal isn't focused and the kind is loud.
+    /// Keep notifications inside bro, without an additional OS popup.
     pub(crate) fn raise(&mut self, kind: Kind, text: String) {
-        if !self.term_focused && kind.loud() && !cfg!(test) {
-            crate::alerts::desktop("bro", &text);
-        }
         self.toast(kind, text);
     }
 
@@ -437,6 +563,7 @@ impl App {
                 }
                 Action::Close => self.close(from),
                 Action::Toast(k, s) => self.toast(k, s),
+                Action::LaunchUsage(h, profile) => self.launch_usage(h, profile),
             }
         }
     }
@@ -477,9 +604,31 @@ impl App {
 
     /// Housekeeping after each batch of events.
     pub(crate) fn after_events(&mut self) {
+        self.follow_focus();
+        let focused = self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone());
+        self.svc.set_focused_session(focused.as_deref());
         self.reap();
         self.track_agents();
         self.toasts.expire();
+    }
+
+    /// Moving focus onto a session (click, keys, tab switch) makes its project the current one, so new sessions
+    /// (the usage panel's, the strip's) start where you are; a view pane keeps the last session's project.
+    pub(crate) fn follow_focus(&mut self) {
+        let focused = self.focused();
+        if focused == self.last_focus {
+            return;
+        }
+        self.last_focus = focused;
+        if let Some(t) = focused.and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()) {
+            self.cur_project = Some(t.meta.project.root.clone());
+        }
+    }
+
+    /// Make `root` current by choice (sidebar, folder picker): it holds until focus moves to another session.
+    pub(crate) fn pick_project(&mut self, root: std::path::PathBuf) {
+        self.cur_project = Some(root);
+        self.last_focus = self.focused();
     }
 
     /// Kill every session and stop the services.
@@ -520,7 +669,14 @@ impl App {
             Event::Input(CEvent::Mouse(m)) => self.mouse(m),
             Event::Input(CEvent::Paste(s)) => self.paste(&s),
             Event::Input(CEvent::FocusGained) => self.term_focused = true,
-            Event::Input(CEvent::FocusLost) => self.term_focused = false,
+            Event::Input(CEvent::FocusLost) => {
+                self.term_focused = false;
+                if self.side_drag {
+                    self.side_drag = false;
+                    self.save_sidebar_width();
+                }
+                self.drag = None;
+            }
             Event::Input(_) => {}
             Event::Wake(id) => {
                 self.with_pane(id, |p, cx| p.poll(cx));
@@ -539,6 +695,12 @@ impl App {
                 }
             }
             Event::Services => {
+                if let Overlay::Launcher(l) = &self.overlay {
+                    let data = overlays::launcher_data_with_installed(self, l.data.installed.clone());
+                    if let Overlay::Launcher(l) = &mut self.overlay {
+                        l.set_data(data);
+                    }
+                }
                 // new data (e.g. the re-scan the continue picker asked for): refresh its list in place
                 if matches!(self.overlay, Overlay::Continue(_)) {
                     self.refresh_continue();
@@ -554,6 +716,24 @@ impl App {
                 }
             }
             Event::Toast(k, s) => self.raise(k, s),
+            Event::OpenLink(uri) => {
+                if !cfg!(test) {
+                    let tx = self.tx.clone();
+                    std::thread::spawn(move || {
+                        if let Err(error) = crate::panes::links::open(&uri) {
+                            let _ = tx.send(Event::Toast(Kind::Error, error));
+                        }
+                    });
+                }
+            }
+            Event::ClipboardText(request, text) => {
+                if self.clipboard_request == Some(request) {
+                    self.clipboard_request = None;
+                    if let Some(text) = text {
+                        self.paste(&text);
+                    }
+                }
+            }
             Event::Clipboard(id, got, key) => match got {
                 Some(paths) => {
                     let text = crate::clip::paste_form(&paths);
@@ -590,16 +770,34 @@ impl App {
     }
 
     fn paste(&mut self, s: &str) {
-        if let Overlay::Launcher(l) = &mut self.overlay {
-            l.paste(s);
+        self.clipboard_request = None;
+        self.sel = None;
+        match &mut self.overlay {
+            Overlay::Launcher(l) => return l.paste(s),
+            Overlay::Folder(p) => return p.paste(s),
+            Overlay::Continue(p) => return p.paste(s),
+            Overlay::Palette(p) => {
+                p.query.extend(s.chars().filter(|c| !c.is_control()));
+                p.sel = 0;
+                let theme = p.preview().unwrap_or_else(|| p.theme_before.clone());
+                if theme != self.theme.name {
+                    self.set_theme(&theme, false);
+                }
+                return;
+            }
+            Overlay::None => {}
+            _ => return,
+        }
+        if let Some((_, text)) = &mut self.renaming {
+            text.extend(s.chars().filter(|c| !c.is_control()).take(40usize.saturating_sub(text.chars().count())));
             return;
         }
-        if let Overlay::Folder(p) = &mut self.overlay {
-            p.paste(s);
+        if self.side_filtering {
+            self.side.filter.extend(s.chars().filter(|c| !c.is_control()));
+            self.side_sel = 0;
             return;
         }
-        if let Overlay::Continue(p) = &mut self.overlay {
-            p.paste(s);
+        if self.side_focus || self.prefix_armed {
             return;
         }
         if let Some(id) = self.focused() {

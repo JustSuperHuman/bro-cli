@@ -10,10 +10,22 @@ use std::time::{Duration, Instant};
 
 impl App {
     pub(crate) fn mouse(&mut self, m: MouseEvent) {
+        if !matches!(m.kind, MouseEventKind::Moved) {
+            self.clipboard_request = None;
+        }
         let pos = Position { x: m.column, y: m.row };
         self.hover = pos;
+        if matches!(m.kind, MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+            self.link_press = None;
+        }
         if self.overlay.is_open() {
             let left = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+            if matches!(self.overlay, super::overlays::Overlay::Confirm(_)) {
+                if left && let Some(&(_, yes)) = self.confirm_hits.iter().find(|(r, _)| r.contains(pos)) {
+                    self.confirm_answer(yes);
+                }
+                return;
+            }
             let wheel = matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp);
             let down = matches!(m.kind, MouseEventKind::ScrollDown);
             match &mut self.overlay {
@@ -68,6 +80,40 @@ impl App {
             }
             return;
         }
+        // Capture the entire gesture before row hits and terminal mouse passthrough, including
+        // release over a different pane. Save once on release, not on every movement.
+        if self.side_drag {
+            match m.kind {
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+                    if matches!(m.kind, MouseEventKind::Drag(_)) {
+                        self.side_edge_click = None;
+                    }
+                    let width = pos.x.saturating_sub(self.side_area.x).saturating_add(1);
+                    self.sidebar_width = Some(Self::clamp_sidebar_width(width, self.side_area.width + self.body.width));
+                    if matches!(m.kind, MouseEventKind::Up(_)) {
+                        self.side_drag = false;
+                        self.save_sidebar_width();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        let on_edge = self.side_area.width > 0 && pos.x == self.side_area.right() - 1
+            && pos.y >= self.side_area.y && pos.y < self.side_area.bottom();
+        if on_edge && matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.sel = None;
+            self.drag = None;
+            let double = self.side_edge_click.take().is_some_and(|at| at.elapsed() < Duration::from_millis(400));
+            if double {
+                self.sidebar_width = None;
+                self.save_sidebar_width();
+            } else {
+                self.side_edge_click = Some(Instant::now());
+                self.side_drag = true;
+            }
+            return;
+        }
         // sidebar
         if let Some((r, hit)) = self.side_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
             let _ = r;
@@ -90,9 +136,13 @@ impl App {
                         SideHit::CloseProject(root, live) => self.close_project(root, live),
                         SideHit::Fable => self.show_fable = !self.show_fable,
                         SideHit::Usage => self.open_view("usage"),
+                        SideHit::LaunchUsage(h, profile) => self.launch_usage(h, profile),
                         SideHit::UsageToggle => self.toggle_usage_details(),
                         SideHit::Proxy => self.open_view("proxy"),
                         SideHit::Bridge => self.open_view("bridge"),
+                        SideHit::Quick(h) => self.quick_launch(h),
+                        SideHit::Launcher => self.open_launcher(None, crate::pane::Place::Tab),
+                        SideHit::TileAll => self.run_act(crate::keymap::Act::TileAll),
                     }
                 }
                 MouseEventKind::Down(MouseButton::Middle) => {
@@ -161,14 +211,63 @@ impl App {
                 return;
             }
             self.sel = None;
+            if let Some((id, pressed, uri)) = self.link_press.take() {
+                if pressed == pos && self.inner.iter().any(|(pane, area)| *pane == id && area.contains(pos)) {
+                    let _ = self.tx.send(crate::pane::Event::OpenLink(uri));
+                }
+                return;
+            }
         }
         // the pane under the cursor
         let Some(&(id, _)) = self.outer.iter().find(|(_, r)| r.contains(pos)) else { return };
         let inner = self.inner.iter().find(|(i, _)| *i == id).map(|x| x.1).unwrap_or_default();
         let wants = self.panes.get(&id).is_some_and(|p| p.wants_mouse());
+        let link = if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+            && inner.contains(pos) && !m.modifiers.contains(KeyModifiers::SHIFT)
+            && (!wants || m.modifiers.contains(KeyModifiers::CONTROL)) {
+                self.panes.get(&id).and_then(|p| p.link_at(pos.y - inner.y, pos.x - inner.x))
+            } else { None };
+        // A click on an option of the prompt an agent is waiting on answers it (the key, then Enter, as the
+        // phone's prompt buttons do).
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind
+            && link.is_none()
+            && inner.contains(pos)
+            && (!wants || m.modifiers.contains(KeyModifiers::SHIFT))
+            && let Some(key) = self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.prompt_option_at(pos.y - inner.y))
+        {
+            if self.stacked() {
+                self.stack_focus = Some(id);
+            } else if let Some(t) = self.tabs.get_mut(self.cur) {
+                t.focus = id;
+            }
+            self.side_focus = false;
+            self.sel = None;
+            self.last_pane_click = None;
+            if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
+                t.send(format!("{key}\r").as_bytes());
+            }
+            return;
+        }
+        // Double-click a pane: full screen, and again back to the tiles or splits. On the frame always; inside
+        // the terminal unless the program there uses the mouse (shift takes it back, as for selecting).
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind
+            && link.is_none()
+        {
+            let ours = !inner.contains(pos) || !wants || m.modifiers.contains(KeyModifiers::SHIFT);
+            let double = ours
+                && self.last_pane_click.is_some_and(|(at, pane, first)| {
+                    pane == id && at.elapsed() < Duration::from_millis(400) && first.x.abs_diff(pos.x) <= 1 && first.y.abs_diff(pos.y) <= 1
+                });
+            self.last_pane_click = (ours && !double).then(|| (Instant::now(), id, pos));
+            if double {
+                self.sel = None;
+                self.zoom_pane(id);
+                return;
+            }
+        }
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
             // programs that use the mouse keep it unless shift is held
-            self.sel = (inner.contains(pos) && (!wants || m.modifiers.contains(KeyModifiers::SHIFT))).then_some(Sel { pane: id, area: inner, a: pos, b: pos, active: false });
+            self.sel = (inner.contains(pos) && (!wants || link.is_some() || m.modifiers.contains(KeyModifiers::SHIFT))).then_some(Sel { pane: id, area: inner, a: pos, b: pos, active: false });
         }
         if let MouseEventKind::Down(_) = m.kind {
             if self.stacked() {
@@ -178,8 +277,32 @@ impl App {
             }
             self.side_focus = false;
         }
+        if let Some(uri) = link {
+            self.link_press = Some((id, pos, uri));
+            return;
+        }
         if inner.contains(pos) && !(m.modifiers.contains(KeyModifiers::SHIFT) && wants) {
             self.with_pane(id, |p, cx| p.mouse(m, inner, cx));
+        }
+    }
+
+    /// Focus `id` and toggle full screen for it (the tiled grid or the tab's splits come back unchanged).
+    fn zoom_pane(&mut self, id: crate::pane::PaneId) {
+        self.side_focus = false;
+        if self.stacked() {
+            self.stack_focus = Some(id);
+            self.stack_zoom = !self.stack_zoom;
+        } else if let Some(t) = self.tabs.get_mut(self.cur) {
+            t.focus = id;
+            t.zoom = !t.zoom;
+        }
+    }
+
+    pub(super) fn save_sidebar_width(&self) {
+        let mut settings = self.svc.settings();
+        if settings.sidebar_width != self.sidebar_width {
+            settings.sidebar_width = self.sidebar_width;
+            self.svc.save_settings(settings);
         }
     }
 }

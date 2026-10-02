@@ -153,12 +153,12 @@ pub fn split_rect(area: Rect, dir: Dir, ratio: f32) -> (Rect, Rect) {
     match dir {
         Dir::Right => {
             let w = ((area.width as f32) * ratio).round() as u16;
-            let w = w.clamp(1.min(area.width), area.width.saturating_sub(1));
+            let w = if area.width < 2 { area.width } else { w.clamp(1, area.width - 1) };
             (Rect { width: w, ..area }, Rect { x: area.x + w, width: area.width - w, ..area })
         }
         Dir::Down => {
             let h = ((area.height as f32) * ratio).round() as u16;
-            let h = h.clamp(1.min(area.height), area.height.saturating_sub(1));
+            let h = if area.height < 2 { area.height } else { h.clamp(1, area.height - 1) };
             (Rect { height: h, ..area }, Rect { y: area.y + h, height: area.height - h, ..area })
         }
     }
@@ -188,6 +188,39 @@ pub fn neighbor(rects: &[(PaneId, Rect)], from: PaneId, dx: i32, dy: i32) -> Opt
             (ox - cx).abs() + (oy - cy).abs()
         })
         .map(|(id, _)| *id)
+}
+
+/// One region per group, in order, sized by `weights` (sessions per project): the list is cut where the two
+/// sides' weights are most even and the area split the same way — side by side when it is wide, over/under
+/// when tall — recursively, so every group gets a usefully shaped block and the regions tile the area exactly.
+pub fn group_regions(area: Rect, weights: &[usize]) -> Vec<Rect> {
+    let mut out = Vec::with_capacity(weights.len());
+    split_groups(area, weights, &mut out);
+    out
+}
+
+fn split_groups(area: Rect, weights: &[usize], out: &mut Vec<Rect>) {
+    match weights.len() {
+        0 => {}
+        1 => out.push(area),
+        n => {
+            let total: usize = weights.iter().map(|w| (*w).max(1)).sum();
+            let mut left = 0;
+            let (mut cut, mut best) = (1, usize::MAX);
+            for (i, w) in weights[..n - 1].iter().enumerate() {
+                left += (*w).max(1);
+                let gap = left.abs_diff(total - left);
+                if gap < best {
+                    (cut, best) = (i + 1, gap);
+                }
+            }
+            let share: usize = weights[..cut].iter().map(|w| (*w).max(1)).sum();
+            let wide = area.width as f32 >= area.height as f32 * 2.2;
+            let (a, b) = split_rect(area, if wide { Dir::Right } else { Dir::Down }, share as f32 / total as f32);
+            split_groups(a, &weights[..cut], out);
+            split_groups(b, &weights[cut..], out);
+        }
+    }
 }
 
 /// Lay `ids` out as a stack that uses the space well: 2 side by side (or over/under when the area is tall),
@@ -265,6 +298,22 @@ mod tests {
     }
 
     #[test]
+    fn tiles_survive_minimized_windows() {
+        for width in 0..=3 {
+            for height in 0..=3 {
+                let area = Rect::new(0, 0, width, height);
+                for n in 1..=12 {
+                    let rects = stack_rects(area, &(1..=n).collect::<Vec<_>>());
+                    assert_eq!(rects.len(), n as usize);
+                    assert!(rects.iter().all(|(_, r)| r.right() <= width && r.bottom() <= height));
+                    let covered: u32 = rects.iter().map(|(_, r)| r.width as u32 * r.height as u32).sum();
+                    assert_eq!(covered, width as u32 * height as u32);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn neighbors() {
         // 1 | 2
         //   | 3
@@ -297,6 +346,32 @@ mod tests {
         let mut out = vec![];
         n.borders(area(), &mut vec![], &mut out);
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn group_regions_tile_the_area_in_order_and_follow_the_weights() {
+        let wide = Rect::new(0, 0, 200, 50);
+        let regions = group_regions(wide, &[3, 1]);
+        assert_eq!(regions.len(), 2);
+        assert!(regions[0].x < regions[1].x, "wide: side by side, in order");
+        assert_eq!(regions[0].width, 150, "3 of 4 sessions get 3/4 of the width");
+        let tall = Rect::new(0, 0, 80, 60);
+        let regions = group_regions(tall, &[1, 1]);
+        assert!(regions[0].y < regions[1].y, "tall: over/under");
+        for weights in [vec![1, 1, 1], vec![5, 1, 1, 1], vec![2, 2, 2, 2, 2], vec![1; 7], vec![0, 4]] {
+            for area in [wide, tall, Rect::new(3, 2, 2, 1), Rect::new(0, 0, 0, 0)] {
+                let regions = group_regions(area, &weights);
+                assert_eq!(regions.len(), weights.len());
+                let covered: u32 = regions.iter().map(|r| r.width as u32 * r.height as u32).sum();
+                assert_eq!(covered, area.width as u32 * area.height as u32, "{weights:?} in {area:?}");
+                for (i, a) in regions.iter().enumerate() {
+                    assert!(area.union(*a) == area || a.is_empty());
+                    for b in &regions[i + 1..] {
+                        assert!(a.intersection(*b).is_empty(), "{weights:?} overlap");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

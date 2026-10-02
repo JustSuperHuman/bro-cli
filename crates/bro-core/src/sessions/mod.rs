@@ -8,8 +8,10 @@
 //! separate files so v1 and v2 don't prune each other's entries — see [`cache`]).
 mod cache;
 pub mod describe;
+mod messages;
 mod stage;
 
+pub use messages::{ChatMessage, read_messages};
 pub use stage::{cleanup_staged, stage_for_profile};
 
 use crate::util::{read_head, system_time_ms};

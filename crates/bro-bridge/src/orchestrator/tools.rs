@@ -1,9 +1,11 @@
 //! The orchestrator's tools over the terminal host: read, drive, open and
-//! close sessions, in OpenAI function-calling form. Every tool runs in
-//! process against the same session registry the web and native clients use.
+//! close sessions, find projects and read chat transcripts. Definitions are in
+//! MCP form (served by [`super::mcp`]); every tool runs in process against the
+//! same session registry the web and native clients use.
 
-use super::context;
-use crate::commands::launch_terminal;
+use super::{cast, chats, context, folders};
+use crate::BridgeCommand;
+use crate::commands::{compose_payload, launch_terminal, submit_settle, write_paced};
 use crate::model::TerminalNotification;
 use crate::prompt;
 use crate::state::{AppState, COMMAND_INPUT, COMMAND_KILL};
@@ -12,19 +14,19 @@ use std::time::{Duration, Instant};
 
 const MAX_READ_LINES: usize = 600;
 const MAX_WAIT_SECONDS: u64 = 45;
+/// How long open_session waits for a new agent to reach its prompt before
+/// typing the task.
+const READY_TIMEOUT: Duration = Duration::from_secs(45);
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-                "additionalProperties": false
-            }
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false
         }
     })
 }
@@ -48,7 +50,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "send_input",
-            "Type text into a tab, optionally pressing Enter afterwards. Works for shells and for AI agent TUIs (Claude Code, Codex): to talk to an agent, send the message with submit=true, then call wait_for_output. Multi-line text is delivered as one bracketed paste when the program supports it.",
+            "Type text into a tab, optionally pressing Enter afterwards. sessionId may also be the tab's name (e.g. \"Toast\"). Works for shells and for AI agent TUIs (Claude Code, Codex): to talk to an agent, send the message with submit=true, then call wait_for_output. Multi-line text is delivered as one bracketed paste when the program supports it.",
             json!({
                 "sessionId": { "type": "string" },
                 "text": { "type": "string", "description": "What to type." },
@@ -84,6 +86,50 @@ pub fn definitions() -> Vec<Value> {
                 "lines": { "type": "integer", "description": "Trailing lines to return (default 60)." }
             }),
             &["sessionId"],
+        ),
+        tool(
+            "open_session",
+            "Open a new agent session in a project and optionally give it a task. The project may be spoken loosely (\"justgains\", \"bro cli\") or be a path; it is resolved like find_project. The session gets the next free squad name (Mal, Pinky, Toast, Minty, Lilac, Sky, Bitty) unless you pass one, so the user can refer to it by name. With a task, waits for the agent to reach its prompt and sends it. Prefer this over create_session.",
+            json!({
+                "project": { "type": "string", "description": "Project name or directory path." },
+                "task": { "type": "string", "description": "First message to send the agent (optional)." },
+                "agent": { "type": "string", "description": "claude (default), codex, pi, or shell. A login-specific id like claude:work also works." },
+                "name": { "type": "string", "description": "Session name; default is the next free squad name." },
+                "focus": { "type": "boolean", "description": "Bring it to the front in bro (default false; true when the user wants to see it)." }
+            }),
+            &["project"],
+        ),
+        tool(
+            "find_project",
+            "Resolve a spoken project name to directories on this machine (bro's projects, recent folders, and top-level folders of each drive and the home directory). Returns the best matches with scores.",
+            json!({ "query": { "type": "string" } }),
+            &["query"],
+        ),
+        tool(
+            "focus_session",
+            "Bring a tab to the front in bro's window.",
+            json!({ "sessionId": { "type": "string" } }),
+            &["sessionId"],
+        ),
+        tool(
+            "list_chats",
+            "List past and current Claude Code / Codex chats saved on disk, newest first: chatId, title (first prompt), directory, project, last activity, transcript path.",
+            json!({
+                "project": { "type": "string", "description": "Only chats whose project or directory contains this." },
+                "query": { "type": "string", "description": "Only chats whose title contains this." },
+                "limit": { "type": "integer", "description": "Default 20, max 100." }
+            }),
+            &[],
+        ),
+        tool(
+            "read_chat",
+            "Read a chat's conversation (user and agent messages, tool calls as one-line markers) from its transcript. Pass sessionId for a live tab's current chat, or chatId from list_chats. Use this to answer questions about what an agent did or said; it sees far more than read_session.",
+            json!({
+                "sessionId": { "type": "string", "description": "A live tab (id or name)." },
+                "chatId": { "type": "string", "description": "A chat id from list_chats." },
+                "messages": { "type": "integer", "description": "Newest messages to return (default 40, max 400)." }
+            }),
+            &[],
         ),
         tool(
             "create_session",
@@ -200,6 +246,16 @@ fn resolve_session(app: &AppState, args: &Value) -> Result<String, String> {
     if by_title.len() == 1 {
         return Ok(by_title[0].id.clone());
     }
+    // A spoken name ("toast") against "Toast · justgains"; the newest wins
+    // when an older tab carries the same name.
+    let mut by_name: Vec<_> = summaries
+        .iter()
+        .filter(|session| cast::name_of(&session.title).to_lowercase() == wanted)
+        .collect();
+    by_name.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    if let Some(session) = by_name.first() {
+        return Ok(session.id.clone());
+    }
     Err(format!(
         "No session matches \"{requested}\". Call list_sessions for current ids."
     ))
@@ -254,6 +310,20 @@ pub fn summarize(app: &AppState, name: &str, args: &Value) -> String {
         ),
         "answer_prompt" => format!("Answered the prompt in {}", target()),
         "wait_for_output" => format!("Waited for {}", target()),
+        "open_session" => format!(
+            "Opened a session in {}",
+            string_arg(args, "project").unwrap_or_else(|| "a project".into())
+        ),
+        "find_project" => format!(
+            "Looked up \"{}\"",
+            string_arg(args, "query").unwrap_or_default()
+        ),
+        "focus_session" => format!("Brought {} to the front", target()),
+        "list_chats" => "Listed chats".into(),
+        "read_chat" => match string_arg(args, "chatId") {
+            Some(chat) => format!("Read chat {}", chat.chars().take(8).collect::<String>()),
+            None => format!("Read {}'s chat", target()),
+        },
         "create_session" => format!(
             "Opened a terminal{}",
             string_arg(args, "cwd")
@@ -385,25 +455,7 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
                 .ok_or("text is required.")?
                 .replace("\r\n", "\n");
             let submit = args.get("submit").and_then(Value::as_bool).unwrap_or(true);
-            let view = app
-                .session_view(&id)
-                .ok_or("The session is no longer available.")?;
-            // A confident agent detection implies paste support even when
-            // this mirror never saw the mode switch (host restarts leave the
-            // screen model empty).
-            let paste = view.bracketed_paste || view.summary.agent.is_some();
-            let payload = if !text.is_empty() && paste {
-                format!("\u{1b}[200~{text}\u{1b}[201~")
-            } else {
-                text.clone()
-            };
-            if !payload.is_empty() {
-                app.dispatch(&id, COMMAND_INPUT, &payload, 0, 0)?;
-            }
-            if submit {
-                tokio::time::sleep(Duration::from_millis(180)).await;
-                app.dispatch(&id, COMMAND_INPUT, "\r", 0, 0)?;
-            }
+            type_text(app, &id, &text, submit).await?;
             Ok(format!(
                 "Sent {} characters to \"{}\"{}.",
                 text.chars().count(),
@@ -521,6 +573,42 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             }))
             .unwrap_or_default())
         }
+        "open_session" => open_session(app, args).await,
+        "find_project" => {
+            let query = string_arg(args, "query").ok_or("query is required.")?;
+            let matches = find_folders(app, &query).await;
+            Ok(serde_json::to_string_pretty(&json!({ "matches": matches })).unwrap_or_default())
+        }
+        "focus_session" => {
+            let id = resolve_session(app, args)?;
+            app.send_command(BridgeCommand::Focus { id: id.clone() });
+            Ok(format!("\"{}\" is in front.", session_label(app, &id)))
+        }
+        "list_chats" => {
+            let project = string_arg(args, "project");
+            let query = string_arg(args, "query");
+            let limit = integer_arg(args, "limit").unwrap_or(20).clamp(1, 100) as usize;
+            let listed = tokio::task::spawn_blocking(move || {
+                chats::list(project.as_deref(), query.as_deref(), limit)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            Ok(serde_json::to_string_pretty(&listed).unwrap_or_default())
+        }
+        "read_chat" => {
+            let session = match string_arg(args, "sessionId") {
+                Some(_) => Some(resolve_session(app, args)?),
+                None => None,
+            };
+            let chat = string_arg(args, "chatId");
+            let messages = integer_arg(args, "messages");
+            let app = app.clone();
+            tokio::task::spawn_blocking(move || {
+                chats::read(&app, session.as_deref(), chat.as_deref(), messages)
+            })
+            .await
+            .map_err(|error| error.to_string())?
+        }
         "close_session" => {
             let id = resolve_session(app, args)?;
             let label = session_label(app, &id);
@@ -532,6 +620,11 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             let title = string_arg(args, "title").ok_or("title is required.")?;
             app.rename(&id, title.clone())
                 .ok_or("The session is no longer available.")?;
+            // bro's own sidebar keeps the name only when told directly.
+            app.send_command(BridgeCommand::Rename {
+                id,
+                title: title.clone(),
+            });
             Ok(format!("Renamed the tab to \"{title}\"."))
         }
         "list_projects" => Ok(serde_json::to_string_pretty(&json!({
@@ -559,4 +652,142 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
         }
         other => Err(format!("Unknown tool \"{other}\".")),
     }
+}
+
+/// Types `text` into a tab the way a person pasting would: one bracketed
+/// paste when the program supports it, paced, then Enter once the paste has
+/// settled (an Enter inside an agent's paste window becomes a newline).
+async fn type_text(app: &AppState, id: &str, text: &str, submit: bool) -> Result<(), String> {
+    let view = app
+        .session_view(id)
+        .ok_or("The session is no longer available.")?;
+    // A confident agent detection implies paste support even when this
+    // mirror never saw the mode switch (host restarts leave the screen model
+    // empty).
+    let paste = view.bracketed_paste || view.summary.agent.is_some();
+    let payload = compose_payload(text, paste);
+    if !payload.is_empty() {
+        write_paced(app, id, &payload).await?;
+    }
+    if submit {
+        tokio::time::sleep(submit_settle(payload.len())).await;
+        app.dispatch(id, COMMAND_INPUT, "\r", 0, 0)?;
+    }
+    Ok(())
+}
+
+async fn find_folders(app: &AppState, query: &str) -> Vec<folders::FolderMatch> {
+    let app = app.clone();
+    let query = query.to_string();
+    tokio::task::spawn_blocking(move || folders::find(&app, &query))
+        .await
+        .unwrap_or_default()
+}
+
+/// Waits until a freshly started tab can take a message: its agent was
+/// detected and sits idle at the prompt, or (a shell) its output settled.
+/// Returns the question the tab is blocked on, if it is.
+async fn wait_until_ready(app: &AppState, id: &str) -> Result<Option<String>, String> {
+    let started = Instant::now();
+    let mut last_seq = 0;
+    let mut last_change = Instant::now();
+    while started.elapsed() < READY_TIMEOUT {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let view = app
+            .session_view(id)
+            .ok_or("The session closed while starting.")?;
+        let seq = app.session_seq(id).unwrap_or(0);
+        if seq != last_seq {
+            last_seq = seq;
+            last_change = Instant::now();
+        }
+        let quiet = last_seq > 0 && last_change.elapsed() >= Duration::from_millis(900);
+        match view.summary.agent_activity.as_deref() {
+            Some("awaiting") => {
+                let question = view
+                    .prompt
+                    .as_ref()
+                    .and_then(|prompt| prompt.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("a question")
+                    .to_string();
+                return Ok(Some(question));
+            }
+            Some("working") => {}
+            _ if view.summary.agent.is_some() && quiet => return Ok(None),
+            // Agents take a moment to be detected; a plain shell never is.
+            _ if quiet && started.elapsed() >= Duration::from_secs(6) => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
+async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
+    let query = string_arg(args, "project").ok_or("project is required.")?;
+    let matches = find_folders(app, &query).await;
+    let best = matches.first().ok_or_else(|| {
+        format!("No folder on this machine matches \"{query}\". Ask the user for the path.")
+    })?;
+    if let Some(second) = matches.get(1)
+        && second.score == best.score
+        && best.score < 1000
+    {
+        return Err(format!(
+            "\"{query}\" is ambiguous; ask which one: {}",
+            matches
+                .iter()
+                .take_while(|found| found.score == best.score)
+                .map(|found| found.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let agent = string_arg(args, "agent").unwrap_or_else(|| "claude".into());
+    let name = string_arg(args, "name").unwrap_or_else(|| {
+        let titles: Vec<String> = app.summaries().into_iter().map(|s| s.title).collect();
+        cast::next_name(titles.iter().map(String::as_str))
+    });
+    let title = cast::title(&name, Some(&best.name));
+    let session = launch_terminal(
+        app,
+        json!({ "title": title, "cwd": best.path, "profileId": agent }),
+    )
+    .await?;
+    let id = session.id.clone();
+    if args.get("focus").and_then(Value::as_bool).unwrap_or(false) {
+        app.send_command(BridgeCommand::Focus { id: id.clone() });
+    }
+    let mut outcome = json!({
+        "id": id,
+        "name": name,
+        "title": title,
+        "cwd": best.path,
+        "agent": agent,
+    });
+    // Same-named folders elsewhere (the most recently used one was picked).
+    let others: Vec<&str> = matches
+        .iter()
+        .skip(1)
+        .filter(|found| found.score == best.score)
+        .map(|found| found.path.as_str())
+        .collect();
+    if !others.is_empty() {
+        outcome["alsoFound"] = json!(others);
+    }
+    if let Some(task) = string_arg(args, "task") {
+        match wait_until_ready(app, &id).await? {
+            Some(question) => {
+                outcome["taskSent"] = json!(false);
+                outcome["note"] = json!(format!(
+                    "The session is waiting on \"{question}\"; answer it with answer_prompt, then send the task with send_input."
+                ));
+            }
+            None => {
+                type_text(app, &id, &task, true).await?;
+                outcome["taskSent"] = json!(true);
+            }
+        }
+    }
+    Ok(serde_json::to_string_pretty(&outcome).unwrap_or_default())
 }

@@ -78,7 +78,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         args.extend([if fork { "fork" } else { "resume" }.to_string(), id]);
     }
     if spec.permission == Permission::Skip {
-        args.push("--dangerously-bypass-approvals-and-sandbox".into());
+        args.push("--yolo".into());
     }
     if let Some(m) = spec.model.as_deref().filter(|m| !m.is_empty()) {
         args.extend(["--model".into(), m.to_string()]);

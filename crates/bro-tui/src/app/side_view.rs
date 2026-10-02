@@ -1,4 +1,4 @@
-//! Drawing the sidebar: "+ new session", projects with their live and earlier sessions, then the footer
+//! Drawing the sidebar: "+ open project", projects with their live and earlier sessions, then the footer
 //! blocks (usage — Claude / Codex totals or every profile — proxy, bridge).
 
 use super::{App, SideHit};
@@ -18,6 +18,7 @@ use ratatui::{
 /// One line of the usage block: a glyph + label, then the 5h / week figures (% left).
 struct UsageLine {
     harness: Option<bro_core::Harness>,
+    profile: Option<String>,
     label: String,
     h5: Option<f64>,
     wk: Option<f64>,
@@ -45,9 +46,31 @@ impl App {
         // footer first (fixed height), rows get the rest
         let usage = self.usage_lines();
         let foot_h = footer_height(usage.len() as u16, self.usage_expanded, inner.height);
-        let list = Rect { height: inner.height.saturating_sub(foot_h), ..inner };
+        // the new-session strip sits on top of the footer, with a blank line either side when there's room
+        let strip_h = if inner.height >= foot_h + 12 {
+            3
+        } else if inner.height >= foot_h + 6 {
+            1
+        } else {
+            0
+        };
+        let sessions = self.panes.values().filter(|p| p.is_terminal()).count();
+        let tile_h = u16::from(sessions >= 2 && inner.height >= foot_h + strip_h + 10);
+        let list = Rect { height: inner.height.saturating_sub(foot_h + strip_h + tile_h), ..inner };
         if foot_h > 0 {
             self.draw_footer(f, Rect { y: inner.bottom() - foot_h, height: foot_h, ..inner }, &usage, &t);
+        }
+        if strip_h > 0 {
+            self.draw_strip(f, Rect { y: list.bottom() + tile_h + strip_h / 2, height: 1, ..inner }, &t);
+        }
+        if tile_h > 0 {
+            let row = Rect { y: list.bottom(), height: 1, ..inner };
+            let all = self.tile_all && self.tile_project.is_none();
+            let label = if all { "tiled" } else { "tile all" };
+            let style = if all || row.contains(self.hover) { ui::bold_accent(&t) } else { muted(&t) };
+            ui::line_lr(f, row, vec![Span::styled(format!("▦ {label} · {sessions}"), style)],
+                vec![Span::styled(format!("{} ", self.keymap.primary(crate::keymap::Act::TileAll)), muted(&t))]);
+            self.side_hits.push((row, SideHit::TileAll));
         }
 
         let mut y = list.y;
@@ -97,7 +120,11 @@ impl App {
             if selected {
                 f.buffer_mut().set_style(r, Style::default().bg(crate::theme::mix(t.user, ratatui::style::Color::Rgb(20, 20, 24), 0.35)));
             } else if current {
-                f.buffer_mut().set_style(r, Style::default().bg(current_tint(&t)));
+                let color = match row {
+                    Row::Live { info, .. } => self.project_color(&info.project_key),
+                    _ => t.accent,
+                };
+                f.buffer_mut().set_style(r, Style::default().bg(crate::theme::project_tint(color, &t)));
             }
             self.draw_row(f, r, row, selected, focus_pane, cur_key.as_deref(), &t, time);
             if let Row::Project { root, live, .. } = row {
@@ -118,11 +145,6 @@ impl App {
     fn draw_row(&self, f: &mut Frame, r: Rect, row: &Row, selected: bool, focus_pane: Option<crate::layout::PaneId>, cur_key: Option<&str>, t: &Theme, time: f64) {
         let w = r.width as usize;
         match row {
-            Row::New => {
-                let key = self.keymap.primary(crate::keymap::Act::NewSession);
-                let st = if selected { ui::bold_accent(t) } else { fg(t.shine).add_modifier(Modifier::BOLD) };
-                ui::line_lr(f, r, vec![Span::styled("+ new session", st)], vec![Span::styled(format!("{key} "), muted(t))]);
-            }
             Row::Continue { count } => {
                 let key = self.keymap.primary(crate::keymap::Act::Continue);
                 let st = if selected { ui::bold_accent(t) } else { muted(t) };
@@ -133,10 +155,12 @@ impl App {
                 let st = if selected { ui::bold_accent(t) } else { muted(t) };
                 ui::line_lr(f, r, vec![Span::styled("+ open project", st)], vec![Span::styled(format!("{key} "), muted(t))]);
             }
-            Row::Project { key, name, root, live, collapsed, attention, last_age, .. } => {
+            Row::Project { key, name, root, live, attention, last_age, .. } => {
                 // the current project (where new sessions start) gets a bar down both lines
                 let current = cur_key == Some(key.as_str());
-                let arrow = if *collapsed { "▸" } else { "▾" };
+                let color = self.project_color(key);
+                // ▦ while the grid shows only this project
+                let mark = if self.tile_project.as_deref() == Some(key.as_str()) { "▦" } else { " " };
                 let mut right = vec![];
                 if *attention {
                     right.push(Span::styled("● ", fg(t.danger)));
@@ -146,11 +170,11 @@ impl App {
                 } else if let Some(age) = last_age {
                     right.push(Span::styled(format!("{} ", crate::util::short_dur(*age)), muted(t)));
                 }
-                let name_style = if selected || current { ui::bold_accent(t) } else { Style::default().add_modifier(Modifier::BOLD) };
-                let bar = |c: bool| if c { Span::styled("▍", ui::accent(t)) } else { Span::raw(" ") };
+                let name_style = fg(color).add_modifier(Modifier::BOLD);
+                let bar = |c: bool| Span::styled(if c { "▍" } else { "▏" }, fg(color));
                 let line1 = Rect { height: 1, ..r };
                 right.push(Span::styled(" ×", if selected { fg(t.danger) } else { fg(t.frame) }));
-                ui::line_lr(f, line1, vec![bar(current), Span::styled(format!("{arrow} "), ui::accent(t)), Span::styled(name.clone(), name_style)], right);
+                ui::line_lr(f, line1, vec![bar(current), Span::styled(format!("{mark} "), fg(color)), Span::styled(name.clone(), name_style)], right);
                 if r.height > 1 {
                     let line2 = Rect { y: r.y + 1, height: 1, ..r };
                     let branch = bro_core::projects::git_branch(root);
@@ -168,6 +192,7 @@ impl App {
             }
             Row::Live { info, n } => {
                 let brand = ui::harness_color(info.harness, t);
+                let color = self.project_color(&info.project_key);
                 let (dot, dot_c) = match status_look(info.activity, info.done, t, time) {
                     Some((g, _, c)) => (g, c),
                     None => ("•", t.muted),
@@ -191,11 +216,11 @@ impl App {
                     return;
                 }
                 let stacked = self.stack.contains(&info.pane);
-                let (bar, bar_style) = if is_focus { ("▌", ui::accent(t)) } else if stacked { ("▏", ui::accent(t)) } else { (" ", muted(t)) };
-                let primary_style = if is_focus || selected { Style::default().fg(brand).add_modifier(Modifier::BOLD) } else { Style::default().fg(brand) };
+                let (bar, bar_style) = if is_focus { ("▶", fg(color)) } else if stacked { ("┃", fg(color)) } else { ("│", fg(color)) };
+                let primary_style = if is_focus || selected { fg(color).add_modifier(Modifier::BOLD) } else { Style::default().fg(t.fg) };
                 let mut left = vec![
                     Span::styled(bar, bar_style.add_modifier(Modifier::BOLD)),
-                    Span::styled(num, if is_focus { ui::bold_accent(t) } else { muted(t) }),
+                    Span::styled(num, if is_focus { fg(color).add_modifier(Modifier::BOLD) } else { muted(t) }),
                     Span::styled(format!(" {dot} "), fg(dot_c).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{} ", ui::harness_glyph(info.harness)), fg(brand)),
                     Span::styled(primary, primary_style),
@@ -206,6 +231,61 @@ impl App {
                 let right = vec![Span::styled(format!(" {}", crate::util::short_dur(info.age_secs)), muted(t)), Span::styled(" ×", if selected { fg(t.danger) } else { fg(t.frame) })];
                 ui::line_lr(f, r, left, right);
             }
+        }
+    }
+
+    /// The new-session strip, Windows Terminal's new-tab buttons: a filled "+" (the launcher), then claude, codex
+    /// and a terminal as evenly spaced icons that start in one click. The key hint sits on the right and turns into
+    /// the name of whatever the mouse is over.
+    fn draw_strip(&mut self, f: &mut Frame, r: Rect, t: &Theme) {
+        use bro_core::Harness;
+        const BTN: u16 = 5;
+        let key = self.keymap.primary(crate::keymap::Act::NewSession);
+        let dark = ratatui::style::Color::Rgb(18, 18, 22);
+        let mut name = None;
+
+        // + : a solid button, so it's plain where new sessions start
+        let plus = Rect { width: BTN.min(r.width), ..r };
+        let hot = plus.contains(self.hover);
+        let fill = if t.is_light() { crate::theme::mix(t.accent, t.bg, if hot { 0.55 } else { 0.7 }) } else { crate::theme::mix(t.accent, dark, if hot { 0.4 } else { 0.58 }) };
+        f.buffer_mut().set_style(plus, Style::default().bg(fill));
+        ui::line(f, plus, vec![Span::styled("  +  ", Style::default().fg(t.shine).bg(fill).add_modifier(Modifier::BOLD))]);
+        self.side_hits.push((plus, SideHit::Launcher));
+        if hot {
+            name = Some(("launcher", "new"));
+        }
+
+        let agents: [(Option<Harness>, &str, &str); 3] = [(Some(Harness::Claude), "new claude", "claude"), (Some(Harness::Codex), "new codex", "codex"), (None, "new terminal", "term")];
+        let mut x = plus.right();
+        for (h, long, short) in agents {
+            if x + BTN > r.right() {
+                break;
+            }
+            let b = Rect { x, width: BTN, ..r };
+            let hot = b.contains(self.hover);
+            if hot {
+                f.buffer_mut().set_style(b, Style::default().bg(current_tint(t)));
+                name = Some((long, short));
+            }
+            let color = if h.is_some() { ui::harness_color(h, t) } else { t.shine };
+            // glyph + the space after it (an image logo takes both cells)
+            ui::line(f, b, vec![Span::raw("  "), Span::styled(format!("{} ", ui::harness_glyph(h)), fg(color).add_modifier(Modifier::BOLD))]);
+            self.side_hits.push((b, SideHit::Quick(h)));
+            x += BTN;
+        }
+
+        // right: alt+n, or what's under the mouse
+        let room = r.right().saturating_sub(x + 1) as usize;
+        let (text, style) = match name {
+            Some((long, _)) if ui::width(long) < room => (long.to_string(), ui::bold()),
+            Some((_, short)) if ui::width(short) < room => (short.to_string(), ui::bold()),
+            _ => (key, muted(t)),
+        };
+        let w = ui::width(&text) + 1;
+        if w <= room {
+            let hint = Rect { x: r.right() - w as u16, width: w as u16, ..r };
+            ui::line(f, hint, vec![Span::styled(format!("{text} "), style)]);
+            self.side_hits.push((hint, SideHit::Launcher));
         }
     }
 
@@ -237,19 +317,19 @@ impl App {
                     None
                 };
                 let h = if claude { bro_core::Harness::Claude } else { bro_core::Harness::Codex };
-                Some(UsageLine { harness: Some(h), label: h.label().into(), h5: s.h5, wk: s.wk, approx: s.h5_estimated, note, resets_at: None, fable: None })
+                Some(UsageLine { harness: Some(h), profile: None, label: h.label().into(), h5: s.h5, wk: s.wk, approx: s.h5_estimated, note, resets_at: None, fable: None })
             };
             let mut v: Vec<UsageLine> = [total(true), total(false)].into_iter().flatten().collect();
             // Fable has its own allowance: show it under Claude when any account has it
             let claude: Vec<_> = signed_in.iter().filter(|p| p.is_claude()).map(|p| (*p, state_of(&p.id))).collect();
             let s = bro_core::usage::app_summary(claude);
             if s.fable_wk.is_some() {
-                // folded under the Claude line; clicking it (or alt+U twice) shows it
+                // The separate disclosure arrow reveals the allowance; the row launches Claude.
                 if let Some(c) = v.first_mut().filter(|l| l.harness == Some(bro_core::Harness::Claude)) {
                     c.fable = Some(self.show_fable);
                 }
                 if self.show_fable {
-                    v.insert(1, UsageLine { harness: None, label: "fable".into(), h5: s.fable_5h, wk: s.fable_wk, approx: false, note: None, resets_at: None, fable: None });
+                    v.insert(1, UsageLine { harness: None, profile: None, label: "fable".into(), h5: s.fable_5h, wk: s.fable_wk, approx: false, note: None, resets_at: None, fable: None });
                 }
             }
             return v;
@@ -268,7 +348,7 @@ impl App {
                     None if e.is_some_and(|e| e.error.is_some()) => (None, None, false, None, Some("unavailable".to_string())),
                     None => (None, None, false, None, Some("…".to_string())),
                 };
-                UsageLine { harness: Some(h), label: p.name.clone(), h5, wk, approx, note, resets_at, fable: None }
+                UsageLine { harness: Some(h), profile: Some(p.id.clone()), label: p.name.clone(), h5, wk, approx, note, resets_at, fable: None }
             })
             .collect()
     }
@@ -296,6 +376,10 @@ impl App {
                     break;
                 }
                 let r = row(y);
+                let hot = r.contains(self.hover) && u.harness.is_some();
+                if hot {
+                    f.buffer_mut().set_style(r, Style::default().bg(current_tint(t)));
+                }
                 let brand = u.harness.map(|h| ui::harness_color(Some(h), t)).unwrap_or(t.muted);
                 let glyph = u.harness.map(|h| ui::harness_glyph(Some(h))).unwrap_or(" ");
                 let name_style = if u.harness.is_some() { ui::bold() } else { muted(t) };
@@ -327,7 +411,19 @@ impl App {
                     }
                 }
                 ui::line_lr(f, r, left, right);
-                self.side_hits.push((r, if u.fable.is_some() { SideHit::Fable } else { SideHit::Usage }));
+                if u.fable.is_some() {
+                    let x = r.x + ui::width(glyph) as u16 + 2 + ui::width(&u.label) as u16;
+                    if x < r.right() {
+                        self.side_hits.push((Rect { x, width: 1, ..r }, SideHit::Fable));
+                    }
+                }
+                if hot && r.width > 0 {
+                    ui::line(f, Rect { x: r.right() - 1, width: 1, ..r }, vec![Span::styled("+", ui::bold_accent(t))]);
+                }
+                self.side_hits.push((r, match u.harness {
+                    Some(h) => SideHit::LaunchUsage(h, u.profile.clone()),
+                    None => SideHit::Usage,
+                }));
                 y += 1;
             }
         }

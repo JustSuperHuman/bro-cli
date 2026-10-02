@@ -140,10 +140,13 @@ pub struct Settings {
     pub nerd_font: bool,
     /// Sidebar usage block shows every profile (true) or just the Claude / Codex totals (false)
     pub usage_expanded: bool,
+    /// Sidebar width in terminal columns; None uses the adaptive default.
+    pub sidebar_width: Option<u16>,
     /// Harness logos as images: "auto" (detect the terminal), "sixel", "kitty", "iterm" or "text"
     pub icons: String,
     pub bridge: BridgeSettings,
     pub proxy: ProxySettings,
+    pub voice: VoiceSettings,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
     pub keys: BTreeMap<String, String>,
 }
@@ -156,6 +159,28 @@ pub struct BridgeSettings {
     pub automatic_port: bool,
     pub bind: String,
     pub web_interface: bool,
+}
+
+/// Push-to-talk to the orchestrator: hold the hotkey anywhere, speak, release.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceSettings {
+    /// Only takes effect when an API key is found in `api_key_env`.
+    pub enabled: bool,
+    /// None = the platform default (right Windows key on Windows); see bro-voice for names.
+    pub hotkey: Option<String>,
+    pub api_key_env: String,
+    /// Transcription model; None = bro-voice's default.
+    pub model: Option<String>,
+    /// ISO-639-1 hint such as "en"; None = auto-detect.
+    pub language: Option<String>,
+    /// "live": talk with GPT-Live, which answers out loud and hands work to Hugh. "transcribe": speech to text
+    /// only, Hugh's answers as toasts.
+    pub mode: String,
+    /// GPT-Live voice (cedar, marin, ash, ...); None = bro-voice's default.
+    pub live_voice: Option<String>,
+    /// GPT-Live model; None = bro-voice's default.
+    pub live_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,11 +199,18 @@ impl Default for Settings {
             shell: None,
             nerd_font: false,
             usage_expanded: false,
+            sidebar_width: None,
             icons: "auto".into(),
             bridge: BridgeSettings::default(),
             proxy: ProxySettings::default(),
+            voice: VoiceSettings::default(),
             keys: BTreeMap::new(),
         }
+    }
+}
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        Self { enabled: true, hotkey: None, api_key_env: "OPENAI_API_KEY".into(), model: None, language: None, mode: "live".into(), live_voice: None, live_model: None }
     }
 }
 impl Default for BridgeSettings {
@@ -335,12 +367,15 @@ mod tests {
         assert_eq!(s.theme, "graphite");
         assert_eq!(s.prefix, "ctrl+space");
         assert!(!s.nerd_font);
+        assert_eq!(s.sidebar_width, None);
         let mut s2 = s.clone();
         s2.theme = "dark".into();
+        s2.sidebar_width = Some(58);
         s2.keys.insert("palette".into(), "ctrl+k".into());
         s2.save().unwrap();
         let back = Settings::load();
         assert_eq!(back.theme, "dark");
+        assert_eq!(back.sidebar_width, Some(58));
         assert_eq!(back.keys["palette"], "ctrl+k");
         assert_eq!(back.bridge.port, 10001);
         std::fs::write(paths::settings_path(), "theme = 3").unwrap();

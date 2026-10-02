@@ -1,0 +1,28 @@
+[package]
+name = "bro-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "bro push-to-talk voice input: global hotkey, microphone capture, OpenAI transcription"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+cpal.workspace = true
+tungstenite.workspace = true
+base64.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+# The bro binary links rustls with both ring and aws-lc-rs (reqwest); tests do too, so a connection that
+# relies on rustls picking a provider by itself fails here as it would in bro.
+rustls = { workspace = true, features = ["aws_lc_rs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

@@ -54,7 +54,7 @@ pub struct Account {
     pub detail: String,
     /// logged in / has a key
     pub ready: bool,
-    /// % left of the 5h window, for logins we have meters for
+    /// % left of the 5h window (weekly when that's the only reported window)
     pub left: Option<f64>,
 }
 
@@ -67,13 +67,15 @@ pub enum Item {
     Account(Account),
 }
 
-/// Snapshot of what the launcher offers (taken from services when it opens).
+/// What the launcher offers, updated as service readings arrive.
 #[derive(Clone, Debug, Default)]
 pub struct Data {
     pub profiles: Vec<Profile>,
     pub providers: Vec<Provider>,
-    /// profile id → 5h used %
+    /// profile id → 5h used % (weekly when that's the only reported window)
     pub usage: BTreeMap<String, f32>,
+    /// Window label and refresh state shown alongside a login's last reading.
+    pub usage_status: BTreeMap<String, String>,
     /// harness → installed on PATH
     pub installed: Vec<(Harness, bool)>,
     pub recents: Vec<Recent>,
@@ -130,6 +132,33 @@ pub struct Launcher {
 }
 
 impl Launcher {
+    /// Replace service data while keeping the user's account, model and typed filters.
+    pub fn set_data(&mut self, data: Data) {
+        let current = self.current();
+        let recent = match &current {
+            Some(Item::Recent(i)) => self.data.recents.get(*i).cloned(),
+            _ => None,
+        };
+        let model = self.model().map(|m| m.id);
+        self.data = data;
+        let items = self.items();
+        let selectable = Self::selectable(&items);
+        let selected = selectable.iter().position(|&i| match (&current, &items[i]) {
+            (Some(Item::Account(a)), Item::Account(b)) => a.kind == b.kind,
+            (Some(Item::Recent(_)), Item::Recent(i)) => recent.as_ref().is_some_and(|r| self.data.recents.get(*i).is_some_and(|other| r.same(other))),
+            _ => false,
+        });
+        self.list_sel = selected.unwrap_or(self.list_sel.min(selectable.len().saturating_sub(1)));
+        if current.is_some() && selected.is_none() {
+            self.reset_models();
+            self.focus = Focus::List;
+        } else {
+            let models = self.models_view();
+            self.model_sel = model.and_then(|id| models.iter().position(|&i| self.models()[i].id == id)).unwrap_or(self.model_sel.min(models.len().saturating_sub(1)));
+        }
+        self.hits.clear();
+    }
+
     /// Open on the most recent harness, in `cwd` (the current project; else the most recent one).
     pub fn new(data: Data, cwd: Option<PathBuf>, place: Place) -> Launcher {
         let recent = data.recents.first().cloned();
@@ -138,7 +167,8 @@ impl Launcher {
             .or_else(|| recent.as_ref().map(|r| r.cwd.clone()))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
-        let (permission, browser) = recent.map(|r| (r.permission, r.browser)).unwrap_or_default();
+        let browser = recent.map(|r| r.browser).unwrap_or_default();
+        let permission = Permission::Skip;
         Launcher {
             data,
             harness,
@@ -153,6 +183,37 @@ impl Launcher {
             place,
             hits: vec![],
             area: ratatui::layout::Rect::default(),
+        }
+    }
+
+    /// Open on `h` instead of the most recent harness.
+    pub fn with_harness(mut self, h: Harness) -> Launcher {
+        self.harness = h;
+        self.list_filter.clear();
+        self.list_sel = 0;
+        self.reset_models();
+        self
+    }
+
+    /// Select an exact login without matching a recent combo or a similarly named account.
+    pub fn with_profile(mut self, id: &str) -> Option<Launcher> {
+        self.list_filter.clear();
+        let items = self.items();
+        self.list_sel = Self::selectable(&items).iter().position(|&i|
+            matches!(&items[i], Item::Account(Account { kind: AccountKind::Profile(profile), .. }) if profile == id))?;
+        self.reset_models();
+        Some(self)
+    }
+
+    /// What a one-click "new claude / codex" should run: the top of `h`'s list (your latest combo for it, else
+    /// its first login). None when that still needs a decision (not installed, nothing to run on, a model to pick).
+    pub fn quick_spec(&self) -> Option<LaunchSpec> {
+        if !self.installed(self.harness) {
+            return None;
+        }
+        match self.current()? {
+            Item::Account(a) if !a.ready || self.needs_model() => None,
+            _ => self.spec(),
         }
     }
 
@@ -173,6 +234,9 @@ impl Launcher {
         }
         if !p.authenticated {
             detail.push("not logged in".into());
+        }
+        if let Some(status) = self.data.usage_status.get(&p.id) {
+            detail.push(status.clone());
         }
         Account {
             kind: AccountKind::Profile(p.id.clone()),

@@ -8,6 +8,7 @@ description = "Just Terminal bridge host: HTTP + WebSocket mirror of bro's agent
 build = "build.rs"
 
 [dependencies]
+bro-core.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

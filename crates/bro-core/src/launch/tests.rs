@@ -191,7 +191,7 @@ fn codex_profile_native_and_resume() {
     s.permission = Permission::Skip;
     let c = build(&s, &ctx()).unwrap();
     assert!(env(&c, "CODEX_HOME").unwrap().ends_with("smol"));
-    assert_eq!(c.args, ["--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.3-codex"]);
+    assert_eq!(c.args, ["--yolo", "--model", "gpt-5.3-codex"]);
     assert_eq!(c.label, "codex · smol · gpt-5.3-codex");
 
     // A rollout owned by the local login, resumed as smol → staged + fork.

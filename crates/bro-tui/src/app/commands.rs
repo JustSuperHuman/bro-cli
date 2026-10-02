@@ -35,10 +35,13 @@ impl App {
                 }
             }
             Act::Zoom => {
-                if let Some(t) = self.tabs.get_mut(self.cur) {
+                if self.stacked() {
+                    self.stack_zoom = !self.stack_zoom;
+                } else if let Some(t) = self.tabs.get_mut(self.cur) {
                     t.zoom = !t.zoom;
                 }
             }
+            Act::TileAll => self.toggle_tiles(),
             Act::FocusLeft => self.move_focus(-1, 0),
             Act::FocusRight => self.move_focus(1, 0),
             Act::FocusUp => self.move_focus(0, -1),
@@ -154,6 +157,9 @@ impl App {
     }
 
     fn resize(&mut self, dir: Dir, delta: f32) {
+        if self.stacked() {
+            return;
+        }
         if let Some(id) = self.focused() {
             self.tabs[self.cur].root.resize(id, dir, delta);
         }
@@ -161,9 +167,10 @@ impl App {
 
     /// Focus a live session (switching tabs) and leave the sidebar.
     pub(crate) fn go_session(&mut self, id: PaneId) {
-        // picking one session shows just that one
-        self.stack.clear();
-        self.stack_focus = None;
+        // In all-sessions mode, navigation moves focus without dismantling the grid.
+        if !self.tile_all {
+            self.clear_stack();
+        }
         if let Some(t) = self.panes.get(&id).and_then(|p| p.as_term_ref()) {
             self.cur_project = Some(t.meta.project.root.clone());
         }
@@ -212,9 +219,52 @@ impl App {
     }
 
     pub(crate) fn open_launcher(&mut self, cwd: Option<PathBuf>, place: Place) {
+        self.svc.refresh_usage();
         let cwd = cwd.or_else(|| self.preferred_dir());
         let data = launcher_data(self);
         self.overlay = Overlay::Launcher(Box::new(Launcher::new(data, cwd, place)));
+    }
+
+    /// The sidebar's new-session strip: claude / codex straight away on your usual login (the launcher, on that
+    /// harness, when there's still something to pick), or a terminal in the current project.
+    pub(crate) fn quick_launch(&mut self, h: Option<bro_core::Harness>) {
+        self.follow_focus();
+        let Some(h) = h else {
+            self.open_shell(self.preferred_dir(), Place::Tab);
+            self.side_focus = false;
+            return;
+        };
+        self.svc.refresh_usage();
+        let l = Launcher::new(launcher_data(self), self.preferred_dir(), Place::Tab).with_harness(h);
+        match l.quick_spec() {
+            Some(spec) => {
+                self.launch_spec(spec, Place::Tab);
+                self.side_focus = false;
+            }
+            None => self.overlay = Overlay::Launcher(Box::new(l)),
+        }
+    }
+
+    /// Usage totals use quick-launch defaults; account rows always use that exact login.
+    pub(crate) fn launch_usage(&mut self, h: bro_core::Harness, profile: Option<String>) {
+        self.follow_focus();
+        let Some(profile) = profile else {
+            self.quick_launch(Some(h));
+            return;
+        };
+        self.svc.refresh_usage();
+        let launcher = Launcher::new(launcher_data(self), self.preferred_dir(), Place::Tab).with_harness(h);
+        let Some(launcher) = launcher.with_profile(&profile) else {
+            self.toast(Kind::Error, "that account is no longer available");
+            return;
+        };
+        match launcher.quick_spec() {
+            Some(spec) => {
+                self.launch_spec(spec, Place::Tab);
+                self.side_focus = false;
+            }
+            None => self.overlay = Overlay::Launcher(Box::new(launcher)),
+        }
     }
 
     /// Launch from the launcher.
@@ -227,6 +277,9 @@ impl App {
 
     /// Focus a view if it's open anywhere, else open it in a new tab.
     pub(crate) fn open_view(&mut self, name: &str) {
+        if name == "usage" {
+            self.svc.refresh_usage();
+        }
         if let Some(id) = self.panes.iter().find(|(_, p)| p.view() == Some(name)).map(|(id, _)| *id) {
             if self.focused() == Some(id) && self.tabs.len() > 1 {
                 // pressing the key again goes back where you were
@@ -257,7 +310,7 @@ impl App {
             }
             Cmd::Recent(i) => {
                 if let Some(r) = self.recents.get(i).cloned() {
-                    let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: r.permission, browser: r.browser, extra_args: vec![] };
+                    let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: bro_core::launch::Permission::Skip, browser: r.browser, extra_args: vec![] };
                     self.launch_spec(spec, Place::Tab);
                 }
             }
@@ -291,6 +344,8 @@ impl App {
 
     /// "↻ continue session" / alt+r: earlier sessions, searchable, current project first.
     pub(crate) fn open_continue(&mut self) {
+        // show what we have now; a fresh scan lands a moment later and updates the open picker
+        self.svc.refresh_sessions();
         let project = self.current_project().map(|r| {
             let pk = self.svc.project_for(&r);
             (pk.key, pk.name)
@@ -309,8 +364,6 @@ impl App {
         let Some(past) = st.past.ready() else { return vec![] };
         let mut v: Vec<crate::continue_picker::Entry> = past
             .iter()
-        // show what we have now; a fresh scan lands a moment later and updates the open picker
-        self.svc.refresh_sessions();
             .enumerate()
             .filter_map(|(idx, s)| {
                 let pk = s.project.clone().or_else(|| s.cwd.as_ref().map(|c| self.svc.project_for(c)))?;
@@ -369,10 +422,9 @@ impl App {
         let Some(r) = rows.get(i) else { return };
         self.side_sel = i;
         match r {
-            Row::New => self.open_launcher(None, Place::Tab),
-            Row::Project { key, root, collapsed, .. } => {
-                self.cur_project = Some(root.clone());
-                self.side.set_collapsed(key, !*collapsed);
+            Row::Project { key, root, .. } => {
+                self.pick_project(root.clone());
+                self.toggle_project_tiles(key);
             }
             Row::OpenFolder => self.open_folder(),
             Row::Continue { .. } => self.open_continue(),
@@ -385,27 +437,20 @@ impl App {
         rows.iter().position(|r| matches!(r, Row::Project { key: k, .. } if k == key))
     }
 
-    /// h / ←: fold the project (from any of its rows, landing on its header).
-    pub(crate) fn side_collapse(&mut self) {
+    /// h / ←: up to the project's header (from any of its rows).
+    pub(crate) fn side_parent(&mut self) {
         let rows = self.rows();
         let Some(r) = rows.get(self.side_sel) else { return };
-        let key = r.project_key().to_string();
-        if key.is_empty() {
-            return;
-        }
-        if let Some(i) = Self::project_row(&rows, &key) {
-            self.side.set_collapsed(&key, true);
+        if let Some(i) = Self::project_row(&rows, r.project_key()) {
             self.side_sel = i;
         }
     }
 
-    /// l / →: unfold a project, or step into it.
-    pub(crate) fn side_expand(&mut self) {
+    /// l / →: step into a project.
+    pub(crate) fn side_step_in(&mut self) {
         let rows = self.rows();
-        match rows.get(self.side_sel) {
-            Some(Row::Project { key, collapsed: true, .. }) => self.side.set_collapsed(key, false),
-            Some(Row::Project { .. } | Row::New | Row::OpenFolder | Row::Continue { .. }) => self.side_sel = (self.side_sel + 1).min(rows.len().saturating_sub(1)),
-            _ => {}
+        if matches!(rows.get(self.side_sel), Some(Row::Project { .. } | Row::OpenFolder | Row::Continue { .. })) {
+            self.side_sel = (self.side_sel + 1).min(rows.len().saturating_sub(1));
         }
     }
 }

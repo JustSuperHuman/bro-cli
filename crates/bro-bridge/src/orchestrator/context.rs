@@ -1,9 +1,9 @@
 //! What the orchestrator knows about the workspace before it answers: every
 //! terminal tab, where it is, what is running in it and what it is doing,
-//! rendered once per turn into the system prompt (and on demand through the
+//! rendered into every message (and on demand through the
 //! `list_sessions` tool).
 
-use super::{OrchestratorConfig, TranscriptItem};
+use super::{MessageContext, OrchestratorConfig};
 use crate::agents;
 use crate::session::SessionView;
 use crate::state::AppState;
@@ -17,10 +17,6 @@ const TAIL_LINES: usize = 12;
 const CROWDED_TAIL_LINES: usize = 4;
 const CROWDED_AT: usize = 12;
 const TAIL_WIDTH: usize = 160;
-/// Conversation history sent back to the model (older items are trimmed).
-const HISTORY_ITEMS: usize = 80;
-const HISTORY_CHARS: usize = 90_000;
-const TOOL_RESULT_CHARS: usize = 12_000;
 
 pub fn idle_seconds(updated_at: &str) -> Option<i64> {
     let at = DateTime::parse_from_rfc3339(updated_at).ok()?;
@@ -244,243 +240,116 @@ pub fn workspace_snapshot(app: &AppState) -> String {
     out
 }
 
-pub fn system_prompt(app: &AppState, config: &OrchestratorConfig) -> String {
+/// The orchestrator's standing instructions (Claude Code's `--system-prompt`).
+/// The live workspace travels with each message instead
+/// ([`message_with_snapshot`]), so it is never stale.
+pub fn system_prompt(config: &OrchestratorConfig) -> String {
     let mut prompt = String::new();
     prompt.push_str(concat!(
-        "You are the Orchestrator built into bro, the user's agentic terminal workspace. You live in a side panel ",
-        "next to the user's terminal sessions and you see all of them: shells and coding agents (Claude Code, Codex, ",
-        "Pi, omp) that bro runs on this machine, mirrored to the web and mobile clients. Your job is to tell the user what every tab is doing, spot the ones that are stuck, failing or ",
-        "waiting on them, and drive tabs on their behalf through your tools.\n\n",
-        "## How to work\n",
-        "- The workspace list below is a live snapshot taken as this message was sent. Answer status questions from it ",
-        "directly; call read_session when you need more of a tab's screen or scrollback.\n",
-        "- Refer to tabs by their title (and directory when titles collide). Tool calls take the session id shown in the list.\n",
-        "- Tabs running Claude Code or Codex are AI coding agents. They accept a message like a person typing: use ",
-        "send_input with submit=true, then wait_for_output before reading the result. Their screens show what they ",
-        "are working on; summarize that in plain language (task, current step, whether they need the user).\n",
-        "- A tab marked WAITING FOR AN ANSWER is blocked on a rendered question; tell the user what it asks and offer to ",
-        "answer it with answer_prompt (only answer yourself when the user has said what to choose).\n",
-        "- These are the user's real terminals. Read before you type. Never run destructive commands (deleting files, ",
-        "resetting git state, killing processes, force pushes) unless the user explicitly asked for exactly that. ",
-        "Do not type into a tab whose agent is mid-turn unless the user asked you to interrupt it.\n",
-        "- After changing something (input sent, tab opened or closed), verify the effect with the tools rather than ",
-        "assuming it worked, and report what you saw.\n",
-        "- Ask before closing a tab that looks busy. Renaming and opening tabs needs no confirmation.\n",
-        "- Be concise. Lead with the answer. For status reports use one short line per tab: title, what it is doing, ",
-        "and anything that needs attention. Use markdown sparingly (bullets, `code` for commands and paths).\n\n"
+        "You are Hugh, the orchestrator built into bro, the user's agentic terminal workspace. You see every terminal ",
+        "session bro runs on this machine: shells and coding agents (Claude Code, Codex, Pi, omp). Your job is to tell ",
+        "the user what every session is doing, spot the ones that are stuck, failing or waiting on them, open new ",
+        "sessions, hand them tasks, chain work between them, and answer questions about their chats, all through your ",
+        "bro tools.\n\n",
+        "## Voice\n",
+        "- Dictated messages arrive as <dictated>...</dictated>, transcribed by speech recognition. Expect mis-hearings: ",
+        "match names and projects to the closest real ones (\"toast\"/\"tost\" -> Toast, \"just gains\" -> justgains) ",
+        "and act on the most plausible reading. Ask only when two readings would do different, hard-to-undo things.\n",
+        "- Your reply is spoken aloud and shown as a toast, so it must be tiny: at most about 8 words, one clause, plain ",
+        "text. State the outcome only. No explanations, no restating the request, no \"I\" preambles, no offers or ",
+        "follow-up questions (\"Want me to...?\"), no pleasantries. Good: \"Opened Toast in justgains.\" \"Sent to Mal.\" ",
+        "\"Mal is idle.\" \"Toast is running the tests.\" \"Nothing is stuck.\" \"Pinky's build failed: missing env var.\" ",
+        "Go longer only when the user explicitly asks for detail or a summary, and even then keep it to two short ",
+        "sentences. Ask a question back only when you truly cannot act, in five words or fewer.\n\n",
+        "## Routing a dictated message: prompt for the focused pane, or instruction for you\n",
+        "Each dictated message comes with a <focus> line: the session the user was looking at when they started speaking. ",
+        "Decide first, then do exactly one of these:\n",
+        "- PROMPT: the focused session runs a coding agent (Claude Code, Codex, Pi, omp) and the words read like something ",
+        "the user would type to that agent: a task, a question about its code or work, feedback or a correction (\"add a ",
+        "loading spinner\", \"why is this test failing?\", \"no, use the other endpoint\", \"looks good, commit it\"). Call ",
+        "send_input right away with the focused sessionId, submit=true, and the user's own words: fix obvious ",
+        "mis-transcriptions and drop filler (um, uh), but never rephrase, summarize or add to them. Use no other tool ",
+        "first and don't wait for output. Reply only \"Sent to <name>.\" (add \"queued behind its current turn\" when that ",
+        "agent is working; it still takes the message).\n",
+        "- INSTRUCTION: the words are about bro and its sessions rather than the focused agent's work: opening, closing, ",
+        "focusing or naming sessions; a different session by name (\"tell Toast...\", \"ask Pinky...\"); status or history ",
+        "questions (\"what is Mal doing\", \"what did Toast change\", \"is anything stuck\"); chaining (\"when... then...\"); ",
+        "or words addressed to you (\"Hugh, ...\"). Handle it with your tools as usual.\n",
+        "- Explicit cues win: starting with \"Hugh\" or \"hey Hugh\" means INSTRUCTION; \"tell it\", \"type\", \"send this\" or ",
+        "\"prompt\" mean PROMPT to the focused session (drop the cue words).\n",
+        "- The focused session is a plain shell: INSTRUCTION, unless the user dictates a literal command (\"run git ",
+        "status\" -> send_input \"git status\"). No focused session: INSTRUCTION.\n",
+        "- Still unsure: PROMPT if the focused agent is idle and the words concern code or its project, otherwise ",
+        "INSTRUCTION.\n",
+        "Messages without a <dictated> tag were typed into your panel and are always instructions for you.\n\n",
+        "## Sessions and names\n",
+        "- Sessions you open get squad names: Mal, Pinky, Toast, Minty, Lilac, Sky, Bitty (titles look like ",
+        "\"Toast · justgains\"). The user refers to sessions by these names; every tool's sessionId accepts the name.\n",
+        "- \"Open a session in X\" means open_session with project X (a claude session unless another agent is named). ",
+        "If a task is given in the same breath, pass it as task. Reply with just the name and project: \"Opened Toast in justgains.\"\n",
+        "- To talk to an agent session: send_input with submit=true. Don't type into a session whose agent is mid-turn ",
+        "unless the user asked you to interrupt it.\n",
+        "- Chaining (\"when Mal is done, have Pinky review it\"): wait_for_output on the first session until its agent is ",
+        "idle (call it again while it reports still working), read what it produced (read_chat or read_session), then ",
+        "send the follow-up to the next session with the relevant context included. When the chain is done, say so in a few words.\n",
+        "- Questions about what a session did or said (\"what did Toast change?\", \"why did the build fail?\"): use ",
+        "read_chat first (the full conversation), read_session for the live screen. For older chats, list_chats then ",
+        "read_chat with a chatId. Read, Grep and Glob work on transcript files and project files when you need more.\n",
+        "- A session marked WAITING FOR AN ANSWER is blocked on a question; tell the user what it asks and offer to answer ",
+        "it with answer_prompt (answer yourself only when the user said what to choose).\n\n",
+        "## Safety\n",
+        "- These are the user's real terminals. Read before you type. Never send destructive commands (deleting files, ",
+        "resetting git state, killing processes, force pushes) unless the user explicitly asked for exactly that.\n",
+        "- Ask before closing a session that looks busy. Opening, naming and focusing sessions needs no confirmation.\n",
+        "- After changing something, verify with the tools rather than assuming, and report what you saw.\n\n",
+        "Each user message arrives with a <workspace> block: a live snapshot of every session taken as it was sent. ",
+        "Answer status questions from it directly; call read_session / read_chat for more.\n"
     ));
-    prompt.push_str(&format!(
-        "You are running as model `{}` through {}.\n\n",
-        config.model,
-        if config.provider == "openrouter" {
-            "OpenRouter"
-        } else {
-            "a custom OpenAI-compatible endpoint"
-        }
-    ));
-    let projects = app.projects();
-    if !projects.is_empty() {
-        prompt.push_str("## Projects (directories the tabs are grouped under)\n");
-        for project in projects.iter().take(40) {
-            prompt.push_str(&format!("- {} — {}\n", project.name, project.cwd));
-        }
-        prompt.push('\n');
-    }
-    prompt.push_str(&workspace_snapshot(app));
+    prompt.push_str(&format!("\nYou are running as Claude Code model `{}`.\n", config.model));
     prompt
 }
 
-fn clip(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let kept: String = text.chars().take(limit).collect();
-    format!("{kept}\n…[trimmed]")
+/// One line on the pane the user was looking at.
+fn focus_line(app: &AppState, focused: Option<&str>) -> String {
+    let Some(view) = focused.and_then(|id| app.session_view(id)) else {
+        return "No session is focused (the user is not looking at a session).".into();
+    };
+    let (_, _, note) = agent_state(&view);
+    format!(
+        "The user is looking at \"{}\" (sessionId {}) in {}: {}.",
+        view.summary.title, view.summary.id, view.summary.cwd, note
+    )
 }
 
-/// Rebuilds the OpenAI message list from the stored transcript so the model
-/// sees its own earlier tool calls and their results.
-pub fn history_messages(items: &[TranscriptItem]) -> Vec<Value> {
-    let mut messages: Vec<Value> = Vec::new();
-    let mut chars = 0usize;
-    let mut trimmed = false;
-    let start = items.len().saturating_sub(HISTORY_ITEMS);
-    if start > 0 {
-        trimmed = true;
-    }
-    // Walk backwards so the newest context survives the character budget.
-    let mut selected: Vec<&TranscriptItem> = Vec::new();
-    for item in items[start..].iter().rev() {
-        let size = item.text.len()
-            + item
-                .tool
-                .as_ref()
-                .map(|tool| tool.result.len())
-                .unwrap_or(0)
-            + item
-                .tool_calls
-                .iter()
-                .map(|call| call.arguments.len())
-                .sum::<usize>();
-        if chars + size > HISTORY_CHARS && !selected.is_empty() {
-            trimmed = true;
-            break;
+/// A user message as Claude receives it: the live workspace, the focused
+/// pane, then the words (tagged when dictated).
+pub fn message_with_snapshot(app: &AppState, text: &str, context: &MessageContext) -> String {
+    let mut out = String::from("<workspace>\n");
+    let projects = app.projects();
+    if !projects.is_empty() {
+        out.push_str("## Projects\n");
+        for project in projects.iter().take(40) {
+            out.push_str(&format!("- {} — {}\n", project.name, project.cwd));
         }
-        chars += size;
-        selected.push(item);
+        out.push('\n');
     }
-    selected.reverse();
-    // A tool result without the assistant call that produced it is rejected
-    // by every provider; drop leading orphans.
-    while selected.first().is_some_and(|item| item.role == "tool") {
-        selected.remove(0);
-        trimmed = true;
+    out.push_str(&workspace_snapshot(app));
+    out.push_str("</workspace>\n");
+    if context.voice {
+        out.push_str(&format!(
+            "<focus>{}</focus>\n<dictated>{text}</dictated>",
+            focus_line(app, context.focused_session.as_deref())
+        ));
+    } else {
+        out.push('\n');
+        out.push_str(text);
     }
-    if trimmed {
-        messages.push(json!({
-            "role": "user",
-            "content": "[Earlier parts of this conversation were trimmed for length.]"
-        }));
-        messages.push(json!({ "role": "assistant", "content": "Understood." }));
-    }
-    for item in selected {
-        match item.role.as_str() {
-            "user" => messages.push(json!({ "role": "user", "content": item.text })),
-            "assistant" => {
-                if item.status == "cancelled" && item.text.is_empty() && item.tool_calls.is_empty()
-                {
-                    continue;
-                }
-                let mut message = json!({
-                    "role": "assistant",
-                    "content": if item.text.is_empty() { Value::Null } else { Value::String(item.text.clone()) }
-                });
-                if !item.tool_calls.is_empty() {
-                    message["tool_calls"] = json!(
-                        item.tool_calls
-                            .iter()
-                            .map(|call| json!({
-                                "id": call.id,
-                                "type": "function",
-                                "function": { "name": call.name, "arguments": call.arguments }
-                            }))
-                            .collect::<Vec<_>>()
-                    );
-                }
-                messages.push(message);
-            }
-            "tool" => {
-                if let Some(tool) = &item.tool {
-                    let content = if tool.ok {
-                        clip(&tool.result, TOOL_RESULT_CHARS)
-                    } else {
-                        format!("Error: {}", clip(&tool.result, TOOL_RESULT_CHARS))
-                    };
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tool.call_id,
-                        "content": content
-                    }));
-                }
-            }
-            _ => {}
-        }
-    }
-    // A cancelled turn can leave an assistant tool call with no result; give
-    // the model a placeholder so the transcript stays well-formed.
-    let mut repaired: Vec<Value> = Vec::with_capacity(messages.len());
-    for (index, message) in messages.iter().enumerate() {
-        repaired.push(message.clone());
-        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
-            for call in calls {
-                let id = call.get("id").and_then(Value::as_str).unwrap_or_default();
-                let answered = messages[index + 1..]
-                    .iter()
-                    .take(calls.len())
-                    .any(|candidate| {
-                        candidate.get("tool_call_id").and_then(Value::as_str) == Some(id)
-                    });
-                if !answered {
-                    repaired.push(json!({
-                        "role": "tool",
-                        "tool_call_id": id,
-                        "content": "[cancelled before this tool ran]"
-                    }));
-                }
-            }
-        }
-    }
-    repaired
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::{ToolCall, ToolRecord};
-
-    fn item(role: &str, text: &str) -> TranscriptItem {
-        TranscriptItem {
-            id: format!("{role}-{}", text.len()),
-            rev: 1,
-            seq: 1,
-            turn_id: "t".into(),
-            role: role.into(),
-            text: text.into(),
-            reasoning: None,
-            tool_calls: Vec::new(),
-            tool: None,
-            status: "done".into(),
-            at: String::new(),
-            finished_at: None,
-            model: None,
-        }
-    }
-
-    #[test]
-    fn history_round_trips_tool_calls_and_results() {
-        let mut assistant = item("assistant", "");
-        assistant.tool_calls.push(ToolCall {
-            id: "call_1".into(),
-            name: "read_session".into(),
-            arguments: "{\"sessionId\":\"a\"}".into(),
-        });
-        let mut tool = item("tool", "");
-        tool.tool = Some(ToolRecord {
-            call_id: "call_1".into(),
-            name: "read_session".into(),
-            arguments: json!({ "sessionId": "a" }),
-            summary: "Read a".into(),
-            result: "PS C:\\>".into(),
-            ok: true,
-        });
-        let messages = history_messages(&[
-            item("user", "hi"),
-            assistant,
-            tool,
-            item("assistant", "done"),
-        ]);
-        assert_eq!(messages.len(), 4);
-        assert_eq!(
-            messages[1]["tool_calls"][0]["function"]["name"],
-            "read_session"
-        );
-        assert_eq!(messages[2]["tool_call_id"], "call_1");
-        assert_eq!(messages[2]["content"], "PS C:\\>");
-    }
-
-    #[test]
-    fn unanswered_tool_calls_get_a_placeholder_result() {
-        let mut assistant = item("assistant", "");
-        assistant.status = "cancelled".into();
-        assistant.tool_calls.push(ToolCall {
-            id: "call_9".into(),
-            name: "send_input".into(),
-            arguments: "{}".into(),
-        });
-        let messages = history_messages(&[item("user", "go"), assistant]);
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[2]["tool_call_id"], "call_9");
-    }
 
     #[test]
     fn screen_tail_drops_trailing_blank_rows_and_clips_width() {

@@ -230,7 +230,7 @@ pub fn fallback_command(spec: &LaunchSpec, st: &State) -> Result<CommandSpec, St
     match (spec.permission, h) {
         (Permission::Auto, Harness::Claude) => args.extend(["--permission-mode".into(), "auto".into()]),
         (Permission::Skip, Harness::Claude) => args.push("--dangerously-skip-permissions".into()),
-        (Permission::Skip, Harness::Codex) => args.push("--dangerously-bypass-approvals-and-sandbox".into()),
+        (Permission::Skip, Harness::Codex) => args.push("--yolo".into()),
         (Permission::Skip, Harness::Omp) => args.push("--yolo".into()),
         _ => {}
     }

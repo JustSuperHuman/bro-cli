@@ -126,6 +126,53 @@ struct Inner {
     bridge_fuse: guard::Fuse,
     usage_kick: Mutex<Option<Sender<()>>>,
     projects: Mutex<HashMap<PathBuf, ProjectKey>>,
+    /// Push-to-talk listener; dropping it unhooks the hotkey.
+    voice: Mutex<Option<bro_voice::Voice>>,
+    /// Bridge id of the session in the focused pane (kept current by the UI loop).
+    focused: Mutex<Option<String>>,
+}
+
+/// GPT-Live's standing instructions: it is Hugh's voice; Hugh (Claude, through the bridge) does the work.
+pub(crate) const LIVE_INSTRUCTIONS: &str = "You are Hugh, the voice of bro, the user's terminal workspace. Coding agents \
+(Claude Code, Codex) run there in sessions named Mal, Pinky, Toast, Minty, Lilac, Sky and Bitty, in projects such as justgains. \
+You cannot see or do anything in the workspace yourself: delegate every request about sessions, projects, code, chats or \
+anything the user wants done, including words the user dictates for the agent they are looking at. Delegate right away \
+without asking first. Be extremely brief. While a delegation runs, say one word at most (\"Sure.\") or nothing, then wait \
+quietly. When the result arrives, say it in as few words as it takes, usually under eight: no preamble, no restating the \
+request, no offers or follow-up questions, never add anything the result doesn't say. Small talk: a few words. \
+The user speaks while holding a key; when they let go, they are done talking.";
+
+/// Longest reply bro speaks or toasts; Hugh's full answer stays in the orchestrator transcript.
+const BRIEF_CHARS: usize = 120;
+
+/// Hugh's reply cut to what is worth hearing: markdown dropped, the first sentence, no trailing offer
+/// ("Want me to...?"), at most [`BRIEF_CHARS`] ending on a word.
+pub(crate) fn brief(text: &str) -> String {
+    let plain: String = text.replace(['*', '`', '#'], "").split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut sentences = vec![];
+    let mut rest = plain.as_str();
+    while !rest.is_empty() {
+        let end = rest.char_indices().find(|&(i, c)| matches!(c, '.' | '!' | '?') && rest[i + c.len_utf8()..].starts_with(' ')).map(|(i, c)| i + c.len_utf8());
+        let (sentence, tail) = rest.split_at(end.unwrap_or(rest.len()));
+        sentences.push(sentence.trim());
+        rest = tail.trim_start();
+    }
+    let offer = |s: &str| {
+        let s = s.to_lowercase();
+        ["want me", "should i", "shall i", "would you like", "do you want", "let me know", "i can also", "anything else"].iter().any(|o| s.starts_with(o))
+    };
+    let first = sentences.iter().find(|s| !s.is_empty() && !offer(s)).or(sentences.first()).copied().unwrap_or("");
+    if first.chars().count() <= BRIEF_CHARS {
+        return first.to_string();
+    }
+    let cut: String = first.chars().take(BRIEF_CHARS).collect();
+    let cut = cut.rsplit_once(' ').map(|(head, _)| head).unwrap_or(&cut);
+    format!("{}…", cut.trim_end_matches([',', ';', ':', ' ']))
+}
+
+/// Names speech recognition should spell exactly: the orchestrator and the squad that names its sessions.
+pub(crate) fn voice_keywords() -> Vec<String> {
+    ["Hugh", "Mal", "Pinky", "Toast", "Minty", "Lilac", "Sky", "Bitty", "bro"].iter().map(|w| w.to_string()).collect()
 }
 
 /// v2.toml settings with every default spelled out (used when `Settings::load` isn't available).
@@ -136,9 +183,11 @@ pub fn fallback_settings() -> Settings {
         shell: None,
         nerd_font: true,
         usage_expanded: false,
+        sidebar_width: None,
         icons: "auto".into(),
         bridge: BridgeSettings::default(),
         proxy: ProxySettings::default(),
+        voice: bro_core::config::VoiceSettings::default(),
         keys: BTreeMap::new(),
     }
 }
@@ -171,6 +220,8 @@ impl Services {
                 bridge_fuse: guard::Fuse::default(),
                 usage_kick: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
+                voice: Mutex::new(None),
+                focused: Mutex::new(None),
             }),
         }
     }
@@ -286,9 +337,6 @@ impl Services {
 
     /// Fetch usage now (the background refresher also runs every 60 s).
     pub fn refresh_usage(&self) {
-        if self.is_demo() {
-            return;
-        }
         if let Some(k) = self.inner.usage_kick.lock().as_ref() {
             let _ = k.send(());
         }
@@ -400,6 +448,79 @@ impl Services {
         self.with_bridge("bridge::unregister", |b| b.unregister(id));
     }
 
+    /// Tell the bridge's orchestrator where the user works (open projects, recent launch dirs, past sessions'
+    /// project roots) so a spoken "open a session in justgains" finds the folder. Blocking file reads: call on
+    /// a worker thread.
+    pub(crate) fn push_known_folders(&self) {
+        if !self.bridge_running() || self.is_demo() {
+            return;
+        }
+        let mut folders: Vec<std::path::PathBuf> = crate::projects::OpenProjects::load().roots;
+        folders.extend(crate::recents::dirs(&crate::recents::load()));
+        if let Some(past) = self.state().past.ready() {
+            folders.extend(past.iter().filter_map(|s| s.project.as_ref().map(|p| p.root.clone()).or_else(|| s.cwd.clone())));
+        }
+        let mut seen = std::collections::HashSet::new();
+        folders.retain(|f| seen.insert(f.to_string_lossy().to_lowercase()));
+        // project names are words speech recognition should spell exactly
+        if let Some(voice) = self.inner.voice.lock().as_ref() {
+            let mut words: Vec<String> = voice_keywords();
+            words.extend(folders.iter().take(60).filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned())));
+            voice.set_keywords(words);
+        }
+        self.with_bridge("bridge::set_known_folders", |b| b.set_known_folders(folders));
+    }
+
+    /// The UI loop reports which session is focused (voice routes dictated prompts to it).
+    pub(crate) fn set_focused_session(&self, sid: Option<&str>) {
+        let mut focused = self.inner.focused.lock();
+        if focused.as_deref() != sid {
+            *focused = sid.map(str::to_owned);
+        }
+    }
+
+    pub(crate) fn focused_session(&self) -> Option<String> {
+        self.inner.focused.lock().clone()
+    }
+
+    /// A dictated message for Hugh, with the session the user was looking at when they started speaking.
+    pub(crate) fn orchestrator_send_voice(&self, text: String, focused: Option<String>, tag: Option<String>) {
+        if !self.bridge_running() {
+            self.send(Event::Toast(crate::alerts::Kind::Error, "Hugh needs the bridge: turn it on in settings".into()));
+            return;
+        }
+        let context = bro_bridge::MessageContext { voice: true, focused_session: focused, tag: tag.clone() };
+        self.with_bridge("bridge::orchestrator_send_with", |b| {
+            if let Err(e) = b.orchestrator_send_with(text, context) {
+                match &tag {
+                    Some(id) => self.voice_delegation_result(id, &format!("Hugh isn't available: {e}")),
+                    None => self.send(Event::Toast(crate::alerts::Kind::Error, format!("Hugh: {e}"))),
+                }
+            }
+        });
+    }
+
+    /// GPT-Live: Hugh's answer to a delegation, for the voice to speak.
+    pub(crate) fn voice_delegation_result(&self, id: &str, text: &str) {
+        if let Some(voice) = self.inner.voice.lock().as_ref() {
+            voice.delegation_result(id, &brief(text));
+        }
+    }
+
+    /// GPT-Live: what Hugh is doing for a delegation (the voice knows, doesn't read it out).
+    pub(crate) fn voice_delegation_progress(&self, id: &str, text: &str) {
+        if let Some(voice) = self.inner.voice.lock().as_ref() {
+            voice.delegation_progress(id, text);
+        }
+    }
+
+    /// Keep the push-to-talk listener alive (None stops it).
+    pub(crate) fn set_voice(&self, voice: Option<bro_voice::Voice>) {
+        if let Some(old) = std::mem::replace(&mut *self.inner.voice.lock(), voice) {
+            old.stop();
+        }
+    }
+
     /// Tell the bridge what remote clients can launch: a shell, every logged-in profile, pi and omp.
     pub(crate) fn push_bridge_profiles(&self) {
         if !self.bridge_running() {
@@ -488,6 +609,18 @@ pub fn local_project_for(cwd: &Path) -> ProjectKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brief_keeps_the_outcome_and_drops_the_rest() {
+        assert_eq!(brief("Opened Toast in justgains."), "Opened Toast in justgains.");
+        assert_eq!(brief("I opened a Claude session in **justgains**. It's named Toast. Want me to send it a task?"), "I opened a Claude session in justgains.");
+        assert_eq!(brief("Want me to retry? Mal's build failed."), "Mal's build failed.");
+        assert_eq!(brief("Version 2.1 is out. Done."), "Version 2.1 is out.", "a dot inside a word isn't a sentence end");
+        let long = "Mal is working through the migration of every settings screen to the new theme system and has touched forty files so far without errors";
+        let cut = brief(long);
+        assert!(cut.chars().count() <= BRIEF_CHARS + 1 && cut.ends_with('…'), "{cut}");
+        assert_eq!(brief("   "), "");
+    }
 
     #[test]
     fn local_projects() {

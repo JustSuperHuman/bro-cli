@@ -37,10 +37,12 @@ pub fn lines(km: &Keymap) -> Vec<Line> {
         v.push(Line::Gap);
     }
     let sheet: &[(&str, &[(&str, &str)])] = &[
-        ("sidebar (alt+b)", &[("j k ↑ ↓", "move"), ("h l ← →", "collapse / expand"), ("⏎", "open a session"), ("c / r", "continue an earlier session (alt+r anywhere)"), ("f", "move a running session to another login"), ("n", "new session in this project"), ("o", "open a project"), ("r", "rename a live session"), ("shift+⏎ / +", "show alongside (stack) · ctrl+click does it too"), ("x", "close a session · on a project: close the project (× works too)"), ("/", "filter"), ("esc", "back to the pane")]),
+        ("sidebar (alt+b)", &[("j k ↑ ↓", "move"), ("h l ← →", "to the project / into it"), ("⏎", "open a session · on a project: tile only its sessions, again: tile all (click works too)"), ("c / r", "continue an earlier session (alt+r anywhere)"), ("f", "move a running session to another login"), ("n", "new session in this project"), ("o", "open a project"), ("r", "rename a live session"), ("shift+⏎ / +", "show alongside (stack) · ctrl+click does it too"), ("x", "close a session · on a project: close the project (× works too)"), ("/", "filter"), ("esc", "back to the pane")]),
         ("launcher (alt+n)", &[("type", "filter the column"), ("tab ← →", "next column"), ("↑ ↓", "pick"), ("ctrl+e", "permission: default → auto → skip"), ("ctrl+b", "browser"), ("ctrl+s", "new tab / split"), ("⏎", "launch")]),
-        ("terminal", &[("drag", "select text — copied when you let go"), ("alt+v", "paste a screenshot / copied files as paths"), ("wheel", "scroll back (when the program doesn't use the mouse)"), ("shift+drag", "select even when the program uses the mouse")]),
-        ("mouse", &[("click", "sidebar rows, panes"), ("drag a divider", "resize"), ("× on a frame", "close the pane")]),
+        ("clipboard", &[("ctrl+v / shift+insert", "paste text into the focused field or terminal"), ("alt+v", "paste a screenshot / copied files as paths")]),
+        ("usage", &[("click agent / account", "new session in the current project"), ("click usage heading", "expand / collapse accounts"), ("click Claude arrow", "show / hide Fable allowance"), ("alt+u", "full usage details")]),
+        ("terminal", &[("alt+↑ in Codex", "edit queued input (prefix ↑ still moves pane focus)"), ("click a link", "open in your default browser or application"), ("ctrl+click", "open a link even when the program uses the mouse"), ("drag", "select text — copied when you let go"), ("wheel", "scroll back (when the program doesn't use the mouse)"), ("shift+drag", "select even when the program uses the mouse")]),
+        ("mouse", &[("click", "sidebar rows, panes"), ("drag a divider", "resize"), ("drag sidebar edge ↔", "resize sidebar (saved for next launch)"), ("double-click edge", "reset sidebar to automatic width"), ("× on a frame", "close the pane")]),
     ];
     for (head, keys) in sheet {
         v.push(Line::Head(head.to_string()));

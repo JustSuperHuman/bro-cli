@@ -24,7 +24,7 @@
 //! | `commands` | create-session round trip, paced compose |
 //! | `project_store` / `projects` | project ids, names, order |
 //! | `net` | access URLs and the pairing QR code |
-//! | `orchestrator` | the built-in chat agent over every session |
+//! | `orchestrator` | Hugh, the built-in agent over every session: a headless Claude Code process using the tools at `/mcp` |
 //!
 //! # Data root
 //!
@@ -65,6 +65,7 @@ mod tests;
 
 pub use auth::is_authorized;
 pub use model::TerminalProfile;
+pub use orchestrator::{MessageContext, OrchestratorLaunch, OrchestratorUpdate};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -372,6 +373,61 @@ impl Bridge {
         self.state().set_profiles(profiles);
     }
 
+    /// How the orchestrator starts Claude Code (program, login environment).
+    /// Takes effect with its next message.
+    pub fn set_orchestrator_launch(&self, launch: OrchestratorLaunch) {
+        self.state().orchestrator.set_launch(launch);
+    }
+
+    /// Folders the user works in (open projects, recents, past sessions), used
+    /// to resolve spoken project names ("open a session in justgains").
+    pub fn set_known_folders(&self, folders: Vec<PathBuf>) {
+        *self.state().known_folders.write() = folders.iter().map(|dir| path_text(dir)).collect();
+    }
+
+    /// Sends a message to the orchestrator as if typed in its panel (voice
+    /// input uses this). Returns at once; progress arrives through
+    /// [`Bridge::on_orchestrator_update`] and the clients' transcript.
+    pub fn orchestrator_send(&self, text: String) -> anyhow::Result<()> {
+        self.orchestrator_send_with(text, MessageContext::default())
+    }
+
+    /// [`Bridge::orchestrator_send`] with where the message came from: voice
+    /// input passes the session the user was looking at, so Hugh can route a
+    /// prompt straight to it.
+    pub fn orchestrator_send_with(&self, text: String, context: MessageContext) -> anyhow::Result<()> {
+        let state = self.state().clone();
+        let runtime = state
+            .runtime
+            .get()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the bridge is not running"))?;
+        runtime.spawn(async move {
+            let tag = context.tag.clone();
+            if let Err((_, message)) = orchestrator::send_message_with(&state, text, context).await {
+                state.orchestrator.emit_failure(message, tag);
+            }
+        });
+        Ok(())
+    }
+
+    /// Interrupts the orchestrator's running turn (and drops queued messages).
+    pub fn orchestrator_cancel(&self) -> bool {
+        let state = self.state().clone();
+        match state.runtime.get().cloned() {
+            Some(runtime) => {
+                let _guard = runtime.enter();
+                state.orchestrator.cancel()
+            }
+            None => false,
+        }
+    }
+
+    /// Turn progress for bro's own UI. Runs on a bridge thread; don't block.
+    pub fn on_orchestrator_update(&self, f: Box<dyn Fn(OrchestratorUpdate) + Send + Sync>) {
+        self.state().orchestrator.on_update(Arc::from(f));
+    }
+
     /// Push a notification to connected clients (and history).
     pub fn notify(&self, n: Notification) {
         let state = self.state();
@@ -447,6 +503,7 @@ impl Bridge {
 
     pub fn shutdown(&self) {
         let state = self.state();
+        state.orchestrator.shutdown();
         state.shutdown.send_replace(true);
         let Some(thread) = self.inner.thread.lock().take() else {
             return;

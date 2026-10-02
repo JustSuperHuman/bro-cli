@@ -63,8 +63,9 @@ impl App {
             store: transcript_store(&spec),
             model: spec.model.clone(),
             label,
+            // a name the bridge asked for (the orchestrator's "Toast · justgains") outlives the agent's own title
+            renamed: name.is_some() && reply.is_some(),
             name,
-            renamed: false,
             project: self.svc.project_for(&cwd),
             cwd,
             started: Instant::now(),
@@ -75,11 +76,13 @@ impl App {
         let term = Term::new(meta, Spawn { program: cmd.program, args: cmd.args, env: cmd.env, env_remove: cmd.env_remove }, self.svc.clone());
         let background = reply.is_some();
         let here = self.cur;
+        let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all);
         let id = self.open(Box::new(term), if self.tabs.is_empty() { Place::Tab } else { place });
         if background {
             // a remote client asked: start it now and stay where you are
             self.start_now(id);
             self.cur = here.min(self.tabs.len().saturating_sub(1));
+            self.restore_background_tiles(tiles);
             if let Some(r) = reply {
                 let _ = r.send(Ok(sid));
             }
@@ -156,7 +159,7 @@ impl App {
                 let cwd = req.cwd.clone().filter(|c| c.is_dir()).or_else(|| self.current_project()).or_else(dirs::home_dir).unwrap_or_default();
                 match create_target(req.profile_id.as_deref()) {
                     Some((harness, profile_id)) => {
-                        let spec = LaunchSpec { harness, profile_id, provider_id: None, model: None, cwd, resume: None, permission: Permission::Default, browser: BrowserMode::Off, extra_args: req.args.clone() };
+                        let spec = LaunchSpec { harness, profile_id, provider_id: None, model: None, cwd, resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: req.args.clone() };
                         let mut lr = LaunchRequest::new(spec, Place::Tab);
                         lr.reply = Some(reply);
                         lr.name = req.title.clone();
@@ -164,9 +167,10 @@ impl App {
                     }
                     None => {
                         let here = self.cur;
+                        let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all);
                         let id = match req.shell.clone() {
                             Some(shell) => {
-                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: false, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
+                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: req.title.is_some(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
                                 let term = Term::new(meta, Spawn { program: shell, args: req.args.clone(), ..Spawn::default() }, self.svc.clone());
                                 self.new_tab(Box::new(term))
                             }
@@ -174,6 +178,7 @@ impl App {
                         };
                         self.start_now(id);
                         self.cur = here.min(self.tabs.len().saturating_sub(1));
+                        self.restore_background_tiles(tiles);
                         let sid = self.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()).unwrap_or_default();
                         let _ = reply.send(Ok(sid));
                     }
@@ -183,6 +188,16 @@ impl App {
     }
 
     // ------------------------------------------------------------------ sidebar data
+
+    /// A remote launch joins an all-sessions grid without stealing focus or unzooming it.
+    fn restore_background_tiles(&mut self, before: (Vec<PaneId>, Option<PaneId>, bool, bool)) {
+        if before.3 {
+            self.stack_focus = before.1;
+            self.stack_zoom = before.2;
+        } else {
+            (self.stack, self.stack_focus, self.stack_zoom, self.tile_all) = before;
+        }
+    }
 
     /// Live sessions for the sidebar.
     pub(crate) fn live_infos(&self) -> Vec<LiveInfo> {
@@ -253,13 +268,13 @@ impl App {
         if self.open_projects.add(root.clone()) {
             self.open_projects.save(self.persist);
         }
-        self.cur_project = Some(root);
+        self.pick_project(root);
     }
 
     /// The project a sidebar row belongs to.
     pub(crate) fn row_root(&self, rows: &[Row], r: &Row) -> Option<std::path::PathBuf> {
         match r {
-            Row::New | Row::OpenFolder | Row::Continue { .. } => {
+            Row::OpenFolder | Row::Continue { .. } => {
                 let _ = rows;
                 None
             }
@@ -297,8 +312,7 @@ impl App {
         let root = self.svc.project_for(&dir).root;
         let added = self.open_projects.add(root.clone());
         self.open_projects.save(self.persist);
-        self.side.set_collapsed(&self.svc.project_for(&root).key, false);
-        self.cur_project = Some(root.clone());
+        self.pick_project(root.clone());
         let rows = self.rows();
         if let Some(i) = rows.iter().position(|r| matches!(r, Row::Project { root: r, .. } if *r == root)) {
             self.side_sel = i;
@@ -353,7 +367,7 @@ impl App {
     pub(crate) fn resume(&mut self, idx: usize) {
         let Some(s) = self.past_session(idx) else { return };
         let cwd = s.cwd.clone().or_else(|| s.project.as_ref().map(|p| p.root.clone())).or_else(dirs::home_dir).unwrap_or_default();
-        let spec = LaunchSpec { harness: s.harness, profile_id: s.profile_id.clone(), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: false }), permission: Permission::Default, browser: BrowserMode::Off, extra_args: vec![] };
+        let spec = LaunchSpec { harness: s.harness, profile_id: s.profile_id.clone(), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: false }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![] };
         let mut req = LaunchRequest::new(spec, Place::Tab);
         req.name = Some(crate::ui::fit(&s.title, 28));
         self.svc.launch(req);
@@ -450,7 +464,7 @@ impl App {
                     return;
                 }
                 self.close(pane);
-                let spec = LaunchSpec { harness, profile_id: Some(profile.clone()), provider_id: None, model: None, cwd: cwd.clone(), resume: None, permission: Permission::Default, browser: BrowserMode::Off, extra_args: vec![] };
+                let spec = LaunchSpec { harness, profile_id: Some(profile.clone()), provider_id: None, model: None, cwd: cwd.clone(), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![] };
                 let mut req = LaunchRequest::new(spec, Place::Tab);
                 req.name = Some(crate::ui::fit(&title, 28));
                 req.find_live = Some(crate::services::launch::FindLive { harness, store, cwd, since });
@@ -463,7 +477,7 @@ impl App {
     /// Stage `s` into `target` and resume it there as a fork.
     pub(super) fn fork_into(&mut self, s: SessionInfo, target: String) {
         let cwd = s.cwd.clone().or_else(|| s.project.as_ref().map(|p| p.root.clone())).or_else(dirs::home_dir).unwrap_or_default();
-        let spec = LaunchSpec { harness: s.harness, profile_id: Some(target.clone()), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: true }), permission: Permission::Default, browser: BrowserMode::Off, extra_args: vec![] };
+        let spec = LaunchSpec { harness: s.harness, profile_id: Some(target.clone()), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: true }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![] };
         let mut req = LaunchRequest::new(spec, Place::Tab);
         req.name = Some(crate::ui::fit(&s.title, 28));
         req.stage = Some(s);

@@ -101,6 +101,33 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
+pub const PROJECT_COLORS: usize = 8;
+
+/// A stable preferred slot; the workspace resolves collisions among its projects.
+pub fn project_color_slot(key: &str) -> usize {
+    // FNV-1a, explicitly fixed instead of a platform-dependent/randomized hasher.
+    let hash = key.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    (hash % PROJECT_COLORS as u64) as usize
+}
+
+/// Light themes use darker counterparts; monochrome/terminal themes retain their palette.
+pub fn project_color(slot: usize, t: &Theme) -> Color {
+    if t.name == "mono" || t.name == "terminal" {
+        return t.accent;
+    }
+    let colors = if t.is_light() {
+        [0x2864ad, 0x8761b4, 0x237d78, 0xa66028, 0xa84d76, 0x587c2c, 0x4e62ad, 0x96701f]
+    } else {
+        [0x7eb8f6, 0xc3a1ef, 0x69c8c2, 0xe9ad79, 0xe896b8, 0xa6c879, 0xa0adf7, 0xe4c579]
+    };
+    let rgb = colors[slot % colors.len()];
+    Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+pub fn project_tint(color: Color, t: &Theme) -> Color {
+    mix(color, if t.is_light() { t.bg } else { Color::Rgb(18, 18, 22) }, if t.is_light() { 0.9 } else { 0.83 })
+}
+
 /// Look a theme up by name (unknown names fall back to the default palette).
 pub fn get(name: &str) -> Theme {
     get_depth(name, 0)

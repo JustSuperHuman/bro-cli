@@ -1,5 +1,5 @@
 //! The system clipboard (ported from z4-oriel): copy text out of bro (selections), and grab an image or copied
-//! files from it (alt+v pastes a screenshot into Claude Code / Codex as a file path).
+//! files from it (ctrl+v pastes text; alt+v pastes an image into Claude Code / Codex as a file path).
 //!
 //! Copy goes two ways at once: OSC 52 (the terminal sets the clipboard; works over SSH too) and the OS tool as a
 //! backup (clip.exe with UTF-16LE, wl-copy, xclip, xsel).
@@ -70,6 +70,38 @@ pub fn copy(text: &str) {
             }
         }
     });
+}
+
+/// Read text or copied file paths. Run on a worker so clipboard contention never blocks input.
+pub fn grab_text() -> Option<String> {
+    #[cfg(windows)]
+    {
+        use clipboard_win::{Clipboard, Getter, formats};
+        let _clipboard = Clipboard::new_attempts(10).ok()?;
+        let mut text = String::new();
+        if formats::Unicode.read_clipboard(&mut text).is_ok() && !text.is_empty() {
+            return Some(text);
+        }
+        let mut paths: Vec<String> = vec![];
+        formats::FileList.read_clipboard(&mut paths).ok()?;
+        (!paths.is_empty()).then(|| paste_form(&paths))
+    }
+    #[cfg(not(windows))]
+    {
+        let helpers: &[(&str, &[&str])] = &[
+            ("pbpaste", &[]),
+            ("wl-paste", &["--no-newline", "--type", "text"]),
+            ("xclip", &["-selection", "clipboard", "-o"]),
+            ("xsel", &["--clipboard", "--output"]),
+        ];
+        let (prog, args) = helpers.iter().find(|(prog, _)| crate::util::which(prog).is_some())?;
+        let out = cmd(prog).args(*args).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(out.stdout).ok()?;
+        (!text.is_empty()).then_some(text)
+    }
 }
 
 /// If the clipboard holds an image, save it as a PNG under `~/.bro/paste` and return its path; if it holds

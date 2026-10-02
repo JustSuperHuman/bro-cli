@@ -900,66 +900,89 @@ async fn bind_errors_are_returned() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mobile_and_desktop_share_orchestrator_chat() {
-    use axum::{Json, Router, routing::post};
-    // A local provider fixture: no real accounts or model calls.
-    let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let provider_address = provider_listener.local_addr().unwrap();
-    let provider = tokio::spawn(async move {
-        axum::serve(
-            provider_listener,
-            Router::new().route(
-                "/v1/chat/completions",
-                post(|Json(_body): Json<Value>| async move {
-                    Json(json!({ "choices": [{ "message": { "role": "assistant", "content": "Both clients share this answer." }, "finish_reason": "stop" }] }))
-                }),
-            ),
-        )
-        .await
-        .unwrap();
-    });
+async fn orchestrator_tools_are_served_over_mcp() {
     let harness = Harness::start();
     let client = reqwest::Client::new();
-    let config = client
-        .put(harness.url("/api/orchestrator/config"))
-        .json(&json!({
-            "provider": "custom", "baseUrl": format!("http://{provider_address}/v1"),
-            "model": "fixture", "apiKey": "test-only-not-a-real-key"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(config.status(), 200);
-    let mut desktop = harness.socket().await;
-    let mut mobile = harness.socket().await;
-    for socket in [&mut desktop, &mut mobile] {
-        let hello = recv_type(socket, "hello").await;
-        assert_eq!(hello["orchestrator"]["state"], "idle");
-    }
-    let response = client
-        .post(harness.url("/api/orchestrator/messages"))
-        .json(&json!({ "text": "Hello from mobile" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 202);
-    for socket in [&mut desktop, &mut mobile] {
-        loop {
-            let event = recv_type(socket, "orchestrator_item").await;
-            if event["item"]["role"] == "assistant" && event["item"]["status"] == "done" {
-                assert_eq!(event["item"]["text"], "Both clients share this answer.");
-                break;
-            }
+    let rpc = |id: u64, method: &str, params: Value| {
+        json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+    };
+    let call = |body: Value| {
+        let client = client.clone();
+        let url = harness.url("/mcp");
+        async move {
+            client
+                .post(url)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
         }
-    }
-    let test: Value = client
-        .post(harness.url("/api/orchestrator/test"))
+    };
+    let init = call(rpc(1, "initialize", json!({ "protocolVersion": "2025-06-18" }))).await;
+    assert_eq!(init["result"]["serverInfo"]["name"], "bro");
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    let accepted = client
+        .post(harness.url("/mcp"))
+        .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
-    assert!(test["ok"].is_boolean());
-    provider.abort();
+    assert_eq!(accepted.status(), 202);
+
+    let listed = call(rpc(2, "tools/list", json!({}))).await;
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    for wanted in ["open_session", "send_input", "read_chat", "list_chats", "find_project", "wait_for_output"] {
+        assert!(names.contains(&wanted), "{wanted} missing from {names:?}");
+    }
+    assert!(listed["result"]["tools"][0]["inputSchema"]["type"] == "object");
+
+    // "open a session in <folder>": the next squad name, titled with the project.
+    let project = harness.root.path().join("justgains");
+    std::fs::create_dir_all(&project).unwrap();
+    let opened = call(rpc(
+        3,
+        "tools/call",
+        json!({ "name": "open_session", "arguments": { "project": project.to_string_lossy() } }),
+    ))
+    .await;
+    assert_eq!(opened["result"]["isError"], false, "{opened}");
+    let text = opened["result"]["content"][0]["text"].as_str().unwrap();
+    let outcome: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(outcome["name"], "Mal");
+    assert_eq!(outcome["title"], "Mal · justgains");
+    assert!(harness.seen.lock().iter().any(|seen| matches!(
+        seen,
+        Seen::Create(Some(profile), _, _) if profile == "claude"
+    )));
+
+    // The name alone reaches the session, and a rename reaches bro's sidebar.
+    let renamed = call(rpc(
+        4,
+        "tools/call",
+        json!({ "name": "rename_session", "arguments": { "sessionId": "mal", "title": "Mal · gains" } }),
+    ))
+    .await;
+    assert_eq!(renamed["result"]["isError"], false, "{renamed}");
+    assert!(harness.seen.lock().iter().any(|seen| matches!(
+        seen,
+        Seen::Rename(_, title) if title == "Mal · gains"
+    )));
+
+    let unknown = call(rpc(5, "tools/call", json!({ "name": "nope", "arguments": {} }))).await;
+    assert_eq!(unknown["result"]["isError"], true);
+    let missing = call(rpc(6, "bogus/method", json!({}))).await;
+    assert_eq!(missing["error"]["code"], -32601);
+
+    let mut socket = harness.socket().await;
+    let hello = recv_type(&mut socket, "hello").await;
+    assert_eq!(hello["orchestrator"]["state"], "idle");
+    assert_eq!(hello["orchestrator"]["config"]["provider"], "claude-code");
 }

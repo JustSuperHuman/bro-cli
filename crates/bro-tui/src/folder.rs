@@ -54,7 +54,7 @@ impl FolderPicker {
     /// Recompute the list after the filter changed.
     fn refresh(&mut self) {
         self.sel = 0;
-        let f = self.filter.trim();
+        let f = unquote_path(self.filter.trim());
         self.view = if looks_like_path(f) {
             let (parent, partial) = split_typed(f);
             let mut v = vec![];
@@ -88,7 +88,17 @@ impl FolderPicker {
     }
 
     pub fn paste(&mut self, s: &str) {
-        self.filter.push_str(s.trim());
+        let s = s.trim();
+        // Explorer's "Copy as path" wraps the directory in quotes. A complete path
+        // replaces a recent-folder search; partial names still append for completion.
+        let s = unquote_path(s);
+        if s.is_empty() || s.chars().any(char::is_control) {
+            return;
+        }
+        if looks_like_path(s) && (s.contains(['/', '\\']) || s.ends_with(':') || s == "~") {
+            self.filter.clear();
+        }
+        self.filter.push_str(s);
         self.refresh();
     }
 
@@ -137,6 +147,12 @@ impl FolderPicker {
         }
         Outcome::None
     }
+}
+
+/// Matching quotes are wrappers used by Explorer and shells, not part of the path.
+fn unquote_path(s: &str) -> &str {
+    s.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+        .or_else(|| s.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))).unwrap_or(s)
 }
 
 /// "F:\code\br" → ("F:\code", "br"); "~/" → (home, ""); "F:" → ("F:\", "").
@@ -188,7 +204,7 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut FolderPicker, t: &Theme) {
     let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     let mut spans = vec![Span::styled("› ", ui::bold_accent(t))];
     if p.filter.is_empty() {
-        spans.push(Span::styled("type to filter your recent folders, or a path like ~/code/ or F:\\", muted(t)));
+        spans.push(Span::styled("type to filter recent folders, or paste a directory (ctrl+v)", muted(t)));
     } else {
         spans.push(Span::styled(p.filter.clone(), ui::bold()));
     }
@@ -217,7 +233,7 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut FolderPicker, t: &Theme) {
         ui::line(f, Rect { y: inner.y + 2, height: 1, ..inner }, vec![Span::styled("  nothing here — type a path (~/, C:\\, /…)", muted(t))]);
     }
     p.hits = hits;
-    ui::hint_line(f, inner, &[("⏎", "open project"), ("tab", "complete"), ("↑↓", "move"), ("esc", "cancel")], t);
+    ui::hint_line(f, inner, &[("⏎", "open project"), ("ctrl+v", "paste path"), ("tab", "complete"), ("↑↓", "move"), ("esc", "cancel")], t);
 }
 
 /// True for input that is clearly a path ("~/x", "C:\x", "/x", "./x").
@@ -266,6 +282,28 @@ mod tests {
         assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::Open(ref x) if x == Path::new("/code/justgains")));
         assert!(looks_like_path("C:\\x") && !looks_like_path("bro"));
         assert_eq!(dedup(vec![PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/a")]), vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
+
+    #[test]
+    fn copied_paths_accept_quotes_spaces_and_replace_a_search() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("project with spaces 日本語");
+        std::fs::create_dir(&dir).unwrap();
+        for quote in ['"', '\''] {
+            let copied = format!("{quote}{}{quote}", dir.display());
+            let mut p = FolderPicker::new(vec![]);
+            p.paste("old search");
+            p.paste(&format!("  {copied}\r\n"));
+            assert_eq!(p.filter, dir.to_string_lossy());
+            assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::Open(path) if path == dir));
+
+            // Some terminal hosts deliver pasted content as individual key events.
+            let mut p = FolderPicker::new(vec![]);
+            for c in copied.chars() {
+                key(&mut p, KeyCode::Char(c));
+            }
+            assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::Open(path) if path == dir));
+        }
     }
 
     #[test]

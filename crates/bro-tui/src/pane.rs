@@ -31,6 +31,10 @@ pub enum Event {
     Toast(Kind, String),
     /// The alt+v clipboard grab finished: paste these paths into the pane, or hand it the original key.
     Clipboard(PaneId, Option<Vec<String>>, KeyEvent),
+    /// A text clipboard read completed; apply only while the same input request is current.
+    ClipboardText(std::time::Instant, Option<String>),
+    /// A terminal link was clicked; open it outside the input/render loop.
+    OpenLink(String),
     /// A theme file changed on disk.
     ThemeFilesChanged,
     /// Another `bro` was started in this folder: open it here as a project.
@@ -57,6 +61,8 @@ pub enum Action {
     /// Close the asking pane.
     Close,
     Toast(Kind, String),
+    /// Start a new session from an account shown in the usage view.
+    LaunchUsage(bro_core::Harness, Option<String>),
 }
 
 /// Agent activity scraped from the screen.
@@ -123,6 +129,8 @@ pub trait Pane {
     /// Mouse event in screen coordinates; `area` is the pane's inner rect.
     fn mouse(&mut self, _ev: MouseEvent, _area: Rect, _cx: &mut Cx) {}
     fn paste(&mut self, _text: &str, _cx: &mut Cx) {}
+    /// Link at the last rendered pane-local cell (row, column).
+    fn link_at(&self, _row: u16, _col: u16) -> Option<String> { None }
     /// Called after a Wake for this pane, and on ticks when `tick_every` asks.
     fn poll(&mut self, _cx: &mut Cx) {}
     /// If Some, the app calls `poll` at least this often.

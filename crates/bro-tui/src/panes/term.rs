@@ -101,6 +101,8 @@ pub struct Term {
     parser: Arc<Mutex<Parser>>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     exited: Arc<AtomicBool>,
+    /// Preserve the process status independently of whether the PTY output pipe has closed.
+    exit_status: Option<i32>,
     /// rows, cols
     size: (u16, u16),
     /// lines scrolled back (0 = live)
@@ -114,11 +116,20 @@ pub struct Term {
     error: Option<String>,
     /// Demo panes: fixed activity, never spawned when `spawn` is None.
     pub demo_activity: Option<Activity>,
+    /// Bytes `send` delivered (tests: fixed panes have no program to write to).
+    #[cfg(test)]
+    pub sent: Vec<u8>,
     svc: Services,
     title_sent: Option<String>,
+    /// Targets for the last displayed cells, including the current scrollback viewport.
+    links: super::links::Links,
 }
 
 impl Term {
+    #[cfg(test)]
+    pub(crate) fn set_test_writer(&mut self, writer: Box<dyn Write + Send>) {
+        *self.writer.lock() = Some(writer);
+    }
     /// A session that spawns lazily at its first render (when the real size is known).
     pub fn new(meta: Meta, spawn: Spawn, svc: Services) -> Term {
         let agent = meta.harness.is_some();
@@ -129,6 +140,7 @@ impl Term {
             parser: Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(24, 80, 10_000, Cb::default()))),
             writer: Arc::new(Mutex::new(None)),
             exited: Arc::new(AtomicBool::new(false)),
+            exit_status: None,
             size: (24, 80),
             scroll: 0,
             last_output: Arc::new(AtomicU64::new(0)),
@@ -138,8 +150,11 @@ impl Term {
             last_scan: Instant::now(),
             error: None,
             demo_activity: None,
+            #[cfg(test)]
+            sent: Vec::new(),
             svc,
             title_sent: None,
+            links: Default::default(),
         }
     }
 
@@ -264,11 +279,27 @@ impl Term {
 
     /// Write raw bytes to the program (keys, paste, bridge input).
     pub fn send(&mut self, bytes: &[u8]) {
+        #[cfg(test)]
+        self.sent.extend_from_slice(bytes);
         self.scroll = 0;
         if let Some(w) = self.writer.lock().as_mut() {
             let _ = w.write_all(bytes);
             let _ = w.flush();
         }
+    }
+
+    /// While the agent waits on a numbered choice ("❯ 1. Yes"), the key that picks the option on screen row
+    /// `row`. Only live at the bottom (not scrolled back) and only while bro sees a prompt, so ordinary
+    /// numbered output never becomes clickable.
+    pub fn prompt_option_at(&self, row: u16) -> Option<String> {
+        if self.scroll != 0 || crate::pane::Pane::activity(self) != Some(Activity::Blocked) {
+            return None;
+        }
+        let p = self.parser.lock();
+        let s = p.screen();
+        let (_, cols) = s.size();
+        let line = s.rows(0, cols).nth(row as usize)?;
+        prompt_option(&line)
     }
 
     /// Resize the pty and the parser (no-op if unchanged).
@@ -292,6 +323,9 @@ impl Term {
 
     /// Kill the program (bridge kill, close).
     pub fn kill(&mut self) {
+        if self.exit_code().is_some() {
+            return;
+        }
         if let Some(l) = &mut self.live {
             let _ = l.child.kill();
         }
@@ -299,7 +333,10 @@ impl Term {
 
     /// Exit code, once exited.
     pub fn exit_code(&mut self) -> Option<i32> {
-        self.live.as_mut().and_then(|l| l.child.try_wait().ok().flatten()).map(|s| s.exit_code() as i32)
+        if self.exit_status.is_none() {
+            self.exit_status = self.live.as_mut().and_then(|l| l.child.try_wait().ok().flatten()).map(|s| s.exit_code() as i32);
+        }
+        self.exit_status
     }
 
     /// The name shown everywhere: your rename, else the launch label.
@@ -465,10 +502,15 @@ impl Pane for Term {
         self.parser.lock().screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None
     }
     fn tick_every(&self) -> Option<Duration> {
-        // agents get re-checked so "working" turns into "idle/done" when they go quiet
-        self.agent.then_some(Duration::from_millis(400))
+        // Watch every running process, including hidden shell tabs. ConPTY may keep its
+        // output pipe open after the child exits, so EOF alone cannot drive tab cleanup.
+        (self.agent || self.live.is_some()).then_some(Duration::from_millis(400))
     }
     fn poll(&mut self, _cx: &mut Cx) {
+        if self.exit_code().is_some() {
+            self.exited.store(true, Ordering::SeqCst);
+            return;
+        }
         if self.last_scan.elapsed() < Duration::from_millis(200) {
             return;
         }
@@ -485,6 +527,7 @@ impl Pane for Term {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, cx: &mut Cx) {
+        self.links.clear();
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -504,6 +547,7 @@ impl Pane for Term {
         p.screen_mut().set_scrollback(self.scroll);
         self.scroll = p.screen().scrollback(); // clamped to what exists
         let screen = p.screen();
+        self.links = super::links::detect(screen);
         let buf = f.buffer_mut();
         for row in 0..area.height {
             for col in 0..area.width {
@@ -521,7 +565,7 @@ impl Pane for Term {
                 if cell.italic() {
                     m |= Modifier::ITALIC;
                 }
-                if cell.underline() {
+                if cell.underline() || self.links.contains_key(&(row, col)) {
                     m |= Modifier::UNDERLINED;
                 }
                 if cell.inverse() {
@@ -543,6 +587,10 @@ impl Pane for Term {
         }
     }
 
+    fn link_at(&self, row: u16, col: u16) -> Option<String> {
+        self.links.get(&(row, col)).map(|uri| uri.to_string())
+    }
+
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         if self.error.is_some() {
             if matches!(key.code, crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Esc) {
@@ -561,6 +609,8 @@ impl Pane for Term {
         let bracketed = self.parser.lock().screen().bracketed_paste();
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         if bracketed {
+            // an end marker inside the text would close the paste early and the rest would be typed
+            let text = text.replace("\x1b[201~", "");
             self.send(format!("\x1b[200~{text}\x1b[201~").as_bytes());
         } else {
             self.send(text.as_bytes());
@@ -633,5 +683,29 @@ mod title_tests {
         assert!(super::looks_like_exe_path(r"C:\Program Files\PowerShell\7\pwsh.exe"));
         assert!(super::looks_like_exe_path("/usr/bin/bash"));
         assert!(!super::looks_like_exe_path("✳ Fix the flaky test"));
+    }
+}
+
+/// The option number on a prompt row: "❯ 1. Yes", "  2. Yes, and don't ask again", "› 3. No" -> "1"/"2"/"3".
+/// The same rows the bridge offers the phone as prompt options.
+pub fn prompt_option(line: &str) -> Option<String> {
+    let rest = line.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '❯' | '>' | '›' | '●' | '○' | '│'));
+    let (number, label) = rest.split_once('.')?;
+    (!number.is_empty() && number.len() <= 2 && number.chars().all(|c| c.is_ascii_digit()) && !label.trim().is_empty()).then(|| number.to_string())
+}
+
+#[cfg(test)]
+mod prompt_option_tests {
+    use super::prompt_option;
+
+    #[test]
+    fn option_rows_give_their_number() {
+        assert_eq!(prompt_option(" ❯ 1. Yes").as_deref(), Some("1"));
+        assert_eq!(prompt_option("   2. Yes, and don't ask again this session").as_deref(), Some("2"));
+        assert_eq!(prompt_option("│ › 3. No, and tell Claude what to do differently │").as_deref(), Some("3"));
+        assert_eq!(prompt_option("Do you want to proceed?"), None);
+        assert_eq!(prompt_option("  1."), None);
+        assert_eq!(prompt_option("v1.2 released"), None);
+        assert_eq!(prompt_option("2024. A year"), None, "long numbers are not options");
     }
 }

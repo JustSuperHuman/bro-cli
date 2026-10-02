@@ -57,6 +57,9 @@ pub(crate) struct AppState {
     on_command: CommandSink,
     pub notifications: Arc<Mutex<NotificationCenter>>,
     pub notification_sinks: Arc<RwLock<Vec<NotificationSink>>>,
+    /// Folders bro knows the user works in (its open projects, recents and
+    /// past sessions); the orchestrator resolves spoken project names with them.
+    pub known_folders: Arc<RwLock<Vec<String>>>,
     pub token: Arc<String>,
     pub data_root: Arc<PathBuf>,
     pub config: Arc<BridgeConfig>,
@@ -95,6 +98,7 @@ impl AppState {
             on_command,
             notifications: Arc::new(Mutex::new(NotificationCenter::default())),
             notification_sinks: Arc::new(RwLock::new(Vec::new())),
+            known_folders: Arc::new(RwLock::new(Vec::new())),
             token: Arc::new(token),
             data_root: Arc::new(data_root),
             config: Arc::new(config),
@@ -105,6 +109,10 @@ impl AppState {
             last_error: Arc::new(Mutex::new(None)),
             shutdown,
         }
+    }
+
+    pub fn known_folders(&self) -> Vec<String> {
+        self.known_folders.read().clone()
     }
 
     // ----- session lifecycle (fed by bro) ---------------------------------

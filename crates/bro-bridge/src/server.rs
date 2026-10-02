@@ -119,6 +119,12 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/api/orchestrator/models", get(rest::orchestrator_models))
         .route(
+            "/mcp",
+            post(crate::orchestrator::mcp::post)
+                .get(crate::orchestrator::mcp::not_allowed)
+                .delete(crate::orchestrator::mcp::not_allowed),
+        )
+        .route(
             "/api/orchestrator/messages",
             post(rest::orchestrator_send).delete(rest::orchestrator_clear),
         )

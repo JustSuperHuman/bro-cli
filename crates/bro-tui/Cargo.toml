@@ -19,6 +19,7 @@ path = "src/bin/bro-app.rs"
 bro-core.workspace = true
 bro-proxy.workspace = true
 bro-bridge.workspace = true
+bro-voice.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,9 +36,11 @@ unicode-width.workspace = true
 uuid.workspace = true
 png.workspace = true
 base64.workspace = true
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+clipboard-win = "5.4"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 tempfile.workspace = true

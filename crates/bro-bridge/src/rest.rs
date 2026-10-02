@@ -176,14 +176,8 @@ pub(crate) async fn orchestrator_update_config(
     }
 }
 
-pub(crate) async fn orchestrator_models(
-    Query(query): Query<HashMap<String, String>>,
-    State(state): State<AppState>,
-) -> Json<Value> {
-    let refresh = query
-        .get("refresh")
-        .is_some_and(|value| !matches!(value.as_str(), "" | "0" | "false"));
-    Json(state.orchestrator.models(refresh).await)
+pub(crate) async fn orchestrator_models(State(state): State<AppState>) -> Json<Value> {
+    Json(state.orchestrator.models())
 }
 
 pub(crate) async fn orchestrator_send(

@@ -20,6 +20,7 @@ mod launcher;
 mod layout;
 mod palette;
 mod pane;
+mod paste_burst;
 mod projects;
 mod proxy_cmd;
 mod panes;
@@ -109,13 +110,7 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
     };
 
     let input_tx = tx.clone();
-    std::thread::spawn(move || {
-        while let Ok(ev) = event::read() {
-            if input_tx.send(pane::Event::Input(ev)).is_err() {
-                break;
-            }
-        }
-    });
+    std::thread::spawn(move || paste_burst::pump(paste_burst::Console, |ev| input_tx.send(pane::Event::Input(ev)).is_ok()));
 
     let _instance = if demo { None } else { instance::serve(tx.clone()) };
     let mut app = app::App::new(svc, tx, app::Opts { demo, fixed_demo: false, load_recents: !demo });

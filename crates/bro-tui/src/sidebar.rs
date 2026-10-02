@@ -1,12 +1,12 @@
-//! The sidebar model: a pure function from live sessions + past sessions + UI state (collapsed projects,
-//! open "more" lists, filter) to the rows the sidebar draws and navigates. No I/O, no drawing.
+//! The sidebar model: a pure function from live sessions + past sessions + UI state (filter) to the rows
+//! the sidebar draws and navigates. No I/O, no drawing.
 //!
 //! Order: the projects you opened (your order), then projects that only have running sessions. Earlier
 //! sessions aren't rows: "continue session" opens a picker for them.
 
 use crate::pane::{Activity, PaneId};
 use bro_core::Harness;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// A live session, as the sidebar needs it.
@@ -49,31 +49,12 @@ pub struct OpenInfo {
 /// Sidebar UI state.
 #[derive(Clone, Debug, Default)]
 pub struct SideState {
-    /// folded projects (projects start open)
-    pub collapsed: HashSet<String>,
     pub filter: String,
-}
-
-impl SideState {
-    pub fn is_collapsed(&self, key: &str) -> bool {
-        self.collapsed.contains(key)
-    }
-
-    /// Fold or unfold a project.
-    pub fn set_collapsed(&mut self, key: &str, fold: bool) {
-        if fold {
-            self.collapsed.insert(key.to_string());
-        } else {
-            self.collapsed.remove(key);
-        }
-    }
 }
 
 /// One sidebar row. Earlier sessions aren't listed — "continue session" opens a picker for them.
 #[derive(Clone, Debug)]
 pub enum Row {
-    /// "+ new session" — always first
-    New,
     /// "+ open project"
     OpenFolder,
     /// "↻ continue session" (when there are earlier sessions)
@@ -83,7 +64,6 @@ pub enum Row {
         name: String,
         root: PathBuf,
         live: usize,
-        collapsed: bool,
         attention: bool,
         /// seconds since the newest earlier session
         last_age: Option<u64>,
@@ -95,7 +75,7 @@ impl Row {
     /// The project a row belongs to (empty for the action rows).
     pub fn project_key(&self) -> &str {
         match self {
-            Row::New | Row::OpenFolder | Row::Continue { .. } => "",
+            Row::OpenFolder | Row::Continue { .. } => "",
             Row::Project { key, .. } => key,
             Row::Live { info, .. } => &info.project_key,
         }
@@ -133,7 +113,7 @@ fn groups<'a>(live: &'a [LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec
     order
 }
 
-/// Live sessions in sidebar order (for alt+1..9 and next/prev), ignoring collapse and filter.
+/// Live sessions in sidebar order (for alt+1..9 and next/prev), ignoring the filter.
 pub fn live_order(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<PaneId> {
     groups(live, past, open).iter().flat_map(|g| g.live.iter().map(|l| l.pane)).collect()
 }
@@ -154,7 +134,6 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo], st: &SideS
     let numbering: HashMap<PaneId, usize> = live_order(live, past, open).into_iter().enumerate().map(|(i, p)| (p, i + 1)).collect();
     let mut rows = vec![];
     if q.is_empty() {
-        rows.push(Row::New);
         rows.push(Row::OpenFolder);
         if !past.is_empty() {
             rows.push(Row::Continue { count: past.len() });
@@ -171,12 +150,8 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo], st: &SideS
         if !q.is_empty() && live_rows.is_empty() && !project_hit {
             continue;
         }
-        let collapsed = q.is_empty() && st.is_collapsed(&g.key);
         let attention = g.live.iter().any(|l| l.activity == Some(Activity::Blocked) || l.done);
-        rows.push(Row::Project { key: g.key.clone(), name: g.name.clone(), root: g.root.clone(), live: g.live.len(), collapsed, attention, last_age: g.last_age });
-        if collapsed {
-            continue;
-        }
+        rows.push(Row::Project { key: g.key.clone(), name: g.name.clone(), root: g.root.clone(), live: g.live.len(), attention, last_age: g.last_age });
         for l in live_rows {
             rows.push(Row::Live { info: l.clone(), n: numbering.get(&l.pane).copied().filter(|n| *n <= 9) });
         }
@@ -216,7 +191,6 @@ mod tests {
     fn kinds(rows: &[Row]) -> String {
         rows.iter()
             .map(|r| match r {
-                Row::New => "+".to_string(),
                 Row::OpenFolder => "o".to_string(),
                 Row::Continue { count } => format!("c{count}"),
                 Row::Project { name, .. } => format!("P:{name}"),
@@ -232,21 +206,20 @@ mod tests {
         let p = vec![past(0, "c", "never opened", 900), past(1, "b", "fix it", 100), past(2, "a", "newer", 50)];
         let rows = build(&l, &p, &opened(&["a", "b"]), &SideState::default());
         // earlier sessions aren't rows: one "continue" entry instead
-        assert_eq!(kinds(&rows), "+ o c3 P:a P:b L10#1 P:x L11#2");
-        assert!(matches!(&rows[3], Row::Project { last_age: Some(50), .. }));
-        assert!(matches!(&rows[6], Row::Project { attention: true, .. }));
+        assert_eq!(kinds(&rows), "o c3 P:a P:b L10#1 P:x L11#2");
+        assert!(matches!(&rows[2], Row::Project { last_age: Some(50), .. }));
+        assert!(matches!(&rows[5], Row::Project { attention: true, .. }));
         assert_eq!(live_order(&l, &p, &opened(&["a", "b"])), vec![10, 11]);
         assert_eq!(project_order(&l, &p, &opened(&["a", "b"])), vec!["a", "b", "x"]);
-        assert_eq!(kinds(&build(&l, &[], &opened(&["a"]), &SideState::default())), "+ o P:a P:x L11#1 P:b L10#2", "no continue row without history");
+        assert_eq!(kinds(&build(&l, &[], &opened(&["a"]), &SideState::default())), "o P:a P:x L11#1 P:b L10#2", "no continue row without history");
     }
 
     #[test]
-    fn collapse_and_filter() {
+    fn filter() {
         let l = vec![live(1, "a", 1, None), live(2, "b", 2, None)];
         let open = opened(&["a", "b"]);
         let mut st = SideState::default();
-        st.set_collapsed("a", true);
-        assert_eq!(kinds(&build(&l, &[], &open, &st)), "+ o P:a P:b L2#2");
+        assert_eq!(kinds(&build(&l, &[], &open, &st)), "o P:a L1#1 P:b L2#2");
         st.filter = "b".into();
         assert_eq!(kinds(&build(&l, &[], &open, &st)), "P:b L2#2");
         st.filter = "zzz".into();

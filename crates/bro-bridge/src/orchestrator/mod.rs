@@ -1,74 +1,66 @@
-//! The Orchestrator: a chat agent built into the terminal host that watches
-//! every tab and drives them through tools. It talks to any OpenAI-compatible
-//! chat endpoint (OpenRouter by default, key from `OPENROUTER_API_KEY` unless
-//! one is entered by hand) and keeps one shared transcript that the web,
-//! native and mobile panels all render.
+//! The Orchestrator ("Hugh"): a chat agent built into the terminal host that
+//! watches every tab and drives them through tools. Its brain is one
+//! long-lived headless Claude Code process ([`claude`]) on the user's own
+//! login, which reaches the tools through the bridge's MCP endpoint
+//! ([`mcp`]). It keeps one shared transcript that the web, native and mobile
+//! panels all render, and takes messages from any of them or from bro's
+//! push-to-talk voice input.
 
-pub mod catalog;
+mod cast;
+mod chats;
+mod claude;
 mod context;
-mod llm;
+mod folders;
+pub(crate) mod mcp;
 mod tools;
 mod turn;
 
-pub use turn::send_message;
+pub use claude::OrchestratorLaunch;
+pub use turn::{send_message, send_message_with};
 
 use crate::model::{ServerEvent, iso_now};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::broadcast;
-use tokio::task::AbortHandle;
 
-pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-5";
-pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-pub const OPENROUTER_KEY_ENV: &str = "OPENROUTER_API_KEY";
-pub const CUSTOM_KEY_ENV: &str = "OPENAI_API_KEY";
+pub const DEFAULT_MODEL: &str = "sonnet";
+/// Model aliases Claude Code accepts, offered by the settings panel.
+pub const MODELS: [(&str, &str); 4] = [
+    ("sonnet", "Sonnet (fast, recommended)"),
+    ("haiku", "Haiku (fastest)"),
+    ("opus", "Opus (strongest)"),
+    ("fable", "Fable"),
+];
 
 const CONFIG_FILE: &str = ".terminal-web-orchestrator.json";
 const HISTORY_FILE: &str = ".terminal-web-orchestrator-history.json";
 /// Transcript items kept in memory and on disk.
 const MAX_ITEMS: usize = 400;
-/// Tool rounds allowed in one turn before the model is asked to wrap up.
-const MAX_STEPS: usize = 24;
 /// Longest a single streamed tool result may be.
 const MAX_TOOL_RESULT: usize = 24_000;
-/// Model catalog freshness.
-const CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 /// Minimum gap between streamed transcript broadcasts for one item.
 const STREAM_PUBLISH_INTERVAL: Duration = Duration::from_millis(80);
+/// Messages that may wait while a turn runs.
+const MAX_QUEUE: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct OrchestratorConfig {
-    /// `openrouter` or `custom`.
-    pub provider: String,
-    pub base_url: String,
+    /// Claude Code model alias or full id.
     pub model: String,
-    /// Manual override; `None` means "use the environment variable".
-    pub api_key: Option<String>,
-    pub key_env: String,
-    /// `off`, `low`, `medium` or `high` (OpenRouter reasoning effort).
+    /// `off` (no extended thinking; fastest), `low`, `medium` or `high`.
     pub reasoning: String,
 }
 
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            provider: "openrouter".into(),
-            base_url: OPENROUTER_BASE_URL.into(),
             model: DEFAULT_MODEL.into(),
-            api_key: None,
-            key_env: OPENROUTER_KEY_ENV.into(),
-            reasoning: "low".into(),
+            reasoning: "off".into(),
         }
-    }
-}
-
-impl OrchestratorConfig {
-    pub fn is_openrouter(&self) -> bool {
-        self.provider == "openrouter"
     }
 }
 
@@ -76,7 +68,7 @@ impl OrchestratorConfig {
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    /// Raw JSON text exactly as the model produced it.
+    /// Raw JSON text of the arguments.
     pub arguments: String,
 }
 
@@ -132,36 +124,71 @@ pub struct Usage {
 struct History {
     items: Vec<TranscriptItem>,
     usage: Usage,
+    /// Claude Code session to `--resume` after a restart.
+    claude_session: Option<String>,
 }
 
 struct ActiveTurn {
     id: String,
     started_at: String,
     step: String,
-    abort: AbortHandle,
-}
-
-struct CachedCatalog {
-    key: String,
-    fetched: Instant,
-    catalog: catalog::Catalog,
+    /// The sender's tag for this message ([`MessageContext::tag`]).
+    tag: Option<String>,
 }
 
 struct State {
     config: OrchestratorConfig,
+    launch: OrchestratorLaunch,
     items: Vec<TranscriptItem>,
     usage: Usage,
     seq: u64,
     turn: Option<ActiveTurn>,
     error: Option<String>,
-    catalog: Option<CachedCatalog>,
+    claude_session: Option<String>,
+    process: Option<claude::Process>,
+    generation: u64,
+    /// The process's cumulative `total_cost_usd` at its last result.
+    process_cost: f64,
+    /// Set by cancel: events until the interrupted turn's `result` are dropped.
+    discard_until_result: bool,
+    stream: claude::StreamState,
+    /// Messages sent while a turn was running, oldest first.
+    queue: Vec<(String, MessageContext)>,
 }
+
+/// Where a message came from, so Hugh can tell a prompt meant for the pane
+/// the user is looking at from an instruction meant for Hugh.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageContext {
+    /// Dictated through push-to-talk (and so transcribed, possibly misheard).
+    pub voice: bool,
+    /// The session focused in bro when the user started speaking.
+    pub focused_session: Option<String>,
+    /// Echoed on every [`OrchestratorUpdate`] of this message's turn, so the
+    /// sender can match the answer to the question (a voice delegation id).
+    pub tag: Option<String>,
+}
+
+/// Progress of a turn, for bro's own UI (voice toasts, status line).
+#[derive(Clone, Debug, PartialEq)]
+/// `tag` is the sender's [`MessageContext::tag`] for the message the turn answers.
+pub enum OrchestratorUpdate {
+    /// A message started a turn.
+    Started { text: String, tag: Option<String> },
+    /// A tool call began: its one-line description ("Opened a session in justgains").
+    Step { summary: String, tag: Option<String> },
+    /// The turn ended; `text` is the final answer.
+    Reply { text: String, tag: Option<String> },
+    Failed { message: String, tag: Option<String> },
+}
+
+pub type UpdateSink = std::sync::Arc<dyn Fn(OrchestratorUpdate) + Send + Sync>;
 
 pub struct Orchestrator {
     state: Mutex<State>,
     data_root: PathBuf,
-    http: reqwest::Client,
     events: broadcast::Sender<ServerEvent>,
+    sinks: parking_lot::RwLock<Vec<UpdateSink>>,
 }
 
 fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
@@ -184,117 +211,37 @@ fn write_json<T: Serialize>(path: &Path, value: &T) {
     }
 }
 
-/// Reads a user or machine environment variable from the registry through
-/// `reg.exe`, so a key set after bro started is still found. (The reference
-/// host called RegGetValueW through windows-sys; bro avoids that dependency.)
-#[cfg(windows)]
-fn registry_environment_value(name: &str) -> Option<String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return None;
+/// Configs written by the OpenRouter-era orchestrator carry an OpenRouter
+/// model id; anything that is not a Claude model falls back to the default.
+fn migrate(mut config: OrchestratorConfig) -> OrchestratorConfig {
+    if let Some(bare) = config.model.strip_prefix("anthropic/") {
+        config.model = bare.to_string();
     }
-    for key in [
-        r"HKCU\Environment",
-        r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-    ] {
-        let output = std::process::Command::new("reg")
-            .args(["query", key, "/v", name])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            let mut parts = line.trim().splitn(3, "    ");
-            if parts
-                .next()
-                .is_some_and(|field| field.eq_ignore_ascii_case(name))
-                && parts.next().is_some_and(|kind| kind.starts_with("REG_"))
-                && let Some(value) = parts
-                    .next()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            {
-                return Some(value.to_owned());
-            }
-        }
+    if config.model.contains('/') || config.model.trim().is_empty() {
+        config.model = DEFAULT_MODEL.into();
     }
-    None
-}
-
-#[cfg(not(windows))]
-fn registry_environment_value(_name: &str) -> Option<String> {
-    None
-}
-
-/// The process environment first, then the user/system variables in the
-/// registry so a key set after the terminal started is still found.
-pub(crate) fn environment_value(name: &str) -> Option<String> {
-    if name.trim().is_empty() {
-        return None;
+    if !matches!(config.reasoning.as_str(), "off" | "low" | "medium" | "high") {
+        config.reasoning = "off".into();
     }
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| registry_environment_value(name))
-}
-
-fn key_preview(key: &str) -> String {
-    let characters: Vec<char> = key.chars().collect();
-    if characters.len() <= 12 {
-        return "•".repeat(characters.len());
-    }
-    let head: String = characters[..8].iter().collect();
-    let tail: String = characters[characters.len() - 4..].iter().collect();
-    format!("{head}…{tail}")
-}
-
-fn resolve_key(config: &OrchestratorConfig) -> (Option<String>, &'static str) {
-    if let Some(key) = config
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-    {
-        return (Some(key.to_string()), "manual");
-    }
-    match environment_value(&config.key_env) {
-        Some(key) => (Some(key), "env"),
-        None => (None, "none"),
-    }
+    config
 }
 
 fn public_config(config: &OrchestratorConfig) -> Value {
-    let (key, source) = resolve_key(config);
     json!({
-        "provider": config.provider,
-        "baseUrl": config.base_url,
+        "provider": "claude-code",
         "model": config.model,
-        "keyEnv": config.key_env,
-        "keySource": source,
-        "keyPreview": key.as_deref().map(key_preview),
         "reasoning": config.reasoning,
-        "defaults": {
-            "model": DEFAULT_MODEL,
-            "openrouterBaseUrl": OPENROUTER_BASE_URL,
-            "openrouterKeyEnv": OPENROUTER_KEY_ENV,
-            "customKeyEnv": CUSTOM_KEY_ENV
-        }
+        // The panel's key fields: Claude Code uses the user's own login.
+        "keySource": "login",
+        "keyPreview": Value::Null,
+        "name": cast::COACH,
+        "defaults": { "model": DEFAULT_MODEL, "reasoning": "off" }
     })
 }
 
 impl Orchestrator {
     pub fn new(data_root: &Path, events: broadcast::Sender<ServerEvent>) -> Self {
-        let config: OrchestratorConfig = read_json(&data_root.join(CONFIG_FILE));
+        let config = migrate(read_json(&data_root.join(CONFIG_FILE)));
         let history: History = read_json(&data_root.join(HISTORY_FILE));
         let mut items = history.items;
         // A turn that was streaming when the host went away never finished.
@@ -307,19 +254,43 @@ impl Orchestrator {
         Self {
             state: Mutex::new(State {
                 config,
+                launch: OrchestratorLaunch::default(),
                 items,
                 usage: history.usage,
                 seq,
                 turn: None,
                 error: None,
-                catalog: None,
+                claude_session: history.claude_session,
+                process: None,
+                generation: 0,
+                process_cost: 0.0,
+                discard_until_result: false,
+                stream: claude::StreamState::default(),
+                queue: Vec::new(),
             }),
             data_root: data_root.to_path_buf(),
-            http: reqwest::Client::builder()
-                .user_agent("bro-Orchestrator/1.0")
-                .build()
-                .unwrap_or_default(),
             events,
+            sinks: parking_lot::RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn on_update(&self, sink: UpdateSink) {
+        self.sinks.write().push(sink);
+    }
+
+    /// A message that could not even start a turn.
+    pub(crate) fn emit_failure(&self, message: String, tag: Option<String>) {
+        self.emit(OrchestratorUpdate::Failed { message, tag });
+    }
+
+    fn turn_tag(&self) -> Option<String> {
+        self.state.lock().turn.as_ref().and_then(|turn| turn.tag.clone())
+    }
+
+    fn emit(&self, update: OrchestratorUpdate) {
+        let sinks = self.sinks.read().clone();
+        for sink in sinks {
+            sink(update.clone());
         }
     }
 
@@ -337,28 +308,30 @@ impl Orchestrator {
             &History {
                 items: state.items.clone(),
                 usage: state.usage.clone(),
+                claude_session: state.claude_session.clone(),
             },
         );
-    }
-
-    pub(crate) fn config(&self) -> OrchestratorConfig {
-        self.state.lock().config.clone()
     }
 
     pub fn public_config(&self) -> Value {
         public_config(&self.state.lock().config)
     }
 
+    /// How the Claude Code process is started; takes effect on the next message.
+    pub fn set_launch(&self, launch: OrchestratorLaunch) {
+        self.state.lock().launch = launch;
+    }
+
     fn status_locked(state: &State, since: Option<u64>, include_transcript: bool) -> Value {
-        let (key, _) = resolve_key(&state.config);
         let running = state.turn.is_some();
         let mut status = json!({
-            "state": if running { "running" } else if key.is_none() { "unconfigured" } else { "idle" },
+            "state": if running { "running" } else { "idle" },
             "seq": state.seq,
             "config": public_config(&state.config),
             "error": state.error,
             "usage": state.usage,
             "itemCount": state.items.len(),
+            "queued": state.queue.len(),
             "activeTurn": state.turn.as_ref().map(|turn| json!({
                 "id": turn.id,
                 "startedAt": turn.started_at,
@@ -385,6 +358,9 @@ impl Orchestrator {
         self.publish(json!({ "type": "orchestrator", "orchestrator": status }));
     }
 
+    /// Accepts `model` and `reasoning`. Fields of the retired OpenRouter
+    /// settings (provider, baseUrl, apiKey, keyEnv) are ignored so older
+    /// panels keep working.
     pub fn update_config(&self, patch: &Value) -> Result<Value, String> {
         let text = |key: &str| {
             patch
@@ -396,61 +372,11 @@ impl Orchestrator {
         let config = {
             let mut state = self.state.lock();
             let mut config = state.config.clone();
-            if let Some(provider) = text("provider") {
-                match provider.as_str() {
-                    "openrouter" => {
-                        if !config.is_openrouter() {
-                            config.base_url = OPENROUTER_BASE_URL.into();
-                            config.key_env = OPENROUTER_KEY_ENV.into();
-                        }
-                        config.provider = provider;
-                    }
-                    "custom" => {
-                        if config.is_openrouter() && config.key_env == OPENROUTER_KEY_ENV {
-                            config.key_env = CUSTOM_KEY_ENV.into();
-                        }
-                        config.provider = provider;
-                    }
-                    other => return Err(format!("Unknown provider \"{other}\".")),
-                }
-            }
-            if let Some(base_url) = text("baseUrl") {
-                if base_url.is_empty() {
-                    config.base_url = if config.is_openrouter() {
-                        OPENROUTER_BASE_URL.into()
-                    } else {
-                        base_url
-                    };
-                } else if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-                    return Err("The base URL must start with http:// or https://.".into());
-                } else {
-                    config.base_url = base_url.trim_end_matches('/').to_string();
-                }
-            }
             if let Some(model) = text("model") {
                 if model.is_empty() {
-                    return Err("A model id is required.".into());
+                    return Err("A model is required (sonnet, haiku, opus or a full id).".into());
                 }
                 config.model = model;
-            }
-            if let Some(key_env) = text("keyEnv") {
-                config.key_env = if key_env.is_empty() {
-                    if config.is_openrouter() {
-                        OPENROUTER_KEY_ENV.into()
-                    } else {
-                        CUSTOM_KEY_ENV.into()
-                    }
-                } else {
-                    key_env
-                };
-            }
-            if let Some(api_key) = patch.get("apiKey") {
-                config.api_key = match api_key {
-                    Value::Null => None,
-                    Value::String(key) if key.trim().is_empty() => None,
-                    Value::String(key) => Some(key.trim().to_string()),
-                    _ => return Err("apiKey must be a string.".into()),
-                };
             }
             if let Some(reasoning) = text("reasoning") {
                 if !matches!(reasoning.as_str(), "off" | "low" | "medium" | "high") {
@@ -458,9 +384,7 @@ impl Orchestrator {
                 }
                 config.reasoning = reasoning;
             }
-            if config.base_url.is_empty() {
-                return Err("A base URL is required.".into());
-            }
+            let config = migrate(config);
             if state.config != config {
                 state.config = config.clone();
                 state.error = None;
@@ -473,15 +397,10 @@ impl Orchestrator {
         Ok(public_config(&config))
     }
 
-    /// Ends the running turn, if any. Items still streaming are marked
-    /// cancelled so the transcript never shows a spinner forever.
-    pub fn cancel(&self) -> bool {
-        let (cancelled, changed) = {
+    /// Marks every streaming item of the transcript `status`.
+    fn close_streaming_items(&self, status: &str) {
+        let changed = {
             let mut state = self.state.lock();
-            let Some(turn) = state.turn.take() else {
-                return false;
-            };
-            turn.abort.abort();
             state.seq += 1;
             let seq = state.seq;
             let now = iso_now();
@@ -491,34 +410,78 @@ impl Orchestrator {
                 .iter_mut()
                 .filter(|item| item.status == "streaming")
             {
-                item.status = "cancelled".into();
+                item.status = status.into();
                 item.finished_at = Some(now.clone());
                 item.rev += 1;
                 item.seq = seq;
                 changed.push(item.clone());
             }
-            self.persist_history_locked(&state);
-            (true, changed)
+            changed
         };
         for item in changed {
             self.publish_item(&item);
         }
-        self.publish_status();
-        cancelled
     }
 
-    pub fn clear(&self) {
-        self.cancel();
+    /// Ends the running turn, if any, and drops queued messages. Claude Code
+    /// is interrupted (and killed if it ignores that); its conversation
+    /// survives either way.
+    pub fn cancel(self: &std::sync::Arc<Self>) -> bool {
+        let generation = {
+            let mut state = self.state.lock();
+            let Some(_) = state.turn.take() else {
+                return false;
+            };
+            state.queue.clear();
+            state.seq += 1;
+            let generation = state.process.as_ref().map(|process| {
+                let _ = process.send(claude::interrupt_line());
+                process.generation
+            });
+            state.discard_until_result = generation.is_some();
+            state.stream = claude::StreamState::default();
+            generation
+        };
+        if let Some(generation) = generation
+            && tokio::runtime::Handle::try_current().is_ok()
         {
+            self.watch_interrupt(generation);
+        }
+        self.close_streaming_items("cancelled");
+        {
+            let state = self.state.lock();
+            self.persist_history_locked(&state);
+        }
+        self.publish_status();
+        true
+    }
+
+    /// Clears the transcript and starts Claude Code afresh (a new conversation).
+    pub fn clear(self: &std::sync::Arc<Self>) {
+        self.cancel();
+        let process = {
             let mut state = self.state.lock();
             state.items.clear();
             state.error = None;
+            state.claude_session = None;
+            state.discard_until_result = false;
             state.seq += 1;
             self.persist_history_locked(&state);
+            state.process.take()
+        };
+        if let Some(process) = process {
+            process.kill();
         }
         let seq = self.state.lock().seq;
         self.publish(json!({ "type": "orchestrator_reset", "seq": seq }));
         self.publish_status();
+    }
+
+    /// Stops Claude Code (bridge shutdown).
+    pub fn shutdown(&self) {
+        if let Some(process) = self.state.lock().process.take() {
+            process.kill();
+        }
     }
 
     fn publish_item(&self, item: &TranscriptItem) {
@@ -569,11 +532,28 @@ impl Orchestrator {
     }
 
     fn finish_turn(&self, turn_id: &str, error: Option<String>, usage: Usage) {
+        let update = match &error {
+            Some(message) => OrchestratorUpdate::Failed { message: message.clone(), tag: self.turn_tag() },
+            None => OrchestratorUpdate::Reply {
+                tag: self.turn_tag(),
+                text: self
+                    .state
+                    .lock()
+                    .items
+                    .iter()
+                    .rev()
+                    .find(|item| item.turn_id == turn_id && item.role == "assistant" && !item.text.trim().is_empty())
+                    .map(|item| item.text.clone())
+                    .unwrap_or_default(),
+            },
+        };
+        self.emit(update);
         {
             let mut state = self.state.lock();
             if state.turn.as_ref().is_some_and(|turn| turn.id == turn_id) {
                 state.turn = None;
             }
+            state.stream = claude::StreamState::default();
             state.error = error;
             state.usage.prompt_tokens += usage.prompt_tokens;
             state.usage.completion_tokens += usage.completion_tokens;
@@ -603,131 +583,55 @@ impl Orchestrator {
         }
     }
 
-    fn reasoning_parameter(&self, config: &OrchestratorConfig) -> Option<Value> {
-        if !config.is_openrouter() {
-            return None;
-        }
-        // Only ask for reasoning when the catalog says the model supports it;
-        // an unknown model is left to OpenRouter's defaults.
-        let supports = {
-            let state = self.state.lock();
-            state
-                .catalog
-                .as_ref()
-                .and_then(|cached| {
-                    cached
-                        .catalog
-                        .models
-                        .iter()
-                        .find(|model| model.id == config.model)
+    /// The models the settings panel offers (Claude Code aliases).
+    pub fn models(&self) -> Value {
+        let current = self.state.lock().config.model.clone();
+        let models: Vec<Value> = MODELS
+            .iter()
+            .map(|(id, name)| {
+                json!({
+                    "id": id, "name": name, "provider": "anthropic", "description": "",
+                    "contextLength": 0, "promptPrice": 0.0, "completionPrice": 0.0,
+                    "tools": true, "reasoning": true, "created": 0
                 })
-                .map(|model| model.reasoning)
-        };
-        match (supports, config.reasoning.as_str()) {
-            (Some(true), "off") => Some(json!({ "enabled": false })),
-            (Some(true), effort) => Some(json!({ "effort": effort })),
-            _ => None,
-        }
+            })
+            .collect();
+        json!({
+            "fetchedAt": iso_now(),
+            "source": "claude-code",
+            "recommended": models,
+            "models": models,
+            "current": current,
+            "error": Value::Null
+        })
     }
 
-    pub async fn models(&self, refresh: bool) -> Value {
-        let config = self.config();
-        let cache_key = format!("{}|{}", config.provider, config.base_url);
-        if !refresh {
-            let state = self.state.lock();
-            if let Some(cached) = state.catalog.as_ref()
-                && cached.key == cache_key
-                && cached.fetched.elapsed() < CATALOG_TTL
-            {
-                return catalog::to_value(Some(&cached.catalog), &config.model, None);
-            }
-        }
-        let (key, _) = resolve_key(&config);
-        match catalog::fetch(
-            &self.http,
-            &config.base_url,
-            key.as_deref(),
-            config.is_openrouter(),
-        )
-        .await
-        {
-            Ok(fetched) => {
-                let value = catalog::to_value(Some(&fetched), &config.model, None);
-                self.state.lock().catalog = Some(CachedCatalog {
-                    key: cache_key,
-                    fetched: Instant::now(),
-                    catalog: fetched,
-                });
-                value
-            }
-            Err(error) => {
-                let state = self.state.lock();
-                let stale = state
-                    .catalog
-                    .as_ref()
-                    .filter(|cached| cached.key == cache_key)
-                    .map(|cached| &cached.catalog);
-                catalog::to_value(stale, &config.model, Some(&error))
-            }
-        }
-    }
-
-    /// Warms the catalog so the first turn knows whether the model reasons.
-    async fn ensure_catalog(&self) {
-        let needs_fetch = {
-            let state = self.state.lock();
-            let key = format!("{}|{}", state.config.provider, state.config.base_url);
-            !state
-                .catalog
-                .as_ref()
-                .is_some_and(|cached| cached.key == key && cached.fetched.elapsed() < CATALOG_TTL)
-        };
-        if needs_fetch {
-            let _ = self.models(true).await;
-        }
-    }
-
+    /// Checks that Claude Code starts (`claude --version`).
     pub async fn test_connection(&self) -> Value {
-        let config = self.config();
-        let (key, source) = resolve_key(&config);
-        let Some(key) = key else {
-            return json!({
+        let launch = self.state.lock().launch.clone();
+        let mut args = launch.args.clone();
+        args.push("--version".into());
+        let mut command = claude::command_for(&launch, args);
+        command
+            .envs(launch.env.iter().map(|(key, value)| (key, value)))
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        match tokio::time::timeout(Duration::from_secs(20), command.output()).await {
+            Ok(Ok(output)) if output.status.success() => json!({
+                "ok": true,
+                "message": format!("Claude Code {} is ready.", String::from_utf8_lossy(&output.stdout).trim())
+            }),
+            Ok(Ok(output)) => json!({
                 "ok": false,
-                "message": format!("No API key: set {} or enter one in the panel.", config.key_env)
-            });
-        };
-        if config.is_openrouter() {
-            match llm::get_json(&self.http, &config.base_url, "key", Some(&key), true).await {
-                Ok(value) => {
-                    let data = value.get("data").cloned().unwrap_or(Value::Null);
-                    let label = data
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .unwrap_or("OpenRouter key");
-                    let usage = data.get("usage").and_then(Value::as_f64).unwrap_or(0.0);
-                    let limit = data.get("limit").and_then(Value::as_f64);
-                    let message = match limit {
-                        Some(limit) => {
-                            format!("{label}: ${usage:.2} used of ${limit:.2} ({source} key)")
-                        }
-                        None => format!("{label}: ${usage:.2} used, no limit ({source} key)"),
-                    };
-                    json!({ "ok": true, "message": message, "key": data })
-                }
-                Err(error) => json!({ "ok": false, "message": error }),
-            }
-        } else {
-            match llm::get_json(&self.http, &config.base_url, "models", Some(&key), false).await {
-                Ok(value) => {
-                    let count = value
-                        .get("data")
-                        .and_then(Value::as_array)
-                        .map(Vec::len)
-                        .unwrap_or(0);
-                    json!({ "ok": true, "message": format!("Endpoint reachable; it lists {count} models ({source} key).") })
-                }
-                Err(error) => json!({ "ok": false, "message": error }),
-            }
+                "message": format!("Claude Code failed: {}", String::from_utf8_lossy(&output.stderr).trim())
+            }),
+            Ok(Err(error)) => json!({
+                "ok": false,
+                "message": format!("Could not start {}: {error}", launch.program.display())
+            }),
+            Err(_) => json!({ "ok": false, "message": "Claude Code did not answer within 20 seconds." }),
         }
     }
 }
@@ -737,60 +641,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manual_key_overrides_environment_and_previews_are_masked() {
-        let mut config = OrchestratorConfig {
-            key_env: "TERMINAL_ORCHESTRATOR_TEST_KEY_THAT_IS_UNSET".into(),
-            ..OrchestratorConfig::default()
+    fn openrouter_era_configs_migrate_to_claude_code() {
+        let old = OrchestratorConfig {
+            model: "anthropic/claude-sonnet-5".into(),
+            reasoning: "low".into(),
         };
-        assert_eq!(resolve_key(&config), (None, "none"));
-        config.api_key = Some("sk-or-v1-abcdefghijklmnopqrstuvwxyz".into());
-        let (key, source) = resolve_key(&config);
-        assert_eq!(source, "manual");
-        assert_eq!(key_preview(&key.unwrap()), "sk-or-v1…wxyz");
+        assert_eq!(migrate(old).model, "claude-sonnet-5");
+        let foreign = OrchestratorConfig {
+            model: "openai/gpt-5".into(),
+            reasoning: "max".into(),
+        };
+        let migrated = migrate(foreign);
+        assert_eq!(migrated.model, DEFAULT_MODEL);
+        assert_eq!(migrated.reasoning, "off");
     }
 
     #[test]
-    fn config_updates_validate_and_switch_provider_defaults() {
+    fn config_updates_validate_and_ignore_retired_fields() {
         let root = tempfile::tempdir().unwrap();
         let (events, _) = broadcast::channel(8);
         let orchestrator = Orchestrator::new(root.path(), events);
         let updated = orchestrator
-            .update_config(&json!({ "provider": "custom", "baseUrl": "http://localhost:1234/v1/", "model": "local-coder" }))
+            .update_config(&json!({ "provider": "openrouter", "baseUrl": "x", "model": "haiku", "reasoning": "off" }))
             .unwrap();
-        assert_eq!(updated["provider"], "custom");
-        assert_eq!(updated["baseUrl"], "http://localhost:1234/v1");
-        assert_eq!(updated["keyEnv"], CUSTOM_KEY_ENV);
-        assert!(
-            orchestrator
-                .update_config(&json!({ "baseUrl": "localhost:1234" }))
-                .is_err()
-        );
-        assert!(
-            orchestrator
-                .update_config(&json!({ "reasoning": "max" }))
-                .is_err()
-        );
-        let back = orchestrator
-            .update_config(&json!({ "provider": "openrouter" }))
-            .unwrap();
-        assert_eq!(back["baseUrl"], OPENROUTER_BASE_URL);
-        assert_eq!(back["keyEnv"], OPENROUTER_KEY_ENV);
-        // The manual key never leaves the process in clear text.
-        let with_key = orchestrator
-            .update_config(&json!({ "apiKey": "sk-or-v1-0123456789abcdefghij" }))
-            .unwrap();
-        assert_eq!(with_key["keySource"], "manual");
-        assert_eq!(with_key["keyPreview"], "sk-or-v1…ghij");
-        assert!(with_key.get("apiKey").is_none());
+        assert_eq!(updated["provider"], "claude-code");
+        assert_eq!(updated["model"], "haiku");
+        assert!(orchestrator.update_config(&json!({ "reasoning": "max" })).is_err());
+        assert!(orchestrator.update_config(&json!({ "model": "" })).is_err());
         let persisted: OrchestratorConfig = read_json(&root.path().join(CONFIG_FILE));
-        assert_eq!(
-            persisted.api_key.as_deref(),
-            Some("sk-or-v1-0123456789abcdefghij")
-        );
-        let cleared = orchestrator
-            .update_config(&json!({ "apiKey": "" }))
-            .unwrap();
-        assert_ne!(cleared["keySource"], "manual");
+        assert_eq!(persisted.model, "haiku");
     }
 
     #[test]
@@ -801,15 +680,18 @@ mod tests {
         let mut item = Orchestrator::new_item("turn", "assistant", "streaming");
         item.text = "half an answer".into();
         orchestrator.push_item(item);
-        orchestrator.state.lock().items[0].seq = 5;
-        let state = orchestrator.state.lock();
-        orchestrator.persist_history_locked(&state);
-        drop(state);
+        {
+            let mut state = orchestrator.state.lock();
+            state.items[0].seq = 5;
+            state.claude_session = Some("session-1".into());
+            orchestrator.persist_history_locked(&state);
+        }
 
         let reloaded = Orchestrator::new(root.path(), events);
         let status = reloaded.status(None, true);
         assert_eq!(status["transcript"][0]["status"], "cancelled");
         assert_eq!(status["transcript"][0]["text"], "half an answer");
+        assert_eq!(reloaded.state.lock().claude_session.as_deref(), Some("session-1"));
         let partial = reloaded.status(Some(5), true);
         assert_eq!(partial["transcript"].as_array().unwrap().len(), 0);
         assert_eq!(partial["partial"], true);

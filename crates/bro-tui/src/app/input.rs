@@ -13,6 +13,22 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 impl App {
     pub(crate) fn key(&mut self, k: KeyEvent) {
         self.sel = None;
+        self.link_press = None;
+        self.clipboard_request = None;
+        let paste_key = (matches!(k.code, KeyCode::Char('v' | 'V'))
+            && (k.modifiers == KeyModifiers::CONTROL || k.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)))
+            || (k.code == KeyCode::Insert && k.modifiers == KeyModifiers::SHIFT);
+        if !self.prefix_armed && paste_key {
+            let request = std::time::Instant::now();
+            self.clipboard_request = Some(request);
+            if !cfg!(test) {
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Event::ClipboardText(request, crate::clip::grab_text()));
+                });
+            }
+            return;
+        }
         if self.overlay.is_open() {
             self.overlay_key(k);
             return;
@@ -55,6 +71,12 @@ impl App {
             self.prefix_armed = true;
             return;
         }
+        // Codex uses Alt+Up to edit queued input. Keep prefix+Up for pane navigation.
+        if !self.side_focus && k.code == KeyCode::Up && k.modifiers == KeyModifiers::ALT
+            && let Some(id) = self.focused().filter(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.harness == Some(bro_core::Harness::Codex))) {
+                self.with_pane(id, |p, cx| p.key(k, cx));
+                return;
+            }
         if let Some(a) = self.keymap.direct(&k) {
             self.run_act(a);
             return;
@@ -219,12 +241,12 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => self.side_sel = n.saturating_sub(1),
             KeyCode::PageDown => self.side_sel = (sel + 10).min(n.saturating_sub(1)),
             KeyCode::PageUp => self.side_sel = sel.saturating_sub(10),
-            KeyCode::Char('h') | KeyCode::Left => self.side_collapse(),
+            KeyCode::Char('h') | KeyCode::Left => self.side_parent(),
             KeyCode::Char('l') | KeyCode::Right => {
                 if matches!(rows.get(sel), Some(Row::Live { .. })) {
                     self.side_focus = false; // → back into the panes
                 } else {
-                    self.side_expand();
+                    self.side_step_in();
                 }
             }
             KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -284,7 +306,7 @@ impl App {
         }
         let rows = self.rows();
         if let Some(root) = rows.get(self.side_sel).and_then(|r| self.row_root(&rows, r)) {
-            self.cur_project = Some(root);
+            self.pick_project(root);
         }
     }
 }

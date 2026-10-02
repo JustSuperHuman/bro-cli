@@ -17,6 +17,7 @@ pub enum Act {
     SplitDown,
     Close,
     Zoom,
+    TileAll,
     FocusLeft,
     FocusRight,
     FocusUp,
@@ -84,7 +85,7 @@ impl Act {
         let mut v = vec![NewSession, NewShell, Rename, Close, Attention, OpenProject, CloseProject, Continue, SwitchLogin, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
-        v.extend([Split, SplitRight, SplitDown, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
+        v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
         v.extend([Usage, UsageDetails, Profiles, Proxy, Bridge, RefreshUsage]);
         v.extend([Palette, Help, Themes, ToggleIcons, Quit]);
         v
@@ -102,6 +103,7 @@ impl Act {
             SplitDown => "split_down".into(),
             Close => "close".into(),
             Zoom => "zoom".into(),
+            TileAll => "tile_all".into(),
             FocusLeft => "focus_left".into(),
             FocusRight => "focus_right".into(),
             FocusUp => "focus_up".into(),
@@ -155,6 +157,7 @@ impl Act {
             SplitDown => "split down with a shell".into(),
             Close => "close the focused pane".into(),
             Zoom => "zoom / unzoom the focused pane".into(),
+            TileAll => "tile all sessions / return to the focused session".into(),
             FocusLeft => "focus the pane to the left".into(),
             FocusRight => "focus the pane to the right".into(),
             FocusUp => "focus the pane above".into(),
@@ -196,7 +199,7 @@ impl Act {
         match self {
             NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | OpenProject | CloseProject => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
-            Split | SplitRight | SplitDown | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
+            Split | SplitRight | SplitDown | TileAll | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Profiles | Proxy | Bridge | RefreshUsage => Group::Views,
             Palette | Help | Themes | ToggleIcons | Quit => Group::App,
         }
@@ -209,8 +212,9 @@ impl Act {
             NewSession => vec!["alt+n"],
             NewShell => vec!["alt+t"],
             Split => vec!["alt+enter", "alt+\\"],
-            Close => vec!["alt+w"],
+            Close => vec!["ctrl+w", "alt+w"],
             Zoom => vec!["alt+z"],
+            TileAll => vec!["alt+shift+t"],
             FocusLeft => vec!["alt+left"],
             FocusRight => vec!["alt+right"],
             FocusUp => vec!["alt+up"],
@@ -252,6 +256,7 @@ impl Act {
             SplitDown => vec!["\"", "-"],
             Close => vec!["x"],
             Zoom => vec!["z"],
+            TileAll => vec!["T"],
             FocusLeft => vec!["h", "left"],
             FocusRight => vec!["l", "right"],
             FocusUp => vec!["k", "up"],
@@ -583,6 +588,8 @@ mod tests {
         assert_eq!(km.direct(&ev(KeyCode::Char('3'), KeyModifiers::ALT)), Some(Act::Jump(3)));
         assert_eq!(km.direct(&ev(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT)), Some(Act::ResizeLeft));
         assert_eq!(km.direct(&ev(KeyCode::Char('c'), KeyModifiers::CONTROL)), None, "ctrl keys belong to the agent");
+        assert_eq!(km.direct(&ev(KeyCode::Char('w'), KeyModifiers::CONTROL)), Some(Act::Close));
+        assert_eq!(km.direct(&ev(KeyCode::Char('w'), KeyModifiers::ALT)), Some(Act::Close));
         assert!(km.is_prefix(&ev(KeyCode::Char(' '), KeyModifiers::CONTROL)));
         assert!(km.is_prefix(&ev(KeyCode::Char('@'), KeyModifiers::CONTROL)));
         assert_eq!(km.after_prefix(&ev(KeyCode::Char('%'), KeyModifiers::SHIFT)), Some(Act::SplitRight));

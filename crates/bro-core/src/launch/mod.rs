@@ -29,11 +29,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
-    #[default]
     Default,
     /// claude `--permission-mode auto`
     Auto,
-    /// claude `--dangerously-skip-permissions`, codex bypass flag, omp `--yolo`
+    /// claude `--dangerously-skip-permissions`, codex and omp `--yolo`. The default: bro always
+    /// launches agents unattended.
+    #[default]
     Skip,
 }
 

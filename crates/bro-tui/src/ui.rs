@@ -104,6 +104,55 @@ pub fn frame(f: &mut Frame, area: Rect, title: &str, subtitle: Option<&str>, foc
     frame_ex(f, area, title, None, subtitle, focused, t)
 }
 
+/// Project-colored session chrome. The active pane has a heavy outline and a full-width
+/// title band; terminal output keeps its own colors and every original row/column.
+#[allow(clippy::too_many_arguments)]
+pub fn session_frame(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<Line<'_>>, subtitle: Option<&str>, project: &str, color: Color, focused: bool, t: &Theme) -> Rect {
+    let border = if focused { color } else { mix(color, t.frame, 0.45) };
+    let block = Block::default().borders(Borders::ALL)
+        .border_type(if focused { BorderType::Thick } else { BorderType::Rounded })
+        .border_style(fg(border));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if area.width < 3 || area.height < 2 {
+        return inner;
+    }
+    let head = Rect { x: area.x + 1, y: area.y, width: area.width - 2, height: 1 };
+    let ink = if t.is_light() { Color::Rgb(255, 255, 255) } else { Color::Rgb(18, 18, 22) };
+    let style = if focused { fg(ink).bg(color).add_modifier(Modifier::BOLD) } else { fg(color).bg(crate::theme::project_tint(color, t)) };
+    f.render_widget(Block::default().style(style), head);
+    let marker = if focused { "▶" } else { " " };
+    // the title brings its own leading space
+    let lead = if project.is_empty() { marker.to_string() } else { format!("{marker} {} ·", fit(project, (head.width as usize / 3).max(6))) };
+    let mut spans = vec![Span::styled(lead, style)];
+    spans.extend(title.spans.into_iter().map(|s| Span::styled(s.content, style)));
+    line(f, head, spans);
+    // Status stays in its semantic color on the bottom edge. Reserve the close button on the right.
+    let foot = Rect { x: area.x + 1, y: area.bottom() - 1, width: area.width.saturating_sub(7), height: 1 };
+    let right = subtitle.map(|s| vec![Span::styled(format!(" {s} "), fg(color))]).unwrap_or_default();
+    line_lr(f, foot, status.map(|s| s.spans).unwrap_or_default(), right);
+    inner
+}
+
+/// The frame around one project's tiled sessions: a rounded border in the project color with the project's
+/// name and session count set into the top edge. The group holding the focused session is drawn at full
+/// strength, the others softened so the eye finds the active project.
+pub fn group_frame(f: &mut Frame, area: Rect, project: &str, sessions: usize, color: Color, focused: bool, t: &Theme) {
+    let border = if focused { color } else { mix(color, t.frame, 0.5) };
+    f.render_widget(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(fg(border)), area);
+    if area.width < 8 {
+        return;
+    }
+    let name = if project.is_empty() { "other" } else { project };
+    let count = format!("{sessions} session{}", if sessions == 1 { "" } else { "s" });
+    let room = area.width.saturating_sub(6) as usize;
+    let mut spans = vec![Span::styled(format!(" ● {} ", fit(name, room.saturating_sub(count.len() + 3).max(4))), fg(border).add_modifier(Modifier::BOLD))];
+    if room > name.chars().count() + count.len() + 8 {
+        spans.push(Span::styled(format!("· {count} "), fg(if focused { mix(color, t.fg, 0.35) } else { t.muted })));
+    }
+    line(f, Rect { x: area.x + 2, y: area.y, width: area.width - 4, height: 1 }, spans);
+}
+
 /// A centered floating box (palette, launcher, dialogs). Clears what's under it and returns the inner rect.
 pub fn popup(f: &mut Frame, screen: Rect, w: u16, h: u16, title: &str, t: &Theme) -> Rect {
     let r = centered(screen, w, h);

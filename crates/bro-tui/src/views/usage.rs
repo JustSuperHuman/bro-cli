@@ -1,19 +1,20 @@
 //! Usage view: big 5h / weekly meters for every profile, reset countdowns, headroom (≈ when capped by the
 //! measured 5h↔week ratio), plan, and the large/small task picks.
 
-use crate::pane::{Cx, Pane};
+use crate::pane::{Action, Cx, Pane};
 use crate::services::UsageEntry;
 use crate::theme::Theme;
 use crate::ui::{self, fg, muted};
 use bro_core::profiles::Profile;
 use bro_core::usage::Window;
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Frame, layout::Rect, style::Modifier, text::Span};
 
 /// The usage pane.
 #[derive(Default)]
 pub struct UsageView {
     scroll: usize,
+    hits: Vec<(Rect, bro_core::Harness, String)>,
 }
 
 impl UsageView {
@@ -55,6 +56,9 @@ fn block(f: &mut Frame, area: Rect, y: u16, p: &Profile, e: Option<&UsageEntry>,
         left.push(Span::styled(format!(" · {m}"), muted(t)));
     }
     let mut right = vec![];
+    if p.authenticated {
+        right.push(Span::styled(" + session ", ui::accent(t)));
+    }
     if picks.0.as_deref() == Some(p.id.as_str()) {
         right.push(Span::styled(" large task ", fg(t.good).add_modifier(Modifier::REVERSED | Modifier::BOLD)));
     }
@@ -112,9 +116,10 @@ impl Pane for UsageView {
         Some("usage")
     }
     fn render(&mut self, f: &mut Frame, area: Rect, cx: &mut Cx) {
+        self.hits.clear();
         let t = cx.theme;
         let st = cx.svc.state();
-        let area = ui::hint_line(f, area, &[("r", "refresh"), ("j/k", "scroll"), ("alt+o", "profiles")], t);
+        let area = ui::hint_line(f, area, &[("click account", "new session"), ("r", "refresh"), ("j/k", "scroll"), ("alt+o", "profiles")], t);
         let ago = match st.usage_at.map(|a| a.elapsed().as_secs()) {
             Some(s) if s < 5 => "just refreshed".to_string(),
             Some(s) => format!("refreshed {} ago", crate::util::short_dur(s)),
@@ -132,7 +137,12 @@ impl Pane for UsageView {
             if y + 3 > body.bottom() {
                 break;
             }
-            y += block(f, body, y, p, st.usage.get(&p.id), &st.picks, t);
+            let height = block(f, body, y, p, st.usage.get(&p.id), &st.picks, t);
+            if p.authenticated {
+                let h = if p.is_claude() { bro_core::Harness::Claude } else { bro_core::Harness::Codex };
+                self.hits.push((Rect { y, height: height.min(body.bottom() - y), ..body }, h, p.id.clone()));
+            }
+            y += height;
         }
         if profiles.is_empty() {
             ui::line(f, Rect { y, height: 1, ..body }, vec![Span::styled("  no profiles yet — alt+o to add a Claude account or Codex profile", muted(t))]);
@@ -152,8 +162,14 @@ impl Pane for UsageView {
         self.scroll = self.scroll.min(n.saturating_sub(1));
         true
     }
-    fn mouse(&mut self, ev: MouseEvent, _area: Rect, _cx: &mut Cx) {
+    fn mouse(&mut self, ev: MouseEvent, _area: Rect, cx: &mut Cx) {
         match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let pos = ratatui::layout::Position { x: ev.column, y: ev.row };
+                if let Some((_, h, profile)) = self.hits.iter().find(|(r, _, _)| r.contains(pos)) {
+                    cx.act(Action::LaunchUsage(*h, Some(profile.clone())));
+                }
+            }
             MouseEventKind::ScrollDown => self.scroll += 1,
             MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_sub(1),
             _ => {}
