@@ -14,6 +14,44 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use std::time::{Duration, Instant};
+
+/// The sidebar scrollbar stays solid this long after the last scroll or move…
+const BAR_HOLD: Duration = Duration::from_millis(800);
+/// …then fades into the border over this long.
+const BAR_FADE: Duration = Duration::from_millis(250);
+/// Redraw this often while it fades.
+const BAR_FRAME: Duration = Duration::from_millis(40);
+
+/// How solid the scrollbar is `since` the sidebar last moved: 1 → 0 over the fade, None once it's gone.
+pub(super) fn bar_alpha(since: Duration) -> Option<f32> {
+    if since < BAR_HOLD {
+        Some(1.0)
+    } else if since < BAR_HOLD + BAR_FADE {
+        Some(1.0 - (since - BAR_HOLD).as_secs_f32() / BAR_FADE.as_secs_f32())
+    } else {
+        None
+    }
+}
+
+/// When the loop must wake to fade or hide the scrollbar.
+pub(super) fn bar_wake(moved: Option<Instant>) -> Option<Duration> {
+    let since = moved?.elapsed();
+    if since < BAR_HOLD {
+        Some(BAR_HOLD - since)
+    } else if since < BAR_HOLD + BAR_FADE {
+        Some(BAR_FRAME)
+    } else {
+        None
+    }
+}
+
+/// The thumb on a track `track` cells long: (offset, length), for `room` of `total` lines scrolled `pos` of `max`.
+fn thumb(track: u16, room: u16, total: u16, pos: u16, max: u16) -> (u16, u16) {
+    let len = ((u32::from(track) * u32::from(room)) / u32::from(total.max(1))).clamp(1, u32::from(track)) as u16;
+    let off = (u32::from(track - len) * u32::from(pos.min(max)) / u32::from(max.max(1))) as u16;
+    (off, len)
+}
 
 /// One line of the usage block: a glyph + label, then the 5h / week figures (% left).
 struct UsageLine {
@@ -42,6 +80,7 @@ impl App {
         let sub = if focused { "? keys" } else { "alt+b" };
         let inner = ui::frame_ex(f, area, title, Some(clock), Some(sub), focused, &t);
         let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(1), ..inner };
+        self.side_thumb = Rect::default();
 
         // footer first (fixed height), rows get the rest
         let usage = self.usage_lines();
@@ -104,6 +143,26 @@ impl App {
             acc += lines[last_start].0 + lines[last_start].1;
         }
         self.side_scroll = self.side_scroll.min(last_start);
+        if self.side_scroll != self.side_drawn_scroll {
+            self.side_drawn_scroll = self.side_scroll;
+            self.side_nav();
+        }
+        // only when the list overflows, over the right border (fading into it)
+        if last_start > 0
+            && let Some(a) = self.side_nav_at.and_then(|at| bar_alpha(at.elapsed()))
+            && area.width > 0
+        {
+            let span = |r: std::ops::Range<usize>| lines[r].iter().map(|(g, h)| g + h).sum::<u16>();
+            let track = list.bottom().saturating_sub(y);
+            let (off, len) = thumb(track, room, span(0..rows.len()), span(0..self.side_scroll), span(0..last_start));
+            let border = if focused { t.accent } else { t.frame };
+            self.side_thumb = Rect { x: area.right() - 1, y: y + off, width: 1, height: len };
+            for cy in self.side_thumb.y..self.side_thumb.bottom() {
+                if let Some(c) = f.buffer_mut().cell_mut((self.side_thumb.x, cy)) {
+                    c.set_symbol("┃").set_fg(crate::theme::mix(t.muted, border, 1.0 - a));
+                }
+            }
+        }
         let focus_pane = self.focused();
         let cur_key = self.current_project().map(|r| self.svc.project_for(&r).key);
         for (i, row) in rows.iter().enumerate().skip(self.side_scroll) {
@@ -139,6 +198,11 @@ impl App {
             self.side_hits.push((r, SideHit::Row(i)));
             y += h;
         }
+    }
+
+    /// The sidebar scrolled or its selection moved: show the scrollbar for a moment.
+    pub(super) fn side_nav(&mut self) {
+        self.side_nav_at = Some(Instant::now());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -229,7 +293,14 @@ impl App {
                     left.push(Span::styled(format!("  {secondary}"), muted(t)));
                 }
                 let right = vec![Span::styled(format!(" {}", crate::util::short_dur(info.age_secs)), muted(t)), Span::styled(" ×", if selected { fg(t.danger) } else { fg(t.frame) })];
-                ui::line_lr(f, r, left, right);
+                ui::line_lr(f, Rect { height: 1, ..r }, left, right);
+                // why it waits / what it did, under the name
+                if let Some(note) = info.note.as_deref().filter(|_| r.height > 1) {
+                    const INDENT: usize = 7;
+                    let style = if note.starts_with('⏸') { fg(crate::theme::mix(t.danger, t.muted, 0.45)) } else { muted(t) };
+                    let text = ui::fit(note, w.saturating_sub(INDENT + 1));
+                    ui::line(f, Rect { y: r.y + 1, height: 1, ..r }, vec![Span::styled(bar, bar_style), Span::raw(" ".repeat(INDENT - 1)), Span::styled(text, style)]);
+                }
             }
         }
     }
@@ -358,14 +429,19 @@ impl App {
         let row = |y: u16| Rect { y, height: 1, ..area };
         let now = crate::util::now_secs();
         if area.height > 2 && !usage.is_empty() {
-            // header: "▸ usage left   5h  wk" — click to switch totals ⇄ every profile
+            // header: "▸ usage left ⓘ ───  5h  wk" — click to switch totals ⇄ every profile; ⓘ opens the stats
             let head = row(y);
             let arrow = if self.usage_expanded { "▾" } else { "▸" };
             let label = format!("{arrow} usage left ");
+            let info = format!("{} ", ui::icon("info"));
+            let info_at = Rect { x: head.x + ui::width(&label) as u16, width: (ui::width(&info) as u16).min(head.width), ..head };
+            let info_style = if info_at.contains(self.hover) { ui::bold_accent(t) } else { muted(t) };
             // column heads sit over the figures: " 46%" + " " + " 39%" + " "
             let heads = " 5h   wk  ";
-            let fill = (area.width as usize).saturating_sub(ui::width(&label) + ui::width(heads) + 1);
-            ui::line_lr(f, head, vec![Span::styled(label, ui::accent(t)), Span::styled("─".repeat(fill), fg(t.frame))], vec![Span::styled(heads, muted(t))]);
+            let fill = (area.width as usize).saturating_sub(ui::width(&label) + ui::width(&info) + ui::width(heads) + 1);
+            ui::line_lr(f, head, vec![Span::styled(label, ui::accent(t)), Span::styled(info, info_style), Span::styled("─".repeat(fill), fg(t.frame))], vec![Span::styled(heads, muted(t))]);
+            // the ⓘ wins over the header (hits are searched in order)
+            self.side_hits.push((info_at, SideHit::Stats));
             self.side_hits.push((head, SideHit::UsageToggle));
             y += 1;
             let name_w = usage.iter().map(|u| ui::width(&u.label)).max().unwrap_or(6).clamp(5, 10);
@@ -505,6 +581,8 @@ fn row_lines(rows: &[Row]) -> Vec<(u16, u16)> {
                 seen_project = true;
                 (gap, 2)
             }
+            // a running session with something to say gets a second line
+            Row::Live { info, .. } if info.note.is_some() => (0, 2),
             _ => (0, 1),
         })
         .collect()

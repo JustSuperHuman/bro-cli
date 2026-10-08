@@ -12,6 +12,9 @@ pub enum Command {
     Help,
     /// `bro proxy <upstream> …` — headless translating proxy.
     Proxy(crate::proxy_cmd::ProxyArgs),
+    /// `bro open <path>[:line]` — show a file to the user (from inside a bro pane).
+    Open(crate::open_cmd::OpenArgs),
+    OpenHelp,
 }
 
 /// Usage text (`{version}` is substituted).
@@ -26,6 +29,9 @@ usage
   bro proxy <upstream> [-m model] [--small-model m] [--port n]
                    run the translating proxy headless (upstream: pool, claude:<profile>,
                    codex:<profile> or a provider id) and print harness env vars
+  bro open <path>[:line] [--editor]
+                   from inside a bro session: show a file (at a line) in bro's preview and
+                   on connected phones / browsers, or open it in the desktop editor
   bro --version    print the version
   bro --help       this help
 
@@ -37,6 +43,9 @@ inside
 pub fn parse(args: &[String]) -> Result<Command, String> {
     if args.first().map(String::as_str) == Some("proxy") {
         return crate::proxy_cmd::parse(&args[1..]).map(Command::Proxy);
+    }
+    if args.first().map(String::as_str) == Some("open") {
+        return crate::open_cmd::parse(&args[1..]).map(|a| a.map_or(Command::OpenHelp, Command::Open));
     }
     let (mut demo, mut new, mut dir) = (false, false, None);
     for a in args {
@@ -69,5 +78,8 @@ mod tests {
         assert_eq!(p(&["--version"]), Ok(Command::Version));
         assert_eq!(p(&["-h"]), Ok(Command::Help));
         assert!(p(&["--nope"]).is_err());
+        assert!(matches!(p(&["open", "src/a.rs:3"]), Ok(Command::Open(ref a)) if a.target == "src/a.rs:3"));
+        assert_eq!(p(&["open", "--help"]), Ok(Command::OpenHelp));
+        assert!(p(&["open"]).is_err());
     }
 }

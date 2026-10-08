@@ -26,6 +26,8 @@ enum Seen {
     Rename(String, String),
     Create(Option<String>, Option<String>, Vec<String>),
     Focus(String),
+    OpenFile(String, PathBuf, Option<u32>, Option<u32>),
+    OpenInEditor(String, PathBuf, Option<u32>, Option<u32>),
 }
 
 struct Harness {
@@ -54,6 +56,12 @@ impl Harness {
                 BridgeCommand::Kill { id } => seen.lock().push(Seen::Kill(id)),
                 BridgeCommand::Rename { id, title } => seen.lock().push(Seen::Rename(id, title)),
                 BridgeCommand::Focus { id } => seen.lock().push(Seen::Focus(id)),
+                BridgeCommand::OpenFile { id, path, line, column } => {
+                    seen.lock().push(Seen::OpenFile(id, path, line, column))
+                }
+                BridgeCommand::OpenInEditor { id, path, line, column } => {
+                    seen.lock().push(Seen::OpenInEditor(id, path, line, column))
+                }
                 BridgeCommand::Create { req, reply } => {
                     let CreateRequest {
                         title,
@@ -780,6 +788,9 @@ async fn status_discovery_qr_auth_and_shutdown() {
     assert_eq!(info["port"], status.port);
     assert_eq!(info["pid"], std::process::id());
     assert!(info["startedAt"].is_string() && info["host"] == "127.0.0.1");
+    let endpoint = crate::read_endpoint(&harness.root.path().join("bridge")).unwrap();
+    assert_eq!((endpoint.port, endpoint.pid), (status.port, std::process::id()));
+    assert_eq!(harness.bridge.local_url(), Some(endpoint.local_url()));
 
     // Loopback needs no token; the embedded client is served for SPA paths.
     let health: Value = reqwest::get(harness.url("/api/health"))
@@ -985,4 +996,519 @@ async fn orchestrator_tools_are_served_over_mcp() {
     let hello = recv_type(&mut socket, "hello").await;
     assert_eq!(hello["orchestrator"]["state"], "idle");
     assert_eq!(hello["orchestrator"]["config"]["provider"], "claude-code");
+}
+
+/// A workspace: `<root>/project` (project root) with cwd `project/app`.
+fn file_workspace(harness: &Harness) -> (PathBuf, PathBuf) {
+    let project = harness.root.path().join("project");
+    let cwd = project.join("app");
+    std::fs::create_dir_all(cwd.join("src")).unwrap();
+    std::fs::write(cwd.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(project.join("README.md"), "# Read me\n").unwrap();
+    harness.register("files", Some(cwd.clone()), Some(project.clone()));
+    (project, cwd)
+}
+
+/// The path bro hands the TUI: canonical, without the Windows `\\?\` prefix.
+fn shown(path: &std::path::Path) -> PathBuf {
+    let canonical = path.canonicalize().unwrap();
+    PathBuf::from(canonical.to_string_lossy().trim_start_matches(r"\\?\"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn links_resolve_and_preview_use_the_session_roots() {
+    let harness = Harness::start();
+    let (project, _cwd) = file_workspace(&harness);
+    let outside = harness.root.path().join("outside.txt");
+    std::fs::write(&outside, "secret").unwrap();
+    let client = reqwest::Client::new();
+    let mut candidates: Vec<Value> = vec![
+        json!({ "path": "src/main.rs" }),
+        json!("README.md"),
+        json!({ "path": "src" }),
+        json!({ "path": "nope.rs" }),
+        json!({ "path": outside.to_string_lossy() }),
+    ];
+    candidates.extend((0..300).map(|n| json!({ "path": format!("x{n}.rs") })));
+    let body: Value = client
+        .post(harness.url("/api/sessions/files/links/resolve"))
+        .json(&json!({ "candidates": candidates }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 200, "capped");
+    assert_eq!(results[0]["exists"], true);
+    assert_eq!(results[0]["kind"], "file");
+    assert_eq!(results[0]["relativePath"], "src/main.rs");
+    assert_eq!(results[1]["path"], "README.md");
+    assert_eq!(results[1]["relativePath"], "README.md");
+    assert_eq!(
+        PathBuf::from(results[1]["resolved"].as_str().unwrap()),
+        shown(&project.join("README.md"))
+    );
+    assert_eq!(results[2]["kind"], "dir");
+    assert_eq!(results[3], json!({ "path": "nope.rs", "exists": false }));
+    assert_eq!(results[4]["exists"], false, "outside the roots");
+
+    let preview: Value = client
+        .get(harness.url("/api/sessions/files/file?path=README.md&line=1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preview["language"], "markdown");
+    assert_eq!(preview["content"], "# Read me");
+    let refused = client
+        .get(harness.url(&format!(
+            "/api/sessions/files/file?path={}",
+            url::form_urlencoded::byte_serialize(outside.to_string_lossy().as_bytes())
+                .collect::<String>()
+        )))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400, "file errors stay 400 for old clients");
+    let unknown = client
+        .post(harness.url("/api/sessions/ghost/links/resolve"))
+        .json(&json!({ "candidates": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_broadcasts_to_clients_and_tells_bro() {
+    let harness = Harness::start();
+    let (_project, cwd) = file_workspace(&harness);
+    let mut socket = harness.socket().await;
+    recv_type(&mut socket, "hello").await;
+    let client = reqwest::Client::new();
+    let reply: Value = client
+        .post(harness.url("/api/sessions/files/open"))
+        .json(&json!({ "path": "src/main.rs:12:4" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reply["opened"], true);
+    assert!(reply["clients"].as_u64().unwrap() >= 1);
+    let event = recv_type(&mut socket, "openFile").await;
+    assert_eq!(event["sessionId"], "files");
+    assert_eq!(event["path"], "src/main.rs");
+    assert_eq!(event["relativePath"], "src/main.rs");
+    assert_eq!(
+        (event["line"].as_u64(), event["column"].as_u64()),
+        (Some(12), Some(4))
+    );
+    assert_eq!(event["source"], "agent");
+    assert!(event["at"].is_string());
+    let main = shown(&cwd.join("src/main.rs"));
+    assert_eq!(PathBuf::from(event["resolved"].as_str().unwrap()), main);
+    let seen = harness.wait_seen(1).await;
+    assert_eq!(
+        seen.last(),
+        Some(&Seen::OpenFile("files".into(), main.clone(), Some(12), Some(4)))
+    );
+
+    // An explicit line wins over a suffix; `source` is passed through.
+    client
+        .post(harness.url("/api/sessions/files/open"))
+        .json(&json!({ "path": "README.md", "line": 3, "source": "user" }))
+        .send()
+        .await
+        .unwrap();
+    let event = recv_type(&mut socket, "openFile").await;
+    assert_eq!(
+        (
+            event["path"].as_str(),
+            event["line"].as_u64(),
+            event["source"].as_str()
+        ),
+        (Some("README.md"), Some(3), Some("user"))
+    );
+
+    let editor = client
+        .post(harness.url("/api/sessions/files/open-in-editor"))
+        .json(&json!({ "path": "src/main.rs", "line": 2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(editor.status(), 204);
+    let seen = harness.wait_seen(3).await;
+    assert_eq!(
+        seen.last(),
+        Some(&Seen::OpenInEditor("files".into(), main, Some(2), None))
+    );
+
+    for (route, body, status) in [
+        ("open", json!({ "path": "missing.rs" }), 404),
+        ("open", json!({ "path": "src" }), 400),
+        ("open", json!({}), 400),
+        ("open-in-editor", json!({ "path": "missing.rs" }), 404),
+    ] {
+        let response = client
+            .post(harness.url(&format!("/api/sessions/files/{route}")))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{route} {body}");
+        let message: Value = response.json().await.unwrap();
+        assert!(message["message"].is_string());
+    }
+    let unknown = client
+        .post(harness.url("/api/sessions/ghost/open"))
+        .json(&json!({ "path": "README.md" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_streams_files_with_ranges() {
+    let harness = Harness::start();
+    let (_project, cwd) = file_workspace(&harness);
+    // Multi-MB, non-repeating content so offsets are checked, not just lengths.
+    let big: Vec<u8> = (0..5 * 1024 * 1024 + 123u32)
+        .map(|n| (n.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    std::fs::write(cwd.join("clip one.mp4"), &big).unwrap();
+    let total = big.len();
+    let client = reqwest::Client::new();
+    let url = harness.url("/api/sessions/files/raw?path=clip%20one.mp4");
+
+    let preview: Value = client
+        .get(harness.url("/api/sessions/files/file?path=clip%20one.mp4"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (preview["kind"].as_str(), preview["mimeType"].as_str()),
+        (Some("video"), Some("video/mp4"))
+    );
+    assert_eq!(preview["bytes"], total);
+    let media_url = preview["url"].as_str().unwrap();
+    assert!(media_url.starts_with("/api/sessions/files/raw?path=") && !media_url.contains("token"));
+    let via_url = client
+        .get(harness.url(media_url))
+        .header("range", "bytes=0-3")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(via_url.status(), 206);
+    assert_eq!(via_url.bytes().await.unwrap().as_ref(), &big[..4]);
+
+    let full = client.get(&url).send().await.unwrap();
+    assert_eq!(full.status(), 200);
+    let headers = full.headers().clone();
+    let header = |name: &str| headers[name].to_str().unwrap().to_owned();
+    assert_eq!(header("accept-ranges"), "bytes");
+    assert_eq!(header("content-type"), "video/mp4");
+    assert_eq!(header("content-length"), total.to_string());
+    assert_eq!(header("x-content-type-options"), "nosniff");
+    assert_eq!(header("content-security-policy"), "sandbox");
+    assert_eq!(header("content-disposition"), "inline; filename*=UTF-8''clip%20one.mp4");
+    assert!(headers.contains_key("etag") && headers.contains_key("last-modified"));
+    assert_eq!(full.bytes().await.unwrap().as_ref(), big.as_slice());
+
+    let range = |spec: String| client.get(&url).header("range", spec).send();
+    let first = range("bytes=0-0".into()).await.unwrap();
+    assert_eq!(first.status(), 206);
+    assert_eq!(first.headers()["content-range"].to_str().unwrap(), format!("bytes 0-0/{total}"));
+    assert_eq!(first.headers()["content-length"].to_str().unwrap(), "1");
+    assert_eq!(first.bytes().await.unwrap().as_ref(), &big[..1]);
+
+    let open = range("bytes=10-".into()).await.unwrap();
+    assert_eq!(open.status(), 206);
+    assert_eq!(
+        open.headers()["content-range"].to_str().unwrap(),
+        format!("bytes 10-{}/{total}", total - 1)
+    );
+    assert_eq!(open.bytes().await.unwrap().as_ref(), &big[10..]);
+
+    let suffix = range("bytes=-5".into()).await.unwrap();
+    assert_eq!(suffix.status(), 206);
+    assert_eq!(
+        suffix.headers()["content-range"].to_str().unwrap(),
+        format!("bytes {}-{}/{total}", total - 5, total - 1)
+    );
+    assert_eq!(suffix.bytes().await.unwrap().as_ref(), &big[total - 5..]);
+
+    let middle = range("bytes=3000000-3065535".into()).await.unwrap();
+    assert_eq!(middle.headers()["content-length"].to_str().unwrap(), "65536");
+    assert_eq!(middle.bytes().await.unwrap().as_ref(), &big[3_000_000..3_065_536]);
+
+    let beyond = range(format!("bytes={total}-")).await.unwrap();
+    assert_eq!(beyond.status(), 416);
+    assert_eq!(beyond.headers()["content-range"].to_str().unwrap(), format!("bytes */{total}"));
+    assert_eq!(beyond.headers()["accept-ranges"].to_str().unwrap(), "bytes");
+
+    let multi = range("bytes=0-1,4-5".into()).await.unwrap();
+    assert_eq!(multi.status(), 200);
+    assert_eq!(multi.bytes().await.unwrap().len(), total);
+
+    // If-Range with a stale validator ignores the range; the current one honours it.
+    let etag = header("etag");
+    let stale = client
+        .get(&url)
+        .header("range", "bytes=0-0")
+        .header("if-range", "\"old\"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 200);
+    let current = client
+        .get(&url)
+        .header("range", "bytes=0-0")
+        .header("if-range", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(current.status(), 206);
+    let cached = client.get(&url).header("if-none-match", &etag).send().await.unwrap();
+    assert_eq!(cached.status(), 304);
+
+    let head = client.head(&url).send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.headers()["content-length"].to_str().unwrap(), total.to_string());
+    assert_eq!(head.headers()["accept-ranges"].to_str().unwrap(), "bytes");
+    assert!(head.bytes().await.unwrap().is_empty());
+    let head_range = client.head(&url).header("range", "bytes=-5").send().await.unwrap();
+    assert_eq!(head_range.status(), 206);
+    assert_eq!(head_range.headers()["content-length"].to_str().unwrap(), "5");
+
+    let download = client.get(format!("{url}&download=1")).send().await.unwrap();
+    assert_eq!(
+        download.headers()["content-disposition"].to_str().unwrap(),
+        "attachment; filename*=UTF-8''clip%20one.mp4"
+    );
+
+    let readme = client
+        .get(harness.url("/api/sessions/files/raw?path=README.md"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(readme.headers()["content-type"].to_str().unwrap(), "text/plain; charset=utf-8");
+    assert_eq!(readme.text().await.unwrap(), "# Read me\n");
+
+    let outside = harness.root.path().join("outside.bin");
+    std::fs::write(&outside, b"secret").unwrap();
+    let status = |path: String| {
+        let client = client.clone();
+        let url = harness.url(&path);
+        async move { client.get(url).send().await.unwrap().status().as_u16() }
+    };
+    let raw = "/api/sessions/files/raw?path=";
+    let encoded: String =
+        url::form_urlencoded::byte_serialize(outside.to_string_lossy().as_bytes()).collect();
+    assert_eq!(status(format!("{raw}{encoded}")).await, 403);
+    assert_eq!(status(format!("{raw}nope.mp4")).await, 404);
+    assert_eq!(status(format!("{raw}src")).await, 400);
+    assert_eq!(status("/api/sessions/ghost/raw?path=README.md".into()).await, 404);
+}
+
+// ----- agent insights (docs/agent-insights.md §4) ------------------------------
+
+fn blocked(reason: &str) -> crate::SessionInsights {
+    crate::SessionInsights {
+        attention: Some(crate::Attention {
+            state: crate::AttentionState::Blocked,
+            reason: Some(reason.into()),
+            since: Some("2026-10-02T00:00:00.000Z".into()),
+        }),
+        recap: Some(crate::Recap {
+            text: "Shipped the build".into(),
+            at: None,
+            source: crate::RecapSource::Claude,
+        }),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn insights_publish_on_change_only_and_debounce() {
+    let harness = Harness::start();
+    harness.register("agent", None, None);
+    let mut socket = harness.socket().await;
+    recv_type(&mut socket, "hello").await;
+
+    harness.bridge.set_insights("agent", blocked("Bash: npm publish"));
+    let first = recv_type(&mut socket, "session").await;
+    assert_eq!(first["session"]["id"], "agent");
+    assert_eq!(
+        first["session"]["attention"],
+        json!({ "state": "blocked", "reason": "Bash: npm publish", "since": "2026-10-02T00:00:00.000Z" })
+    );
+    assert_eq!(first["session"]["recap"], json!({ "text": "Shipped the build", "source": "claude" }));
+    assert!(first["session"].get("agentFiles").is_none(), "omitted when empty");
+
+    // Unchanged: nothing. Two quick changes: one event, carrying the latest.
+    harness.bridge.set_insights("agent", blocked("Bash: npm publish"));
+    let started = std::time::Instant::now();
+    harness.bridge.set_insights("agent", blocked("Question: Which DB?"));
+    harness.bridge.set_insights("agent", blocked("Edit: main.rs"));
+    let next = recv_type(&mut socket, "session").await;
+    assert!(started.elapsed() >= Duration::from_millis(300), "debounced");
+    assert_eq!(next["session"]["attention"]["reason"], "Edit: main.rs");
+    let quiet = tokio::time::timeout(Duration::from_millis(900), recv_type(&mut socket, "session")).await;
+    assert!(quiet.is_err(), "one event for the burst: {quiet:?}");
+
+    // Clearing removes the fields; unknown ids are ignored.
+    harness.bridge.set_insights("agent", Default::default());
+    let cleared = recv_type(&mut socket, "session").await;
+    assert!(cleared["session"].get("attention").is_none() && cleared["session"].get("recap").is_none());
+    harness.bridge.set_insights("ghost", blocked("x"));
+    let sessions: Vec<Value> = reqwest::get(harness.url("/api/sessions")).await.unwrap().json().await.unwrap();
+    assert_eq!(sessions.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_files_route_lists_relative_paths_and_counts() {
+    let harness = Harness::start();
+    let (project, cwd) = file_workspace(&harness);
+    let outside = harness.root.path().join("outside.png");
+    std::fs::write(&outside, "png").unwrap();
+    let client = reqwest::Client::new();
+
+    let empty: Value = client.get(harness.url("/api/sessions/files/agent-files")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(empty, json!({ "sessionId": "files", "sent": [], "touched": [] }));
+
+    let mut socket = harness.socket().await;
+    recv_type(&mut socket, "hello").await;
+    let mut touched: Vec<crate::TouchedFile> = vec![
+        crate::TouchedFile { path: cwd.join("src/main.rs"), kind: crate::TouchKind::Edit, at: Some("2026-10-02T00:00:02.000Z".into()), line: Some(3) },
+        crate::TouchedFile { path: project.join("README.md"), kind: crate::TouchKind::Read, at: None, line: None },
+        crate::TouchedFile { path: cwd.join("gone.rs"), kind: crate::TouchKind::Delete, at: None, line: None },
+    ];
+    touched.extend((0..250).map(|n| crate::TouchedFile { path: cwd.join(format!("f{n}.rs")), kind: crate::TouchKind::Write, at: None, line: None }));
+    harness.bridge.set_agent_files("files", crate::AgentFiles {
+        transcript: Some(harness.root.path().join("t.jsonl")),
+        sent: vec![crate::SentFile { path: outside.clone(), caption: Some("chart".into()), at: None, mime_type: Some("image/png".into()), is_image: true }],
+        touched,
+    });
+    let event = recv_type(&mut socket, "session").await;
+    assert_eq!(event["session"]["agentFiles"]["sent"], 1);
+    assert_eq!(event["session"]["agentFiles"]["touched"], 253);
+    assert!(event["session"]["agentFiles"]["updatedAt"].is_string());
+
+    let body: Value = client.get(harness.url("/api/sessions/files/agent-files")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(body["sessionId"], "files");
+    assert!(body["transcript"].as_str().unwrap().ends_with("t.jsonl"));
+    let sent = &body["sent"][0];
+    assert_eq!(sent["caption"], "chart");
+    assert_eq!(sent["isImage"], true);
+    assert_eq!(sent["mimeType"], "image/png");
+    assert!(sent.get("relativePath").is_none(), "outside the roots");
+    let list = body["touched"].as_array().unwrap();
+    assert_eq!(list.len(), 200, "capped");
+    assert_eq!(list[0]["relativePath"], "src/main.rs");
+    assert_eq!(list[0]["kind"], "edit");
+    assert_eq!(list[0]["line"], 3);
+    assert_eq!(list[1]["relativePath"], "README.md");
+    assert_eq!(list[2]["relativePath"], "gone.rs", "deleted files resolve lexically");
+    assert_eq!(list[2]["kind"], "delete");
+
+    let unknown = client.get(harness.url("/api/sessions/ghost/agent-files")).send().await.unwrap();
+    assert_eq!(unknown.status(), 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notifications_use_the_reason_and_the_recap() {
+    let harness = Harness::start();
+    harness.bridge.register(SessionMeta {
+        id: "agent".into(),
+        title: "Claude".into(),
+        shell: "claude".into(),
+        args: vec![],
+        cwd: None,
+        project: None,
+        pid: None,
+        cols: 100,
+        rows: 30,
+        agent: Some("claude".into()),
+    });
+    harness.register("done", None, None);
+    let mut socket = harness.socket().await;
+    recv_type(&mut socket, "hello").await;
+
+    harness.bridge.set_insights("agent", blocked("Bash: rm -rf dist"));
+    harness.bridge.output(
+        "agent",
+        "Do you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n\r\nEnter to confirm · Esc to cancel".as_bytes(),
+    );
+    let notify = recv_type(&mut socket, "notify").await;
+    assert_eq!(notify["title"], "Claude Code needs input");
+    assert_eq!(notify["body"], "Bash: rm -rf dist");
+
+    // A finished turn: the recap replaces "Task finished"; a done-state reason wins over it.
+    harness.bridge.set_insights("done", crate::SessionInsights {
+        attention: None,
+        recap: Some(crate::Recap { text: "Tests pass; ready to ship".into(), at: None, source: crate::RecapSource::LastMessage }),
+    });
+    harness.bridge.output("done", b"ok\x07");
+    let finished = recv_type(&mut socket, "notify").await;
+    assert_eq!(finished["sessionId"], "done");
+    assert_eq!(finished["body"], "Tests pass; ready to ship");
+    let raised = harness.notifications.lock().clone();
+    assert!(raised.iter().any(|n| n.body == "Tests pass; ready to ship"));
+}
+
+/// Waits (briefly) until the bridge's remote-viewer count for `id` is `want`.
+async fn viewers_become(harness: &Harness, id: &str, want: usize) -> usize {
+    for _ in 0..200 {
+        if harness.bridge.remote_viewers(id) == want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    harness.bridge.remote_viewers(id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_viewers_follow_subscriptions_slots_and_disconnects() {
+    let harness = Harness::start();
+    harness.register("s1", None, None);
+    harness.register("s2", None, None);
+    assert_eq!(harness.bridge.remote_viewers("s1"), 0);
+
+    let mut phone = harness.socket().await;
+    recv_type(&mut phone, "hello").await;
+    send(&mut phone, json!({ "type": "subscribe", "sessionId": "s1" })).await;
+    recv_type(&mut phone, "snapshot").await;
+    assert_eq!(viewers_become(&harness, "s1", 1).await, 1);
+
+    // A second client on the same session, in a named slot.
+    let mut web = harness.socket().await;
+    recv_type(&mut web, "hello").await;
+    send(&mut web, json!({ "type": "subscribe", "sessionId": "s1", "slot": "side" })).await;
+    recv_type(&mut web, "snapshot").await;
+    assert_eq!(viewers_become(&harness, "s1", 2).await, 2);
+
+    // Re-subscribing a slot to another session moves the count.
+    send(&mut phone, json!({ "type": "subscribe", "sessionId": "s2" })).await;
+    recv_type(&mut phone, "snapshot").await;
+    assert_eq!(viewers_become(&harness, "s1", 1).await, 1);
+    assert_eq!(viewers_become(&harness, "s2", 1).await, 1);
+
+    // Unsubscribing a slot releases it; unknown slots are a no-op.
+    send(&mut web, json!({ "type": "unsubscribe", "slot": "nope" })).await;
+    send(&mut web, json!({ "type": "unsubscribe", "slot": "side" })).await;
+    assert_eq!(viewers_become(&harness, "s1", 0).await, 0);
+
+    // Dropping the connection releases whatever it still watched.
+    drop(phone);
+    assert_eq!(viewers_become(&harness, "s2", 0).await, 0);
+    assert!(harness.bridge.state().viewers.lock().is_empty(), "no leaked entries");
 }

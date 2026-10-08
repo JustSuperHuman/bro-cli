@@ -40,7 +40,9 @@ mod agents;
 mod alerts;
 mod auth;
 mod commands;
-mod file_preview;
+pub mod file_links;
+pub mod file_preview;
+pub mod insights;
 mod file_search;
 mod model;
 mod net;
@@ -51,6 +53,7 @@ mod profiles;
 mod project_store;
 mod projects;
 mod prompt;
+mod raw_file;
 mod rest;
 mod rest_sessions;
 mod server;
@@ -64,6 +67,7 @@ mod ws;
 mod tests;
 
 pub use auth::is_authorized;
+pub use insights::{AgentFiles, Attention, AttentionState, Recap, RecapSource, SentFile, SessionInsights, TouchKind, TouchedFile};
 pub use model::TerminalProfile;
 pub use orchestrator::{MessageContext, OrchestratorLaunch, OrchestratorUpdate};
 
@@ -187,6 +191,22 @@ pub enum BridgeCommand {
     Focus {
         id: String,
     },
+    /// Show bro's file preview for a resolved file in this session's workspace
+    /// (`POST /api/sessions/{id}/open`, e.g. an agent running `bro open`).
+    OpenFile {
+        id: String,
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
+    /// Open a resolved file in the desktop's editor
+    /// (`POST /api/sessions/{id}/open-in-editor`, "Open on desktop").
+    OpenInEditor {
+        id: String,
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
 }
 
 impl std::fmt::Debug for BridgeCommand {
@@ -211,8 +231,48 @@ impl std::fmt::Debug for BridgeCommand {
                 .finish(),
             Self::Create { req, .. } => f.debug_struct("Create").field("req", req).finish(),
             Self::Focus { id } => f.debug_struct("Focus").field("id", id).finish(),
+            Self::OpenFile { id, path, line, column } => f
+                .debug_struct("OpenFile")
+                .field("id", id)
+                .field("path", path)
+                .field("line", line)
+                .field("column", column)
+                .finish(),
+            Self::OpenInEditor { id, path, line, column } => f
+                .debug_struct("OpenInEditor")
+                .field("id", id)
+                .field("path", path)
+                .field("line", line)
+                .field("column", column)
+                .finish(),
         }
     }
+}
+
+/// A running bridge as described by `<data_root>/.terminal-web-server.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Endpoint {
+    pub port: u16,
+    pub pid: u32,
+}
+
+impl Endpoint {
+    /// Loopback base URL (`http://127.0.0.1:<port>`); loopback needs no token.
+    pub fn local_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+}
+
+/// Reads the discovery file a bridge writes when it binds (and removes on
+/// shutdown) so local tools like `bro open` can reach it. `None` when no
+/// bridge has published one under `data_root`.
+pub fn read_endpoint(data_root: &std::path::Path) -> Option<Endpoint> {
+    let bytes = std::fs::read(data_root.join(server::SERVER_INFO_FILE)).ok()?;
+    let info: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(Endpoint {
+        port: u16::try_from(info["port"].as_u64()?).ok().filter(|port| *port != 0)?,
+        pid: u32::try_from(info["pid"].as_u64().unwrap_or_default()).unwrap_or_default(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +427,19 @@ impl Bridge {
         self.state().unregister(id);
     }
 
+    /// Why the agent waits and its recap (`docs/agent-insights.md`). Publishes
+    /// a `session` event only when something changed, at most twice a second;
+    /// unknown ids are ignored.
+    pub fn set_insights(&self, id: &str, insights: SessionInsights) {
+        self.state().set_insights(id, insights);
+    }
+
+    /// The files the agent sent / touched, newest first. The summary carries
+    /// their counts (`agentFiles`); clients fetch `GET .../agent-files`.
+    pub fn set_agent_files(&self, id: &str, files: AgentFiles) {
+        self.state().set_agent_files(id, files);
+    }
+
     /// Replaces the launch profiles advertised to clients (default: shell,
     /// claude, codex, pi, omp) and broadcasts them.
     pub fn set_profiles(&self, profiles: Vec<TerminalProfile>) {
@@ -457,6 +530,12 @@ impl Bridge {
         self.state().notification_sinks.write().push(Arc::from(f));
     }
 
+    /// How many remote client slots are subscribed to session `id` right now (web,
+    /// phone). Cheap: one lock and a map lookup, fine to call every frame.
+    pub fn remote_viewers(&self, id: &str) -> usize {
+        self.state().remote_viewers(id)
+    }
+
     pub fn status(&self) -> BridgeStatus {
         let state = self.state();
         let (host, port) = {
@@ -480,6 +559,26 @@ impl Bridge {
             clients: state.clients.load(Ordering::Relaxed),
             error: state.last_error.lock().clone(),
         }
+    }
+
+    /// Base URL local processes use to reach this bridge (`http://127.0.0.1:<port>`,
+    /// or the bound address when it is a specific interface). Cheap: no
+    /// interface enumeration. `None` until the listener is bound.
+    pub fn local_url(&self) -> Option<String> {
+        let (host, port) = {
+            let inner = self.state().inner.lock();
+            (inner.host, inner.port)
+        };
+        if port == 0 {
+            return None;
+        }
+        Some(if host.is_unspecified() || host.is_loopback() {
+            format!("http://127.0.0.1:{port}")
+        } else if host.is_ipv6() {
+            format!("http://[{host}]:{port}")
+        } else {
+            format!("http://{host}:{port}")
+        })
     }
 
     /// Pairing QR (unicode half-blocks, one String per row) for the first LAN URL.

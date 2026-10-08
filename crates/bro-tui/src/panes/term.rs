@@ -105,6 +105,23 @@ pub struct Term {
     exit_status: Option<i32>,
     /// rows, cols
     size: (u16, u16),
+    /// What the pty would be without the remote minimum: the tile it was last drawn in, or
+    /// what a remote client asked for while it was hidden. (rows, cols)
+    base: (u16, u16),
+    /// When a remote client last watched (the minimum outlives it by a grace period).
+    hold: super::remote_min::RemoteHold,
+    /// Screen row shown on the tile's top row. Above 0 while the remote minimum makes the pty
+    /// taller than the tile: the tile then shows the bottom rows (pinned bottom-left).
+    view_top: u16,
+    /// Tests: remote viewers instead of asking the bridge.
+    #[cfg(test)]
+    pub test_viewers: Option<usize>,
+    /// Tests: added to the clock (grace periods).
+    #[cfg(test)]
+    pub test_skew: Duration,
+    /// Tests: a fixed pane sized by its tile like a live one.
+    #[cfg(test)]
+    pub test_sized: bool,
     /// lines scrolled back (0 = live)
     scroll: usize,
     /// ms since `born` of the last output (set by the reader thread)
@@ -123,6 +140,20 @@ pub struct Term {
     title_sent: Option<String>,
     /// Targets for the last displayed cells, including the current scrollback viewport.
     links: super::links::Links,
+    /// Which path-like words on screen are files (resolved off the UI thread).
+    files: super::file_cache::FileCache,
+    /// The agent's transcript, followed on a worker (Claude / Codex panes).
+    insights: Option<super::insights::Insights>,
+    /// What was launched (a `/recap` runs the same program with the same env).
+    launch: Option<Spawn>,
+    /// While a prompt is on screen: its question line ("Do you want to proceed?").
+    prompt_title: Option<String>,
+    /// Types `continue` for an agent that stopped on an API error.
+    resume: super::auto_resume::AutoResume,
+    /// Input from you so far (auto-resume backs off when this moves).
+    typed: u64,
+    /// Auto-resume typed its prompt: press enter at this time (a separate write, so it isn't read as a paste).
+    enter_at: Option<Instant>,
 }
 
 impl Term {
@@ -133,6 +164,7 @@ impl Term {
     /// A session that spawns lazily at its first render (when the real size is known).
     pub fn new(meta: Meta, spawn: Spawn, svc: Services) -> Term {
         let agent = meta.harness.is_some();
+        let files = super::file_cache::FileCache::new(bro_bridge::file_preview::ResolveRoots { cwd: meta.cwd.clone(), project: Some(meta.project.root.clone()) });
         Term {
             meta,
             spawn: Some(spawn),
@@ -142,6 +174,15 @@ impl Term {
             exited: Arc::new(AtomicBool::new(false)),
             exit_status: None,
             size: (24, 80),
+            base: (24, 80),
+            hold: Default::default(),
+            view_top: 0,
+            #[cfg(test)]
+            test_viewers: None,
+            #[cfg(test)]
+            test_skew: Duration::ZERO,
+            #[cfg(test)]
+            test_sized: false,
             scroll: 0,
             last_output: Arc::new(AtomicU64::new(0)),
             born: Instant::now(),
@@ -155,6 +196,13 @@ impl Term {
             svc,
             title_sent: None,
             links: Default::default(),
+            files,
+            insights: None,
+            launch: None,
+            prompt_title: None,
+            resume: Default::default(),
+            typed: 0,
+            enter_at: None,
         }
     }
 
@@ -194,6 +242,11 @@ impl Term {
         }
         cmd.env("BRO", "1");
         cmd.env("BRO_SESSION_ID", &self.meta.sid);
+        // `bro open` finds the bridge here (else via its discovery file)
+        match self.svc.bridge_local_url() {
+            Some(url) => cmd.env("BRO_BRIDGE_URL", url),
+            None => cmd.env_remove("BRO_BRIDGE_URL"),
+        }
         for k in &s.env_remove {
             cmd.env_remove(k);
         }
@@ -207,11 +260,83 @@ impl Term {
         *self.writer.lock() = Some(writer);
         self.parser.lock().screen_mut().set_size(rows, cols);
         self.size = (rows, cols);
+        self.base = (rows, cols);
         let pid = child.process_id();
         self.live = Some(Live { master: pair.master, child });
         self.svc.bridge_register(self.bridge_meta(s, pid));
+        self.launch = Some(s.clone());
+        if let Some(spec) = self.bind_spec(s, pid)
+            && !self.svc.is_demo()
+        {
+            self.insights = Some(super::insights::Insights::start(spec, waker.clone()));
+        }
         self.start_reader(reader, waker);
         Ok(())
+    }
+
+    /// How to find this pane's transcript (Claude / Codex only).
+    fn bind_spec(&self, s: &Spawn, pid: Option<u32>) -> Option<bro_core::sessions::live::BindSpec> {
+        let harness = self.meta.harness.filter(|h| matches!(h, Harness::Claude | Harness::Codex))?;
+        let var = if harness == Harness::Claude { "CLAUDE_CONFIG_DIR" } else { "CODEX_HOME" };
+        let config_dir = s.env.iter().find(|(k, _)| k == var).map(|(_, v)| PathBuf::from(v)).filter(|p| !p.as_os_str().is_empty());
+        let started = std::time::SystemTime::now().checked_sub(self.meta.started.elapsed()).unwrap_or_else(std::time::SystemTime::now);
+        Some(bro_core::sessions::live::BindSpec {
+            harness,
+            profile_id: self.meta.store.clone(),
+            config_dir,
+            pid,
+            cwd: self.meta.cwd.clone(),
+            started,
+            resume_id: super::insights::resume_id(harness, &s.args),
+        })
+    }
+
+    /// What the transcript says so far (None for shells, pi/omp, and until the worker has read anything).
+    pub fn insights(&self) -> Option<super::insights::Snapshot> {
+        self.insights.as_ref().map(|i| i.snapshot())
+    }
+
+    #[cfg(test)]
+    pub fn set_screen_status(&mut self, status: Option<Activity>) {
+        self.demo_activity = None;
+        self.status = status;
+    }
+
+    /// The transcript shows a question tool (AskUserQuestion, ExitPlanMode, Codex
+    /// request_user_input_async) still waiting for its answer.
+    fn asking_question(&self) -> bool {
+        const QUESTION_TOOLS: [&str; 3] = ["AskUserQuestion", "ExitPlanMode", "request_user_input_async"];
+        self.insights()
+            .and_then(|s| s.facts)
+            .and_then(|f| f.pending.as_ref().map(|p| QUESTION_TOOLS.contains(&p.tool.as_str())))
+            .unwrap_or(false)
+    }
+
+    /// The transcript worker's handle (a finished `/recap` is handed to it).
+    pub fn insights_handle(&self) -> Option<&super::insights::Insights> {
+        self.insights.as_ref()
+    }
+
+    /// Tests: give a fixed pane transcript facts.
+    #[cfg(test)]
+    pub fn set_insights(&mut self, insights: super::insights::Insights) {
+        self.insights = Some(insights);
+    }
+
+    /// Tests: what the program was launched with.
+    #[cfg(test)]
+    pub fn set_launch(&mut self, spawn: Spawn) {
+        self.launch = Some(spawn);
+    }
+
+    /// The question on screen while the agent waits on a prompt.
+    pub fn prompt_title(&self) -> Option<&str> {
+        self.prompt_title.as_deref()
+    }
+
+    /// The program and environment this session was launched with.
+    pub fn launch_spawn(&self) -> Option<&Spawn> {
+        self.launch.as_ref()
     }
 
     /// What the bridge is told about this session.
@@ -279,9 +404,15 @@ impl Term {
 
     /// Write raw bytes to the program (keys, paste, bridge input).
     pub fn send(&mut self, bytes: &[u8]) {
+        self.typed += 1;
+        self.scroll = 0;
+        self.write(bytes);
+    }
+
+    /// Write to the program on bro's own behalf.
+    fn write(&mut self, bytes: &[u8]) {
         #[cfg(test)]
         self.sent.extend_from_slice(bytes);
-        self.scroll = 0;
         if let Some(w) = self.writer.lock().as_mut() {
             let _ = w.write_all(bytes);
             let _ = w.flush();
@@ -298,12 +429,66 @@ impl Term {
         let p = self.parser.lock();
         let s = p.screen();
         let (_, cols) = s.size();
-        let line = s.rows(0, cols).nth(row as usize)?;
+        let line = s.rows(0, cols).nth(row.saturating_add(self.view_top) as usize)?;
         prompt_option(&line)
     }
 
-    /// Resize the pty and the parser (no-op if unchanged).
+    /// The local size for the pty (the tile, or a hidden pane's remote request). The pty gets
+    /// this grown to the remote minimum while a phone or web client watches the session.
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        self.base = (rows, cols);
+        self.apply_size();
+    }
+
+    /// Size the pty for `base` plus the remote minimum (held for its grace period).
+    fn apply_size(&mut self) {
+        let min = self.svc.remote_min();
+        let viewers = self.remote_viewers();
+        let active = self.hold.active(viewers, self.now(), min.grace);
+        let (rows, cols) = super::remote_min::effective(self.base, min, active);
+        self.set_pty_size(rows, cols);
+    }
+
+    fn remote_viewers(&self) -> usize {
+        #[cfg(test)]
+        if let Some(n) = self.test_viewers {
+            return n;
+        }
+        self.svc.bridge_remote_viewers(&self.meta.sid)
+    }
+
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        return Instant::now() + self.test_skew;
+        #[cfg(not(test))]
+        Instant::now()
+    }
+
+    /// Sized by its tile: a running program (fixed panes keep the transcript's size).
+    fn sized(&self) -> bool {
+        #[cfg(test)]
+        if self.test_sized {
+            return true;
+        }
+        self.live.is_some()
+    }
+
+    /// Tests: more output for a fixed pane.
+    #[cfg(test)]
+    pub fn feed(&self, bytes: &[u8]) {
+        self.parser.lock().process(bytes);
+    }
+
+    /// The pty is bigger than its local size because a remote client watches (or did within the grace).
+    pub fn remote_grown(&self) -> bool {
+        self.size.0 > self.base.0 || self.size.1 > self.base.1
+    }
+
+    /// Resize the pty and the parser (no-op if unchanged).
+    fn set_pty_size(&mut self, rows: u16, cols: u16) {
         if (rows, cols) == self.size || rows == 0 || cols == 0 {
             return;
         }
@@ -339,6 +524,29 @@ impl Term {
         self.exit_status
     }
 
+    /// A program that failed right after starting closes before you can read why: its last lines on screen.
+    pub fn early_failure(&mut self) -> Option<String> {
+        if self.born.elapsed() > Duration::from_secs(15) || self.exit_code().is_none_or(|c| c == 0) {
+            return None;
+        }
+        let p = self.parser.lock();
+        let s = p.screen();
+        let rows: Vec<String> = s.rows(0, s.size().1).map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect();
+        let tail = rows[rows.len().saturating_sub(2)..].join(" ");
+        (!tail.is_empty()).then(|| crate::ui::fit(&tail, 200))
+    }
+
+    /// Where this session's file links resolve: its cwd, then its project root.
+    pub fn file_roots(&self) -> bro_bridge::file_preview::ResolveRoots {
+        self.files.roots().clone()
+    }
+
+    /// Tests: answer the file-link candidates seen so far without the worker thread.
+    #[cfg(test)]
+    pub fn resolve_file_links_now(&self) {
+        self.files.resolve_queued_now();
+    }
+
     /// The name shown everywhere: your rename, else the launch label.
     pub fn display_name(&self) -> String {
         self.display_title().unwrap_or_else(|| self.meta.label.clone())
@@ -367,16 +575,16 @@ impl Term {
     /// Read the bottom of the screen for an agent's tell-tale lines: "esc to interrupt" while it works, a
     /// permission prompt or question when it's waiting on you.
     fn scan(&mut self) {
-        let text = {
+        let (text, question) = {
             let p = self.parser.lock();
             let s = p.screen();
             let (_, cols) = s.size();
             let rows: Vec<String> = s.rows(0, cols).collect();
             let tail: Vec<&String> = rows.iter().rev().filter(|r| !r.trim().is_empty()).take(14).collect();
-            tail.iter().rev().map(|r| r.to_lowercase()).collect::<Vec<_>>().join("\n")
+            (tail.iter().rev().map(|r| r.to_lowercase()).collect::<Vec<_>>().join("\n"), prompt_question(&tail))
         };
         let working = ["esc to interrupt", "esc to cancel", "ctrl+c to interrupt", "ctrl-c to interrupt"].iter().any(|m| text.contains(m));
-        let blocked = ["do you want to", "do you want me to", "allow this", "allow once", "approve this", "(y/n)", "[y/n]", "❯ 1. yes", "› 1. yes", "press enter to confirm", "waiting for your approval"]
+        let blocked = ["do you want to", "do you want me to", "allow this", "allow once", "approve this", "(y/n)", "[y/n]", "❯ 1. yes", "› 1. yes", "enter to confirm", "enter to select", "waiting for your approval"]
             .iter()
             .any(|m| text.contains(m));
         if working || blocked {
@@ -386,6 +594,7 @@ impl Term {
             return;
         }
         let quiet_ms = (self.born.elapsed().as_millis() as u64).saturating_sub(self.last_output.load(Ordering::Relaxed));
+        self.prompt_title = if blocked { question } else { None };
         self.status = Some(if blocked {
             Activity::Blocked
         } else if working || quiet_ms < 1500 {
@@ -393,6 +602,61 @@ impl Term {
         } else {
             Activity::Idle
         });
+    }
+
+    /// Retry an agent that stopped on an API error: see [`super::auto_resume`].
+    fn auto_resume(&mut self, cx: &mut Cx) {
+        if let Some(at) = self.enter_at
+            && Instant::now() >= at
+        {
+            self.enter_at = None;
+            self.write(b"\r");
+        }
+        // agents only: a shell that printed "(y/n)" once never gets `continue` typed into it
+        if !self.agent || self.meta.harness.is_none() || self.svc.is_demo() || self.enter_at.is_some() {
+            return;
+        }
+        let cfg = self.svc.settings().auto_resume;
+        let now = chrono::Local::now();
+        let quiet_ms = (self.born.elapsed().as_millis() as u64).saturating_sub(self.last_output.load(Ordering::Relaxed));
+        let seen = super::auto_resume::Seen { activity: self.activity(), quiet: Duration::from_millis(quiet_ms), stall: self.stall(now), typed: self.typed };
+        for step in self.resume.step(now, &seen, &cfg) {
+            match step {
+                super::auto_resume::Step::Send(text) => {
+                    self.write(text.as_bytes());
+                    self.enter_at = Some(Instant::now() + Duration::from_millis(250));
+                }
+                super::auto_resume::Step::Toast(kind, text) => cx.toast(kind, format!("{} · {text}", self.display_name())),
+            }
+        }
+    }
+
+    /// The API error the agent stopped on: from the transcript when bro reads one (Codex doesn't always
+    /// record them, so its screen counts too), else from the screen.
+    fn stall(&self, now: chrono::DateTime<chrono::Local>) -> Option<super::auto_resume::Stall> {
+        use super::auto_resume::{Stall, classify, screen_stall};
+        let facts = self.insights().and_then(|s| s.facts);
+        if let Some(f) = &facts {
+            // an error left over from before this pane started (a resumed session) isn't this pane's to retry
+            let born_ms = chrono::Utc::now().timestamp_millis() - self.meta.started.elapsed().as_millis() as i64;
+            if let Some(e) = f.api_error.as_ref().filter(|e| e.at_ms.is_none_or(|t| t >= born_ms)) {
+                return Some(Stall { key: format!("t:{}", e.id), text: e.text.clone(), cause: classify(&e.text, e.code.as_deref(), now)?, below: None });
+            }
+            if f.harness == Harness::Claude {
+                return None;
+            }
+        }
+        let rows: Vec<String> = {
+            let p = self.parser.lock();
+            let (_, cols) = p.screen().size();
+            p.screen().rows(0, cols).collect()
+        };
+        screen_stall(&rows, now)
+    }
+
+    /// What auto-resume is waiting on, for headers and the sidebar ("↻ retry 2 in 14s").
+    pub fn resume_note(&self) -> Option<String> {
+        self.resume.note(chrono::Local::now())
     }
 
     /// Cleanup to run when the session ends: bridge exit/unregister. (Route + staged files: see the app.)
@@ -404,7 +668,7 @@ impl Term {
 }
 
 /// `.cmd`/`.bat` shims (npm installs on Windows) run through cmd.exe; everything else resolves on PATH.
-fn resolve(program: &str) -> (String, Vec<String>) {
+pub(crate) fn resolve(program: &str) -> (String, Vec<String>) {
     let path = crate::util::which(program).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| program.to_string());
     let lower = path.to_lowercase();
     if cfg!(windows) && (lower.ends_with(".cmd") || lower.ends_with(".bat")) {
@@ -445,8 +709,21 @@ fn color(c: vt100::Color) -> Color {
 
 impl Drop for Term {
     fn drop(&mut self) {
+        if let Some(i) = &self.insights {
+            i.stop();
+        }
         self.kill();
     }
+}
+
+/// The prompt's question among the bottom rows (newest first): the nearest line asking something, box
+/// drawing and option markers trimmed.
+fn prompt_question(tail_newest_first: &[&String]) -> Option<String> {
+    tail_newest_first
+        .iter()
+        .map(|r| r.trim_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '╭' | '╰' | '─' | '╮' | '╯' | '┃')))
+        .find(|r| r.ends_with('?') && prompt_option(r).is_none())
+        .map(str::to_string)
 }
 
 /// Status glyph + word + colour for an activity.
@@ -484,6 +761,13 @@ impl Pane for Term {
         if self.scroll > 0 {
             right.push(Span::styled(format!(" ↑{} ", self.scroll), Style::default().fg(t.inline)));
         }
+        if self.remote_grown() {
+            // the tile shows the bottom-left of a bigger screen while a phone / web client watches
+            right.push(Span::styled(format!(" ⇲ {}×{} remote ", self.size.1, self.size.0), Style::default().fg(t.muted)));
+        }
+        if let Some(note) = self.resume_note() {
+            right.push(Span::styled(format!(" {note} "), Style::default().fg(t.inline)));
+        }
         if let Some((g, word, c)) = status_look(self.activity(), false, t, time) {
             right.push(Span::styled(format!(" {g} {word} "), Style::default().fg(c).add_modifier(Modifier::BOLD)));
         }
@@ -496,7 +780,13 @@ impl Pane for Term {
         !self.exited.load(Ordering::SeqCst)
     }
     fn activity(&self) -> Option<Activity> {
-        self.demo_activity.or(self.status)
+        let screen = self.demo_activity.or(self.status);
+        // A question tool waiting for its answer means the agent needs you, whatever the screen
+        // markers say (Claude's question menu shows "esc to cancel", which reads as working).
+        if self.demo_activity.is_none() && screen.is_some() && screen != Some(Activity::Blocked) && self.asking_question() {
+            return Some(Activity::Blocked);
+        }
+        screen
     }
     fn wants_mouse(&self) -> bool {
         self.parser.lock().screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None
@@ -506,16 +796,21 @@ impl Pane for Term {
         // output pipe open after the child exits, so EOF alone cannot drive tab cleanup.
         (self.agent || self.live.is_some()).then_some(Duration::from_millis(400))
     }
-    fn poll(&mut self, _cx: &mut Cx) {
+    fn poll(&mut self, cx: &mut Cx) {
         if self.exit_code().is_some() {
             self.exited.store(true, Ordering::SeqCst);
             return;
+        }
+        // hidden panes are never rendered: start and end the remote minimum from here too
+        if self.sized() {
+            self.apply_size();
         }
         if self.last_scan.elapsed() < Duration::from_millis(200) {
             return;
         }
         self.last_scan = Instant::now();
         self.scan();
+        self.auto_resume(cx);
         // shells title their window with their own exe path — that's noise, keep bro's name for them
         let title = Some(self.display_name());
         if title.is_some() && title != self.title_sent {
@@ -540,18 +835,37 @@ impl Pane for Term {
             }
             return;
         }
-        if self.live.is_some() {
+        if self.sized() {
             self.resize(area.height, area.width);
         }
+        // A pty grown past the tile for a remote viewer shows its bottom-left (pinned to the end of
+        // the content: right after growing, the rows below it are still blank until the program
+        // redraws). Scrolling up first reveals the screen rows above, then the scrollback.
         let mut p = self.parser.lock();
-        p.screen_mut().set_scrollback(self.scroll);
-        self.scroll = p.screen().scrollback(); // clamped to what exists
+        let hidden = if self.size.0 > self.base.0 && self.size.0 > area.height {
+            p.screen_mut().set_scrollback(0);
+            let s = p.screen();
+            let (rows, cols) = s.size();
+            let last_text = s.rows(0, cols).enumerate().filter(|(_, r)| !r.trim().is_empty()).map(|(i, _)| i as u16).last().unwrap_or(0);
+            let end = last_text.max(s.cursor_position().0) + 1;
+            end.saturating_sub(area.height).min(rows.saturating_sub(area.height)) as usize
+        } else {
+            0
+        };
+        p.screen_mut().set_scrollback(self.scroll.saturating_sub(hidden));
+        if self.scroll > hidden {
+            self.scroll = hidden + p.screen().scrollback(); // clamped to what exists
+        }
+        self.view_top = (hidden - self.scroll.min(hidden)) as u16;
+        let top = self.view_top;
         let screen = p.screen();
-        self.links = super::links::detect(screen);
+        let mut files = self.files.lookup();
+        self.links = super::links::detect_with(screen, &mut |m| files.get(m));
+        files.finish(Some(cx.waker()));
         let buf = f.buffer_mut();
         for row in 0..area.height {
             for col in 0..area.width {
-                let Some(cell) = screen.cell(row, col) else { continue };
+                let Some(cell) = screen.cell(top + row, col) else { continue };
                 if cell.is_wide_continuation() {
                     continue;
                 }
@@ -565,7 +879,7 @@ impl Pane for Term {
                 if cell.italic() {
                     m |= Modifier::ITALIC;
                 }
-                if cell.underline() || self.links.contains_key(&(row, col)) {
+                if cell.underline() || self.links.contains_key(&(top + row, col)) {
                     m |= Modifier::UNDERLINED;
                 }
                 if cell.inverse() {
@@ -581,14 +895,14 @@ impl Pane for Term {
         }
         if cx.focused && !screen.hide_cursor() && self.scroll == 0 && self.live.is_some() {
             let (r, c) = screen.cursor_position();
-            if r < area.height && c < area.width {
-                f.set_cursor_position(Position { x: area.x + c, y: area.y + r });
+            if r >= top && r - top < area.height && c < area.width {
+                f.set_cursor_position(Position { x: area.x + c, y: area.y + r - top });
             }
         }
     }
 
     fn link_at(&self, row: u16, col: u16) -> Option<String> {
-        self.links.get(&(row, col)).map(|uri| uri.to_string())
+        self.links.get(&(row.saturating_add(self.view_top), col)).map(|uri| uri.to_string())
     }
 
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
@@ -631,6 +945,8 @@ impl Pane for Term {
             }
             return;
         }
+        // the program sees screen rows: add the rows hidden above a remote-grown tile
+        let ev = MouseEvent { row: ev.row.saturating_add(self.view_top), ..ev };
         if let Some(bytes) = encode_mouse(ev, area, mode, enc) {
             self.send(&bytes);
         }

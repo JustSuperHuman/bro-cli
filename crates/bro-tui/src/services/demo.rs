@@ -181,6 +181,8 @@ pub fn fake_event(at_ms: i64, seed: u64) -> ProxyEvent {
             _ => None,
         },
         account: acct.map(String::from),
+        trim_tokens_before: None,
+        trim_tokens_after: None,
     }
 }
 

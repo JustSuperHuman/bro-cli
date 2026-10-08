@@ -8,7 +8,7 @@ exclude = ["vendor/vt100"]
 vt100 = { path = "vendor/vt100" }
 
 [workspace.package]
-version = "2.0.0-alpha.1"
+version = "2.0.8"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -36,6 +36,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ureq = { version = "3", features = ["json"] }
 vt100 = "0.16"
+regex = "1"
+memchr = "2"
+url = "2"
+
+# Request compression in bro-proxy (MPL-2.0). Pinned exactly: its byte output is the prompt-cache
+# contract, so an upgrade costs one cache miss per conversation. No tree-sitter / tiktoken / image.
+llmtrim-core = { version = "=0.13.7", default-features = false }
 
 # async (proxy + bridge)
 tokio = { version = "1", features = ["fs", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time", "io-util"] }

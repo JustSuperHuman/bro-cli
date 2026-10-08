@@ -23,6 +23,10 @@ pub enum Overlay {
     Folder(Box<crate::folder::FolderPicker>),
     Continue(Box<crate::continue_picker::ContinuePicker>),
     Confirm(Confirm),
+    /// A file's preview (a clicked path, or an agent's `bro open`).
+    File(Box<crate::file_view::FileView>),
+    /// What the focused agent sent you and the files it touched.
+    AgentFiles(Box<crate::agent_files::AgentFilesView>),
 }
 
 impl Overlay {
@@ -103,6 +107,8 @@ impl App {
             Overlay::Folder(p) => crate::folder::draw(f, area, p, &t),
             Overlay::Continue(p) => crate::continue_picker::draw(f, area, p, &t),
             Overlay::Confirm(c) => self.confirm_hits = draw_confirm(f, area, c, self.hover, &t),
+            Overlay::File(v) => crate::file_view::draw(f, area, v, self.hover, &t),
+            Overlay::AgentFiles(v) => crate::agent_files::draw(f, area, v, &t),
         }
     }
 

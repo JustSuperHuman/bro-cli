@@ -30,6 +30,7 @@ mod server;
 pub mod sse;
 mod state;
 pub mod translate;
+mod trim;
 mod upstream;
 pub(crate) mod util;
 
@@ -38,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use trim::TrimLevel;
 pub use upstream::pool::{PoolAccountStatus, pool_account_name};
 
 /// API dialect of a request or upstream.
@@ -112,6 +114,9 @@ pub struct ProxyOptions {
     pub codex_auth: Option<CodexAuthFn>,
     /// Idle interval after which streams get a keepalive (Anthropic `ping`)
     pub keepalive: Duration,
+    /// Compress requests with llmtrim at start-up ([`ProxyHandle::set_trim`] changes it live)
+    pub trim: bool,
+    pub trim_level: TrimLevel,
 }
 
 impl Default for ProxyOptions {
@@ -124,6 +129,8 @@ impl Default for ProxyOptions {
             claude_token: None,
             codex_auth: None,
             keepalive: Duration::from_secs(15),
+            trim: false,
+            trim_level: TrimLevel::Safe,
         }
     }
 }
@@ -136,6 +143,8 @@ impl std::fmt::Debug for ProxyOptions {
             .field("openai_base_url", &self.openai_base_url)
             .field("pool_usage_file", &self.pool_usage_file)
             .field("keepalive", &self.keepalive)
+            .field("trim", &self.trim)
+            .field("trim_level", &self.trim_level)
             .finish_non_exhaustive()
     }
 }
@@ -212,6 +221,22 @@ pub struct ProxyEvent {
     pub error: Option<String>,
     /// Pool account used, if any
     pub account: Option<String>,
+    /// Request compression ran: estimated input tokens before / after (llmtrim's counter,
+    /// content and tools only). Equal when there was nothing to trim.
+    #[serde(default)]
+    pub trim_tokens_before: Option<u64>,
+    #[serde(default)]
+    pub trim_tokens_after: Option<u64>,
+}
+
+impl ProxyEvent {
+    /// Estimated input tokens request compression removed (0 when it didn't run).
+    pub fn trim_saved(&self) -> u64 {
+        match (self.trim_tokens_before, self.trim_tokens_after) {
+            (Some(b), Some(a)) => b.saturating_sub(a),
+            _ => 0,
+        }
+    }
 }
 
 /// Cheap-to-clone handle to a running proxy (it owns its own tokio runtime thread).
@@ -266,6 +291,14 @@ impl ProxyHandle {
     /// Pool accounts with their v1-compatible usage counters and availability.
     pub fn pool_status(&self, config_dirs: &[PathBuf]) -> Vec<PoolAccountStatus> {
         self.inner.state.pool().status(config_dirs)
+    }
+    /// Turn request compression on/off or change its level; applies to the next request.
+    pub fn set_trim(&self, enabled: bool, level: TrimLevel) {
+        self.inner.state.trim.set(enabled, level)
+    }
+    /// Whether request compression is on, and at which level.
+    pub fn trim(&self) -> (bool, TrimLevel) {
+        (self.inner.state.trim.enabled(), self.inner.state.trim.level())
     }
     pub fn shutdown(&self) {
         self.inner.shutdown()

@@ -84,6 +84,7 @@ impl App {
             Act::Palette => self.open_palette(""),
             Act::Usage => self.open_view("usage"),
             Act::Profiles => self.open_view("profiles"),
+            Act::Stats => self.open_view("stats"),
             Act::Proxy => self.open_view("proxy"),
             Act::Bridge => self.open_view("bridge"),
             Act::Help => self.overlay = Overlay::Help(Help::default()),
@@ -102,6 +103,18 @@ impl App {
                 self.toast(Kind::Info, if n { "nerd font icons" } else { "plain icons (no nerd font)" });
             }
             Act::UsageDetails => self.toggle_usage_details(),
+            Act::ToggleTrim => {
+                let on = !self.svc.settings().proxy.trim;
+                self.svc.set_trim(on);
+                self.toast(Kind::Info, if on { "request compression on (new sessions go through bro-proxy)" } else { "request compression off" });
+            }
+            Act::ToggleAutoResume => {
+                let mut s = self.svc.settings();
+                s.auto_resume.enabled = !s.auto_resume.enabled;
+                let on = s.auto_resume.enabled;
+                self.svc.save_settings(s);
+                self.toast(Kind::Info, if on { "auto-resume on: agents that stop on an API error get `continue`" } else { "auto-resume off" });
+            }
             Act::Continue => self.open_continue(),
             Act::CloseProject => {
                 if let Some(root) = self.current_project() {
@@ -111,6 +124,8 @@ impl App {
                 }
             }
             Act::OpenProject => self.open_folder(),
+            Act::OpenedFile => self.show_last_opened(),
+            Act::AgentFiles => self.show_agent_files(),
             Act::SwitchLogin => {
                 if let Some(id) = self.focused() {
                     self.open_switch(id);
@@ -277,6 +292,9 @@ impl App {
 
     /// Focus a view if it's open anywhere, else open it in a new tab.
     pub(crate) fn open_view(&mut self, name: &str) {
+        if name == "profiles" {
+            self.svc.refresh_data();
+        }
         if name == "usage" {
             self.svc.refresh_usage();
         }

@@ -113,6 +113,12 @@ pub fn grab_image() -> Option<Vec<String>> {
     let file: PathBuf = dir.join(format!("paste-{}.png", crate::util::now_ms()));
     #[cfg(windows)]
     {
+        // Browsers can publish a correct PNG alongside a synthesized CF_BITMAP
+        // that WinForms reads as an all-black 1-bit image. Keep the original PNG.
+        if let Some(bytes) = grab_png() {
+            std::fs::write(&file, bytes).ok()?;
+            return Some(vec![file.to_string_lossy().into_owned()]);
+        }
         // Windows PowerShell 5.1 is STA by default (the clipboard needs STA); give it its own module path so a
         // pwsh-7 parent's PSModulePath doesn't break it.
         let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
@@ -170,6 +176,34 @@ foreach ($f in $files) {{ 'FILE ' + $f }}"#
     }
 }
 
+#[cfg(windows)]
+fn grab_png() -> Option<Vec<u8>> {
+    use clipboard_win::{Clipboard, raw};
+    let candidates = {
+        let _clipboard = Clipboard::new_attempts(10).ok()?;
+        ["PNG", "image/png"].into_iter().filter_map(|name| {
+            let format = raw::register_format(name)?.get();
+            let size = raw::size(format)?.get();
+            if size > 256 * 1024 * 1024 { return None; }
+            let mut bytes = vec![0; size];
+            let copied = raw::get(format, &mut bytes).ok()?;
+            bytes.truncate(copied);
+            Some(bytes)
+        }).collect::<Vec<_>>()
+    }; // Release the clipboard before decoding or writing anything.
+    candidates.into_iter().find(|bytes| valid_png(bytes))
+}
+
+#[cfg(any(windows, test))]
+fn valid_png(bytes: &[u8]) -> bool {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_limits(png::Limits { bytes: 256 * 1024 * 1024 });
+    let Ok(mut reader) = decoder.read_info() else { return false; };
+    let Some(size) = reader.output_buffer_size().filter(|size| *size <= 256 * 1024 * 1024) else { return false; };
+    let mut pixels = vec![0; size];
+    reader.next_frame(&mut pixels).is_ok()
+}
+
 /// How paths are pasted: quoted when they contain spaces (like dragging a file into a terminal).
 pub fn paste_form(paths: &[String]) -> String {
     paths.iter().map(|p| if p.contains(' ') { format!("\"{p}\"") } else { p.clone() }).collect::<Vec<_>>().join(" ")
@@ -177,6 +211,33 @@ pub fn paste_form(paths: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn registered_png_accepts_rgba_and_rejects_broken_data() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[255, 0, 10, 0, 0, 255, 20, 128]).unwrap();
+        }
+        assert!(super::valid_png(&bytes));
+        assert!(!super::valid_png(&bytes[..33]));
+        assert!(!super::valid_png(b"not an image"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "reads the current clipboard PNG and briefly creates its paste file; does not change the clipboard"]
+    fn live_image_paste_preserves_original_png_bytes() {
+        let original = super::grab_png().expect("copy an image with a PNG clipboard format first");
+        let paths = super::grab_image().expect("image paste failed");
+        assert_eq!(paths.len(), 1);
+        let saved = std::fs::read(&paths[0]).unwrap();
+        std::fs::remove_file(&paths[0]).unwrap();
+        assert_eq!(saved, original, "image paste must preserve the original PNG, including alpha");
+    }
+
     #[test]
     fn base64_and_paste_form() {
         assert_eq!(super::base64(b"hi"), "aGk=");

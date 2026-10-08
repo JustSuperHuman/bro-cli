@@ -42,16 +42,26 @@ pub enum Act {
     Profiles,
     Proxy,
     Bridge,
+    /// Token totals per login (the ⓘ on the sidebar's usage).
+    Stats,
     Help,
     Rename,
     Themes,
     ToggleIcons,
+    /// Request compression (llmtrim) in bro-proxy on/off.
+    ToggleTrim,
+    /// Retry agents that stop on an API error, on / off.
+    ToggleAutoResume,
     RefreshUsage,
     UsageDetails,
     Continue,
     SwitchLogin,
     OpenProject,
     CloseProject,
+    /// Show the file an agent last opened (`bro open`).
+    OpenedFile,
+    /// What the focused agent sent you and the files it touched.
+    AgentFiles,
     Quit,
 }
 
@@ -82,12 +92,12 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, OpenProject, CloseProject, Continue, SwitchLogin, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, OpenProject, CloseProject, Continue, SwitchLogin, OpenedFile, AgentFiles, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, UsageDetails, Profiles, Proxy, Bridge, RefreshUsage]);
-        v.extend([Palette, Help, Themes, ToggleIcons, Quit]);
+        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, RefreshUsage]);
+        v.extend([Palette, Help, Themes, ToggleIcons, ToggleAutoResume, Quit]);
         v
     }
 
@@ -126,16 +136,21 @@ impl Act {
             Profiles => "profiles".into(),
             Proxy => "proxy".into(),
             Bridge => "bridge".into(),
+            Stats => "stats".into(),
             Help => "help".into(),
             Rename => "rename".into(),
             Themes => "themes".into(),
             ToggleIcons => "toggle_icons".into(),
+            ToggleTrim => "toggle_trim".into(),
+            ToggleAutoResume => "toggle_auto_resume".into(),
             RefreshUsage => "refresh_usage".into(),
             UsageDetails => "usage_details".into(),
             Continue => "continue".into(),
             SwitchLogin => "switch_login".into(),
             OpenProject => "open_project".into(),
             CloseProject => "close_project".into(),
+            OpenedFile => "opened_file".into(),
+            AgentFiles => "agent_files".into(),
             Quit => "quit".into(),
         }
     }
@@ -180,16 +195,21 @@ impl Act {
             Profiles => "profiles: accounts and logins".into(),
             Proxy => "proxy: routes and live requests".into(),
             Bridge => "bridge: phone / web pairing".into(),
+            Stats => "stats: tokens per login — lifetime, last 24h / 7d / 30d".into(),
             Help => "keys and help".into(),
             Rename => "rename the focused session".into(),
             Themes => "pick a theme (live preview)".into(),
             ToggleIcons => "toggle nerd font icons".into(),
+            ToggleTrim => "compress requests (llmtrim) on / off".into(),
+            ToggleAutoResume => "auto-resume agents after API errors on / off".into(),
             RefreshUsage => "refresh usage now".into(),
             UsageDetails => "sidebar usage: totals / every profile".into(),
             Continue => "continue an earlier session (search, resume in any login)".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
             OpenProject => "open a project".into(),
             CloseProject => "close the current project (and its sessions)".into(),
+            OpenedFile => "show the file an agent last opened (bro open)".into(),
+            AgentFiles => "agent files: what it sent you and the files it touched".into(),
             Quit => "quit bro".into(),
         }
     }
@@ -197,11 +217,11 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | OpenProject | CloseProject => Group::Sessions,
+            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | OpenProject | CloseProject | OpenedFile | AgentFiles => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | UsageDetails | Profiles | Proxy | Bridge | RefreshUsage => Group::Views,
-            Palette | Help | Themes | ToggleIcons | Quit => Group::App,
+            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | RefreshUsage => Group::Views,
+            Palette | Help | Themes | ToggleIcons | ToggleAutoResume | Quit => Group::App,
         }
     }
 
@@ -278,10 +298,13 @@ impl Act {
             Palette => vec![":", "space"],
             Usage => vec!["u"],
             UsageDetails => vec!["U"],
+            Stats => vec!["S"],
             Continue => vec!["R"],
             SwitchLogin => vec!["P"],
             OpenProject => vec!["O"],
             CloseProject => vec!["X"],
+            OpenedFile => vec!["f"],
+            AgentFiles => vec!["F"],
             Profiles => vec!["o"],
             Proxy => vec!["y"],
             Bridge => vec!["g"],
@@ -291,7 +314,7 @@ impl Act {
             ToggleIcons => vec!["i"],
             RefreshUsage => vec!["r"],
             Quit => vec!["q"],
-            Split => vec![],
+            Split | ToggleTrim | ToggleAutoResume => vec![],
         }
     }
 }

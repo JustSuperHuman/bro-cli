@@ -84,6 +84,8 @@ impl Recorder {
                 latency_ms: 0,
                 error: None,
                 account: None,
+                trim_tokens_before: None,
+                trim_tokens_after: None,
             }),
             usage: None,
             upstream_error: false,
@@ -106,6 +108,13 @@ impl Recorder {
     pub fn set_account(&mut self, a: Option<String>) {
         if let Some(e) = self.ev() {
             e.account = a;
+        }
+    }
+    /// Request compression ran (estimated input tokens before / after).
+    pub fn set_trim(&mut self, tokens: Option<(u64, u64)>) {
+        if let (Some((before, after)), Some(e)) = (tokens, self.ev()) {
+            e.trim_tokens_before = Some(before);
+            e.trim_tokens_after = Some(after);
         }
     }
     pub fn set_usage(&mut self, u: &Usage) {

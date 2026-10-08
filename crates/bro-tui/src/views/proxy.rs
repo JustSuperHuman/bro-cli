@@ -56,6 +56,34 @@ pub fn upstream_label(u: &Upstream) -> String {
     }
 }
 
+/// Saved-token cell: "—" when compression didn't run, else the estimate (often 0).
+pub fn saved(e: &ProxyEvent) -> String {
+    match e.trim_tokens_before {
+        None => "—".into(),
+        Some(_) => tokens(Some(e.trim_saved())),
+    }
+}
+
+/// "compression  on · safe · ~1.2k tokens saved in 14 requests" (estimates, recent log only).
+fn trim_line<'a>(s: &bro_core::config::ProxySettings, events: impl Iterator<Item = &'a ProxyEvent>, t: &Theme) -> Vec<Span<'static>> {
+    let mut label = vec![Span::styled("  compression  ", muted(t))];
+    if !s.trim {
+        label.push(Span::styled("off", muted(t)));
+        label.push(Span::styled("   c turns on llmtrim (lossless; small savings on Claude Code, whose history is cached)", muted(t)));
+        return label;
+    }
+    let (mut n, mut saved) = (0usize, 0u64);
+    for e in events.filter(|e| e.trim_tokens_before.is_some()) {
+        n += 1;
+        saved += e.trim_saved();
+    }
+    label.push(Span::styled("on", fg(t.good).add_modifier(Modifier::BOLD)));
+    label.push(Span::styled(format!(" · {}", bro_proxy::TrimLevel::parse(&s.trim_level).as_str()), fg(t.inline)));
+    let routed = if s.trim_route_native { "native logins launched from now on go through the proxy" } else { "proxied launches only" };
+    label.push(Span::styled(format!("   ~{} tokens saved in {n} requests (estimate) · {routed}", tokens(Some(saved))), muted(t)));
+    label
+}
+
 fn status_style(e: &ProxyEvent, t: &Theme) -> Style {
     match e.status {
         200..=299 => fg(t.good),
@@ -89,7 +117,7 @@ impl Pane for ProxyView {
         let t = cx.theme;
         let st = cx.svc.state();
         let p = &st.proxy;
-        let area = ui::hint_line(f, area, &[("j/k", "scroll log"), ("g", "newest")], t);
+        let area = ui::hint_line(f, area, &[("j/k", "scroll log"), ("g", "newest"), ("c", "compression on/off")], t);
         let row = |y: u16| Rect { y, height: 1, ..area };
         let mut y = area.y;
         let head = match &p.status {
@@ -103,6 +131,8 @@ impl Pane for ProxyView {
             other => vec![Span::styled(" PROXY ", ui::bold_accent(t)), Span::styled(" ○ ", fg(t.danger)), Span::styled(other.why(), muted(t))],
         };
         ui::line(f, row(y), head);
+        y += 1;
+        ui::line(f, row(y), trim_line(&st.settings.proxy, p.events.iter(), t));
         y += 2;
         ui::rule(f, row(y), "routes", t);
         y += 1;
@@ -149,7 +179,7 @@ impl Pane for ProxyView {
         }
         ui::rule(f, row(y), "live requests", t);
         y += 1;
-        let cols = format!("  {:<9} {:<4} {:<22} {:<26} {:>7} {:>7} {:>7} {:>7}  {}", "time", "code", "in → upstream", "model", "in", "out", "cache", "latency", "note");
+        let cols = format!("  {:<9} {:<4} {:<22} {:<26} {:>7} {:>7} {:>7} {:>7} {:>7}  {}", "time", "code", "in → upstream", "model", "in", "out", "cache", "saved", "latency", "note");
         ui::line(f, row(y), vec![Span::styled(cols, muted(t).add_modifier(Modifier::BOLD))]);
         y += 1;
         let room = area.bottom().saturating_sub(y) as usize;
@@ -165,6 +195,7 @@ impl Pane for ProxyView {
                 Span::styled(format!("{:>7} ", tokens(e.input_tokens)), Style::default()),
                 Span::styled(format!("{:>7} ", tokens(e.output_tokens)), Style::default()),
                 Span::styled(format!("{:>7} ", tokens(e.cache_read_tokens)), muted(t)),
+                Span::styled(format!("{:>7} ", saved(e)), if e.trim_saved() > 0 { fg(t.good) } else { muted(t) }),
                 Span::styled(format!("{:>6.1}s  ", e.latency_ms as f64 / 1000.0), latency_style(e.latency_ms, t)),
                 Span::styled(note, if e.error.is_some() { fg(t.danger) } else { muted(t) }),
             ]);
@@ -174,8 +205,9 @@ impl Pane for ProxyView {
             ui::line(f, row(y), vec![Span::styled("  no requests yet", muted(t))]);
         }
     }
-    fn key(&mut self, key: KeyEvent, _cx: &mut Cx) -> bool {
+    fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         match key.code {
+            KeyCode::Char('c') => cx.svc.set_trim(!cx.svc.settings().proxy.trim),
             KeyCode::Char('j') | KeyCode::Down => self.scroll += 1,
             KeyCode::Char('k') | KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
@@ -204,5 +236,20 @@ mod tests {
         assert_eq!(tokens(None), "—");
         assert_eq!(upstream_label(&Upstream::OpenAiChat { base_url: "https://api.x.ai/v1".into(), api_key: None }), "chat · api.x.ai");
         assert_eq!(hms(0).len(), 8);
+    }
+
+    #[test]
+    fn saved_cell_distinguishes_off_from_nothing_to_trim() {
+        let mut e: ProxyEvent = serde_json::from_value(serde_json::json!({
+            "at_ms": 0, "route_id": "r", "inbound": "anthropic", "upstream": "claude_oauth", "model": "m",
+            "status": 200, "stream": true, "input_tokens": null, "output_tokens": null, "cache_read_tokens": null,
+            "latency_ms": 1, "error": null, "account": null
+        })).unwrap();
+        assert_eq!(saved(&e), "—", "older events without the fields deserialize as 'did not run'");
+        e.trim_tokens_before = Some(5_000);
+        e.trim_tokens_after = Some(5_000);
+        assert_eq!(saved(&e), "0");
+        e.trim_tokens_after = Some(3_800);
+        assert_eq!(saved(&e), "1.2k");
     }
 }

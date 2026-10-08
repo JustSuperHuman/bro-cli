@@ -60,6 +60,13 @@ impl AppState {
         }
         let session_title = self.summary(session_id).map(|session| session.title);
         let body = body.or_else(|| (origin == "bell").then(|| "Task finished".to_owned()));
+        // A finished turn reads better as the question it ended on, or its recap.
+        let body = match body {
+            Some(text) if origin == "bell" && text == "Task finished" => {
+                self.finished_summary(session_id).or(Some(text))
+            }
+            other => other,
+        };
         self.notify(
             TerminalNotification {
                 id: String::new(),
@@ -92,10 +99,12 @@ impl AppState {
                 origin: "api".into(),
                 session_id: Some(session_id.to_owned()),
                 title: Some(format!("{agent_label} needs input")),
-                body: Some(format!(
-                    "Open {} to answer.",
-                    session_title.as_deref().unwrap_or("this terminal")
-                )),
+                body: Some(self.blocked_reason(session_id).unwrap_or_else(|| {
+                    format!(
+                        "Open {} to answer.",
+                        session_title.as_deref().unwrap_or("this terminal")
+                    )
+                })),
                 session_title,
                 sound: Some("attention".into()),
             },

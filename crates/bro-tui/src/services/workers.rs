@@ -34,6 +34,19 @@ pub(super) fn spawn_data(svc: &Services) {
     });
 }
 
+/// Publish profile mutations before a potentially slow session scan.
+pub(super) fn load_profiles(svc: &Services) {
+    let profiles = guard("profiles::list", bro_core::profiles::list);
+    svc.update(|st| {
+        st.profiles = avail(profiles, &mut st.issues);
+        if let Some(ps) = st.profiles.ready() {
+            st.usage.retain(|id, _| ps.iter().any(|p| &p.id == id));
+        }
+    });
+    svc.push_bridge_profiles();
+    svc.refresh_usage();
+}
+
 /// Config, profiles, providers and past sessions. Blocking; call on a worker thread.
 pub(super) fn load_data(svc: &Services) {
     let config = guard_res("config::Config::load", Config::load);
@@ -253,7 +266,8 @@ pub(super) fn spawn_proxy(svc: &Services) {
         let s = svc.settings().proxy;
         let token = uuid::Uuid::new_v4().simple().to_string();
         let cfg = bro_proxy::ProxyConfig { bind: "127.0.0.1".into(), port: s.port, token: Some(token.clone()) };
-        match guard_res("proxy::start", || bro_proxy::ProxyHandle::start(cfg)) {
+        let opts = bro_proxy::ProxyOptions { trim: s.trim, trim_level: bro_proxy::TrimLevel::parse(&s.trim_level), ..Default::default() };
+        match guard_res("proxy::start", || bro_proxy::ProxyHandle::start_with(cfg, opts)) {
             Ok(h) => {
                 let port = guard("proxy::port", || h.port()).unwrap_or(s.port);
                 let base = guard("proxy::base_url", || h.base_url()).unwrap_or_else(|_| format!("http://127.0.0.1:{port}"));

@@ -3,6 +3,7 @@
 pub mod claude;
 pub mod codex;
 pub mod history;
+pub mod tokens;
 
 use crate::profiles::Profile;
 use serde::{Deserialize, Serialize};

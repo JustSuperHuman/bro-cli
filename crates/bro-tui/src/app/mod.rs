@@ -8,7 +8,9 @@
 
 mod commands;
 mod draw;
+mod files;
 mod input;
+pub(crate) mod insights;
 mod mouse;
 mod overlays;
 mod sessions;
@@ -74,6 +76,8 @@ pub(crate) enum SideHit {
     /// Start a session from a harness total or a specific usage account.
     LaunchUsage(bro_core::Harness, Option<String>),
     UsageToggle,
+    /// the ⓘ on "usage left": token stats
+    Stats,
     /// the × on a running session's row
     Close(PaneId),
     /// the × on a project row: (root, running sessions)
@@ -142,6 +146,8 @@ pub struct App {
     last_pane_click: Option<(Instant, PaneId, Position)>,
     /// Open only on release at the same cell, so dragging a link still selects text.
     link_press: Option<(PaneId, Position, String)>,
+    /// The file an agent last opened with `bro open` (prefix f).
+    last_opened: Option<files::Opened>,
     // sidebar
     pub(crate) sidebar: bool,
     pub(crate) side_focus: bool,
@@ -154,9 +160,21 @@ pub struct App {
     pub(crate) side_filtering: bool,
     pub(crate) renaming: Option<(PaneId, String)>,
     side_scroll: usize,
+    /// when the sidebar last scrolled or its selection moved (the scrollbar shows for a moment)
+    pub(crate) side_nav_at: Option<Instant>,
+    /// `side_scroll` as last drawn, to notice scrolling that wasn't a key or the wheel
+    side_drawn_scroll: usize,
+    /// the scrollbar thumb as last drawn (empty when hidden)
+    side_thumb: Rect,
     // agents
     agent_state: HashMap<PaneId, Activity>,
     pub(crate) done: HashSet<PaneId>,
+    /// per agent pane: attention state, what the bridge was told, recap attempts
+    tracks: HashMap<PaneId, insights::Track>,
+    /// the sidebar's second line per agent pane (`⏸ why it waits` / `↳ recap`)
+    pub(crate) notes: HashMap<PaneId, String>,
+    /// generated `/recap`s: one at a time
+    pub(crate) recaps: insights::Recaps,
     pub(crate) recents: Vec<Recent>,
     /// archived earlier sessions (hidden from the sidebar)
     pub(crate) archive: crate::archive::Archive,
@@ -222,6 +240,7 @@ impl App {
             last_pane_click: None,
             confirm_hits: vec![],
             link_press: None,
+            last_opened: None,
             sidebar: true,
             side_focus: false,
             usage_expanded: settings.usage_expanded,
@@ -231,8 +250,14 @@ impl App {
             side_filtering: false,
             renaming: None,
             side_scroll: 0,
+            side_nav_at: None,
+            side_drawn_scroll: 0,
+            side_thumb: Rect::default(),
             agent_state: HashMap::new(),
             done: HashSet::new(),
+            tracks: HashMap::new(),
+            notes: HashMap::new(),
+            recaps: insights::Recaps::default(),
             recents: if opts.load_recents { crate::recents::load() } else { vec![] },
             archive: if opts.load_recents { crate::archive::Archive::load() } else { Default::default() },
             persist: opts.load_recents,
@@ -609,6 +634,7 @@ impl App {
         self.svc.set_focused_session(focused.as_deref());
         self.reap();
         self.track_agents();
+        self.update_insights();
         self.toasts.expire();
     }
 
@@ -650,6 +676,9 @@ impl App {
         }
         if let Some(t) = self.toasts.next_expiry() {
             d = d.min(t + Duration::from_millis(10));
+        }
+        if let Some(t) = side_view::bar_wake(self.side_nav_at) {
+            d = d.min(t);
         }
         // terminals tick even when hidden, so agents in other tabs still turn "done"
         let ids: Vec<PaneId> = self.panes.iter().filter(|(id, p)| p.is_terminal() || self.visible().contains(id)).map(|(id, _)| *id).collect();
@@ -726,6 +755,8 @@ impl App {
                     });
                 }
             }
+            Event::FileView(loaded) => self.file_view_loaded(*loaded),
+            Event::EditorPane(e) => self.editor_pane(*e),
             Event::ClipboardText(request, text) => {
                 if self.clipboard_request == Some(request) {
                     self.clipboard_request = None;
@@ -757,6 +788,7 @@ impl App {
                 self.add_project(dir);
                 self.side_focus = false;
             }
+            Event::FolderCreated(request, result) => self.project_folder_created(request, result),
             Event::ThemeFilesChanged => {
                 if theme::is_custom(&self.theme.name) {
                     let name = self.theme.name.clone();
@@ -810,8 +842,12 @@ impl App {
         let dead: Vec<PaneId> = self.panes.iter().filter(|(_, p)| !p.alive()).map(|(id, _)| *id).collect();
         for id in dead {
             let name = self.panes.get(&id).map(|p| p.title()).unwrap_or_default();
+            let why = self.panes.get_mut(&id).and_then(|p| p.as_term()).and_then(|t| t.early_failure());
             self.close(id);
-            self.toast(Kind::Info, format!("{name} exited"));
+            match why {
+                Some(why) => self.raise(Kind::Error, format!("{name} exited: {why}")),
+                None => self.toast(Kind::Info, format!("{name} exited")),
+            }
         }
     }
 }

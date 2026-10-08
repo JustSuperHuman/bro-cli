@@ -26,6 +26,7 @@ async-stream.workspace = true
 tokio-stream.workspace = true
 dirs.workspace = true
 chrono.workspace = true
+llmtrim-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

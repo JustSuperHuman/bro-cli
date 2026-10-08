@@ -3,6 +3,7 @@
 use crate::errors::{ErrorKind, ProxyError};
 use crate::events::EventBus;
 use crate::translate::reasoning_cache::ReasoningCache;
+use crate::trim::Trimmer;
 use crate::upstream::chatgpt::CodexModel;
 use crate::upstream::pool::PoolManager;
 use crate::{ProxyOptions, Route};
@@ -25,6 +26,8 @@ pub(crate) struct AppState {
     pub upstream_models: Mutex<HashMap<String, (Instant, Vec<String>)>>,
     /// Per-proxy session id (ChatGPT `session_id` header / fallback cache key)
     pub session_id: String,
+    /// Optional request compression
+    pub trim: Trimmer,
 }
 
 impl AppState {
@@ -34,6 +37,7 @@ impl AppState {
             .read_timeout(Duration::from_secs(15 * 60))
             .pool_idle_timeout(Duration::from_secs(90))
             .build()?;
+        let trim = Trimmer::new(opts.trim, opts.trim_level);
         Ok(AppState {
             routes: RwLock::new(HashMap::new()),
             events: EventBus::new(),
@@ -45,6 +49,7 @@ impl AppState {
             chatgpt_models: Mutex::new(HashMap::new()),
             upstream_models: Mutex::new(HashMap::new()),
             session_id: uuid::Uuid::new_v4().to_string(),
+            trim,
         })
     }
 

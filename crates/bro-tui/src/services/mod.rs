@@ -188,6 +188,8 @@ pub fn fallback_settings() -> Settings {
         bridge: BridgeSettings::default(),
         proxy: ProxySettings::default(),
         voice: bro_core::config::VoiceSettings::default(),
+        insights: bro_core::config::InsightsSettings::default(),
+        auto_resume: bro_core::config::AutoResumeSettings::default(),
         keys: BTreeMap::new(),
     }
 }
@@ -356,32 +358,30 @@ impl Services {
         guard("profiles::login_command", || bro_core::profiles::login_command(p))
     }
 
-    /// Create a profile on a background thread; `then` gets the result on that thread.
-    pub fn create_profile(&self, kind: bro_core::profiles::ProfileKind, name: String) {
+    /// Create a profile off the UI thread. The pane opens login after success.
+    pub fn create_profile(&self, kind: bro_core::profiles::ProfileKind, name: String) -> std::sync::mpsc::Receiver<Result<Profile, String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
         let svc = self.clone();
         std::thread::spawn(move || {
             let r = if svc.is_demo() { Err("demo mode: profiles are read-only".to_string()) } else { guard_res("profiles::create", || bro_core::profiles::create(kind, &name)) };
-            let (kind, text) = match &r {
-                Ok(p) => (crate::alerts::Kind::Info, format!("created {} — log in with l", p.id)),
-                Err(e) => (crate::alerts::Kind::Error, e.clone()),
-            };
-            svc.send(Event::Toast(kind, text));
-            workers::load_data(&svc);
+            if r.is_ok() { workers::load_profiles(&svc); }
+            let _ = tx.send(r);
         });
+        rx
     }
 
     /// Remove a profile (its login dir) on a background thread.
-    pub fn remove_profile(&self, id: String) {
+    pub fn remove_profile(&self, id: String) -> std::sync::mpsc::Receiver<Result<(), String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
         let svc = self.clone();
         std::thread::spawn(move || {
             let r = if svc.is_demo() { Err("demo mode: profiles are read-only".to_string()) } else { guard_res("profiles::remove", || bro_core::profiles::remove(&id)) };
-            let (kind, text) = match r {
-                Ok(()) => (crate::alerts::Kind::Info, format!("removed {id}")),
-                Err(e) => (crate::alerts::Kind::Error, e),
-            };
-            svc.send(Event::Toast(kind, text));
-            workers::load_data(&svc);
+            if r.is_ok() { workers::load_profiles(&svc); }
+            let removed = r.is_ok();
+            let _ = tx.send(r);
+            if removed { workers::load_past(&svc); }
         });
+        rx
     }
 
     // ------------------------------------------------------------------ proxy
@@ -428,6 +428,13 @@ impl Services {
         self.inner.bridge.read().is_some() && !self.inner.bridge_fuse.blown()
     }
 
+    /// Loopback URL of the running bridge, for `BRO_BRIDGE_URL` in pane env (`bro open`).
+    pub fn bridge_local_url(&self) -> Option<String> {
+        let mut url = None;
+        self.with_bridge("bridge::local_url", |b| url = b.local_url());
+        url
+    }
+
     pub fn bridge_register(&self, meta: SessionMeta) {
         self.with_bridge("bridge::register", |b| b.register(meta));
     }
@@ -438,6 +445,18 @@ impl Services {
     pub fn bridge_title(&self, id: &str, title: &str) {
         self.with_bridge("bridge::title", |b| b.title(id, title));
     }
+    /// Remote clients (phone, web) subscribed to session `id` (0 when the bridge is off).
+    pub fn bridge_remote_viewers(&self, id: &str) -> usize {
+        let mut n = 0;
+        self.with_bridge("bridge::remote_viewers", |b| n = b.remote_viewers(id));
+        n
+    }
+    /// `[bridge] remote_min_*`: the size a remotely watched session is grown to.
+    pub fn remote_min(&self) -> crate::panes::remote_min::MinSize {
+        let st = self.state();
+        let b = &st.settings.bridge;
+        crate::panes::remote_min::MinSize { rows: b.remote_min_rows, cols: b.remote_min_cols, grace: std::time::Duration::from_secs(b.remote_min_grace_secs) }
+    }
     pub fn bridge_resize(&self, id: &str, cols: u16, rows: u16) {
         self.with_bridge("bridge::resize", |b| b.resize(id, cols, rows));
     }
@@ -446,6 +465,14 @@ impl Services {
     }
     pub fn bridge_unregister(&self, id: &str) {
         self.with_bridge("bridge::unregister", |b| b.unregister(id));
+    }
+    /// Why the session waits and its recap (the bridge debounces and publishes on change).
+    pub fn bridge_set_insights(&self, id: &str, insights: bro_bridge::SessionInsights) {
+        self.with_bridge("bridge::set_insights", |b| b.set_insights(id, insights));
+    }
+    /// The files the agent sent / touched.
+    pub fn bridge_set_agent_files(&self, id: &str, files: bro_bridge::AgentFiles) {
+        self.with_bridge("bridge::set_agent_files", |b| b.set_agent_files(id, files));
     }
 
     /// Tell the bridge's orchestrator where the user works (open projects, recent launch dirs, past sessions'
@@ -548,6 +575,16 @@ impl Services {
         list.push(tp("pi", "Pi".into(), "pi", vec![], "agent", Some("pi coding agent".into()), None));
         list.push(tp("omp", "omp".into(), "omp", vec![], "agent", Some("oh-my-pi".into()), None));
         self.with_bridge("bridge::set_profiles", |b| b.set_profiles(list));
+    }
+
+    /// Request compression (llmtrim) in bro-proxy on or off: saved, applied to the running proxy
+    /// at once. Native logins launched from now on are routed through the proxy while it is on.
+    pub fn set_trim(&self, on: bool) {
+        let mut s = self.settings();
+        s.proxy.trim = on;
+        let level = bro_proxy::TrimLevel::parse(&s.proxy.trim_level);
+        self.save_settings(s);
+        self.with_proxy("proxy::set_trim", |p| p.set_trim(on, level));
     }
 
     /// Turn the bridge on or off (saved to settings).

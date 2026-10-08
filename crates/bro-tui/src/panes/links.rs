@@ -1,9 +1,38 @@
-//! Link targets for the displayed terminal cells: OSC 8 labels and ordinary web URLs.
+//! Link targets for the displayed terminal cells: OSC 8 labels, ordinary web URLs, and paths to files that exist
+//! (`src/app.rs:42`, `C:\repo\x.ts(10,4)`, `` `README.md` ``). File links are `file://` URIs with the location in
+//! the fragment (`#L42C3`); clicking one opens bro's preview instead of handing it to the OS.
 
+use bro_bridge::file_links::FileLinkMatch;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub type Links = HashMap<(u16, u16), Arc<str>>;
+
+/// `file:///C:/repo/src/app.rs#L42C3`
+pub fn file_uri(path: &Path, line: Option<u32>, column: Option<u32>) -> Option<String> {
+    let mut url = url::Url::from_file_path(path).ok()?;
+    if let Some(line) = line {
+        url.set_fragment(Some(&match column {
+            Some(column) => format!("L{line}C{column}"),
+            None => format!("L{line}"),
+        }));
+    }
+    Some(url.into())
+}
+
+/// A `file:` link's path and `#L12` / `#L12C3` location (other fragments are ignored).
+pub fn parse_file_uri(uri: &str) -> Option<(PathBuf, Option<u32>, Option<u32>)> {
+    let url = url::Url::parse(uri).ok().filter(|u| u.scheme() == "file")?;
+    let path = url.to_file_path().ok()?;
+    let (mut line, mut column) = (None, None);
+    if let Some(rest) = url.fragment().and_then(|f| f.strip_prefix('L')) {
+        let (l, c) = rest.split_once('C').map_or((rest, None), |(l, c)| (l, Some(c)));
+        line = l.parse().ok().filter(|n| *n > 0);
+        column = line.and(c.and_then(|c| c.parse().ok()).filter(|n| *n > 0));
+    }
+    Some((path, line, column))
+}
 
 /// Only ordinary browser, mail and file links are handed to the OS, never shell commands.
 pub fn target(raw: &str) -> Option<String> {
@@ -21,7 +50,15 @@ pub fn target(raw: &str) -> Option<String> {
 }
 
 /// Inspect only the visible screen. Wrapped rows form one logical line; hard newlines do not.
+#[cfg(test)]
 pub fn detect(screen: &vt100::Screen) -> Links {
+    detect_with(screen, &mut |_| None)
+}
+
+/// [`detect`] plus file paths: `files` gets every path-like candidate and returns the link target for the
+/// ones known to be files (it must answer from a cache, never the disk — this runs on every render).
+/// OSC 8 links and URLs win over a candidate that overlaps them.
+pub fn detect_with(screen: &vt100::Screen, files: &mut dyn FnMut(&FileLinkMatch) -> Option<Arc<str>>) -> Links {
     let mut links = Links::new();
     let mut explicit: HashMap<&str, Option<Arc<str>>> = HashMap::new();
     let (rows, cols) = screen.size();
@@ -50,6 +87,19 @@ pub fn detect(screen: &vt100::Screen) -> Links {
                             // The explicit target wins when a hyperlink's label looks like a URL.
                             links.entry((r, column)).or_insert_with(|| uri.clone());
                         }
+                    }
+                }
+            }
+            for found in bro_bridge::file_links::find_file_links(&text) {
+                let covers: Vec<&(usize, usize, u16, u16, u16)> = cells.iter().filter(|(a, b, ..)| *a < found.end && *b > found.start).collect();
+                let taken = covers.iter().any(|&&(_, _, r, c, width)| (c..(c + width).min(cols)).any(|column| links.contains_key(&(r, column))));
+                if taken {
+                    continue;
+                }
+                let Some(uri) = files(&found) else { continue };
+                for &&(_, _, r, c, width) in &covers {
+                    for column in c..(c + width).min(cols) {
+                        links.insert((r, column), uri.clone());
                     }
                 }
             }
@@ -192,5 +242,52 @@ mod tests {
         assert_eq!(&*links[&(0, 2)], "https://actual.example/");
         p.process(b"\x1bc");
         assert!(detect(p.screen()).is_empty());
+    }
+
+    /// Every candidate is a file at `/repo/<path>` (the cache's job is tested in file_cache).
+    fn all_files(m: &FileLinkMatch) -> Option<Arc<str>> {
+        file_uri(&std::env::temp_dir().join(&m.path), m.line, m.column).map(Arc::from)
+    }
+
+    #[test]
+    fn file_paths_follow_wrapping_wide_cells_and_locations() {
+        let mut p = vt100::Parser::new(6, 20, 0);
+        p.process("界 crates/bro-tui/src/main.rs:42:7 x\r\nC:\\repo\\a.ts(10,4)".as_bytes());
+        let links = detect_with(p.screen(), &mut all_files);
+        assert!(!links.contains_key(&(0, 0)) && !links.contains_key(&(0, 2)));
+        let first = &links[&(0, 3)];
+        let (path, line, column) = parse_file_uri(first).unwrap();
+        assert!(path.ends_with("main.rs"));
+        assert_eq!((line, column), (Some(42), Some(7)));
+        assert_eq!(&links[&(1, 0)], first, "a wrapped path stays one link");
+        // 17 characters fit on the first row after "界 "; the other 14 wrap
+        let wrapped_end = (1, "crates/bro-tui/src/main.rs:42:7".len() as u16 - 17 - 1);
+        assert_eq!(&links[&wrapped_end], first);
+        let windows = links.iter().find(|((r, _), _)| *r == 2).map(|(_, uri)| parse_file_uri(uri).unwrap()).expect("next line");
+        assert_eq!((windows.1, windows.2), (Some(10), Some(4)), "(L,C) locations");
+    }
+
+    #[test]
+    fn urls_and_osc_links_win_over_paths_and_unknown_paths_do_not_link() {
+        let mut p = vt100::Parser::new(3, 80, 0);
+        p.process(b"https://example.com/src/app.rs \x1b]8;;https://docs.example/\x07docs/readme.md\x1b]8;;\x07 src/x.rs");
+        let links = detect_with(p.screen(), &mut all_files);
+        assert_eq!(&*links[&(0, 22)], "https://example.com/src/app.rs");
+        assert_eq!(&*links[&(0, 32)], "https://docs.example/");
+        assert!(links[&(0, 47)].starts_with("file:"));
+        assert!(detect_with(p.screen(), &mut |_| None).values().all(|uri| !uri.starts_with("file:")), "only confirmed files link");
+        assert!(detect(p.screen()).values().all(|uri| !uri.starts_with("file:")));
+    }
+
+    #[test]
+    fn file_uris_round_trip_locations() {
+        let path = std::env::temp_dir().join("dir with space").join("a.rs");
+        let uri = file_uri(&path, Some(3), Some(9)).unwrap();
+        assert!(uri.ends_with("#L3C9") && uri.contains("%20"), "{uri}");
+        assert_eq!(parse_file_uri(&uri), Some((path.clone(), Some(3), Some(9))));
+        assert_eq!(parse_file_uri(&file_uri(&path, None, None).unwrap()), Some((path.clone(), None, None)));
+        let other = format!("{}#section", file_uri(&path, None, None).unwrap());
+        assert_eq!(parse_file_uri(&other), Some((path, None, None)));
+        assert!(parse_file_uri("https://example.com/#L3").is_none());
     }
 }

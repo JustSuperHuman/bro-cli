@@ -1,8 +1,9 @@
-//! The service views, opened as panes (alt+u usage, alt+o profiles, alt+y proxy, alt+g bridge).
+//! The service views, opened as panes (alt+u usage, alt+o profiles, alt+y proxy, alt+g bridge, prefix S stats).
 
 pub mod bridge;
 pub mod profiles;
 pub mod proxy;
+pub mod stats;
 pub mod usage;
 
 use crate::pane::Pane;
@@ -14,6 +15,7 @@ pub fn open(name: &str) -> Option<Box<dyn Pane>> {
         "profiles" => Box::new(profiles::ProfilesView::new()),
         "proxy" => Box::new(proxy::ProxyView::new()),
         "bridge" => Box::new(bridge::BridgeView::new()),
+        "stats" => Box::new(stats::StatsView::new()),
         _ => return None,
     })
 }

@@ -76,8 +76,10 @@ impl App {
             if hot {
                 f.buffer_mut().set_style(edge, ui::bold_accent(&t));
             }
-            if area.height > 2 {
-                ui::line(f, Rect { y: area.y + area.height / 2, height: 1, ..edge }, vec![Span::styled("↔", fg(if hot { t.accent } else { t.muted }))]);
+            let handle = Rect { y: area.y + area.height / 2, height: 1, ..edge };
+            // the scrollbar thumb passes over the resize handle
+            if area.height > 2 && (hot || !self.side_thumb.intersects(handle)) {
+                ui::line(f, handle, vec![Span::styled("↔", fg(if hot { t.accent } else { t.muted }))]);
             }
         }
         self.pane_close.clear();

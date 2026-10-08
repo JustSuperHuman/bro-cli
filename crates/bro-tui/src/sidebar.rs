@@ -1,7 +1,7 @@
 //! The sidebar model: a pure function from live sessions + past sessions + UI state (filter) to the rows
 //! the sidebar draws and navigates. No I/O, no drawing.
 //!
-//! Order: the projects you opened (your order), then projects that only have running sessions. Earlier
+//! Order: projects with open sessions first, preserving project order within each group. Earlier
 //! sessions aren't rows: "continue session" opens a picker for them.
 
 use crate::pane::{Activity, PaneId};
@@ -24,6 +24,8 @@ pub struct LiveInfo {
     pub activity: Option<Activity>,
     /// finished while you weren't looking
     pub done: bool,
+    /// a second line: `⏸ why it waits` / `↳ recap`
+    pub note: Option<String>,
     /// seconds since launch
     pub age_secs: u64,
     /// launch order (smaller = earlier)
@@ -91,7 +93,7 @@ struct Group<'a> {
     last_age: Option<u64>,
 }
 
-/// Opened projects in your order, then projects that only have running sessions (in launch order).
+/// Active projects first; preserve opened-project order and then launch order within each group.
 fn groups<'a>(live: &'a [LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<Group<'a>> {
     let mut order: Vec<Group> = open.iter().map(|o| Group { key: o.key.clone(), name: o.name.clone(), root: o.root.clone(), live: vec![], last_age: None }).collect();
     let mut at: HashMap<String, usize> = order.iter().enumerate().map(|(i, g)| (g.key.clone(), i)).collect();
@@ -110,6 +112,7 @@ fn groups<'a>(live: &'a [LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec
             g.last_age = Some(g.last_age.map_or(p.age_secs, |a| a.min(p.age_secs)));
         }
     }
+    order.sort_by_key(|g| g.live.is_empty());
     order
 }
 
@@ -175,6 +178,7 @@ mod tests {
             project_root: PathBuf::from(project),
             activity: act,
             done: false,
+            note: None,
             age_secs: 60,
             seq,
         }
@@ -206,12 +210,26 @@ mod tests {
         let p = vec![past(0, "c", "never opened", 900), past(1, "b", "fix it", 100), past(2, "a", "newer", 50)];
         let rows = build(&l, &p, &opened(&["a", "b"]), &SideState::default());
         // earlier sessions aren't rows: one "continue" entry instead
-        assert_eq!(kinds(&rows), "o c3 P:a P:b L10#1 P:x L11#2");
-        assert!(matches!(&rows[2], Row::Project { last_age: Some(50), .. }));
-        assert!(matches!(&rows[5], Row::Project { attention: true, .. }));
+        assert_eq!(kinds(&rows), "o c3 P:b L10#1 P:x L11#2 P:a");
+        assert!(matches!(&rows[6], Row::Project { last_age: Some(50), .. }));
+        assert!(matches!(&rows[4], Row::Project { attention: true, .. }));
         assert_eq!(live_order(&l, &p, &opened(&["a", "b"])), vec![10, 11]);
-        assert_eq!(project_order(&l, &p, &opened(&["a", "b"])), vec!["a", "b", "x"]);
-        assert_eq!(kinds(&build(&l, &[], &opened(&["a"]), &SideState::default())), "o P:a P:x L11#1 P:b L10#2", "no continue row without history");
+        assert_eq!(project_order(&l, &p, &opened(&["a", "b"])), vec!["b", "x", "a"]);
+        assert_eq!(kinds(&build(&l, &[], &opened(&["a"]), &SideState::default())), "o P:x L11#1 P:b L10#2 P:a", "no continue row without history");
+    }
+
+    #[test]
+    fn projects_reorder_when_sessions_open_and_close() {
+        let open = opened(&["a", "b", "c", "d"]);
+        let mut sessions = vec![live(1, "c", 1, None), live(2, "b", 2, Some(Activity::Blocked))];
+        assert_eq!(project_order(&sessions, &[], &open), vec!["b", "c", "a", "d"]);
+        sessions.push(live(3, "a", 3, Some(Activity::Working)));
+        assert_eq!(project_order(&sessions, &[], &open), vec!["a", "b", "c", "d"]);
+        sessions.retain(|l| l.project_key != "b");
+        assert_eq!(project_order(&sessions, &[], &open), vec!["a", "c", "b", "d"]);
+        assert_eq!(live_order(&sessions, &[], &open), vec![3, 1]);
+        sessions.clear();
+        assert_eq!(project_order(&sessions, &[], &open), vec!["a", "b", "c", "d"]);
     }
 
     #[test]

@@ -87,7 +87,7 @@ impl ContinuePicker {
         } else {
             let hits = fuzzy::filter(q, &pool, |&i| {
                 let e = &self.entries[i];
-                format!("{} {} {} {}", e.title, e.project_name, e.login.as_deref().unwrap_or(""), e.harness.label())
+                format!("{} {} {} {} {}", e.title, e.project_name, e.login.as_deref().unwrap_or(""), e.harness.label(), e.id)
             });
             hits.into_iter().map(|k| pool[k]).collect()
         };
@@ -198,7 +198,8 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut ContinuePicker, t: &Theme) {
             f.buffer_mut().set_style(r, Style::default().bg(crate::theme::mix(t.user, ratatui::style::Color::Rgb(20, 20, 24), 0.35)));
         }
         let brand = ui::harness_color(Some(e.harness), t);
-        let mut right = vec![];
+        let id_tail = e.id.rsplit('-').next().unwrap_or(&e.id);
+        let mut right = vec![Span::styled(format!("[{id_tail}]  "), muted(t))];
         if p.all {
             right.push(Span::styled(format!("{}  ", ui::fit(&e.project_name, 16)), fg(crate::theme::mix(t.shine, t.muted, 0.4))));
         }

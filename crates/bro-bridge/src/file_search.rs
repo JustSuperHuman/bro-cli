@@ -322,6 +322,36 @@ pub(crate) fn search_files(cwd: &str, query: &str, limit: usize) -> Vec<FileHit>
     rank(&get_index(cwd), query, limit)
 }
 
+/// Index entries (relative to `root`) that are `needle` or end with
+/// `/needle`, at most `limit`. Case-insensitive on Windows. Blocking (the
+/// first call for a root builds the cached index).
+pub(crate) fn suffix_matches(root: &str, needle: &str, limit: usize) -> Vec<FileHit> {
+    let needle = needle.replace('\\', "/");
+    let needle = needle.trim_start_matches("./").trim_matches('/');
+    if root.is_empty() || needle.is_empty() {
+        return Vec::new();
+    }
+    let needle = if cfg!(windows) {
+        needle.to_lowercase()
+    } else {
+        needle.to_string()
+    };
+    let suffix = format!("/{needle}");
+    get_index(root)
+        .iter()
+        .filter(|entry| {
+            let path: &str = if cfg!(windows) {
+                &entry.lower
+            } else {
+                &entry.hit.path
+            };
+            path == needle || path.ends_with(&suffix)
+        })
+        .take(limit)
+        .map(|entry| entry.hit.clone())
+        .collect()
+}
+
 /// The Node route's `limit` handling: 1..=100, default 30.
 pub(crate) fn clamp_limit(raw: Option<&str>) -> usize {
     raw.and_then(|value| value.trim().parse::<f64>().ok())

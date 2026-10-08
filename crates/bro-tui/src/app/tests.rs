@@ -530,7 +530,7 @@ fn conpty_process_exit_removes_agent_and_shell_tabs_without_output_eof() {
         meta.cleanup.clear();
         let spawn = Spawn {
             program: "powershell.exe".into(),
-            args: vec!["-NoLogo".into(), "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "exit 7".into()],
+            args: vec!["-NoLogo".into(), "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "Write-Output 'boom: no daemon'; Start-Sleep -Milliseconds 300; exit 7".into()],
             env: ["HOME", "USERPROFILE", "BRO_DIR", "CLAUDE_POOL_DIR", "BRO_CODEX_PROFILES_DIR"].into_iter()
                 .map(|name| (name.into(), dir.path().to_string_lossy().into_owned())).collect(),
             ..Spawn::default()
@@ -549,8 +549,10 @@ fn conpty_process_exit_removes_agent_and_shell_tabs_without_output_eof() {
         let removed = !a.panes.contains_key(&id);
         let tabs = a.tabs.len();
         let focus = a.focused();
+        let toasts: Vec<String> = a.toasts.items.iter().map(|t| t.text.clone()).collect();
         a.shutdown();
         assert!(removed, "an exited {harness:?} process must not wait for ConPTY output EOF");
+        assert!(toasts.iter().any(|t| t.contains("exited: boom: no daemon")), "a quick failure says why: {toasts:?}");
         assert_eq!(tabs, before);
         assert_eq!(focus, Some(survivor));
     }
@@ -668,8 +670,8 @@ fn profiles_view() {
     key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
     key(&mut a, KeyCode::Char('d'), KeyModifiers::NONE);
     let s = shot(&mut a, "profiles");
-    assert!(s.contains("PROFILES") && s.contains("claude:personal"), "{s}");
-    assert!(s.contains("remove claude:personal?") && s.contains("accounts"), "confirm names the dir\n{s}");
+    assert!(s.contains("Profiles · Claude and Codex logins") && s.contains("claude:personal"), "{s}");
+    assert!(s.contains("Remove claude:personal?") && s.contains("accounts"), "confirm names the dir\n{s}");
 }
 
 #[test]
@@ -748,6 +750,68 @@ fn keyboard_navigation() {
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(!a.side_focus);
+}
+
+/// Draw at w×h and keep the buffer (to look at single cells).
+fn draw_buf(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).expect("backend");
+    term.draw(|f| app.draw(f)).expect("draw");
+    term.backend().buffer().clone()
+}
+
+/// The sidebar's right border column, top to bottom.
+fn side_edge(a: &App, buf: &ratatui::buffer::Buffer) -> String {
+    let x = a.side_area.right() - 1;
+    (a.side_area.y..a.side_area.bottom()).map(|y| buf[(x, y)].symbol().to_string()).collect()
+}
+
+#[test]
+fn sidebar_scrollbar_shows_while_navigating_then_hides() {
+    let mut a = app(true);
+    a.run_act(Act::FocusSidebar);
+    let (w, h) = (120, 22);
+    let buf = draw_buf(&mut a, w, h);
+    assert!(a.side_thumb.is_empty() && !side_edge(&a, &buf).contains('┃'), "hidden until something moves");
+    // keys: down to the end scrolls the list; the thumb sits on the border at the bottom
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    let buf = draw_buf(&mut a, w, h);
+    assert!(a.side_scroll > 0, "the demo list overflows {h} rows");
+    let thumb = a.side_thumb;
+    assert!(thumb.height >= 1 && thumb.x == a.side_area.right() - 1, "{thumb:?}");
+    assert!(side_edge(&a, &buf).contains('┃'));
+    // home: back at the top, the thumb moves up
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+    let _ = draw_buf(&mut a, w, h);
+    assert!(a.side_thumb.y < thumb.y, "{:?} vs {thumb:?}", a.side_thumb);
+    // a second after the last move it's gone, and the loop doesn't need to wake for it
+    a.side_nav_at = Instant::now().checked_sub(Duration::from_secs(2));
+    let buf = draw_buf(&mut a, w, h);
+    assert!(a.side_thumb.is_empty() && !side_edge(&a, &buf).contains('┃'));
+    assert_eq!(side_view::bar_wake(a.side_nav_at), None);
+    // the wheel shows it too
+    let r = a.side_area;
+    a.mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: r.x + 4, row: r.y + 3, modifiers: KeyModifiers::NONE });
+    let _ = draw_buf(&mut a, w, h);
+    assert!(!a.side_thumb.is_empty());
+    assert!(side_view::bar_wake(a.side_nav_at).is_some_and(|d| d <= Duration::from_secs(1)), "the loop wakes to hide it");
+}
+
+#[test]
+fn sidebar_scrollbar_fades_then_hides() {
+    use side_view::bar_alpha;
+    assert_eq!(bar_alpha(Duration::ZERO), Some(1.0));
+    assert!(bar_alpha(Duration::from_millis(900)).is_some_and(|a| a > 0.0 && a < 1.0));
+    assert_eq!(bar_alpha(Duration::from_millis(1100)), None);
+}
+
+#[test]
+fn sidebar_scrollbar_stays_hidden_when_everything_fits() {
+    let mut a = app(true);
+    a.run_act(Act::FocusSidebar);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    let buf = draw_buf(&mut a, W, 80);
+    assert!(a.side_nav_at.is_some() && a.side_scroll == 0);
+    assert!(a.side_thumb.is_empty() && !side_edge(&a, &buf).contains('┃'));
 }
 
 #[test]
@@ -964,11 +1028,9 @@ fn projects_are_opened_explicitly_and_new_sessions_start_in_the_current_one() {
     assert!(matches!(a.overlay, Overlay::Folder(_)));
     a.paste(&project.to_string_lossy());
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(matches!(a.overlay, Overlay::None));
     assert!(a.open_projects.contains(&a.svc.project_for(&project).root));
     assert!(a.rows().iter().any(|r| matches!(r, Row::Project { name, .. } if name == "fresh")));
-    // it's current: the launcher starts there
-    key(&mut a, KeyCode::Char('n'), KeyModifiers::ALT);
+    // Opening the project immediately offers a session in its directory.
     let Overlay::Launcher(l) = &a.overlay else { panic!("launcher") };
     assert_eq!(l.dir, a.svc.project_for(&project).root);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
@@ -977,6 +1039,182 @@ fn projects_are_opened_explicitly_and_new_sessions_start_in_the_current_one() {
     a.side_sel = a.rows().iter().position(|r| matches!(r, Row::Project { name, .. } if name == "fresh")).unwrap();
     key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
     assert!(!a.rows().iter().any(|r| matches!(r, Row::Project { name, .. } if name == "fresh")));
+}
+
+#[test]
+fn clicking_a_project_opens_its_session_picker_and_cancel_keeps_the_project() {
+    let mut a = app(true);
+    let project = tempfile::tempdir().unwrap();
+    let root = a.svc.project_for(project.path()).root;
+    let panes = a.panes.len();
+    a.open_folder();
+    a.paste(&project.path().to_string_lossy());
+    draw(&mut a);
+    let Overlay::Folder(p) = &a.overlay else { panic!("folder picker") };
+    let r = p.hits.iter().find(|(_, i)| *i == p.sel).unwrap().0;
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session picker") };
+    assert_eq!(l.dir, root);
+    assert_eq!(l.place, Place::Tab);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::None));
+    assert!(a.open_projects.contains(&root));
+    assert_eq!(a.panes.len(), panes, "cancel does not start a session");
+    assert_eq!(a.preferred_dir(), Some(root));
+}
+
+fn folder_creation_app() -> (App, std::sync::mpsc::Receiver<Event>) {
+    testkit::isolate();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let svc = Services::offline(fallback_settings(), tx.clone());
+    (App::new(svc, tx, Opts { demo: false, fixed_demo: true, load_recents: false }), rx)
+}
+
+fn finish_folder_creation(a: &mut App, rx: &std::sync::mpsc::Receiver<Event>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let event = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("folder creation finished");
+        let finished = matches!(event, Event::FolderCreated(_, _));
+        a.handle(event);
+        if finished { break; }
+    }
+}
+
+fn choose_folder(a: &mut App, mouse: bool) {
+    if mouse {
+        draw(a);
+        let Overlay::Folder(p) = &a.overlay else { panic!("folder picker") };
+        let r = p.hits.iter().find(|(_, i)| *i == p.sel).unwrap().0;
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+    } else {
+        key(a, KeyCode::Enter, KeyModifiers::NONE);
+    }
+}
+
+#[test]
+fn creating_a_project_folder_uses_it_for_the_session_and_launch_command() {
+    for mouse in [false, true] {
+        for in_repo in [false, true] {
+            let (mut a, rx) = folder_creation_app();
+            let projects = a.open_projects.roots.clone();
+            let dir = tempfile::tempdir().unwrap();
+            if in_repo {
+                std::fs::create_dir(dir.path().join(".git")).unwrap();
+            }
+            let project = dir.path().join("new parent").join("project with spaces 日本語");
+            a.open_folder();
+            let suffix = if mouse { std::path::MAIN_SEPARATOR.to_string() } else { String::new() };
+            a.paste(&format!("\"{}{suffix}\"", project.display()));
+            assert!(draw(&mut a).contains("create and open"));
+            assert!(!project.exists(), "typing a path does not create it");
+            choose_folder(&mut a, mouse);
+            assert!(matches!(a.overlay, Overlay::Folder(ref p) if p.pending.is_some()));
+            assert_eq!(a.open_projects.roots, projects, "creation must finish before the project is added");
+            finish_folder_creation(&mut a, &rx);
+            assert!(project.is_dir(), "missing parents and the selected folder are created");
+            let root = a.svc.project_for(&project).root;
+            assert!(a.open_projects.contains(&root));
+            if in_repo { assert_eq!(root, dir.path()); }
+            let Overlay::Launcher(l) = &a.overlay else { panic!("new folder opens its session picker") };
+            assert_eq!(l.dir, project, "a git ancestor must not replace the selected working directory");
+            assert_eq!(l.spec().unwrap().cwd, project);
+            key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+            let launch = usage_launch_result(&rx);
+            assert_eq!(launch.spec.cwd, project);
+            assert_eq!(launch.result.unwrap().cwd, project, "the command sent to the PTY uses the created directory");
+        }
+    }
+}
+
+#[test]
+fn folder_creation_errors_keep_the_modal_open_and_allow_a_corrected_path() {
+    for mouse in [false, true] {
+        for blocked_parent in [false, true] {
+            let (mut a, rx) = folder_creation_app();
+            let projects = a.open_projects.roots.clone();
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("existing file");
+            std::fs::write(&file, "keep this content").unwrap();
+            let blocked = if blocked_parent { file.join("child") } else { file.clone() };
+            a.open_folder();
+            a.paste(&blocked.to_string_lossy());
+            choose_folder(&mut a, mouse);
+            if matches!(a.overlay, Overlay::Folder(ref p) if p.pending.is_some()) {
+                finish_folder_creation(&mut a, &rx);
+            }
+            let Overlay::Folder(p) = &a.overlay else { panic!("a failed folder stays in the picker") };
+            assert_eq!(p.filter, blocked.to_string_lossy());
+            assert!(p.pending.is_none() && p.error.is_some());
+            let error = p.error.as_ref().unwrap().clone();
+            assert!(draw(&mut a).contains(&error.chars().take(35).collect::<String>()), "the error is visible in the modal");
+            assert_eq!(a.open_projects.roots, projects);
+            assert!(a.cur_project.is_none());
+            assert!(a.panes.is_empty());
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep this content");
+            key(&mut a, KeyCode::Char('u'), KeyModifiers::CONTROL);
+            let valid = dir.path().join("corrected project");
+            a.paste(&valid.to_string_lossy());
+            choose_folder(&mut a, mouse);
+            finish_folder_creation(&mut a, &rx);
+            assert!(valid.is_dir());
+            assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.dir == valid));
+        }
+    }
+}
+
+#[test]
+fn cancelling_folder_creation_ignores_its_completion_in_a_new_modal() {
+    let (mut a, rx) = folder_creation_app();
+    let projects = a.open_projects.roots.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("cancelled project");
+    a.open_folder();
+    a.paste(&project.to_string_lossy());
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let Overlay::Folder(p) = &a.overlay else { panic!("creating folder") };
+    let request = p.pending.unwrap();
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    a.paste("ignored while creating");
+    assert!(matches!(a.overlay, Overlay::Folder(ref p) if p.pending == Some(request) && p.filter == project.to_string_lossy()));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    a.open_folder();
+    finish_folder_creation(&mut a, &rx);
+    assert!(matches!(a.overlay, Overlay::Folder(ref p) if p.pending.is_none() && p.error.is_none() && p.filter.is_empty()));
+    assert_eq!(a.open_projects.roots, projects, "a dismissed request cannot open a project later");
+    assert!(rx.try_iter().all(|event| !matches!(event, Event::FolderCreated(_, _))), "repeated Enter did not start another worker");
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "spawns a local PowerShell in ConPTY; no accounts or network"]
+fn conpty_session_starts_in_the_folder_created_by_the_modal() {
+    let (mut a, rx) = folder_creation_app();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("native project 日本語");
+    let proof = dir.path().join("native-cwd.txt");
+    a.open_folder();
+    a.paste(&project.to_string_lossy());
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    finish_folder_creation(&mut a, &rx);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let mut launch = usage_launch_result(&rx);
+    let cmd = launch.result.as_mut().unwrap();
+    assert_eq!(cmd.cwd, project);
+    // Keep the modal's launch directory; use a local shell to report the child's actual cwd.
+    cmd.program = "powershell.exe".into();
+    cmd.args = vec!["-NoLogo".into(), "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(),
+        format!("[IO.File]::WriteAllText('{}', (Get-Location).ProviderPath)", proof.to_string_lossy().replace('\'', "''"))];
+    cmd.env.extend(["HOME", "USERPROFILE"].into_iter().map(|name| (name.into(), dir.path().to_string_lossy().into_owned())));
+    a.handle(Event::Launched(launch));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let observed = loop {
+        draw(&mut a);
+        if let Ok(cwd) = std::fs::read_to_string(&proof) { break Some(cwd); }
+        if Instant::now() >= deadline { break None; }
+        if let Ok(event) = rx.recv_timeout(Duration::from_millis(30)) { a.handle(event); }
+    };
+    a.shutdown();
+    assert_eq!(observed.as_deref(), Some(project.to_str().unwrap()), "the real child process must start in the created directory");
 }
 
 fn usage_launch_app() -> (App, std::sync::mpsc::Receiver<Event>) {
@@ -1003,6 +1241,7 @@ fn usage_rows_launch_the_clicked_account_or_harness_in_the_current_project() {
         let (mut a, rx) = usage_launch_app();
         let project = tempfile::tempdir().unwrap();
         a.add_project(project.path().to_path_buf());
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         a.usage_expanded = profile.is_some();
         draw(&mut a);
         let r = a.side_hits.iter().find_map(|(r, hit)| match hit {
@@ -1030,6 +1269,7 @@ fn usage_launch_starts_in_the_focused_sessions_project() {
     let (mut a, rx) = usage_launch_app();
     let picked = tempfile::tempdir().unwrap();
     a.add_project(picked.path().to_path_buf());
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     // a project picked in the sidebar holds while focus stays put
     a.follow_focus();
     assert_eq!(a.preferred_dir().as_deref(), Some(a.svc.project_for(picked.path()).root.as_path()));
@@ -1202,8 +1442,9 @@ fn clipboard_shortcuts_and_terminal_paste_open_a_copied_project_path() {
             a.handle(Event::Input(crossterm::event::Event::Paste(copied.clone())));
         }
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(a.overlay, Overlay::None));
         assert!(a.open_projects.contains(&a.svc.project_for(&project).root));
+        let Overlay::Launcher(l) = &a.overlay else { panic!("opening a pasted project shows the session picker") };
+        assert_eq!(l.dir, a.svc.project_for(&project).root);
     }
 }
 
@@ -1416,4 +1657,380 @@ fn new_session_strip_above_usage() {
     if let Overlay::Launcher(l) = &a.overlay {
         assert_eq!(l.harness, bro_core::Harness::Codex);
     }
+}
+
+#[test]
+fn file_paths_link_once_confirmed_and_open_the_preview_and_agents_can_open_files() {
+    use crate::file_view::{Body, Outcome as FileOutcome};
+    use crate::panes::term::Term;
+    let mut a = app(true);
+    let (tx, rx) = std::sync::mpsc::channel();
+    a.tx = tx;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/app.rs"), (1..=80).map(|n| format!("let line_{n} = {n};\n")).collect::<String>()).unwrap();
+    let id = a.focused().unwrap();
+    let mut meta = a.panes[&id].as_term_ref().unwrap().meta.clone();
+    meta.cwd = dir.path().to_path_buf();
+    meta.project = a.svc.project_for(dir.path());
+    let sid = meta.sid.clone();
+    // a URL, a real file with a line, a word that looks like a file but isn't one
+    let output = "see https://example.com/x.rs and src/app.rs:42 or notes.txt\r\n";
+    a.panes.insert(id, Box::new(Term::fixed(meta, output, a.svc.clone())));
+    a.tabs[a.cur].zoom = true;
+    a.side_focus = false;
+    let _ = draw(&mut a);
+    let inner = a.inner.iter().find(|(pane, _)| *pane == id).unwrap().1;
+    let col = |s: &str| output.find(s).unwrap() as u16;
+    assert!(a.panes[&id].link_at(0, col("src/app.rs")).is_none(), "not a link until it's known to be a file");
+    a.panes[&id].as_term_ref().unwrap().resolve_file_links_now();
+    let _ = draw(&mut a);
+    let uri = a.panes[&id].link_at(0, col("src/app.rs") + 3).expect("confirmed files link");
+    assert!(uri.starts_with("file:") && uri.ends_with("app.rs#L42"), "{uri}");
+    assert!(a.panes[&id].link_at(0, col("notes.txt")).is_none(), "missing files never link");
+    assert_eq!(a.panes[&id].link_at(0, col("example.com")).as_deref(), Some("https://example.com/x.rs"), "URLs win");
+
+    // click: the preview opens at line 42 (loaded off the UI thread)
+    let pos = Position { x: inner.x + col("src/app.rs") + 2, y: inner.y };
+    for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+        a.mouse(MouseEvent { kind, column: pos.x, row: pos.y, modifiers: KeyModifiers::NONE });
+    }
+    assert!(!rx.try_iter().any(|e| matches!(e, Event::OpenLink(_))), "file links preview in bro, not the OS");
+    let pump = |a: &mut App| {
+        let ev = rx.recv_timeout(Duration::from_secs(10)).expect("the preview loads");
+        a.handle(ev);
+    };
+    pump(&mut a);
+    let Overlay::File(v) = &a.overlay else { panic!("preview open") };
+    assert!(matches!(v.body, Body::Text(_)) && v.line == Some(42));
+    let screen = draw(&mut a);
+    assert!(screen.contains("let line_42 = 42;") && screen.contains("src/app.rs:42"), "{screen}");
+    // @ mentions it to the agent and closes
+    key(&mut a, KeyCode::Char('@'), KeyModifiers::NONE);
+    assert!(!a.overlay.is_open());
+    let sent = String::from_utf8_lossy(&a.panes.get_mut(&id).unwrap().as_term().unwrap().sent).into_owned();
+    assert_eq!(sent, "@src/app.rs ");
+
+    // an agent's `bro open` in the session you're looking at: the preview opens
+    a.bridge_command(bro_bridge::BridgeCommand::OpenFile { id: sid.clone(), path: dir.path().join("src/app.rs"), line: Some(7), column: None });
+    assert!(matches!(&a.overlay, Overlay::File(v) if v.line == Some(7)));
+    pump(&mut a);
+    a.file_view_outcome(FileOutcome::Close);
+    // …elsewhere: a toast, and prefix f shows it
+    a.side_focus = true;
+    a.bridge_command(bro_bridge::BridgeCommand::OpenFile { id: sid, path: dir.path().join("src/app.rs"), line: Some(9), column: None });
+    assert!(!a.overlay.is_open());
+    assert!(a.toasts.items.iter().any(|t| t.text.contains("opened src/app.rs:9")), "{:?}", a.toasts.items.iter().map(|t| &t.text).collect::<Vec<_>>());
+    a.side_focus = false;
+    a.run_act(Act::OpenedFile);
+    assert!(matches!(&a.overlay, Overlay::File(v) if v.line == Some(9)));
+}
+
+/// A Claude pane over a fixture transcript (no process): `lines` as JSONL, fixed `activity`.
+fn insight_pane(a: &mut App, dir: &std::path::Path, lines: &[serde_json::Value], activity: Activity) -> (PaneId, String) {
+    use crate::panes::insights::Insights;
+    use crate::panes::term::{Spawn, Term};
+    let id = a.focused().unwrap();
+    let mut meta = a.panes[&id].as_term_ref().unwrap().meta.clone();
+    meta.harness = Some(bro_core::Harness::Claude);
+    meta.cwd = dir.to_path_buf();
+    meta.project = a.svc.project_for(dir);
+    meta.name = Some("Pinky".into());
+    meta.renamed = true;
+    let sid = meta.sid.clone();
+    let transcript = dir.join("session.jsonl");
+    std::fs::write(&transcript, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    let mut t = Term::fixed(meta, "working on it\r\n", a.svc.clone());
+    t.demo_activity = Some(activity);
+    t.set_insights(Insights::from_transcript(bro_core::Harness::Claude, &transcript, None));
+    t.set_launch(Spawn { program: "claude".into(), ..Spawn::default() });
+    a.panes.insert(id, Box::new(t));
+    (id, sid)
+}
+
+#[test]
+fn a_pending_question_tool_means_needs_you_even_when_the_screen_reads_working() {
+    use serde_json::json;
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    let ask = json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"AskUserQuestion","input":{"questions":[{"header":"Color","question":"Which color do you prefer?"}]}}]}});
+    let (id, _) = insight_pane(&mut a, dir.path(), &[ask.clone()], Activity::Working);
+    let term = a.panes.get_mut(&id).unwrap().as_term().unwrap();
+    // Claude's question menu ends "esc to cancel", which the screen scan reads as working.
+    term.set_screen_status(Some(Activity::Working));
+    assert_eq!(a.panes[&id].activity(), Some(Activity::Blocked));
+    a.after_events();
+    assert_eq!(a.notes.get(&id).map(String::as_str), Some("⏸ Question: Color"));
+
+    // Answered: the tool result arrives and the screen's own status is back in charge.
+    let answered = json!({"type":"user","timestamp":"2026-10-02T10:00:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"red"}]}});
+    let (id, _) = insight_pane(&mut a, dir.path(), &[ask, answered], Activity::Working);
+    a.panes.get_mut(&id).unwrap().as_term().unwrap().set_screen_status(Some(Activity::Working));
+    assert_eq!(a.panes[&id].activity(), Some(Activity::Working));
+}
+
+#[test]
+fn agent_panes_say_why_they_wait_and_list_the_files_they_touched_or_sent() {
+    use serde_json::json;
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/app.rs"), (1..=40).map(|n| format!("let line_{n} = {n};\n")).collect::<String>()).unwrap();
+    let p = |s: &str| dir.path().join(s).to_string_lossy().into_owned();
+    let sid = "0b6e3c1e-0000-4000-8000-0000000000aa";
+    let lines = [
+        json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","sessionId":sid,"message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":p("src/app.rs"),"old_string":"a","new_string":"b"}}]}}),
+        json!({"type":"user","timestamp":"2026-10-02T10:00:01Z","sessionId":sid,"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]},"toolUseResult":{"filePath":p("src/app.rs"),"structuredPatch":[{"newStart":12}]}}),
+        json!({"type":"assistant","timestamp":"2026-10-02T10:00:02Z","sessionId":sid,"message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"SendUserFile","input":{"files":[p("src/app.rs")],"caption":"the change"}}]}}),
+        json!({"type":"user","timestamp":"2026-10-02T10:00:03Z","sessionId":sid,"message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"1 file delivered"}]}}),
+        json!({"type":"assistant","timestamp":"2026-10-02T10:00:04Z","sessionId":sid,"message":{"id":"m3","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"npm publish","description":"Publish the package"}}]}}),
+    ];
+    let (id, _) = insight_pane(&mut a, dir.path(), &lines, Activity::Blocked);
+    a.after_events();
+    assert_eq!(a.notes.get(&id).map(String::as_str), Some("⏸ Bash: Publish the package"));
+    let screen = draw(&mut a);
+    assert!(screen.contains("⏸ Bash: Publish the package"), "the sidebar's second line says why it waits:\n{screen}");
+
+    // prefix F: what it sent, then what it touched; enter previews at the line
+    a.side_focus = false;
+    a.run_act(Act::AgentFiles);
+    let Overlay::AgentFiles(v) = &a.overlay else { panic!("agent files open") };
+    let rows: Vec<(&str, &str, Option<u32>)> = v.items.iter().map(|i| (i.kind, i.shown.as_str(), i.line)).collect();
+    assert_eq!(rows, vec![("sent", "src/app.rs", None), ("edit", "src/app.rs", Some(12))]);
+    let screen = draw(&mut a);
+    assert!(screen.contains("sent to you") && screen.contains("touched") && screen.contains("src/app.rs:12") && screen.contains("the change"), "{screen}");
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(&a.overlay, Overlay::File(v) if v.line == Some(12)), "the preview opens at the edit");
+
+    // a shell has nothing to list
+    a.overlay = Overlay::None;
+    let shell = a.panes.keys().copied().find(|k| *k != id && a.panes[k].as_term_ref().is_some_and(|t| t.meta.harness.is_none()));
+    if let Some(shell) = shell {
+        a.focus_pane(shell);
+        a.run_act(Act::AgentFiles);
+        assert!(matches!(&a.overlay, Overlay::AgentFiles(v) if v.items.is_empty() && v.empty.contains("shell")));
+    }
+}
+
+#[test]
+fn a_recap_is_generated_once_for_a_wait_nobody_looked_at() {
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    let sid = "0b6e3c1e-0000-4000-8000-0000000000bb";
+    let lines = [json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","sessionId":sid,"message":{"id":"m1","content":[{"type":"text","text":"Refactored the parser. Tests pass."}]}})];
+    let (id, _) = insight_pane(&mut a, dir.path(), &lines, Activity::Idle);
+    a.done.insert(id);
+    let runs = std::sync::Arc::new(AtomicUsize::new(0));
+    let seen = runs.clone();
+    a.recaps.runner = std::sync::Arc::new(move |job| {
+        assert_eq!(job.session_id, "0b6e3c1e-0000-4000-8000-0000000000bb");
+        seen.fetch_add(1, Ordering::SeqCst);
+        Ok(("You refactored the parser; next is the release.".into(), Some(0.02)))
+    });
+    // the last message is the recap until a generated one exists
+    a.update_insights();
+    assert_eq!(a.notes.get(&id).map(String::as_str), Some("↳ Refactored the parser."));
+    // looking at it: never
+    a.term_focused = true;
+    a.recaps.skew = Duration::from_secs(200);
+    a.update_insights();
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "not while you're looking at it");
+    // unseen, but not for 180 s since you looked
+    a.term_focused = false;
+    a.recaps.skew = Duration::from_secs(300);
+    a.update_insights();
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "the clock restarts when you looked");
+    a.recaps.skew = Duration::from_secs(400);
+    a.update_insights();
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "one recap after 180 s unseen");
+    a.update_insights(); // the next batch (the pane's wake) shows it
+    assert_eq!(a.notes.get(&id).map(String::as_str), Some("↳ You refactored the parser; next is the release."));
+    a.recaps.skew = Duration::from_secs(4000);
+    a.update_insights();
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "once per wait");
+    let view = a.pane_view(id).unwrap();
+    assert_eq!(view.recap.map(|r| r.source), Some(bro_core::recap::Source::Generated));
+}
+
+/// A fixed pane sized by its tile like a live one, watched by `viewers` remote clients.
+fn remote_pane(a: &mut App, transcript: &str, viewers: Option<usize>) -> PaneId {
+    use crate::panes::term::Term;
+    let mut meta = a.panes[&a.focused().unwrap()].as_term_ref().unwrap().meta.clone();
+    meta.sid = format!("remote-{}", a.panes.len()); // its own bridge session
+    let mut t = Term::fixed(meta, transcript, a.svc.clone());
+    t.test_sized = true;
+    t.test_viewers = viewers;
+    a.new_tab(Box::new(t))
+}
+
+fn term_of(a: &mut App, id: PaneId) -> &mut crate::panes::term::Term {
+    a.panes.get_mut(&id).unwrap().as_term().unwrap()
+}
+
+/// The text of tile row `row` of pane `id` as drawn.
+fn tile_row(a: &mut App, id: PaneId, row: u16) -> String {
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(W, H)).unwrap();
+    term.draw(|f| a.draw(f)).unwrap();
+    let inner = a.inner.iter().find(|(i, _)| *i == id).unwrap().1;
+    let buf = term.backend().buffer();
+    (inner.x..inner.right()).map(|x| buf[(x, inner.y + row)].symbol().to_string()).collect::<String>().trim_end().to_string()
+}
+
+#[test]
+fn a_remotely_watched_session_gets_a_minimum_size_and_the_tile_shows_its_bottom_left() {
+    let mut a = app(true);
+    let id = remote_pane(&mut a, "", Some(1));
+    draw(&mut a);
+    let screen = draw(&mut a); // the header is laid out before the pane resizes in a frame
+    let inner = a.inner.iter().find(|(i, _)| *i == id).unwrap().1;
+    assert!(inner.height < 50 && inner.width > 80, "the test tile is short and wide: {inner:?}");
+    assert_eq!(term_of(&mut a, id).size(), (50, inner.width), "rows grow to the minimum, the wide tile keeps its width");
+    assert!(screen.contains(&format!("⇲ {}×50 remote", inner.width)), "the header says why:\n{screen}");
+
+    // Fill the taller screen: the tile shows its last rows, the first ones are above it.
+    let lines: String = (1..=120).map(|n| format!("line {n:03}\r\n")).collect();
+    term_of(&mut a, id).feed(lines.as_bytes());
+    term_of(&mut a, id).feed(b"see https://example.com/native here\r\n Do you want to proceed?\r\n \xe2\x9d\xaf 1. Yes\r\n   2. No\r\n");
+    let hidden = 50 - inner.height; // the cursor sits on the last screen row
+    let last = inner.height - 1;
+    assert_eq!(tile_row(&mut a, id, last), "", "the cursor's (empty) row is the tile's last");
+    assert_eq!(tile_row(&mut a, id, last - 1), "   2. No");
+    assert_eq!(tile_row(&mut a, id, last - 4), "see https://example.com/native here");
+    // Screen row `hidden` is the tile's top row; the rows above it are not drawn.
+    let first_shown: u16 = 120 - (50 - 5 - hidden) + 1; // 5 rows of prompt + cursor below the numbered lines
+    assert_eq!(tile_row(&mut a, id, 0), format!("line {first_shown:03}"));
+
+    // Every tile-relative lookup is shifted by the hidden rows: links, prompt options, clicks.
+    let col = |s: &str, needle: &str| s.find(needle).unwrap() as u16;
+    let url_row = last - 4;
+    assert_eq!(
+        a.panes[&id].link_at(url_row, col("see https://example.com/native here", "example") ).as_deref(),
+        Some("https://example.com/native")
+    );
+    term_of(&mut a, id).demo_activity = Some(Activity::Blocked);
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: inner.x + 6, row: inner.y + last - 1, modifiers: KeyModifiers::NONE });
+    assert_eq!(std::mem::take(&mut term_of(&mut a, id).sent), b"2\r", "the option on the clicked tile row");
+    term_of(&mut a, id).demo_activity = None;
+    // A program that tracks the mouse gets screen rows, not tile rows.
+    term_of(&mut a, id).feed(b"\x1b[?1000h\x1b[?1006h");
+    draw(&mut a);
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: inner.x + 2, row: inner.y, modifiers: KeyModifiers::NONE });
+    let sent = String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap();
+    assert_eq!(sent, format!("\x1b[<0;3;{}M", hidden + 1), "tile row 0 is screen row {hidden}");
+    term_of(&mut a, id).feed(b"\x1b[?1000l\x1b[?1006l");
+
+    // Scrolling up first reveals the hidden screen rows, then the scrollback.
+    let wheel = |a: &mut App| a.mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column: inner.x + 2, row: inner.y + 2, modifiers: KeyModifiers::NONE });
+    wheel(&mut a);
+    assert_eq!(tile_row(&mut a, id, 0), format!("line {:03}", first_shown - 3));
+    for _ in 0..((hidden as usize + 3) / 3 + 1) {
+        wheel(&mut a);
+    }
+    let top = tile_row(&mut a, id, 0);
+    let n: u16 = top.trim_start_matches("line ").parse().unwrap();
+    assert!(n < first_shown - hidden, "past the screen's top, into the scrollback: {top}");
+}
+
+#[test]
+fn the_remote_minimum_needs_a_viewer_outlives_it_briefly_and_can_be_turned_off() {
+    let mut a = app(true);
+    let id = remote_pane(&mut a, "", Some(0));
+    draw(&mut a);
+    let inner = a.inner.iter().find(|(i, _)| *i == id).unwrap().1;
+    let tile = (inner.height, inner.width);
+    assert_eq!(term_of(&mut a, id).size(), tile, "nobody watches: the tile's size");
+    assert!(!draw(&mut a).contains("remote"));
+
+    term_of(&mut a, id).test_viewers = Some(1);
+    draw(&mut a);
+    assert_eq!(term_of(&mut a, id).size(), (50, inner.width));
+    term_of(&mut a, id).test_viewers = Some(0);
+    draw(&mut a);
+    assert_eq!(term_of(&mut a, id).size(), (50, inner.width), "held through the grace period");
+    term_of(&mut a, id).test_skew = std::time::Duration::from_secs(16);
+    draw(&mut a);
+    assert_eq!(term_of(&mut a, id).size(), tile, "back to the tile after it");
+
+    // 0 turns an axis off; the other still applies.
+    a.svc.update(|st| {
+        st.settings.bridge.remote_min_rows = 0;
+        st.settings.bridge.remote_min_cols = inner.width + 20;
+    });
+    term_of(&mut a, id).test_viewers = Some(1);
+    draw(&mut a);
+    let screen = draw(&mut a);
+    assert_eq!(term_of(&mut a, id).size(), (inner.height, inner.width + 20));
+    assert!(screen.contains(&format!("⇲ {}×{} remote", inner.width + 20, inner.height)), "{screen}");
+}
+
+#[test]
+fn hidden_panes_get_the_remote_minimum_without_being_drawn() {
+    let mut a = app(true);
+    let id = remote_pane(&mut a, "", Some(0));
+    draw(&mut a);
+    let inner = a.inner.iter().find(|(i, _)| *i == id).unwrap().1;
+    // Put another tab in front: this pane is no longer drawn.
+    let mut meta = a.panes[&id].as_term_ref().unwrap().meta.clone();
+    meta.sid = "another-session".into();
+    let other = a.new_tab(Box::new(crate::panes::term::Term::fixed(meta, "", a.svc.clone())));
+    draw(&mut a);
+    assert!(!a.visible().contains(&id) && a.visible().contains(&other));
+    // A phone opens the hidden session: the tick that polls hidden panes grows it.
+    term_of(&mut a, id).test_viewers = Some(1);
+    a.handle(Event::Wake(id));
+    assert_eq!(term_of(&mut a, id).size(), (50, inner.width));
+    // A remote resize request for a hidden pane is its new local size, still grown to the minimum.
+    let sid = term_of(&mut a, id).meta.sid.clone();
+    a.bridge_command(bro_bridge::BridgeCommand::Resize { id: sid, cols: 60, rows: 20 });
+    assert_eq!(term_of(&mut a, id).size(), (50, 80));
+    term_of(&mut a, id).test_viewers = Some(0);
+    term_of(&mut a, id).test_skew = std::time::Duration::from_secs(16);
+    a.handle(Event::Wake(id));
+    assert_eq!(term_of(&mut a, id).size(), (20, 60), "the phone left: what was asked for");
+}
+
+#[test]
+fn usage_info_icon_opens_token_stats_in_two_tabs() {
+    use bro_core::profiles::{Profile, ProfileKind};
+    let (mut a, rx) = usage_launch_app();
+    // logins in a tempdir: the demo's point at the real ~/.claude and ~/.codex
+    let home = tempfile::tempdir().unwrap();
+    let now = crate::util::now_secs();
+    let iso = |s: i64| chrono::DateTime::from_timestamp(s, 0).unwrap().to_rfc3339();
+    let claude = home.path().join("claude");
+    std::fs::create_dir_all(claude.join("projects").join("p")).unwrap();
+    std::fs::write(claude.join("stats-cache.json"), serde_json::json!({ "modelUsage": { "m": { "inputTokens": 9_000_000_000u64 } }, "lastComputedDate": "2099-01-01" }).to_string()).unwrap();
+    std::fs::write(claude.join("projects").join("p").join("s.jsonl"), format!("{}\n", serde_json::json!({ "timestamp": iso(now - 60), "requestId": "r", "message": { "id": "m", "usage": { "input_tokens": 1_500_000, "output_tokens": 0 } } }))).unwrap();
+    let codex = home.path().join("codex");
+    std::fs::create_dir_all(codex.join("sessions")).unwrap();
+    let u = serde_json::json!({ "input_tokens": 2_000_000, "cached_input_tokens": 0, "output_tokens": 500_000 });
+    std::fs::write(codex.join("sessions").join("rollout.jsonl"), format!("{}\n", serde_json::json!({ "timestamp": iso(now - 60), "payload": { "type": "token_count", "info": { "total_token_usage": u, "last_token_usage": u } } }))).unwrap();
+    let login = |id: &str, kind, dir: &std::path::Path| Profile { id: id.into(), kind, name: "local".into(), dir: dir.to_path_buf(), authenticated: true, plan: None, tier: None, identity: None, email: None };
+    a.svc.update(|st| st.profiles = crate::services::Avail::Ready(vec![login("claude:local", ProfileKind::ClaudeLocal, &claude), login("codex:local", ProfileKind::CodexLocal, &codex)]));
+
+    draw(&mut a);
+    let info = a.side_hits.iter().find(|(_, h)| matches!(h, SideHit::Stats)).expect("ⓘ on usage left").0;
+    let heading = a.side_hits.iter().find(|(_, h)| matches!(h, SideHit::UsageToggle)).unwrap().0;
+    assert!(heading.contains(ratatui::layout::Position { x: info.x, y: info.y }), "the ⓘ sits on the usage header");
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: info.x, row: info.y, modifiers: KeyModifiers::NONE });
+    assert!(!a.usage_expanded, "the ⓘ doesn't toggle the usage block");
+    let id = a.focused().unwrap();
+    assert_eq!(a.panes[&id].view(), Some("stats"));
+
+    draw(&mut a); // starts the scan
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("the scan finishes") {
+            Event::Wake(w) if w == id => break,
+            _ => {}
+        }
+    }
+    let s = draw(&mut a);
+    assert!(s.contains("lifetime") && s.contains("9.00B") && s.contains("2.50M"), "{s}");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.contains("24h") && s.contains("1.50M") && s.contains("4.00M"), "{s}");
 }

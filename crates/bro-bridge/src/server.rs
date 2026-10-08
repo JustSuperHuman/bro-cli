@@ -94,6 +94,17 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/commands", get(rest_sessions::commands))
         .route("/api/sessions/{id}/files", get(rest_sessions::files))
         .route("/api/sessions/{id}/file", get(rest_sessions::file_preview))
+        .route("/api/sessions/{id}/agent-files", get(rest_sessions::agent_files))
+        .route(
+            "/api/sessions/{id}/links/resolve",
+            post(rest_sessions::resolve_links),
+        )
+        .route("/api/sessions/{id}/raw", get(crate::raw_file::raw))
+        .route("/api/sessions/{id}/open", post(rest_sessions::open_file))
+        .route(
+            "/api/sessions/{id}/open-in-editor",
+            post(rest_sessions::open_in_editor),
+        )
         .route("/api/sessions/{id}/focus", post(rest_sessions::focus))
         .route("/api/sessions/{id}/agent", get(rest::unavailable))
         .route("/api/sessions/{id}/agent/attach", any(rest::unavailable))

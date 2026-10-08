@@ -119,7 +119,7 @@ impl App {
         self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.cwd.clone())
     }
 
-    fn term_id(&self, sid: &str) -> Option<PaneId> {
+    pub(super) fn term_id(&self, sid: &str) -> Option<PaneId> {
         self.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.sid == sid)).map(|(id, _)| *id)
     }
 
@@ -153,6 +153,11 @@ impl App {
                 if let Some(pid) = self.term_id(&id) {
                     self.focus_pane(pid);
                 }
+            }
+            BridgeCommand::OpenFile { id, path, line, column } => self.agent_opened_file(&id, path, line, column),
+            BridgeCommand::OpenInEditor { id, path, line, column } => {
+                let pane = self.term_id(&id);
+                self.open_in_editor(pane, path, line, column);
             }
             BridgeCommand::Create { req, reply } => {
                 // no folder from the phone → the current project, like alt+n
@@ -216,6 +221,7 @@ impl App {
                     project_root: t.meta.project.root.clone(),
                     activity: p.activity(),
                     done: self.done.contains(id),
+                    note: self.notes.get(id).cloned(),
                     age_secs: t.meta.started.elapsed().as_secs(),
                     seq: self.seqs.get(id).copied().unwrap_or(*id),
                 })
@@ -307,7 +313,31 @@ impl App {
         self.overlay = Overlay::Folder(Box::new(crate::folder::FolderPicker::new(cands)));
     }
 
-    /// Add a folder as a project (its git root when inside a repo) and make it current.
+    /// Create a typed folder before it becomes a project or a session's working directory.
+    pub(crate) fn create_project_folder(&mut self, dir: PathBuf, request: uuid::Uuid) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = std::fs::create_dir_all(&dir)
+                .and_then(|_| std::fs::metadata(&dir))
+                .map_err(|error| format!("couldn't create folder: {error}"))
+                .and_then(|meta| if meta.is_dir() { Ok(dir) } else { Err("that path is a file; choose a folder".into()) });
+            let _ = tx.send(crate::pane::Event::FolderCreated(request, result));
+        });
+    }
+
+    pub(crate) fn project_folder_created(&mut self, request: uuid::Uuid, result: Result<PathBuf, String>) {
+        let Overlay::Folder(p) = &mut self.overlay else { return };
+        if p.pending != Some(request) {
+            return;
+        }
+        p.pending = None;
+        match result {
+            Ok(dir) => self.add_project(dir),
+            Err(error) => p.error = Some(error),
+        }
+    }
+
+    /// Group the folder under its git root and open the session picker in the selected directory.
     pub(crate) fn add_project(&mut self, dir: std::path::PathBuf) {
         let root = self.svc.project_for(&dir).root;
         let added = self.open_projects.add(root.clone());
@@ -319,7 +349,8 @@ impl App {
             self.side_focus = true;
         }
         let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        self.toast(Kind::Info, if added { format!("opened {name} \u{b7} alt+n starts a session in it") } else { format!("{name} is already open") });
+        self.toast(Kind::Info, if added { format!("opened {name}") } else { format!("{name} is already open") });
+        self.open_launcher(Some(dir), Place::Tab);
     }
 
     /// x on a project row: take it off the sidebar (the folder and its sessions are untouched).
@@ -497,10 +528,10 @@ impl App {
             let seen = visible.contains(id) && self.term_focused;
             if prev == Some(Activity::Working) && a == Activity::Idle && !seen {
                 self.done.insert(*id);
-                notes.push((Kind::AgentDone, format!("{} finished", p.title())));
+                notes.push((Kind::AgentDone, *id, format!("{} finished", p.title())));
             }
             if a == Activity::Blocked && prev.is_some_and(|x| x != Activity::Blocked) && !seen {
-                notes.push((Kind::NeedsYou, format!("{} needs you", p.title())));
+                notes.push((Kind::NeedsYou, *id, format!("{} needs you", p.title())));
             }
             if visible.contains(id) {
                 self.done.remove(id);
@@ -508,7 +539,17 @@ impl App {
         }
         self.agent_state.retain(|id, _| self.panes.contains_key(id));
         self.done.retain(|id| self.panes.contains_key(id));
-        for (k, text) in notes {
+        for (k, id, text) in notes {
+            // say why it waits / what it did, when the transcript tells
+            let view = self.pane_view(id);
+            let extra = match k {
+                Kind::NeedsYou => view.as_ref().and_then(|v| v.reason.clone()),
+                _ => view.as_ref().and_then(|v| v.reason.clone().or_else(|| v.recap.as_ref().map(|r| r.text.clone()))),
+            };
+            let text = match extra {
+                Some(x) => format!("{text} · {}", crate::ui::fit(&x.split_whitespace().collect::<Vec<_>>().join(" "), 72)),
+                None => text,
+            };
             self.raise(k, text);
         }
     }

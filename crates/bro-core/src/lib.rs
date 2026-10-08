@@ -16,10 +16,13 @@ pub mod providers;
 pub mod profiles;
 pub mod creds;
 pub mod sessions;
+pub mod recap;
 pub mod projects;
 pub mod usage;
 pub mod launch;
 pub mod browser;
+pub mod skills;
+pub mod claude_shared;
 pub mod catalogue;
 
 use serde::{Deserialize, Serialize};

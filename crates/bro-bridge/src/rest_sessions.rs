@@ -377,29 +377,228 @@ pub(crate) async fn files(
     }
 }
 
+fn query_number(query: &HashMap<String, String>, key: &str) -> Option<usize> {
+    query
+        .get(key)
+        .and_then(|value| value.trim().parse::<usize>().ok())
+}
+
+/// Bounded text/image preview; see `docs/file-links.md`. File errors stay 400
+/// (older mobile builds read 404 as "host has no previews").
 pub(crate) async fn file_preview(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Response {
-    let Some(session) = state.summary(&id) else {
+    let Some(roots) = state.file_roots(&id) else {
         return api_error(StatusCode::NOT_FOUND, UNKNOWN_SESSION);
     };
     let target = query.get("path").cloned().unwrap_or_default();
-    let line = query
-        .get("line")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(1);
+    let request = crate::file_preview::PreviewRequest {
+        line: query_number(&query, "line").unwrap_or(1),
+        start: query_number(&query, "start"),
+        limit: query_number(&query, "limit"),
+    };
     match tokio::task::spawn_blocking(move || {
-        crate::file_preview::read_preview(&session.cwd, &target, line)
+        crate::file_preview::read_preview(&roots, &target, request)
     })
     .await
     {
-        Ok(Ok(preview)) => Json(preview).into_response(),
+        Ok(Ok(mut preview)) => {
+            if matches!(preview["kind"].as_str(), Some("video" | "audio")) {
+                // Host-relative and token-free; clients append `token=` for media elements.
+                let path: String = url::form_urlencoded::byte_serialize(
+                    preview["path"].as_str().unwrap_or_default().as_bytes(),
+                )
+                .collect();
+                let session: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
+                preview["url"] = json!(format!(
+                    "/api/sessions/{}/raw?path={path}",
+                    session.replace('+', "%20")
+                ));
+            }
+            Json(preview).into_response()
+        }
         Ok(Err(message)) => api_error(StatusCode::BAD_REQUEST, message),
         Err(_) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "File could not be opened.",
         ),
+    }
+}
+
+/// Files the agent sent / touched, newest first (`docs/agent-insights.md` §4).
+pub(crate) async fn agent_files(Path(id): Path<String>, State(state): State<AppState>) -> Response {
+    let (Some(roots), Some(files)) = (state.file_roots(&id), state.agent_files(&id)) else {
+        return api_error(StatusCode::NOT_FOUND, UNKNOWN_SESSION);
+    };
+    match tokio::task::spawn_blocking(move || crate::insights::agent_files_json(&id, &roots, &files)).await {
+        Ok(body) => Json(body).into_response(),
+        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "Agent files could not be listed."),
+    }
+}
+
+/// Most candidates one `links/resolve` request checks.
+const MAX_RESOLVE_CANDIDATES: usize = 200;
+
+/// Which detected path candidates are real files/directories, in order.
+pub(crate) async fn resolve_links(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let Some(roots) = state.file_roots(&id) else {
+        return api_error(StatusCode::NOT_FOUND, UNKNOWN_SESSION);
+    };
+    let candidates: Vec<String> = body["candidates"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .take(MAX_RESOLVE_CANDIDATES)
+                .map(|item| {
+                    item.as_str()
+                        .or_else(|| item["path"].as_str())
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let resolved =
+        tokio::task::spawn_blocking(move || {
+            candidates
+            .into_iter()
+            .map(|path| match crate::file_preview::resolve_path(&roots, &path) {
+                Ok(found) => json!({
+                    "path": path, "exists": true, "kind": found.kind.as_str(),
+                    "resolved": found.path.to_string_lossy(), "relativePath": found.relative,
+                }),
+                Err(_) => json!({ "path": path, "exists": false }),
+            })
+            .collect::<Vec<_>>()
+        })
+        .await;
+    match resolved {
+        Ok(results) => Json(json!({ "results": results })).into_response(),
+        Err(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Links could not be resolved.",
+        ),
+    }
+}
+
+struct OpenTarget {
+    given: String,
+    resolved: crate::file_preview::Resolved,
+    line: Option<u32>,
+    column: Option<u32>,
+}
+
+/// Shared by `open` and `open-in-editor`: the body's file, which must exist.
+/// A `path:line[:col]` suffix is honoured when `line` is not given.
+async fn open_target(
+    state: &AppState,
+    id: &str,
+    body: &Value,
+) -> Result<OpenTarget, (StatusCode, String)> {
+    let roots = state
+        .file_roots(id)
+        .ok_or((StatusCode::NOT_FOUND, UNKNOWN_SESSION.to_owned()))?;
+    let number = |key: &str| {
+        body[key]
+            .as_u64()
+            .map(|n| n.clamp(1, u64::from(u32::MAX)) as u32)
+    };
+    let raw = body["path"].as_str().unwrap_or_default().trim().to_owned();
+    if raw.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "A file path is required.".into()));
+    }
+    let (mut given, mut line, mut column) = (raw.clone(), number("line"), number("column"));
+    if line.is_none() {
+        let (path, parsed_line, parsed_column) = crate::file_links::split_location(&raw);
+        if parsed_line.is_some() {
+            (given, line, column) = (path, parsed_line, parsed_column.or(column));
+        }
+    }
+    let lookup = given.clone();
+    let resolved =
+        tokio::task::spawn_blocking(move || crate::file_preview::resolve_path(&roots, &lookup))
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "File could not be opened.".to_owned(),
+                )
+            })?
+            .map_err(|message| {
+                let status = if message == crate::file_preview::NOT_FOUND {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                (status, message)
+            })?;
+    if resolved.kind != crate::file_preview::Kind::File {
+        return Err((StatusCode::BAD_REQUEST, "This path is not a file.".into()));
+    }
+    Ok(OpenTarget {
+        given,
+        resolved,
+        line,
+        column,
+    })
+}
+
+/// bro addition: show a file to the user everywhere (WS `openFile` + the TUI).
+pub(crate) async fn open_file(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let target = match open_target(&state, &id, &body).await {
+        Ok(target) => target,
+        Err((status, message)) => return api_error(status, message),
+    };
+    let source = body["source"]
+        .as_str()
+        .filter(|source| !source.is_empty())
+        .unwrap_or("agent");
+    state.publish(crate::model::ServerEvent::session(
+        json!({
+            "type": "openFile", "sessionId": id, "path": target.given,
+            "relativePath": target.resolved.relative, "resolved": target.resolved.path.to_string_lossy(),
+            "line": target.line, "column": target.column, "source": source,
+            "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        }),
+        id.clone(),
+    ));
+    state.send_command(BridgeCommand::OpenFile {
+        id,
+        path: target.resolved.path,
+        line: target.line,
+        column: target.column,
+    });
+    let clients = state.clients.load(std::sync::atomic::Ordering::Relaxed);
+    Json(json!({ "opened": true, "clients": clients })).into_response()
+}
+
+/// bro addition: open the file in the host's editor ("Open on desktop").
+pub(crate) async fn open_in_editor(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Response {
+    match open_target(&state, &id, &body).await {
+        Ok(target) => {
+            state.send_command(BridgeCommand::OpenInEditor {
+                id,
+                path: target.resolved.path,
+                line: target.line,
+                column: target.column,
+            });
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err((status, message)) => api_error(status, message),
     }
 }

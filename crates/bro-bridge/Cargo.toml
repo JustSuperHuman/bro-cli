@@ -30,6 +30,8 @@ tower-http.workspace = true
 if-addrs.workspace = true
 json5.workspace = true
 qrcode.workspace = true
+regex.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

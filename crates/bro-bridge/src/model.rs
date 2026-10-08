@@ -42,6 +42,14 @@ pub struct TerminalSessionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<u32>,
     pub buffered_bytes: usize,
+    /// Why the agent waits / what state it is in (`docs/agent-insights.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<crate::insights::Attention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recap: Option<crate::insights::Recap>,
+    /// Counts of files the agent sent / touched; lists at `agent-files`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_files: Option<crate::insights::AgentFilesCount>,
 }
 
 impl TerminalSessionSummary {
@@ -78,6 +86,9 @@ impl TerminalSessionSummary {
             exit_code: None,
             signal: None,
             buffered_bytes: 0,
+            attention: None,
+            recap: None,
+            agent_files: None,
         }
     }
 }

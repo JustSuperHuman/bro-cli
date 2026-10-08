@@ -132,8 +132,8 @@ pub fn parse_id(id: &str) -> Option<(ProfileKind, &str)> {
     match (family, name) {
         ("claude", "local") => Some((ProfileKind::ClaudeLocal, name)),
         ("codex", "local") => Some((ProfileKind::CodexLocal, name)),
-        ("claude", n) if valid_name(n) => Some((ProfileKind::ClaudeAccount, n)),
-        ("codex", n) if valid_name(n) => Some((ProfileKind::CodexProfile, n)),
+        ("claude", n) if safe_component(n) => Some((ProfileKind::ClaudeAccount, n)),
+        ("codex", n) if safe_component(n) => Some((ProfileKind::CodexProfile, n)),
         _ => None,
     }
 }
@@ -163,16 +163,16 @@ pub fn get(id: &str) -> Option<Profile> {
 pub fn create(kind: ProfileKind, name: &str) -> anyhow::Result<Profile> {
     let name = name.trim();
     if !valid_name(name) {
-        bail!("Invalid profile name: {name:?} (letters, digits, dot, dash and underscore only)");
+        bail!("Use 1–40 letters, digits, dots, dashes or underscores. The name 'local' is reserved.");
     }
     let dir = dir_for(kind, name);
     match kind {
         ProfileKind::ClaudeLocal | ProfileKind::CodexLocal => bail!("the local profile always exists"),
         ProfileKind::ClaudeAccount => {
-            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            create_named_dir(&dir)?;
         }
         ProfileKind::CodexProfile => {
-            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            create_named_dir(&dir)?;
             let from = paths::codex_local_dir();
             for item in CODEX_SEEDED {
                 let (src, dst) = (from.join(item), dir.join(item));
@@ -186,6 +186,14 @@ pub fn create(kind: ProfileKind, name: &str) -> anyhow::Result<Profile> {
     Ok(describe(kind, name, dir))
 }
 
+fn create_named_dir(dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir.parent().context("profile directory has no parent")?)?;
+    std::fs::create_dir(dir).with_context(|| {
+        if dir.exists() { "A profile with that name already exists. Choose another name or log in to the existing profile.".to_string() }
+        else { format!("creating {}", dir.display()) }
+    })
+}
+
 /// Delete a named profile's directory. Local logins are never removed.
 pub fn remove(id: &str) -> anyhow::Result<()> {
     let (kind, name) = parse_id(id).ok_or_else(|| anyhow!("unknown profile id {id:?}"))?;
@@ -196,15 +204,35 @@ pub fn remove(id: &str) -> anyhow::Result<()> {
     if !dir.exists() {
         bail!("no such profile: {id}");
     }
+    let root = dir.parent().context("profile directory has no parent")?.canonicalize()?;
+    let resolved = dir.canonicalize()?;
+    if resolved.parent() != Some(root.as_path()) {
+        bail!("Profile directory points outside its profile folder; remove the link manually.");
+    }
+    if kind == ProfileKind::ClaudeAccount {
+        crate::claude_shared::unshare_skills(&dir);
+    }
     std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))
 }
 
-/// `^[A-Za-z0-9._-]+$`
+/// Names for new profiles. Existing longer v1 names still resolve through `parse_id`.
 pub fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
+    safe_component(name)
+        && name.len() <= 40
+        && !name.eq_ignore_ascii_case("local")
+        && !name.ends_with('.')
+        && !windows_reserved_name(name)
+}
+
+fn safe_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".."
         && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|p| stem.strip_prefix(p).is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9')))
 }
 
 /// Command that performs an interactive login for this profile inside a PTY

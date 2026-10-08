@@ -88,6 +88,7 @@ pub struct Data {
 /// Something clickable in the launcher (recorded while drawing).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
+    Profiles,
     Harness(Harness),
     /// index into the selectable run-on rows
     Row(usize),
@@ -105,6 +106,7 @@ pub enum Hit {
 pub enum Outcome {
     None,
     Close,
+    Profiles,
     Launch(LaunchSpec, Place),
 }
 
@@ -518,6 +520,7 @@ impl Launcher {
         }
         let Some(&(_, hit)) = self.hits.iter().find(|(r, _)| r.contains(pos)) else { return Outcome::None };
         match hit {
+            Hit::Profiles => return Outcome::Profiles,
             Hit::Harness(h) => {
                 while self.harness != h {
                     self.set_harness(1);
@@ -567,6 +570,9 @@ impl Launcher {
 
     /// Handle a key. The launcher is modal: it takes every key.
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
+        if k.code == KeyCode::Char('o') && k.modifiers == KeyModifiers::ALT {
+            return Outcome::Profiles;
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
             KeyCode::Esc => {

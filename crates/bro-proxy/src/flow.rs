@@ -64,6 +64,8 @@ struct Ctx<'a> {
     resolved: Resolved,
     codex_auth: Option<bro_core::creds::CodexAuth>,
     chatgpt: bool,
+    /// Request compression's memo entries, recorded once the request went upstream
+    trim: Option<crate::trim::Commit>,
 }
 
 async fn run(
@@ -79,6 +81,12 @@ async fn run(
     if !json.is_object() {
         return Err(ProxyError::invalid("request body must be a JSON object"));
     }
+    // Optional compression, on the inbound shape (before translation / dispatch).
+    let trimmed = state.trim.apply(inbound, json).await;
+    if let Some(rec) = slot.as_mut() {
+        rec.set_trim(trimmed.tokens);
+    }
+    let json = trimmed.json;
     let client_model = json
         .get("model")
         .and_then(Value::as_str)
@@ -105,6 +113,7 @@ async fn run(
         resolved,
         codex_auth,
         chatgpt,
+        trim: trimmed.commit,
     };
     if inbound == route.upstream.dialect() {
         passthrough(ctx, json, slot).await
@@ -137,6 +146,7 @@ async fn passthrough(
         resolved,
         codex_auth,
         chatgpt,
+        trim,
         ..
     } = ctx;
     let obj = json.as_object_mut().expect("checked object");
@@ -200,6 +210,9 @@ async fn passthrough(
         codex_auth,
     };
     let resp = upstream::send(state, route, &call).await?;
+    if let Some(c) = trim {
+        state.trim.commit(c);
+    }
     let account = resp.account.clone();
     if let Some(rec) = slot.as_mut() {
         rec.set_account(account.clone());
@@ -265,6 +278,7 @@ async fn translated(
         resolved,
         codex_auth,
         chatgpt,
+        trim,
     } = ctx;
     let up = route.upstream.dialect();
     let claude_oauth = matches!(
@@ -359,6 +373,9 @@ async fn translated(
         codex_auth,
     };
     let resp = upstream::send(state, route, &call).await?;
+    if let Some(c) = trim {
+        state.trim.commit(c);
+    }
     let account = resp.account.clone();
     if let Some(rec) = slot.as_mut() {
         rec.set_account(account.clone());

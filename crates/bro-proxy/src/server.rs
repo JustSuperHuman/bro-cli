@@ -232,10 +232,13 @@ async fn count_tokens(
     if route.upstream.dialect() != Dialect::Anthropic {
         return estimate();
     }
-    let Ok(mut v) = serde_json::from_slice::<Value>(&body) else {
+    let Ok(v) = serde_json::from_slice::<Value>(&body) else {
         return ProxyError::invalid("request body was not valid JSON")
             .into_response(Dialect::Anthropic);
     };
+    // Count what a real request would send: the same compression, without recording it.
+    let trimmed = s.trim.apply(Dialect::Anthropic, v).await;
+    let mut v = trimmed.json;
     let client_model = v
         .get("model")
         .and_then(Value::as_str)
@@ -245,6 +248,7 @@ async fn count_tokens(
     v["model"] = json!(mapped);
     let mut rec = Recorder::new(s.clone(), &route, Dialect::Anthropic);
     rec.set_model(&mapped);
+    rec.set_trim(trimmed.tokens);
     let call = UpstreamCall {
         endpoint: Endpoint::CountTokens,
         body: Some(Bytes::from(serde_json::to_vec(&v).unwrap_or_default())),

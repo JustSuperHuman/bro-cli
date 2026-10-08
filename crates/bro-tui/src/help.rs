@@ -41,7 +41,8 @@ pub fn lines(km: &Keymap) -> Vec<Line> {
         ("launcher (alt+n)", &[("type", "filter the column"), ("tab ← →", "next column"), ("↑ ↓", "pick"), ("ctrl+e", "permission: default → auto → skip"), ("ctrl+b", "browser"), ("ctrl+s", "new tab / split"), ("⏎", "launch")]),
         ("clipboard", &[("ctrl+v / shift+insert", "paste text into the focused field or terminal"), ("alt+v", "paste a screenshot / copied files as paths")]),
         ("usage", &[("click agent / account", "new session in the current project"), ("click usage heading", "expand / collapse accounts"), ("click Claude arrow", "show / hide Fable allowance"), ("alt+u", "full usage details")]),
-        ("terminal", &[("alt+↑ in Codex", "edit queued input (prefix ↑ still moves pane focus)"), ("click a link", "open in your default browser or application"), ("ctrl+click", "open a link even when the program uses the mouse"), ("drag", "select text — copied when you let go"), ("wheel", "scroll back (when the program doesn't use the mouse)"), ("shift+drag", "select even when the program uses the mouse")]),
+        ("terminal", &[("alt+↑ in Codex", "edit queued input (prefix ↑ still moves pane focus)"), ("click a link", "open in your default browser or application"),
+            ("click a file path", "preview it at that line · e editor · c copy · @ mention · prefix f: the file an agent opened"), ("ctrl+click", "open a link even when the program uses the mouse"), ("drag", "select text — copied when you let go"), ("wheel", "scroll back (when the program doesn't use the mouse)"), ("shift+drag", "select even when the program uses the mouse")]),
         ("mouse", &[("click", "sidebar rows, panes"), ("drag a divider", "resize"), ("drag sidebar edge ↔", "resize sidebar (saved for next launch)"), ("double-click edge", "reset sidebar to automatic width"), ("× on a frame", "close the pane")]),
     ];
     for (head, keys) in sheet {

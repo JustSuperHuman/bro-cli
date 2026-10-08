@@ -28,6 +28,10 @@ const MAX_OSC_BUFFER: usize = 4096;
 pub const NOTIFY_THROTTLE: Duration = Duration::from_millis(4000);
 /// How long a bare BEL waits for a prompt to render before it is published.
 pub const BELL_SETTLE: Duration = Duration::from_millis(300);
+/// How long an agent-state notification ("needs input", "finished") waits so bro's
+/// transcript insights (why it waits, the recap) can land first: the transcript is
+/// polled about once a second and insights are published at most every 500 ms.
+pub const INSIGHT_SETTLE: Duration = Duration::from_millis(2000);
 
 /// A signal found in a session's output.
 #[derive(Clone, Debug, PartialEq, Eq)]

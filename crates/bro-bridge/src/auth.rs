@@ -218,6 +218,31 @@ mod tests {
     }
 
     #[test]
+    fn media_urls_authorize_with_a_query_token() {
+        // `<video src>` can't send headers: the token rides after `path=`.
+        let headers = HeaderMap::new();
+        let with = |query: &str| -> Uri { format!("/api/sessions/s/raw?{query}").parse().unwrap() };
+        assert!(is_authorized(
+            remote(),
+            &headers,
+            &with("path=a%2Fb.mp4&token=t%2B1"),
+            "t+1"
+        ));
+        assert!(!is_authorized(
+            remote(),
+            &headers,
+            &with("path=a%2Fb.mp4&token=wrong"),
+            "t+1"
+        ));
+        assert!(!is_authorized(
+            remote(),
+            &headers,
+            &with("path=a%2Fb.mp4"),
+            "t+1"
+        ));
+    }
+
+    #[test]
     fn loopback_needs_no_token() {
         let headers = HeaderMap::new();
         let uri: Uri = "/api/bootstrap".parse().unwrap();

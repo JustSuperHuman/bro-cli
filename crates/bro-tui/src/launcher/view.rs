@@ -32,6 +32,11 @@ fn draw_inner(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64, 
     let close = Rect { x: r.right().saturating_sub(5), y: r.y, width: 3, height: 1 };
     ui::line(f, close, vec![Span::styled(" × ", fg(t.danger).add_modifier(Modifier::BOLD))]);
     hits.push((close, Hit::Close));
+    if r.width >= 42 {
+        let manage = Rect { x: r.right().saturating_sub(35), y: r.y, width: 28, height: 1 };
+        ui::line(f, manage, vec![Span::styled(" Manage profiles (alt+o) ", ui::bold_accent(t))]);
+        hits.push((manage, Hit::Profiles));
+    }
     let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     let row = |y: u16| Rect { y, height: 1, ..inner };
     let mut y = inner.y;

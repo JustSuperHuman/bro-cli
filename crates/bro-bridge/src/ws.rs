@@ -40,6 +40,47 @@ impl Drop for ClientGuard {
     }
 }
 
+/// This connection's slot -> session subscriptions. Keeps [`AppState::viewers`] in step
+/// on every change and releases them all when the connection ends, however it ends.
+struct Subscriptions {
+    state: AppState,
+    slots: HashMap<String, String>,
+}
+
+impl Subscriptions {
+    fn new(state: &AppState) -> Self {
+        Self {
+            state: state.clone(),
+            slots: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, slot: String, session_id: String) {
+        self.state.add_viewer(&session_id);
+        if let Some(previous) = self.slots.insert(slot, session_id) {
+            self.state.remove_viewer(&previous);
+        }
+    }
+
+    fn remove(&mut self, slot: &str) {
+        if let Some(previous) = self.slots.remove(slot) {
+            self.state.remove_viewer(&previous);
+        }
+    }
+
+    fn watches(&self, session_id: &str) -> bool {
+        self.slots.values().any(|value| value == session_id)
+    }
+}
+
+impl Drop for Subscriptions {
+    fn drop(&mut self) {
+        for session_id in self.slots.values() {
+            self.state.remove_viewer(session_id);
+        }
+    }
+}
+
 fn text(value: &Value) -> Message {
     Message::Text(value.to_string().into())
 }
@@ -55,7 +96,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     }
     // Per-connection replies from background tasks (create results).
     let (direct_tx, mut direct_rx) = mpsc::unbounded_channel::<Value>();
-    let mut subscriptions: HashMap<String, String> = HashMap::new();
+    let mut subscriptions = Subscriptions::new(&state);
     // Output at or below this seq is already contained in the snapshot sent.
     let mut snapshot_seq: HashMap<String, u64> = HashMap::new();
     loop {
@@ -93,7 +134,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                 let watched = event
                     .session_id
                     .as_ref()
-                    .is_none_or(|id| subscriptions.values().any(|value| value == id));
+                    .is_none_or(|id| subscriptions.watches(id));
                 let value = if event.output && !watched {
                     json!({ "type": "activity", "sessionId": event.session_id, "seq": event.value["seq"] })
                 } else if event.output {
@@ -122,7 +163,7 @@ async fn client_socket(socket: WebSocket, state: AppState) {
 fn handle_message(
     state: &AppState,
     message: ClientMessage,
-    subscriptions: &mut HashMap<String, String>,
+    subscriptions: &mut Subscriptions,
     snapshot_seq: &mut HashMap<String, u64>,
     direct: &mpsc::UnboundedSender<Value>,
 ) -> Option<Value> {
@@ -135,7 +176,7 @@ fn handle_message(
             Some(snapshot)
         }
         ClientMessage::Unsubscribe { slot } => {
-            subscriptions.remove(&slot.unwrap_or_else(|| "main".into()));
+            subscriptions.remove(slot.as_deref().unwrap_or("main"));
             None
         }
         ClientMessage::Input { session_id, data } => {

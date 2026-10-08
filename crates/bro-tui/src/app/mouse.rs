@@ -29,10 +29,24 @@ impl App {
             let wheel = matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp);
             let down = matches!(m.kind, MouseEventKind::ScrollDown);
             match &mut self.overlay {
+                Overlay::File(v) => {
+                    let o = v.mouse(m);
+                    self.file_view_outcome(o);
+                    return;
+                }
+                Overlay::AgentFiles(v) => {
+                    let o = v.mouse(m);
+                    self.agent_files_outcome(o);
+                    return;
+                }
                 Overlay::Launcher(l) if left => {
                     match l.click(pos) {
                         crate::launcher::Outcome::None => {}
                         crate::launcher::Outcome::Close => self.overlay = Overlay::None,
+                        crate::launcher::Outcome::Profiles => {
+                            self.overlay = Overlay::None;
+                            self.open_view("profiles");
+                        }
                         crate::launcher::Outcome::Launch(spec, place) => {
                             self.overlay = Overlay::None;
                             self.launch_spec(spec, place);
@@ -45,9 +59,13 @@ impl App {
                     return;
                 }
                 Overlay::Folder(p) if left => {
-                    if let crate::folder::Outcome::Open(dir) = p.click(pos) {
-                        self.overlay = Overlay::None;
-                        self.add_project(dir);
+                    match p.click(pos) {
+                        crate::folder::Outcome::Open(dir) => {
+                            self.overlay = Overlay::None;
+                            self.add_project(dir);
+                        }
+                        crate::folder::Outcome::Create(dir, request) => self.create_project_folder(dir, request),
+                        _ => {}
                     }
                     return;
                 }
@@ -138,6 +156,7 @@ impl App {
                         SideHit::Usage => self.open_view("usage"),
                         SideHit::LaunchUsage(h, profile) => self.launch_usage(h, profile),
                         SideHit::UsageToggle => self.toggle_usage_details(),
+                        SideHit::Stats => self.open_view("stats"),
                         SideHit::Proxy => self.open_view("proxy"),
                         SideHit::Bridge => self.open_view("bridge"),
                         SideHit::Quick(h) => self.quick_launch(h),
@@ -151,8 +170,14 @@ impl App {
                             self.ask_close(info.pane);
                         }
                 }
-                MouseEventKind::ScrollDown => self.side_scroll += 2,
-                MouseEventKind::ScrollUp => self.side_scroll = self.side_scroll.saturating_sub(2),
+                MouseEventKind::ScrollDown => {
+                    self.side_scroll += 2;
+                    self.side_nav();
+                }
+                MouseEventKind::ScrollUp => {
+                    self.side_scroll = self.side_scroll.saturating_sub(2);
+                    self.side_nav();
+                }
                 _ => {}
             }
             return;
@@ -213,7 +238,11 @@ impl App {
             self.sel = None;
             if let Some((id, pressed, uri)) = self.link_press.take() {
                 if pressed == pos && self.inner.iter().any(|(pane, area)| *pane == id && area.contains(pos)) {
-                    let _ = self.tx.send(crate::pane::Event::OpenLink(uri));
+                    if uri.starts_with("file:") {
+                        self.open_file_link(id, &uri);
+                    } else {
+                        let _ = self.tx.send(crate::pane::Event::OpenLink(uri));
+                    }
                 }
                 return;
             }

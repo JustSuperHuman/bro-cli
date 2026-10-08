@@ -35,10 +35,16 @@ pub enum Event {
     ClipboardText(std::time::Instant, Option<String>),
     /// A terminal link was clicked; open it outside the input/render loop.
     OpenLink(String),
+    /// The file preview finished loading a page (or failed).
+    FileView(Box<crate::file_view::Loaded>),
+    /// Run a terminal editor (vim, hx…) in a pane beside the session.
+    EditorPane(Box<crate::editor::EditorPane>),
     /// A theme file changed on disk.
     ThemeFilesChanged,
     /// Another `bro` was started in this folder: open it here as a project.
     OpenProject(std::path::PathBuf),
+    /// The folder picker finished creating a directory on a background thread.
+    FolderCreated(uuid::Uuid, Result<std::path::PathBuf, String>),
 }
 
 /// Where a new pane goes.

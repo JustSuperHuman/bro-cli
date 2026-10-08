@@ -123,6 +123,10 @@ impl App {
             Overlay::Launcher(l) => match l.key(k) {
                 Outcome::None => {}
                 Outcome::Close => self.overlay = Overlay::None,
+                Outcome::Profiles => {
+                    self.overlay = Overlay::None;
+                    self.open_view("profiles");
+                }
                 Outcome::Launch(spec, place) => {
                     self.overlay = Overlay::None;
                     self.launch_spec(spec, place);
@@ -175,8 +179,17 @@ impl App {
                     self.overlay = Overlay::None;
                     self.add_project(dir);
                 }
+                crate::folder::Outcome::Create(dir, request) => self.create_project_folder(dir, request),
             },
             Overlay::Confirm(_) => self.confirm_key(k),
+            Overlay::File(v) => {
+                let o = v.key(k);
+                self.file_view_outcome(o);
+            }
+            Overlay::AgentFiles(v) => {
+                let o = v.key(k);
+                self.agent_files_outcome(o);
+            }
         }
     }
 
@@ -303,6 +316,11 @@ impl App {
                     self.side_focus = false;
                 }
             _ => {}
+        }
+        // a move shows the scrollbar, even one that's stopped at the end
+        let nav = matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Char('j' | 'k' | 'g' | 'G'));
+        if nav || self.side_sel != sel {
+            self.side_nav();
         }
         let rows = self.rows();
         if let Some(root) = rows.get(self.side_sel).and_then(|r| self.row_root(&rows, r)) {

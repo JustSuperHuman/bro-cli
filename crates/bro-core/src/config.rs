@@ -147,6 +147,8 @@ pub struct Settings {
     pub bridge: BridgeSettings,
     pub proxy: ProxySettings,
     pub voice: VoiceSettings,
+    pub insights: InsightsSettings,
+    pub auto_resume: AutoResumeSettings,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
     pub keys: BTreeMap<String, String>,
 }
@@ -159,6 +161,48 @@ pub struct BridgeSettings {
     pub automatic_port: bool,
     pub bind: String,
     pub web_interface: bool,
+    /// While a remote client (phone, web) watches a session, its terminal is at least this
+    /// many columns wide, even if the desktop tile is narrower (the tile then shows the
+    /// bottom-left of it). 0 turns the column minimum off.
+    pub remote_min_cols: u16,
+    /// Same for rows. 0 turns the row minimum off.
+    pub remote_min_rows: u16,
+    /// How long the minimum is kept after the last remote viewer leaves, so a phone that
+    /// briefly backgrounds the app doesn't make the session resize back and forth.
+    pub remote_min_grace_secs: u64,
+}
+
+/// Agent insights (why a pane waits, recaps, files it touched or sent).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InsightsSettings {
+    /// Ask Claude for a `/recap` of a pane left waiting unseen for 3 minutes (a few cents each).
+    pub generate_recaps: bool,
+}
+
+impl Default for InsightsSettings {
+    fn default() -> Self {
+        Self { generate_recaps: true }
+    }
+}
+
+/// Nudge an agent that stopped on an API error (connection lost, overloaded, rate / usage limit) to carry on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoResumeSettings {
+    pub enabled: bool,
+    /// What to type to resume
+    pub prompt: String,
+    /// Retries per stall before giving up (a usage limit's wait for its reset doesn't count)
+    pub max_attempts: u32,
+    /// After a session / weekly limit, resume once it resets
+    pub after_limit_reset: bool,
+}
+
+impl Default for AutoResumeSettings {
+    fn default() -> Self {
+        Self { enabled: true, prompt: "continue".into(), max_attempts: 6, after_limit_reset: true }
+    }
 }
 
 /// Push-to-talk to the orchestrator: hold the hotkey anywhere, speak, release.
@@ -189,6 +233,21 @@ pub struct ProxySettings {
     pub enabled: bool,
     /// 0 = pick a free port
     pub port: u16,
+    /// Compress requests that go through bro-proxy (llmtrim). Off by default.
+    pub trim: bool,
+    /// While `trim` is on, newly launched native Claude logins and Codex logins are routed
+    /// through bro-proxy (as their own login) so compression applies to them too.
+    pub trim_route_native: bool,
+    /// "safe" (terminal-noise normalization of tool output only) or "lossless" (also llmtrim's
+    /// lossless preset: JSON minify, columnar arrays, exact-duplicate lines).
+    pub trim_level: String,
+}
+
+impl ProxySettings {
+    /// Native launches should go through the proxy (trim on and routing allowed).
+    pub fn routes_native(&self) -> bool {
+        self.enabled && self.trim && self.trim_route_native
+    }
 }
 
 impl Default for Settings {
@@ -204,6 +263,8 @@ impl Default for Settings {
             bridge: BridgeSettings::default(),
             proxy: ProxySettings::default(),
             voice: VoiceSettings::default(),
+            insights: InsightsSettings::default(),
+            auto_resume: AutoResumeSettings::default(),
             keys: BTreeMap::new(),
         }
     }
@@ -214,9 +275,24 @@ impl Default for VoiceSettings {
     }
 }
 impl Default for BridgeSettings {
-    fn default() -> Self { Self { enabled: true, port: 10001, automatic_port: true, bind: "0.0.0.0".into(), web_interface: true } }
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: 10001,
+            automatic_port: true,
+            bind: "0.0.0.0".into(),
+            web_interface: true,
+            remote_min_cols: 80,
+            remote_min_rows: 50,
+            remote_min_grace_secs: 15,
+        }
+    }
 }
-impl Default for ProxySettings { fn default() -> Self { Self { enabled: true, port: 3458 } } }
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self { enabled: true, port: 3458, trim: false, trim_route_native: true, trim_level: "safe".into() }
+    }
+}
 
 impl Settings {
     /// Missing or malformed file → defaults (never fails).
@@ -378,6 +454,16 @@ mod tests {
         assert_eq!(back.sidebar_width, Some(58));
         assert_eq!(back.keys["palette"], "ctrl+k");
         assert_eq!(back.bridge.port, 10001);
+        assert_eq!((back.bridge.remote_min_cols, back.bridge.remote_min_rows, back.bridge.remote_min_grace_secs), (80, 50, 15));
+        assert!(!back.proxy.trim && back.proxy.trim_route_native && back.proxy.trim_level == "safe");
+        assert!(!back.proxy.routes_native(), "trim is off by default");
+        std::fs::write(paths::settings_path(), "[proxy]\ntrim = true\n").unwrap();
+        let trimmed = Settings::load();
+        assert!(trimmed.proxy.trim && trimmed.proxy.enabled && trimmed.proxy.port == 3458);
+        assert!(trimmed.proxy.routes_native(), "older files without the new keys get the defaults");
+        std::fs::write(paths::settings_path(), "[bridge]\nport = 10002\nremote_min_rows = 0\n").unwrap();
+        let bridge = Settings::load().bridge;
+        assert_eq!((bridge.port, bridge.remote_min_cols, bridge.remote_min_rows, bridge.remote_min_grace_secs), (10002, 80, 0, 15));
         std::fs::write(paths::settings_path(), "theme = 3").unwrap();
         assert_eq!(Settings::load().theme, "graphite");
     }

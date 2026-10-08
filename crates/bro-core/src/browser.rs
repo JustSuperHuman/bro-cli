@@ -94,7 +94,7 @@ pub fn owner_config_dir(st: &BrowserState) -> PathBuf {
     }
 }
 
-fn write_if_changed(path: &Path, body: &str) -> std::io::Result<()> {
+pub(crate) fn write_if_changed(path: &Path, body: &str) -> std::io::Result<()> {
     if std::fs::read_to_string(path).ok().as_deref() == Some(body) {
         return Ok(());
     }

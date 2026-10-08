@@ -68,6 +68,16 @@ pub struct LaunchCtx {
     pub proxy_base: Option<String>,
     /// Token the proxy expects from local clients
     pub proxy_token: Option<String>,
+    /// Route native Claude / Codex logins through the proxy as their own login (request
+    /// compression is on; see `ProxySettings::routes_native`). Ignored without `proxy_base`.
+    pub route_native: bool,
+}
+
+impl LaunchCtx {
+    /// The proxy is running and native logins should go through it.
+    fn routes_native(&self) -> bool {
+        self.route_native && self.proxy_base.as_deref().is_some_and(|b| !b.is_empty())
+    }
 }
 
 /// A proxy route the caller must register with bro-proxy before spawning.

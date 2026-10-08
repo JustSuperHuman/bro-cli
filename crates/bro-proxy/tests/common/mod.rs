@@ -226,6 +226,7 @@ pub async fn env_with(token: Option<&str>) -> Env {
             })
         })),
         keepalive: Duration::from_secs(15),
+        ..ProxyOptions::default()
     };
     let cfg = ProxyConfig {
         bind: "127.0.0.1".into(),

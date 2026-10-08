@@ -4,12 +4,15 @@
 //! into bro-core / bro-proxy / bro-bridge go through [`services`] (background threads + panic guards).
 //! Core derived from z4-oriel (MIT).
 
+mod agent_files;
 mod alerts;
 mod archive;
 mod app;
 mod cli;
 mod continue_picker;
 mod clip;
+mod editor;
+mod file_view;
 mod folder;
 mod fuzzy;
 mod help;
@@ -22,6 +25,7 @@ mod palette;
 mod pane;
 mod paste_burst;
 mod projects;
+mod open_cmd;
 mod proxy_cmd;
 mod panes;
 mod recents;
@@ -50,6 +54,20 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("bro proxy: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(cli::Command::OpenHelp) => {
+            print!("{}", open_cmd::HELP);
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Command::Open(args)) => match open_cmd::run(&args, &open_cmd::Context::from_env()) {
+            Ok(done) => {
+                println!("{done}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("bro open: {e}");
                 ExitCode::FAILURE
             }
         },

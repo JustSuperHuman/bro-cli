@@ -69,6 +69,9 @@ pub(crate) struct AppState {
     pub runtime: Arc<OnceLock<tokio::runtime::Handle>>,
     /// Connected `/ws` clients.
     pub clients: Arc<AtomicUsize>,
+    /// Remote `/ws` subscriptions per session id (one per client slot). bro uses it to
+    /// give watched sessions a minimum size; see [`crate::Bridge::remote_viewers`].
+    pub viewers: Arc<Mutex<HashMap<String, usize>>>,
     pub running: Arc<AtomicBool>,
     pub last_error: Arc<Mutex<Option<String>>>,
     /// Flipped to true on shutdown; websocket loops close on it.
@@ -105,9 +108,29 @@ impl AppState {
             orchestrator,
             runtime: Arc::new(OnceLock::new()),
             clients: Arc::new(AtomicUsize::new(0)),
+            viewers: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
             last_error: Arc::new(Mutex::new(None)),
             shutdown,
+        }
+    }
+
+    /// Remote subscriptions to `session_id` right now.
+    pub fn remote_viewers(&self, session_id: &str) -> usize {
+        self.viewers.lock().get(session_id).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn add_viewer(&self, session_id: &str) {
+        *self.viewers.lock().entry(session_id.to_owned()).or_insert(0) += 1;
+    }
+
+    pub(crate) fn remove_viewer(&self, session_id: &str) {
+        let mut viewers = self.viewers.lock();
+        if let Some(count) = viewers.get_mut(session_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                viewers.remove(session_id);
+            }
         }
     }
 
@@ -327,6 +350,16 @@ impl AppState {
             .sessions
             .get(session_id)
             .map(|session| session.summary.clone())
+    }
+
+    /// Where file references from this session may resolve (cwd + project root).
+    pub fn file_roots(&self, session_id: &str) -> Option<crate::file_preview::ResolveRoots> {
+        let inner = self.inner.lock();
+        let session = inner.sessions.get(session_id)?;
+        Some(crate::file_preview::ResolveRoots {
+            cwd: session.summary.cwd.clone().into(),
+            project: session.project_dir.clone().map(Into::into),
+        })
     }
 
     /// The snapshot plus the output seq it already contains.
@@ -594,6 +627,29 @@ impl AppState {
     }
 
     fn handle_transition(&self, session_id: &str, transition: Transition) {
+        // Wait for bro's insights so the body can say why it waits / what it did.
+        if let Some(runtime) = self.runtime.get() {
+            if let Transition::Awaiting { .. } = transition {
+                // Settle the bell and start the throttle now, so a bell rung meanwhile
+                // can't publish a generic "Task finished" ahead of this alert.
+                let mut center = self.notifications.lock();
+                center.cancel_bell(session_id);
+                center.mark(session_id, std::time::Instant::now());
+            }
+            let state = self.clone();
+            let id = session_id.to_owned();
+            runtime.spawn(async move {
+                tokio::time::sleep(crate::notifications::INSIGHT_SETTLE).await;
+                if state.summary(&id).is_some() {
+                    state.publish_transition(&id, transition);
+                }
+            });
+            return;
+        }
+        self.publish_transition(session_id, transition);
+    }
+
+    fn publish_transition(&self, session_id: &str, transition: Transition) {
         match transition {
             Transition::Done => self.publish_terminal_notification(
                 session_id,

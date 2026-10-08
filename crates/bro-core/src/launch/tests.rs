@@ -8,7 +8,7 @@ use std::path::Path;
 const PROXY: &str = "http://127.0.0.1:3458";
 
 fn ctx() -> LaunchCtx {
-    LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: Some("tok".into()) }
+    LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: Some("tok".into()), route_native: false }
 }
 
 fn spec(harness: Harness, profile: Option<&str>, provider: Option<&str>, model: Option<&str>) -> LaunchSpec {
@@ -139,7 +139,7 @@ fn claude_openai_provider_routes_through_proxy() {
 #[test]
 fn claude_on_codex_login_and_pool() {
     let _sb = setup();
-    let c = build(&spec(Harness::Claude, None, Some("codex:smol"), Some("gpt-5.3-codex")), &LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: None }).unwrap();
+    let c = build(&spec(Harness::Claude, None, Some("codex:smol"), Some("gpt-5.3-codex")), &LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: None, route_native: false }).unwrap();
     assert_eq!(c.route.as_ref().unwrap().upstream, "codex:smol");
     assert_eq!(env(&c, "ANTHROPIC_AUTH_TOKEN"), Some("bro"));
     assert_eq!(env(&c, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), Some("1"));
@@ -184,6 +184,11 @@ fn claude_resume_same_and_cross_profile() {
     assert!(work.join("projects").join("F--work").join(format!("{id}.jsonl")).exists());
 }
 
+/// Codex args minus `--no-daemon`, which depends on whether the test runs elevated.
+fn codex_args(c: &CommandSpec) -> Vec<&str> {
+    c.args.iter().map(String::as_str).filter(|a| *a != "--no-daemon").collect()
+}
+
 #[test]
 fn codex_profile_native_and_resume() {
     let sb = setup();
@@ -191,7 +196,8 @@ fn codex_profile_native_and_resume() {
     s.permission = Permission::Skip;
     let c = build(&s, &ctx()).unwrap();
     assert!(env(&c, "CODEX_HOME").unwrap().ends_with("smol"));
-    assert_eq!(c.args, ["--yolo", "--model", "gpt-5.3-codex"]);
+    assert_eq!(c.args.iter().any(|a| a == "--no-daemon"), codex::elevated(), "--no-daemon exactly when elevated");
+    assert_eq!(codex_args(&c), ["--yolo", "--model", "gpt-5.3-codex"]);
     assert_eq!(c.label, "codex · smol · gpt-5.3-codex");
 
     // A rollout owned by the local login, resumed as smol → staged + fork.
@@ -203,14 +209,14 @@ fn codex_profile_native_and_resume() {
     s.model = None;
     s.resume = Some(Resume { session_id: id.into(), fork: false });
     let c = build(&s, &ctx()).unwrap();
-    assert_eq!(c.args, ["fork", id]);
+    assert_eq!(codex_args(&c), ["fork", id]);
     assert_eq!(c.cleanup.len(), 1);
     assert!(c.cleanup[0].starts_with(crate::paths::codex_profiles_dir().join("smol")));
     crate::sessions::cleanup_staged(&c.cleanup);
 
     s.profile_id = Some("codex:local".into());
     let c = build(&s, &ctx()).unwrap();
-    assert_eq!(c.args, ["resume", id]);
+    assert_eq!(codex_args(&c), ["resume", id]);
     assert!(c.cleanup.is_empty());
 }
 
@@ -309,6 +315,48 @@ fn pi_native_uses_pis_own_login() {
 }
 
 #[test]
+fn trim_routes_native_logins_through_the_proxy_as_themselves() {
+    let _sb = setup();
+    let trim = LaunchCtx { route_native: true, ..ctx() };
+
+    // Claude account: same CLAUDE_CONFIG_DIR (transcripts stay put), backend = proxy route
+    // whose upstream is the same login, no model pinning (first-party models).
+    let c = build(&spec(Harness::Claude, Some("claude:work"), None, Some("opus")), &trim).unwrap();
+    assert!(env(&c, "CLAUDE_CONFIG_DIR").unwrap().ends_with("work"));
+    let route = c.route.clone().expect("routed through the proxy");
+    assert_eq!(route.upstream, "claude:work");
+    assert_eq!(env(&c, "ANTHROPIC_BASE_URL"), Some(format!("{PROXY}/r/{}", route.route_id).as_str()));
+    assert_eq!(env(&c, "ANTHROPIC_AUTH_TOKEN"), Some("tok"));
+    assert!(removes(&c, "ANTHROPIC_API_KEY"));
+    assert!(env(&c, "CLAUDE_CODE_DISABLE_1M_CONTEXT").is_none(), "Anthropic upstream keeps 1M context");
+    assert!(env(&c, "ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none(), "background model slots stay Claude's own");
+    assert_eq!(c.label, "claude · work · opus");
+    assert!(matches!(resolve_upstream(&route.upstream, None, &crate::config::Config::default()).unwrap(),
+        UpstreamTarget::ClaudeOAuth { config_dir } if config_dir.ends_with("work")));
+
+    // The local login routes as claude:local.
+    let c = build(&spec(Harness::Claude, Some("claude:local"), None, None), &trim).unwrap();
+    assert_eq!(c.route.unwrap().upstream, "claude:local");
+
+    // Codex login → ChatGPT backend through the proxy, same CODEX_HOME.
+    let c = build(&spec(Harness::Codex, Some("codex:smol"), None, None), &trim).unwrap();
+    assert!(env(&c, "CODEX_HOME").unwrap().ends_with("smol"));
+    let route = c.route.clone().unwrap();
+    assert_eq!(route.upstream, "codex:smol");
+    assert!(has_seq(&c.args, &["-c", &format!("model_providers.bro.base_url=\"{PROXY}/r/{}/v1\"", route.route_id)]));
+    assert_eq!(env(&c, "BRO_PROVIDER_API_KEY"), Some("tok"));
+
+    // Provider launches and non-trim launches are unchanged; without a running proxy the
+    // native route quietly stays direct.
+    let z = build(&spec(Harness::Claude, None, Some("zai"), Some("glm-5.3")), &trim).unwrap();
+    assert!(z.route.is_none());
+    assert!(build(&spec(Harness::Claude, Some("claude:work"), None, None), &ctx()).unwrap().route.is_none());
+    let no_proxy = LaunchCtx { route_native: true, ..LaunchCtx::default() };
+    assert!(build(&spec(Harness::Claude, Some("claude:work"), None, None), &no_proxy).unwrap().route.is_none());
+    assert!(build(&spec(Harness::Codex, Some("codex:smol"), None, None), &no_proxy).unwrap().route.is_none());
+}
+
+#[test]
 fn browser_additions_follow_the_route() {
     let _sb = setup();
     let root = crate::browser::browser_root();
@@ -323,6 +371,32 @@ fn browser_additions_follow_the_route() {
     // An explicit --no-chrome wins.
     s.extra_args = vec!["--no-chrome".into()];
     assert_eq!(build(&s, &ctx()).unwrap().args, ["--no-chrome"]);
+}
+
+#[test]
+fn account_profiles_share_the_root_skills_and_mcp_servers() {
+    let sb = setup();
+    let root_skill = crate::paths::claude_local_dir().join("skills").join("mine");
+    std::fs::create_dir_all(&root_skill).unwrap();
+    std::fs::write(root_skill.join("SKILL.md"), "x").unwrap();
+    std::fs::write(sb.home().join(".claude.json"), json!({ "mcpServers": { "pw": { "type": "stdio", "command": "pw" } } }).to_string()).unwrap();
+
+    let mut s = spec(Harness::Claude, Some("claude:work"), None, None);
+    s.extra_args = vec!["hello".into()];
+    let c = build(&s, &ctx()).unwrap();
+    let account = Path::new(env(&c, "CLAUDE_CONFIG_DIR").unwrap());
+    assert!(account.join("skills").join("mine").join("SKILL.md").is_file());
+    let cfg = crate::claude_shared::shared_mcp_path(account);
+    assert_eq!(c.args, ["hello", "--mcp-config", &cfg.to_string_lossy()]);
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+    assert_eq!(doc["mcpServers"]["pw"]["command"], "pw");
+
+    s.extra_args = vec!["--".into(), "hello".into()];
+    assert_eq!(build(&s, &ctx()).unwrap().args[0], "--mcp-config");
+    s.extra_args = vec!["--strict-mcp-config".into()];
+    assert_eq!(build(&s, &ctx()).unwrap().args, ["--strict-mcp-config"]);
+    // The machine's own login already has them.
+    assert!(build(&spec(Harness::Claude, Some("claude:local"), None, None), &ctx()).unwrap().args.is_empty());
 }
 
 #[cfg(windows)]
@@ -360,4 +434,17 @@ fn upstream_resolution() {
     }
     assert_ne!(route_id("a", Some("m")), route_id("a", None));
     assert_eq!(route_id("a", Some("m")), route_id("a", Some("m")));
+}
+
+#[test]
+fn launches_install_the_bro_open_skill_in_the_harness_home() {
+    let _sb = setup();
+    let c = build(&spec(Harness::Claude, Some("claude:work"), None, None), &ctx()).unwrap();
+    let claude_home = Path::new(env(&c, "CLAUDE_CONFIG_DIR").unwrap());
+    assert!(crate::skills::bro_open_skill_path(claude_home).is_file());
+    build(&spec(Harness::Claude, Some("claude:local"), None, None), &ctx()).unwrap();
+    assert!(crate::skills::bro_open_skill_path(&crate::paths::claude_local_dir()).is_file());
+    let c = build(&spec(Harness::Codex, Some("codex:smol"), None, None), &ctx()).unwrap();
+    let codex_home = Path::new(env(&c, "CODEX_HOME").unwrap());
+    assert!(crate::skills::bro_open_skill_path(codex_home).is_file());
 }

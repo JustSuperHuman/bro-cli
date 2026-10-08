@@ -89,7 +89,11 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
         let ctx = {
             let st = svc.state();
             match st.proxy.status.ready() {
-                Some(p) => LaunchCtx { proxy_base: Some(p.base.clone()), proxy_token: Some(p.token.clone()) },
+                Some(p) => LaunchCtx {
+                    proxy_base: Some(p.base.clone()),
+                    proxy_token: Some(p.token.clone()),
+                    route_native: st.settings.proxy.routes_native(),
+                },
                 None => LaunchCtx::default(),
             }
         };

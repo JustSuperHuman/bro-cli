@@ -35,6 +35,13 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     let login = r.profile.as_ref().filter(|p| p.is_claude());
     let config_dir = login.map(|p| p.dir.clone()).unwrap_or_else(paths::claude_local_dir);
     let target_profile = login.map(|p| p.id.clone()).unwrap_or_else(|| "claude:local".into());
+    // An account profile runs with the root `~/.claude`'s skills and MCP servers.
+    let account = login.filter(|p| p.kind == ProfileKind::ClaudeAccount);
+    // Best effort: a read-only profile dir must not block the launch.
+    if let Some(p) = account {
+        let _ = crate::claude_shared::share_skills(&p.dir);
+    }
+    let _ = crate::skills::write_bro_open_skill(&config_dir);
     match login {
         Some(p) if p.kind == ProfileKind::ClaudeAccount => cmd.set_env("CLAUDE_CONFIG_DIR", p.dir.to_string_lossy()),
         _ => cmd.remove_env("CLAUDE_CONFIG_DIR"),
@@ -45,10 +52,17 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
 
     let who;
     let mut third_party = true;
+    // A native login routed through bro-proxy for request compression: Claude Code then
+    // authenticates with the proxy token, but the backend and models stay first-party.
+    let mut proxied_login = false;
     match &r.target {
         Target::Login => {
             third_party = false;
             who = login.map(|p| p.name.clone()).unwrap_or_else(|| "local".into());
+            if ctx.routes_native() {
+                wire_proxy(&mut cmd, &target_profile, spec, ctx)?;
+                proxied_login = true;
+            }
         }
         Target::Provider(p, _) if p.mode == ProviderMode::Native => {
             third_party = false;
@@ -91,7 +105,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         let claude_path = super::which("claude").map(|p| p.to_string_lossy().into_owned());
         let bctx = BrowserCtx {
             profile_dir: Some(&config_dir),
-            third_party_auth: third_party,
+            third_party_auth: third_party || proxied_login,
             skip_permissions: spec.permission == Permission::Skip,
             claude_path: claude_path.as_deref(),
         };
@@ -112,6 +126,19 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         }
     }
     args.extend(spec.extra_args.iter().cloned());
+    let strict_mcp = spec.extra_args.iter().any(|a| a == "--strict-mcp-config");
+    if let Some(p) = account.filter(|_| !strict_mcp)
+        && let Ok(Some(servers)) = crate::claude_shared::write_shared_mcp(&p.dir, &spec.cwd)
+    {
+        // `--mcp-config` is variadic and would swallow a prompt that followed it, so it
+        // goes last; after a `--` nothing is an option any more, so there it leads.
+        let shared = ["--mcp-config".to_string(), servers.to_string_lossy().into_owned()];
+        if spec.extra_args.iter().any(|a| a == "--") {
+            args.splice(0..0, shared);
+        } else {
+            args.extend(shared);
+        }
+    }
     (cmd.program, cmd.args) = super::program_and_args("claude", args);
     cmd.label = label(Harness::Claude, &who, spec.model.as_deref());
     Ok(cmd)

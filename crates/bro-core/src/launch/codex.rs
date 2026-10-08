@@ -38,10 +38,18 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     let home = login.map(|p| p.dir.clone()).unwrap_or_else(paths::codex_local_dir);
     let target_profile = login.map(|p| p.id.clone()).unwrap_or_else(|| "codex:local".into());
     cmd.set_env("CODEX_HOME", home.to_string_lossy());
+    // Best effort: a read-only CODEX_HOME must not block the launch.
+    let _ = crate::skills::write_bro_open_skill(&home);
 
     let mut provider = Vec::new();
     let who = match &r.target {
-        Target::Login => login.map(|p| p.name.clone()).unwrap_or_else(|| "local".into()),
+        Target::Login => {
+            // Request compression: talk to bro-proxy, which signs in as this same login.
+            if ctx.routes_native() {
+                provider = wire_proxy(&mut cmd, &target_profile, spec, ctx)?;
+            }
+            login.map(|p| p.name.clone()).unwrap_or_else(|| "local".into())
+        }
         Target::Provider(p, key) => match p.responses_base() {
             Some(base) => {
                 require_key(p, key)?;
@@ -80,6 +88,11 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     if spec.permission == Permission::Skip {
         args.push("--yolo".into());
     }
+    // An elevated codex refuses to start its shared background server ("start the Windows daemon from a
+    // non-elevated terminal") and exits before showing anything; without the daemon it runs in-process.
+    if elevated() {
+        args.push("--no-daemon".into());
+    }
     if let Some(m) = spec.model.as_deref().filter(|m| !m.is_empty()) {
         args.extend(["--model".into(), m.to_string()]);
     }
@@ -88,6 +101,31 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     (cmd.program, cmd.args) = super::program_and_args("codex", args);
     cmd.label = label(Harness::Codex, &who, spec.model.as_deref());
     Ok(cmd)
+}
+
+/// Is bro running as administrator (an elevated token)? Children inherit it.
+#[cfg(windows)]
+pub(super) fn elevated() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    static ELEVATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ELEVATED.get_or_init(|| unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut len = 0u32;
+        let ok = GetTokenInformation(token, TokenElevation, (&raw mut e).cast(), size_of::<TOKEN_ELEVATION>() as u32, &mut len) != 0;
+        CloseHandle(token);
+        ok && e.TokenIsElevated != 0
+    })
+}
+
+#[cfg(not(windows))]
+pub(super) fn elevated() -> bool {
+    false
 }
 
 fn wire_proxy(cmd: &mut CommandSpec, upstream: &str, spec: &LaunchSpec, ctx: &LaunchCtx) -> anyhow::Result<Vec<String>> {

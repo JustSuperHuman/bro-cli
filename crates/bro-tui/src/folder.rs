@@ -21,6 +21,8 @@ pub struct FolderPicker {
     view: Vec<(PathBuf, Kind)>,
     /// row rects from the last draw: (rect, index into the list)
     pub hits: Vec<(Rect, usize)>,
+    pub(crate) pending: Option<uuid::Uuid>,
+    pub(crate) error: Option<String>,
 }
 
 /// Why a row is listed.
@@ -38,11 +40,12 @@ pub enum Outcome {
     None,
     Close,
     Open(PathBuf),
+    Create(PathBuf, uuid::Uuid),
 }
 
 impl FolderPicker {
     pub fn new(dirs: Vec<PathBuf>) -> FolderPicker {
-        let mut p = FolderPicker { filter: String::new(), sel: 0, dirs, view: vec![], hits: vec![] };
+        let mut p = FolderPicker { filter: String::new(), sel: 0, dirs, view: vec![], hits: vec![], pending: None, error: None };
         p.refresh();
         p
     }
@@ -54,12 +57,13 @@ impl FolderPicker {
     /// Recompute the list after the filter changed.
     fn refresh(&mut self) {
         self.sel = 0;
+        self.error = None;
         let f = unquote_path(self.filter.trim());
         self.view = if looks_like_path(f) {
             let (parent, partial) = split_typed(f);
             let mut v = vec![];
             let typed = expand(f);
-            if typed.is_dir() || !partial.is_empty() {
+            if typed.is_dir() || !partial.is_empty() || typed.file_name().is_some() {
                 v.push((typed.clone(), Kind::Typed));
             }
             v.extend(complete(&parent, &partial).into_iter().filter(|p| *p != typed).map(|p| (p, Kind::Completion)));
@@ -88,6 +92,9 @@ impl FolderPicker {
     }
 
     pub fn paste(&mut self, s: &str) {
+        if self.pending.is_some() {
+            return;
+        }
         let s = s.trim();
         // Explorer's "Copy as path" wraps the directory in quotes. A complete path
         // replaces a recent-folder search; partial names still append for completion.
@@ -104,28 +111,54 @@ impl FolderPicker {
 
     /// Click a row: select it; clicking the selected row opens it.
     pub fn click(&mut self, pos: ratatui::layout::Position) -> Outcome {
+        if self.pending.is_some() {
+            return Outcome::None;
+        }
         let Some(&(_, i)) = self.hits.iter().find(|(r, _)| r.contains(pos)) else { return Outcome::None };
         if i == self.sel {
-            return self.view.get(i).map(|(p, _)| Outcome::Open(p.clone())).unwrap_or(Outcome::None);
+            return self.open_selected();
         }
         self.sel = i;
+        self.error = None;
         Outcome::None
     }
 
+    /// Only an explicitly typed missing path may create a folder; stale history stays an error.
+    fn open_selected(&mut self) -> Outcome {
+        let Some((path, kind)) = self.view.get(self.sel) else { return Outcome::None };
+        self.error = None;
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => Outcome::Open(path.clone()),
+            Ok(_) => {
+                self.error = Some("that path is a file; choose a folder".into());
+                Outcome::None
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && *kind == Kind::Typed => {
+                let request = uuid::Uuid::new_v4();
+                self.pending = Some(request);
+                Outcome::Create(path.clone(), request)
+            }
+            Err(error) => {
+                self.error = Some(format!("couldn't open folder: {error}"));
+                Outcome::None
+            }
+        }
+    }
+
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
+        if self.pending.is_some() {
+            return if k.code == KeyCode::Esc { Outcome::Close } else { Outcome::None };
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let n = self.view.len();
+        let before = self.sel;
         match k.code {
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
                 self.refresh();
             }
             KeyCode::Esc => return Outcome::Close,
-            KeyCode::Enter => {
-                if let Some((p, _)) = self.view.get(self.sel) {
-                    return Outcome::Open(p.clone());
-                }
-            }
+            KeyCode::Enter => return self.open_selected(),
             KeyCode::Tab => self.tab_complete(),
             KeyCode::Down => self.sel = (self.sel + 1).min(n.saturating_sub(1)),
             KeyCode::Up => self.sel = self.sel.saturating_sub(1),
@@ -144,6 +177,9 @@ impl FolderPicker {
                 self.refresh();
             }
             _ => {}
+        }
+        if self.sel != before {
+            self.error = None;
         }
         Outcome::None
     }
@@ -210,6 +246,11 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut FolderPicker, t: &Theme) {
     }
     spans.push(Span::styled("▏", ui::accent(t)));
     ui::line(f, Rect { height: 1, ..inner }, spans);
+    if let Some(error) = &p.error {
+        ui::line(f, Rect { y: inner.y + 1, height: 1, ..inner }, vec![Span::styled(error, fg(t.danger))]);
+    } else if p.pending.is_some() {
+        ui::line(f, Rect { y: inner.y + 1, height: 1, ..inner }, vec![Span::styled("creating folder…", muted(t))]);
+    }
     let rows = inner.height.saturating_sub(3) as usize;
     let view = p.view().to_vec();
     let start = p.sel.saturating_sub(rows.saturating_sub(1));
@@ -219,7 +260,8 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut FolderPicker, t: &Theme) {
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string_lossy().to_string());
         let mut s = vec![if on { Span::styled("▌ ", ui::accent(t)) } else { Span::raw("  ") }];
         match kind {
-            Kind::Typed if !path.is_dir() => s.push(Span::styled("new? ", fg(t.danger))),
+            Kind::Typed if path.is_file() => s.push(Span::styled("file ", fg(t.danger))),
+            Kind::Typed if !path.exists() => s.push(Span::styled("create ", fg(t.shine))),
             Kind::Typed => s.push(Span::styled("↳ ", fg(t.shine))),
             Kind::Completion => s.push(Span::styled("▸ ", muted(t))),
             Kind::Suggested => {}
@@ -233,7 +275,12 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut FolderPicker, t: &Theme) {
         ui::line(f, Rect { y: inner.y + 2, height: 1, ..inner }, vec![Span::styled("  nothing here — type a path (~/, C:\\, /…)", muted(t))]);
     }
     p.hits = hits;
-    ui::hint_line(f, inner, &[("⏎", "open project"), ("ctrl+v", "paste path"), ("tab", "complete"), ("↑↓", "move"), ("esc", "cancel")], t);
+    if p.pending.is_some() {
+        ui::hint_line(f, inner, &[("esc", "cancel")], t);
+    } else {
+        let action = if p.view().get(p.sel).is_some_and(|(path, kind)| *kind == Kind::Typed && !path.exists()) { "create and open" } else { "open project" };
+        ui::hint_line(f, inner, &[("⏎", action), ("ctrl+v", "paste path"), ("tab", "complete"), ("↑↓", "move"), ("esc", "cancel")], t);
+    }
 }
 
 /// True for input that is clearly a path ("~/x", "C:\x", "/x", "./x").
@@ -275,11 +322,16 @@ mod tests {
 
     #[test]
     fn filter_suggestions_and_open() {
-        let mut p = FolderPicker::new(vec![PathBuf::from("/code/bro"), PathBuf::from("/code/justgains")]);
+        let root = tempfile::tempdir().unwrap();
+        let bro = root.path().join("bro");
+        let justgains = root.path().join("justgains");
+        std::fs::create_dir(&bro).unwrap();
+        std::fs::create_dir(&justgains).unwrap();
+        let mut p = FolderPicker::new(vec![bro, justgains.clone()]);
         for c in "just".chars() {
             key(&mut p, KeyCode::Char(c));
         }
-        assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::Open(ref x) if x == Path::new("/code/justgains")));
+        assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::Open(ref x) if *x == justgains));
         assert!(looks_like_path("C:\\x") && !looks_like_path("bro"));
         assert_eq!(dedup(vec![PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/a")]), vec![PathBuf::from("/a"), PathBuf::from("/b")]);
     }
@@ -304,6 +356,21 @@ mod tests {
             }
             assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::Open(path) if path == dir));
         }
+    }
+
+    #[test]
+    fn stale_suggestions_are_not_recreated() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("deleted project");
+        let mut p = FolderPicker::new(vec![missing.clone()]);
+        assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::None));
+        assert!(p.error.is_some());
+        assert!(!missing.exists());
+        p.paste(&format!("{}{MAIN_SEPARATOR}", missing.display()));
+        assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::Create(path, _) if path == missing));
+        assert!(p.pending.is_some(), "an explicit path, including a trailing separator, can create the folder");
+        assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::None), "only one creation request at a time");
+        assert!(matches!(key(&mut p, KeyCode::Esc), Outcome::Close));
     }
 
     #[test]

@@ -98,6 +98,11 @@ pub(crate) struct Session {
     pub last_observed: Option<Instant>,
     /// Output arrived since the last observation.
     pub observation_pending: bool,
+    /// Files the agent sent / touched (`agent-files`).
+    pub agent_files: crate::insights::AgentFiles,
+    /// When insights last produced a `session` event, and whether one is queued.
+    pub insights_published: Option<Instant>,
+    pub insights_scheduled: bool,
 }
 
 /// One session as the orchestrator and the composed-input context see it,
@@ -125,6 +130,9 @@ impl Session {
             agent_hint: None,
             last_observed: None,
             observation_pending: false,
+            agent_files: Default::default(),
+            insights_published: None,
+            insights_scheduled: false,
         }
     }
 

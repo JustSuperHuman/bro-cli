@@ -21,6 +21,8 @@ bro-proxy.workspace = true
 bro-bridge.workspace = true
 bro-voice.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -37,6 +39,9 @@ uuid.workspace = true
 png.workspace = true
 base64.workspace = true
 url = "2"
+# file preview highlighting: pure-Rust regex engine (no oniguruma), bat's extra grammars (TypeScript, TOML…)
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"

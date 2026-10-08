@@ -25,6 +25,17 @@ bro
 
 Press **F1** inside bro to see every key binding.
 
+Choose **Manage profiles** in the new-session picker, or press **Alt+O**, to add
+Claude or Codex profiles. Choose **+ Claude** or **+ Codex**, enter a name, then
+**Create + log in**. Bro opens that profile's login tab; in Claude, run `/login`.
+Select a profile and choose **Remove** to delete its local login, settings and
+saved sessions after confirmation. Bro protects the machine's default logins
+(`claude:local` and `codex:local`) from removal.
+
+Alt+V pastes a clipboard image into the focused agent as a file path. On Windows,
+Bro uses the original clipboard PNG when available; this avoids blank images
+from a browser's bitmap copy. Clipboard contents stay unchanged.
+
 On Windows the archive also contains `bro-app.exe`, which opens bro in its own window — pin it to the Start menu or taskbar.
 
 You need at least one agent installed (Claude Code, Codex, Pi or omp); bro launches the ones it finds.
