@@ -75,6 +75,8 @@ pub struct LaunchCtx {
     pub claude_env: crate::claude_env::ClaudeEnvSettings,
     /// Caveman mode for Claude / Codex / Pi launches (`Settings::caveman`).
     pub caveman: crate::caveman::CavemanSettings,
+    /// Claude / Codex launches get the JustTools skill (`Settings::justtools`).
+    pub justtools_skill: bool,
 }
 
 impl LaunchCtx {

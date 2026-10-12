@@ -90,6 +90,7 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
             let st = svc.state();
             let claude_env = st.settings.claude_env.clone();
             let caveman = st.settings.caveman.clone();
+            let justtools_skill = st.settings.justtools.skill;
             match st.proxy.status.ready() {
                 Some(p) => LaunchCtx {
                     proxy_base: Some(p.base.clone()),
@@ -97,8 +98,9 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
                     route_native: st.settings.proxy.routes_native(),
                     claude_env,
                     caveman,
+                    justtools_skill,
                 },
-                None => LaunchCtx { claude_env, caveman, ..LaunchCtx::default() },
+                None => LaunchCtx { claude_env, caveman, justtools_skill, ..LaunchCtx::default() },
             }
         };
         let mut cmd = match guard("launch::build", || bro_core::launch::build(&spec, &ctx)) {

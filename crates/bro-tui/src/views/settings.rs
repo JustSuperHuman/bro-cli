@@ -1,14 +1,17 @@
 //! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), caveman
-//! mode (terse replies in new Claude / Codex / Pi sessions) and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
+//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools and its skill) and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
 //! part applies to sessions launched from now on.
 
 use crate::keymap::Act;
+use crate::alerts::Kind;
 use crate::pane::{Action, Cx, Pane};
+use crate::services::justtools::JobKind;
 use crate::ui::{self, fg, muted};
 use bro_core::caveman::Level;
 use bro_core::claude_env::{self, ClaudeEnvSettings, KNOBS, PRESETS, Source};
 use bro_core::config::RainMode;
+use bro_core::justtools::Step;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
@@ -17,6 +20,7 @@ use ratatui::{
     text::Span,
 };
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 /// bro's own options, shown above the Claude Code section.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -134,11 +138,37 @@ fn cave_choices() -> Vec<Option<Level>> {
     std::iter::once(None).chain(Level::ALL.map(Some)).collect()
 }
 
-/// A selectable row: bro's options, caveman mode, then the Claude preset, then each [`KNOBS`] switch.
+/// JustTools' rows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ToolOpt {
+    Install,
+    Skill,
+    AutoUpdate,
+}
+
+/// What an install is doing at `step`.
+fn step_label(step: Step) -> &'static str {
+    match step {
+        Step::Installer => "fetching the installer",
+        Step::Download => "downloading the release",
+        Step::Verify => "checking its SHA-256",
+        Step::Install => "installing the commands",
+        Step::Skill => "adding the skill",
+    }
+}
+
+/// A spinner frame for a job that began at `started`.
+fn spinner(started: Instant) -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES[(started.elapsed().as_millis() / 100) as usize % FRAMES.len()]
+}
+
+/// A selectable row: bro's options, caveman mode, JustTools, then the Claude preset, then each [`KNOBS`] switch.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
     Bro(BroOpt),
     Cave(CaveOpt),
+    Tool(ToolOpt),
     Preset,
     Knob(usize),
 }
@@ -147,7 +177,7 @@ fn rows() -> Vec<Row> {
     bro_opts()
         .into_iter()
         .map(Row::Bro)
-        .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Preset])
+        .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate), Row::Preset])
         .chain((0..KNOBS.len()).map(Row::Knob))
         .collect()
 }
@@ -161,6 +191,10 @@ pub struct SettingsView {
     hits: Vec<(u16, usize)>,
     /// The upstream Caveman plugin is installed in `~/.claude` (checked when the view opens)
     upstream_caveman: bool,
+    /// JustTools has been looked for since the view opened
+    tools_checked: bool,
+    /// a JustTools job is running: keep its spinner and timer moving
+    tools_busy: bool,
 }
 
 impl SettingsView {
@@ -172,12 +206,35 @@ impl SettingsView {
         rows()[self.sel.min(rows().len() - 1)]
     }
 
+    /// Enter on a JustTools row: install, update or check for a release; switch its skill or auto-update.
+    fn tool(&self, o: ToolOpt, cx: &mut Cx) {
+        let jt = cx.svc.state().justtools.clone();
+        let mut s = cx.svc.settings();
+        match o {
+            ToolOpt::AutoUpdate => {
+                s.justtools.auto_update = !s.justtools.auto_update;
+                cx.svc.save_settings(s);
+            }
+            _ if jt.job.is_some() => {}
+            ToolOpt::Install if cx.svc.is_demo() => cx.toast(Kind::Info, "the demo doesn't install anything"),
+            ToolOpt::Install if jt.installed.is_none() || jt.update().is_some() => cx.svc.install_justtools(),
+            ToolOpt::Install => cx.svc.check_justtools(),
+            ToolOpt::Skill if s.justtools.skill => {
+                cx.svc.set_justtools_skill_on(false);
+                cx.toast(Kind::Info, "JustTools skill off · bro took its copies back out");
+            }
+            ToolOpt::Skill if jt.installed.is_none() && !cx.svc.is_demo() => cx.toast(Kind::Info, "install JustTools first: its skill needs the commands"),
+            ToolOpt::Skill => cx.svc.set_justtools_skill_on(true),
+        }
+    }
+
     /// Step the selected row's value by `dir` (+1 / -1).
     fn step(&self, dir: isize, cx: &mut Cx) {
         let mut s = cx.svc.settings();
         let env = &mut s.claude_env;
         match self.row() {
             Row::Bro(o) => return o.change(dir, cx),
+            Row::Tool(o) => return self.tool(o, cx),
             Row::Cave(CaveOpt::Mode) => {
                 let all = cave_choices();
                 let i = all.iter().position(|c| *c == s.caveman.active()).unwrap_or(0) as isize;
@@ -206,7 +263,7 @@ impl SettingsView {
     fn reset(&self, cx: &mut Cx) {
         let mut s = cx.svc.settings();
         match self.row() {
-            Row::Bro(_) | Row::Cave(_) => return,
+            Row::Bro(_) | Row::Cave(_) | Row::Tool(_) => return,
             Row::Preset => s.claude_env.overrides.clear(),
             Row::Knob(k) => {
                 s.claude_env.overrides.remove(KNOBS[k].id);
@@ -241,6 +298,10 @@ impl Pane for SettingsView {
     }
     fn render(&mut self, f: &mut Frame, area: Rect, cx: &mut Cx) {
         let t = cx.theme;
+        if !self.tools_checked {
+            self.tools_checked = true;
+            cx.svc.check_justtools();
+        }
         let env = cx.svc.settings().claude_env;
         let reset = matches!(self.row(), Row::Preset | Row::Knob(_));
         let mut hints = vec![("j/k", "move"), ("enter/→", "change"), ("←", "back")];
@@ -291,6 +352,58 @@ impl Pane for SettingsView {
                 muted(t),
             )]));
         }
+
+        lines.push((None, vec![]));
+        lines.push((None, heading("integrations · tools your agents can call", t)));
+        let jt = cx.svc.state().justtools.clone();
+        let jts = cx.svc.settings().justtools;
+        self.tools_busy = jt.job.is_some();
+        let note = |text: String, style: Style| (None, vec![Span::styled(format!("  {:<26}{text}", ""), style)]);
+        let i = idx(Row::Tool(ToolOpt::Install));
+        let installing = jt.job.as_ref().filter(|j| j.kind != JobKind::Skill);
+        let version = jt.installed.as_ref().map(|f| f.version.clone().unwrap_or_else(|| "installed".into()));
+        let (v, style, help): (String, Style, &str) = match (installing, &version, jt.update()) {
+            (Some(job), _, _) => (format!("{} {}", spinner(job.started), if job.kind == JobKind::Update { "updating" } else { "installing" }), fg(t.shine).add_modifier(Modifier::BOLD), ""),
+            _ if jt.checking || !jt.checked => ("checking…".into(), muted(t), ""),
+            (_, None, _) => ("not installed".into(), muted(t), "enter installs it · image, video, PDF and port commands in one binary"),
+            (_, Some(v), Some(new)) => (format!("{v} → {new}"), fg(t.shine).add_modifier(Modifier::BOLD), "a newer release is out · enter updates"),
+            (_, Some(v), None) if jt.offline => (v.clone(), fg(t.inline), "couldn't reach GitHub to look for a newer release · enter tries again"),
+            (_, Some(v), None) => (v.clone(), fg(t.inline), "the newest release · enter checks again"),
+        };
+        lines.push((Some(i), vec![name(i, "JustTools"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
+        if let Some(job) = installing {
+            // one segment per step, then where it is and how long it has taken
+            let at = Step::ALL.iter().position(|s| *s == job.step).unwrap_or(0) + 1;
+            lines.push((None, vec![
+                Span::raw(format!("  {:<26}", "")),
+                Span::styled("━━━━".repeat(at), fg(t.accent)),
+                Span::styled("━━━━".repeat(Step::ALL.len() - at), fg(t.frame)),
+                Span::styled(format!("  {at} of {} · {} · {}s", Step::ALL.len(), step_label(job.step), job.started.elapsed().as_secs()), muted(t)),
+            ]));
+        } else if let Some(e) = &jt.error {
+            let retry = if version.is_none() || jt.update().is_some() { " · enter tries again" } else { "" };
+            lines.push(note(format!("✗ {e}{retry}"), fg(t.danger)));
+        } else if let Some(done) = &jt.done {
+            lines.push(note(format!("✓ {done}"), fg(t.good)));
+        } else if let Some(found) = jt.installed.as_ref().filter(|f| !f.on_path()) {
+            lines.push(note(format!("in {} · restart bro so new sessions find it on PATH", found.bin.display()), muted(t)));
+        } else if jt.checked && version.is_none() {
+            lines.push(note("github.com/JustGains/JustTools · the download is checked against its SHA-256 before it installs".into(), muted(t)));
+        }
+        let i = idx(Row::Tool(ToolOpt::Skill));
+        let (v, style) = match &jt.job {
+            Some(job) if job.kind == JobKind::Skill => (format!("{} adding", spinner(job.started)), fg(t.shine).add_modifier(Modifier::BOLD)),
+            _ if jts.skill => ("on".into(), fg(t.inline)),
+            _ => ("off".into(), muted(t)),
+        };
+        let help = if jt.own_skill { "~/.claude has its own copy, which bro leaves alone" } else { "tells new Claude and Codex sessions when to use the just* commands" };
+        lines.push((Some(i), vec![name(i, "JustTools skill"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
+        let i = idx(Row::Tool(ToolOpt::AutoUpdate));
+        lines.push((Some(i), vec![
+            name(i, "Auto-update JustTools"),
+            Span::styled(ui::pad(if jts.auto_update { "on" } else { "off" }, 16), if jts.auto_update { fg(t.inline) } else { muted(t) }),
+            Span::styled(" when bro opens, looks on GitHub for a newer release and installs it", muted(t)),
+        ]));
 
         lines.push((None, vec![]));
         lines.push((None, heading("Claude Code · applies to sessions launched from now on", t)));
@@ -358,6 +471,9 @@ impl Pane for SettingsView {
             ui::line(f, r, spans);
         }
     }
+    fn tick_every(&self) -> Option<Duration> {
+        self.tools_busy.then_some(Duration::from_millis(100))
+    }
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         let last = rows().len() - 1;
         match key.code {
@@ -404,12 +520,13 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_bro_then_caveman_then_preset_then_knobs() {
+    fn rows_are_bro_then_caveman_then_justtools_then_preset_then_knobs() {
         let r = rows();
         assert_eq!(r[0], Row::Bro(BroOpt::Theme));
         assert_eq!(r[bro_opts().len()], Row::Cave(CaveOpt::Mode));
-        assert_eq!(r[bro_opts().len() + 2], Row::Preset);
-        assert_eq!(r.len(), bro_opts().len() + 3 + KNOBS.len());
+        assert_eq!(r[bro_opts().len() + 2], Row::Tool(ToolOpt::Install));
+        assert_eq!(r[bro_opts().len() + 5], Row::Preset);
+        assert_eq!(r.len(), bro_opts().len() + 6 + KNOBS.len());
     }
 
     #[test]

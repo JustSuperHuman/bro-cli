@@ -329,18 +329,21 @@ impl FileView {
 
 /// Resolve and read `target` (blocking): text highlighted with the theme's colours, media described.
 pub fn read(roots: &ResolveRoots, target: &str, r: PreviewRequest, theme: &Theme) -> Result<Payload, (String, Option<PathBuf>)> {
-    let resolved = file_preview::resolve_path(roots, target).map_err(|e| (e, None))?;
+    let resolved = crate::panes::file_cache::resolve_local(roots, target).map_err(|e| (e, None))?;
     if resolved.kind != Kind::File {
         return Err(("This is a folder, not a file.".into(), None));
     }
     let path = resolved.path;
+    // the file may be outside the session's roots: read it from its own folder
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let read_roots = ResolveRoots { cwd: parent.clone(), project: Some(parent) };
     let mention = mention_for(&path, roots);
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     if let Some(mime) = file_preview::media_mime(&ext).or_else(|| file_preview::image_mime(&ext)) {
         let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         return Ok(Payload::Media(Media { relative: resolved.relative, mention, mime: mime.into(), bytes, path }));
     }
-    let v = file_preview::read_preview(roots, &path.to_string_lossy(), r).map_err(|e| (e, Some(path.clone())))?;
+    let v = file_preview::read_preview(&read_roots, &path.to_string_lossy(), r).map_err(|e| (e, Some(path.clone())))?;
     if v["kind"] != "text" {
         return Err(("This file can't be shown as text.".into(), Some(path)));
     }
@@ -761,16 +764,21 @@ mod tests {
     }
 
     #[test]
-    fn links_bro_cant_preview_go_back_to_the_system() {
+    fn files_outside_the_session_preview_and_folders_go_back_to_the_system() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("notes.md"), "x").unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let uri = crate::panes::links::file_uri(&outside.path().join("notes.md"), None, None).unwrap();
         let target = outside.path().join("notes.md").to_string_lossy().into_owned();
-        let mut v = FileView::open(None, roots(dir.path()), target, None, None, Some(uri.clone()), &theme(), tx);
+        let uri = crate::panes::links::file_uri(&outside.path().join("notes.md"), None, None).unwrap();
+        let mut v = FileView::open(None, roots(dir.path()), target, None, None, Some(uri), &theme(), tx.clone());
         let Ok(Event::FileView(l)) = rx.recv_timeout(Duration::from_secs(10)) else { panic!("loaded") };
-        assert_eq!(v.apply(*l), Outcome::Fallback(uri));
+        assert_eq!(v.apply(*l), Outcome::None);
+        assert!(v.path().is_some_and(|p| p.ends_with("notes.md")), "previewed in bro");
+        let uri = crate::panes::links::file_uri(outside.path(), None, None).unwrap();
+        let mut v = FileView::open(None, roots(dir.path()), outside.path().to_string_lossy().into_owned(), None, None, Some(uri.clone()), &theme(), tx);
+        let Ok(Event::FileView(l)) = rx.recv_timeout(Duration::from_secs(10)) else { panic!("loaded") };
+        assert_eq!(v.apply(*l), Outcome::Fallback(uri), "a folder opens in the file manager");
     }
 
     #[test]

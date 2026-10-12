@@ -101,6 +101,24 @@ impl Provider {
         }
     }
 
+    /// Codex settings the provider asks for (`"codex": { "model_reasoning_effort": "high", … }`), as
+    /// `-c key=value` overrides with TOML values. Only plain strings, numbers and booleans.
+    pub fn codex_overrides(&self) -> Vec<String> {
+        let Some(Value::Object(settings)) = self.extra.get("codex") else { return vec![] };
+        settings
+            .iter()
+            .filter_map(|(k, v)| {
+                let value = match v {
+                    Value::String(s) => serde_json::to_string(s).ok()?,
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    _ => return None,
+                };
+                Some(format!("{k}={value}"))
+            })
+            .collect()
+    }
+
     /// v1 `providerForModel`: a new-api relay serves Claude models on the Anthropic
     /// endpoint and everything else on OpenAI's, so the provider is reshaped for the
     /// chosen model using the cached live catalogue (`~/.bro/newapi-<id>.cache.json`).
@@ -175,8 +193,8 @@ fn with_bundled(data: Value, bundled: &Value) -> Value {
 /// v1 `mergeProviders`: same id → append models and override the listed fields;
 /// new id → added.
 fn merge_config(mut providers: Vec<Value>, config_providers: &[Value]) -> Vec<Value> {
-    const OVERRIDE: [&str; 9] =
-        ["baseUrl", "responsesBaseUrl", "mode", "keyEnv", "keyUrl", "noKey", "disable1mContext", "section", "catalogue"];
+    const OVERRIDE: [&str; 10] =
+        ["baseUrl", "responsesBaseUrl", "mode", "keyEnv", "keyUrl", "noKey", "disable1mContext", "section", "catalogue", "codex"];
     for cp in config_providers {
         let Some(id) = cp.get("id").and_then(Value::as_str) else { continue };
         if let Some(existing) = providers.iter_mut().find(|p| p.get("id").and_then(Value::as_str) == Some(id)) {
@@ -315,6 +333,24 @@ mod tests {
         assert_eq!(find(&ps, "openai").unwrap().responses_base().as_deref(), Some("https://api.openai.com/v1"));
         assert_eq!(find(&ps, "openrouter").unwrap().responses_base().as_deref(), Some("https://openrouter.ai/api/v1"));
         assert_eq!(find(&ps, "zai").unwrap().responses_base(), None);
+        assert_eq!(find(&ps, "meta").unwrap().responses_base().as_deref(), Some("https://api.meta.ai/v1"));
+    }
+
+    #[test]
+    fn meta_muse_serves_claude_and_codex() {
+        let _sb = sandbox();
+        let ps = load(&Config::default());
+        let meta = find(&ps, "meta").unwrap();
+        assert_eq!(meta.mode, ProviderMode::Anthropic);
+        assert_eq!(meta.base_url.as_deref(), Some("https://api.meta.ai"));
+        assert_eq!(meta.key_env.as_deref(), Some("META_MUSE_API_KEY"));
+        assert_eq!(meta.env["ENABLE_TOOL_SEARCH"], "true");
+        assert_eq!(meta.model_ids(), vec!["muse-wonder-1.0"]);
+        let codex = meta.codex_overrides();
+        for want in ["model_reasoning_effort=\"high\"", "model_context_window=1048576", "model_supports_reasoning_summaries=true"] {
+            assert!(codex.iter().any(|c| c == want), "{want} in {codex:?}");
+        }
+        assert!(find(&ps, "zai").unwrap().codex_overrides().is_empty());
     }
 
     #[test]

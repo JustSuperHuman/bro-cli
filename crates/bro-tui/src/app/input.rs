@@ -121,7 +121,7 @@ impl App {
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Launcher(l) => match l.key(k) {
-                Outcome::None => {}
+                Outcome::None => self.remember_launcher_permission(),
                 Outcome::Close => self.overlay = Overlay::None,
                 Outcome::Profiles => {
                     self.overlay = Overlay::None;

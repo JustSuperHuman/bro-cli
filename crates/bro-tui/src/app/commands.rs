@@ -246,9 +246,22 @@ impl App {
     }
 
     fn session_launcher(&self, cwd: Option<PathBuf>, place: Place) -> Launcher {
-        let launcher = Launcher::new(launcher_data(self), cwd, place).with_projects(self.launcher_projects());
+        let permission = self.svc.state().settings.permission;
+        let launcher = Launcher::new(launcher_data(self), cwd, place).with_projects(self.launcher_projects()).with_permission(permission);
         let project = self.svc.project_for(&launcher.dir);
         launcher.with_continue(self.continue_entries(), Some((project.key, project.name)))
+    }
+
+    /// Keep the permission mode picked in the launcher for the next new session.
+    pub(crate) fn remember_launcher_permission(&mut self) {
+        let Overlay::Launcher(l) = &self.overlay else { return };
+        let permission = l.permission;
+        if self.svc.state().settings.permission == permission {
+            return;
+        }
+        let mut s = self.svc.settings();
+        s.permission = permission;
+        self.svc.save_settings(s);
     }
 
     /// The sidebar's new-session strip: claude / codex straight away on your usual login (the launcher, on that
@@ -361,7 +374,7 @@ impl App {
             Cmd::Caveman(level) => self.set_caveman(level),
             Cmd::Recent(i) => {
                 if let Some(r) = self.recents.get(i).cloned() {
-                    let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: bro_core::launch::Permission::Skip, browser: r.browser, extra_args: vec![] };
+                    let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: self.svc.state().settings.permission, browser: r.browser, extra_args: vec![] };
                     self.launch_spec(spec, Place::Tab);
                 }
             }

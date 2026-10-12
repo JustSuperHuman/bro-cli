@@ -22,6 +22,7 @@ pub mod usage;
 pub mod launch;
 pub mod browser;
 pub mod skills;
+pub mod justtools;
 pub mod claude_shared;
 pub mod catalogue;
 pub mod claude_env;

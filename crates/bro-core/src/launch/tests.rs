@@ -49,7 +49,7 @@ fn setup() -> Sandbox {
     std::fs::create_dir_all(sb.bro()).unwrap();
     std::fs::write(
         crate::paths::config_path(),
-        json!({ "keys": { "zai": "z-key", "openai": "o-key" } }).to_string(),
+        json!({ "keys": { "zai": "z-key", "openai": "o-key", "meta": "m-key" } }).to_string(),
     )
     .unwrap();
     sb
@@ -230,6 +230,39 @@ fn codex_openai_provider_direct() {
     assert!(has_seq(&c.args, &["-c", "model_providers.bro.env_key=\"BRO_PROVIDER_API_KEY\""]));
     assert_eq!(env(&c, "BRO_PROVIDER_API_KEY"), Some("o-key"));
     assert!(c.route.is_none());
+}
+
+#[test]
+fn meta_muse_runs_claude_direct_and_codex_on_responses_with_its_settings() {
+    let _sb = setup();
+    let c = build(&spec(Harness::Claude, None, Some("meta"), Some("muse-wonder-1.0")), &ctx()).unwrap();
+    assert_eq!(env(&c, "ANTHROPIC_BASE_URL"), Some("https://api.meta.ai"));
+    assert_eq!(env(&c, "ANTHROPIC_AUTH_TOKEN"), Some("m-key"));
+    assert_eq!(env(&c, "ENABLE_TOOL_SEARCH"), Some("true"));
+    assert_eq!(env(&c, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), None);
+    for k in claude::MODEL_VARS {
+        assert_eq!(env(&c, k), Some("muse-wonder-1.0"), "{k}");
+    }
+    assert!(c.route.is_none());
+
+    let mut s = spec(Harness::Codex, None, Some("meta"), Some("muse-wonder-1.0"));
+    s.extra_args = vec!["-c".into(), "model_reasoning_effort=\"low\"".into()];
+    let c = build(&s, &ctx()).unwrap();
+    assert!(c.route.is_none());
+    assert_eq!(env(&c, "BRO_PROVIDER_API_KEY"), Some("m-key"));
+    assert!(has_seq(&c.args, &["-c", "model_providers.bro.base_url=\"https://api.meta.ai/v1\""]));
+    assert!(has_seq(&c.args, &["-c", "model_providers.bro.wire_api=\"responses\""]));
+    for setting in [
+        "model_reasoning_effort=\"high\"",
+        "model_reasoning_summary=\"auto\"",
+        "model_context_window=1048576",
+        "model_supports_reasoning_summaries=true",
+        "model_auto_compact_token_limit=900000",
+    ] {
+        assert!(has_seq(&c.args, &["-c", setting]), "{setting}");
+    }
+    let at = |want: &str| c.args.iter().position(|a| a == want).unwrap();
+    assert!(at("model_reasoning_effort=\"high\"") < at("model_reasoning_effort=\"low\""), "your own -c wins");
 }
 
 #[test]

@@ -40,6 +40,9 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     cmd.set_env("CODEX_HOME", home.to_string_lossy());
     // Best effort: a read-only CODEX_HOME must not block the launch.
     let _ = crate::skills::write_bro_open_skill(&home);
+    if ctx.justtools_skill {
+        let _ = crate::justtools::write_skill(&home);
+    }
 
     let mut provider = Vec::new();
     let who = match &r.target {
@@ -54,6 +57,10 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             Some(base) => {
                 require_key(p, key)?;
                 provider = provider_args(p.display_name(), &base, key.is_some());
+                // before your own args, so a `-c` of yours still wins
+                for setting in p.codex_overrides() {
+                    provider.extend(["-c".into(), setting]);
+                }
                 if let Some(k) = key {
                     cmd.set_env(CODEX_KEY_ENV, k.clone());
                 }

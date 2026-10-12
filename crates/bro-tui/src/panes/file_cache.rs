@@ -2,13 +2,17 @@
 //! and stale candidates are resolved in a batch on a worker thread (`bro_bridge::file_preview::resolve_path`:
 //! cwd, project root, git `a/`/`b/` prefixes, a unique suffix in the project index), which wakes the pane
 //! when it's done. A confirmed file keeps its link while it is re-checked, so links don't flicker.
+//!
+//! Unlike the bridge (remote clients stay inside the workspace), bro runs on your own machine: absolute paths
+//! anywhere on disk link too, folders link (a click opens them in the system file manager), and a bare
+//! `name.png` is also looked for in the folders other absolute paths on screen pointed at.
 
 use crate::pane::Waker;
 use bro_bridge::file_links::FileLinkMatch;
-use bro_bridge::file_preview::{Kind, ResolveRoots, resolve_path};
+use bro_bridge::file_preview::{Kind, ResolveRoots, Resolved, resolve_path};
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +22,36 @@ const MISSING_TTL: Duration = Duration::from_secs(8);
 /// Candidates resolved per worker batch, and entries kept before the cache starts over.
 const BATCH: usize = 200;
 const MAX_ENTRIES: usize = 4096;
+/// Folders remembered from absolute paths, for bare file names printed after them.
+const MAX_DIRS: usize = 8;
+
+/// [`resolve_path`], then (outside the session's roots) an absolute or `~/` path straight from the disk.
+/// Blocking.
+pub fn resolve_local(roots: &ResolveRoots, raw: &str) -> Result<Resolved, String> {
+    let confined = resolve_path(roots, raw);
+    if confined.is_ok() {
+        return confined;
+    }
+    let text = raw.trim();
+    // network shares can hang a lookup
+    if text.starts_with(r"\\") || text.starts_with("//") || text.chars().any(char::is_control) {
+        return confined;
+    }
+    let path = match text.strip_prefix("~/").or_else(|| text.strip_prefix("~\\")) {
+        Some(rest) => bro_core::util::home_dir().join(rest),
+        None => PathBuf::from(text),
+    };
+    if !path.is_absolute() {
+        return confined;
+    }
+    on_disk(&path).ok_or(()).or(confined)
+}
+
+fn on_disk(path: &Path) -> Option<Resolved> {
+    let canonical = crate::util::strip_verbatim(path.canonicalize().ok()?);
+    let kind = if canonical.is_dir() { Kind::Dir } else { Kind::File };
+    Some(Resolved { relative: canonical.to_string_lossy().replace('\\', "/"), path: canonical, kind })
+}
 
 #[derive(Default)]
 struct Entry {
@@ -32,6 +66,8 @@ struct Shared {
     entries: HashMap<String, Entry>,
     queue: Vec<String>,
     busy: bool,
+    /// Newest first.
+    dirs: Vec<PathBuf>,
 }
 
 /// One per terminal pane (its roots don't change).
@@ -59,23 +95,44 @@ impl FileCache {
         Lookup { cache: self, shared: self.shared.lock() }
     }
 
-    /// Resolve `paths` now (the worker's body; tests call it directly).
-    fn resolve_batch(roots: &ResolveRoots, paths: &[String]) -> Vec<(String, Option<PathBuf>)> {
-        paths
-            .iter()
+    /// Resolve `paths` now (the worker's body; tests call it directly). Absolute paths go first so a bare name
+    /// in the same batch can be found in the folder they name; `dirs` collects those folders.
+    fn resolve_batch(roots: &ResolveRoots, dirs: &mut Vec<PathBuf>, paths: &[String]) -> Vec<(String, Option<PathBuf>)> {
+        let mut order: Vec<&String> = paths.iter().collect();
+        order.sort_by_key(|p| !Path::new(p.as_str()).is_absolute());
+        order
+            .into_iter()
             .map(|path| {
-                let file = crate::services::guard("file_links::resolve", || resolve_path(roots, path))
+                let found = crate::services::guard("file_links::resolve", || resolve_local(roots, path).ok().or_else(|| Self::near(dirs, path)))
                     .ok()
-                    .and_then(Result::ok)
-                    .filter(|r| r.kind == Kind::File)
-                    .map(|r| r.path);
-                (path.clone(), file)
+                    .flatten();
+                if let Some(r) = &found
+                    && Path::new(path).is_absolute()
+                {
+                    let dir = if r.kind == Kind::Dir { Some(r.path.clone()) } else { r.path.parent().map(Path::to_path_buf) };
+                    if let Some(dir) = dir {
+                        dirs.retain(|d| *d != dir);
+                        dirs.insert(0, dir);
+                        dirs.truncate(MAX_DIRS);
+                    }
+                }
+                (path.clone(), found.map(|r| r.path))
             })
             .collect()
     }
 
-    fn store(shared: &Mutex<Shared>, results: Vec<(String, Option<PathBuf>)>) {
+    /// A plain relative name inside one of the remembered folders.
+    fn near(dirs: &[PathBuf], path: &str) -> Option<Resolved> {
+        let relative = Path::new(path);
+        if relative.is_absolute() || relative.has_root() || relative.components().any(|c| !matches!(c, Component::Normal(_))) {
+            return None;
+        }
+        dirs.iter().find_map(|dir| on_disk(&dir.join(relative)))
+    }
+
+    fn store(shared: &Mutex<Shared>, dirs: Vec<PathBuf>, results: Vec<(String, Option<PathBuf>)>) {
         let mut s = shared.lock();
+        s.dirs = dirs;
         let now = Instant::now();
         for (path, file) in results {
             let e = s.entries.entry(path).or_default();
@@ -89,14 +146,17 @@ impl FileCache {
     /// Tests: resolve everything queued on this thread.
     #[cfg(test)]
     pub fn resolve_queued_now(&self) {
-        let queue = std::mem::take(&mut self.shared.lock().queue);
-        let results = Self::resolve_batch(&self.roots, &queue);
-        Self::store(&self.shared, results);
+        let (queue, mut dirs) = {
+            let mut s = self.shared.lock();
+            (std::mem::take(&mut s.queue), s.dirs.clone())
+        };
+        let results = Self::resolve_batch(&self.roots, &mut dirs, &queue);
+        Self::store(&self.shared, dirs, results);
     }
 }
 
 impl Lookup<'_> {
-    /// The link target for a confirmed file (with the candidate's line/column), queueing unknown or stale ones.
+    /// The link target for a confirmed file or folder (with the candidate's line/column), queueing unknown or stale ones.
     pub fn get(&mut self, m: &FileLinkMatch) -> Option<Arc<str>> {
         if self.shared.entries.len() >= MAX_ENTRIES && !self.shared.busy {
             self.shared.entries.clear();
@@ -121,12 +181,13 @@ impl Lookup<'_> {
         let Some(waker) = waker else { return };
         let take = self.shared.queue.len().min(BATCH);
         let batch: Vec<String> = self.shared.queue.drain(..take).collect();
+        let mut dirs = self.shared.dirs.clone();
         self.shared.busy = true;
         let (roots, shared) = (self.cache.roots.clone(), self.cache.shared.clone());
         drop(self);
         std::thread::spawn(move || {
-            let results = FileCache::resolve_batch(&roots, &batch);
-            FileCache::store(&shared, results);
+            let results = FileCache::resolve_batch(&roots, &mut dirs, &batch);
+            FileCache::store(&shared, dirs, results);
             // re-render with the answers (and pick up whatever queued meanwhile)
             waker.wake();
         });
@@ -162,7 +223,7 @@ mod tests {
         assert!(path.ends_with("app.rs"));
         assert_eq!(line, Some(3));
         assert!(l.get(&candidate("src/missing.rs", None)).is_none());
-        assert!(l.get(&candidate("src", None)).is_none(), "directories aren't linked");
+        assert!(l.get(&candidate("src", None)).is_some(), "folders link too");
         drop(l);
         assert!(cache.shared.lock().queue.is_empty(), "fresh answers aren't re-queued");
     }
@@ -177,5 +238,29 @@ mod tests {
         cache.shared.lock().entries.get_mut("README.md").unwrap().checked = Some(Instant::now() - FOUND_TTL);
         assert!(cache.lookup().get(&candidate("README.md", None)).is_some(), "still linked while re-checking");
         assert_eq!(cache.shared.lock().queue, vec!["README.md".to_string()]);
+    }
+
+    #[test]
+    fn paths_outside_the_workspace_link_and_bare_names_find_their_folder() {
+        let (session, elsewhere) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let folder = elsewhere.path().join("Zapier");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("banner-1x1.png"), b"png").unwrap();
+        let cache = FileCache::new(ResolveRoots { cwd: session.path().to_path_buf(), project: None });
+        let text = format!("Other candidates are in {}{} (files 2026*). It stays at banner-1x1.png.", folder.display(), std::path::MAIN_SEPARATOR);
+        let found = bro_bridge::file_links::find_file_links(&text);
+        assert_eq!(found.len(), 2, "{found:?}");
+        // queued bare name first: absolute paths still resolve first within a batch
+        for m in found.iter().rev() {
+            drop(cache.lookup().get(m));
+        }
+        cache.resolve_queued_now();
+        let mut l = cache.lookup();
+        let dir = l.get(&found[0]).expect("an absolute folder outside the session links");
+        assert!(super::super::links::parse_file_uri(&dir).unwrap().0.ends_with("Zapier"));
+        let file = l.get(&found[1]).expect("a bare name next to it links");
+        assert!(super::super::links::parse_file_uri(&file).unwrap().0.ends_with("banner-1x1.png"));
+        drop(l);
+        assert!(FileCache::near(&[folder], "../Zapier/banner-1x1.png").is_none(), "no climbing out of a folder");
     }
 }

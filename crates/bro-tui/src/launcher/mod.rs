@@ -271,6 +271,12 @@ impl Launcher {
         self.hits.clear();
     }
 
+    /// Start on the permission mode picked last time instead of skip.
+    pub fn with_permission(mut self, p: Permission) -> Launcher {
+        self.permission = p;
+        self
+    }
+
     /// Open on `h` instead of the most recent harness.
     pub fn with_harness(mut self, h: Harness) -> Launcher {
         self.harness = h;

@@ -6,6 +6,7 @@
 
 pub mod demo;
 pub mod guard;
+pub mod justtools;
 pub mod launch;
 mod workers;
 
@@ -104,6 +105,7 @@ pub struct State {
     pub picks: (Option<String>, Option<String>),
     pub proxy: ProxyState,
     pub bridge: BridgeState,
+    pub justtools: justtools::JustToolsState,
     /// Things that didn't work at startup, shown once as toasts and in the views.
     pub issues: Vec<String>,
 }
@@ -193,8 +195,10 @@ pub fn fallback_settings() -> Settings {
         insights: bro_core::config::InsightsSettings::default(),
         auto_resume: bro_core::config::AutoResumeSettings::default(),
         auto_approve: false,
+        permission: Default::default(),
         claude_env: Default::default(),
         caveman: Default::default(),
+        justtools: Default::default(),
         keys: BTreeMap::new(),
     }
 }
@@ -238,6 +242,7 @@ impl Services {
             proxy: ProxyState { status: Avail::Loading, routes: vec![], events: VecDeque::new(), pool: vec![], enabled: settings.proxy.enabled },
             bridge: BridgeState { status: Avail::Loading, qr: None, enabled: settings.bridge.enabled },
             settings,
+            justtools: Default::default(),
             config: None,
             profiles: Avail::Loading,
             providers: Avail::Loading,

@@ -41,7 +41,7 @@ impl App {
                 }
                 Overlay::Launcher(l) if left => {
                     match l.click(pos) {
-                        crate::launcher::Outcome::None => {}
+                        crate::launcher::Outcome::None => self.remember_launcher_permission(),
                         crate::launcher::Outcome::Close => self.overlay = Overlay::None,
                         crate::launcher::Outcome::Profiles => {
                             self.overlay = Overlay::None;

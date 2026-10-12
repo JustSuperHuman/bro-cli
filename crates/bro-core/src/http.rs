@@ -42,6 +42,14 @@ pub fn get_json(url: &str, headers: &[(&str, &str)], timeout: Duration) -> anyho
     Ok(finish(resp))
 }
 
+/// `GET url`: the status and the body as text.
+pub fn get_text(url: &str, timeout: Duration) -> anyhow::Result<(u16, String)> {
+    let resp = agent(timeout).get(url).call().with_context(|| format!("GET {url}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.into_body().read_to_string().with_context(|| format!("reading {url}"))?;
+    Ok((status, text))
+}
+
 /// `POST url` with a JSON body.
 pub fn post_json(url: &str, body: &Value, timeout: Duration) -> anyhow::Result<JsonResponse> {
     let resp = agent(timeout)

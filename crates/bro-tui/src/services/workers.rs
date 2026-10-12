@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 pub(super) fn spawn_all(svc: &Services) {
     spawn_usage_loop(svc);
     spawn_data(svc);
+    svc.check_justtools();
     let s = svc.settings();
     if s.proxy.enabled {
         spawn_proxy(svc);

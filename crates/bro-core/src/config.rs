@@ -156,10 +156,14 @@ pub struct Settings {
     /// Answer Yes for you when Claude stops on a "Do you want to proceed?" permission prompt (the safety
     /// checks bypass mode still asks, e.g. "Dangerous rm operation on statically-unresolvable target"). Off by default.
     pub auto_approve: bool,
+    /// Permission mode new sessions start on: the one last picked in the launcher.
+    pub permission: crate::launch::Permission,
     /// Privacy / update / behaviour env for Claude launches (preset + overrides).
     pub claude_env: crate::claude_env::ClaudeEnvSettings,
     /// Caveman mode: terse replies for new Claude / Codex / Pi sessions.
     pub caveman: crate::caveman::CavemanSettings,
+    /// JustTools integration: its skill in new Claude / Codex sessions.
+    pub justtools: crate::justtools::JustToolsSettings,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
     pub keys: BTreeMap<String, String>,
 }
@@ -292,8 +296,10 @@ impl Default for Settings {
             insights: InsightsSettings::default(),
             auto_resume: AutoResumeSettings::default(),
             auto_approve: false,
+            permission: Default::default(),
             claude_env: Default::default(),
             caveman: Default::default(),
+            justtools: Default::default(),
             keys: BTreeMap::new(),
         }
     }
@@ -476,6 +482,8 @@ mod tests {
         let mut s2 = s.clone();
         s2.theme = "dark".into();
         s2.sidebar_width = Some(58);
+        assert_eq!(s2.permission, crate::launch::Permission::Skip, "unattended unless you pick another mode");
+        s2.permission = crate::launch::Permission::Auto;
         s2.keys.insert("palette".into(), "ctrl+k".into());
         assert_eq!(s2.claude_env.preset, "standard");
         s2.claude_env.use_preset("private");
@@ -489,6 +497,7 @@ mod tests {
         assert_eq!(w.rain, RainMode::Working);
         assert_eq!(back.theme, "dark");
         assert_eq!(back.sidebar_width, Some(58));
+        assert_eq!(back.permission, crate::launch::Permission::Auto);
         assert_eq!(back.keys["palette"], "ctrl+k");
         assert_eq!(back.bridge.port, 10001);
         assert_eq!((back.bridge.remote_min_cols, back.bridge.remote_min_rows, back.bridge.remote_min_grace_secs), (80, 50, 15));

@@ -37,6 +37,25 @@
       ]
     },
     {
+      "id": "meta",
+      "name": "Meta (Muse)",
+      "mode": "anthropic",
+      "baseUrl": "https://api.meta.ai",
+      "responsesBaseUrl": "https://api.meta.ai/v1",
+      "keyEnv": "META_MUSE_API_KEY",
+      "env": { "ENABLE_TOOL_SEARCH": "true" },
+      "codex": {
+        "model_reasoning_effort": "high",
+        "model_reasoning_summary": "auto",
+        "model_context_window": 1048576,
+        "model_supports_reasoning_summaries": true,
+        "model_auto_compact_token_limit": 900000
+      },
+      "models": [
+        { "id": "muse-wonder-1.0", "name": "Muse Wonder 1.0", "context": 1048576 }
+      ]
+    },
+    {
       "id": "zai",
       "name": "Z.ai (GLM)",
       "mode": "anthropic",

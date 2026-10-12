@@ -1876,6 +1876,9 @@ fn launcher_works_with_the_mouse() {
     // clicking outside the launcher closes it
     key(&mut a, KeyCode::Char('n'), KeyModifiers::ALT);
     let _ = draw(&mut a);
+    let Overlay::Launcher(l) = &a.overlay else { panic!() };
+    assert_eq!(l.permission, bro_core::launch::Permission::Auto, "the next launcher opens on the mode picked last");
+    assert_eq!(a.svc.settings().permission, bro_core::launch::Permission::Auto);
     a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 0, row: 0, modifiers: KeyModifiers::NONE });
     assert!(matches!(a.overlay, Overlay::None));
 }
@@ -2420,6 +2423,18 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // subagents
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().caveman.subagents);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustTools: the demo never installs or looks for it
+    { let s = draw(&mut a); assert!(s.contains("integrations") && s.contains("not installed"), "{s}"); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // its skill
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().justtools.skill);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().justtools.skill);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // auto-update: on unless you turn it off
+    assert!(a.svc.settings().justtools.auto_update);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().justtools.auto_update);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
     assert_eq!(a.svc.settings().claude_env.preset, "quiet");
@@ -2433,13 +2448,44 @@ fn settings_view_switches_presets_and_overrides_switches() {
     let screen = draw(&mut a);
     assert!(screen.contains("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"), "{screen}");
     key(&mut a, KeyCode::Home, KeyModifiers::NONE);
-    for _ in 0..10 {
+    for _ in 0..13 {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // back to error reports
     }
     key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
     assert_eq!(a.svc.settings().claude_env.summary(), "Quiet");
     a.run_palette(crate::palette::Cmd::ClaudePreset("presenter".into()));
     assert_eq!(a.svc.settings().claude_env.preset, "presenter");
+}
+
+#[test]
+fn settings_show_a_justtools_update_its_progress_and_how_it_ended() {
+    use crate::services::justtools::{Job, JobKind};
+    use bro_core::justtools::{Installed, Step};
+    let mut a = app(false);
+    a.run_act(Act::Settings);
+    let _ = draw(&mut a);
+    a.svc.update(|st| {
+        st.justtools.installed = Some(Installed { bin: std::env::temp_dir(), version: Some("2.8.0".into()) });
+        st.justtools.latest = Some("2.9.0".into());
+    });
+    let s = draw(&mut a);
+    assert!(s.contains("2.8.0 → 2.9.0") && s.contains("enter updates"), "{s}");
+    a.svc.update(|st| st.justtools.job = Some(Job { kind: JobKind::Update, step: Step::Download, started: Instant::now() }));
+    let s = draw(&mut a);
+    assert!(s.contains("updating") && s.contains("2 of 5 · downloading the release · 0s"), "{s}");
+    a.svc.update(|st| {
+        st.justtools.job = None;
+        st.justtools.error = Some("the JustTools installer failed: Checksum verification failed".into());
+    });
+    let s = draw(&mut a);
+    assert!(s.contains("✗ the JustTools installer failed") && s.contains("enter tries again"), "{s}");
+    a.svc.update(|st| {
+        st.justtools.error = None;
+        st.justtools.installed.as_mut().unwrap().version = Some("2.9.0".into());
+        st.justtools.done = Some("updated 2.8.0 → 2.9.0".into());
+    });
+    let s = draw(&mut a);
+    assert!(s.contains("✓ updated 2.8.0 → 2.9.0") && s.contains("the newest release · enter checks again"), "{s}");
 }
 
 #[test]
