@@ -5,8 +5,8 @@
 //! it). [`machine`] is the platform-free hold/tap/chord state machine; the
 //! backends feed it and act on its verdicts:
 //!
-//! - `windows`: `WH_KEYBOARD_LL` hook; swallows the hotkey, replays taps and
-//!   chords, masks Win/Alt releases.
+//! - `windows`: `WH_KEYBOARD_LL` hook; reserves a solo Win press for voice,
+//!   replays chords and non-Win taps, masks Win/Alt releases.
 //! - `macos`: `CGEventTap` on a CFRunLoop thread; needs Input Monitoring (and
 //!   Accessibility to swallow). Modifier hotkeys pass through (a lone Option /
 //!   Cmd does nothing on macOS); F13+ keys can be swallowed.

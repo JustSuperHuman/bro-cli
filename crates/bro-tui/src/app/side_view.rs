@@ -1,4 +1,4 @@
-//! Drawing the sidebar: "+ open project", projects with their live and earlier sessions, then the footer
+//! Drawing the sidebar: projects with live sessions, the New/Continue strip, then the footer
 //! blocks (usage — Claude / Codex totals or every profile — proxy, bridge).
 
 use super::{App, SideHit};
@@ -78,16 +78,34 @@ impl App {
         let title = Line::from(vec![Span::raw(" "), Span::styled("bro", ui::bold_accent(&t)), Span::raw(" ")]);
         let clock = Line::from(Span::styled(format!(" {} ", crate::util::clock()), muted(&t)));
         let sub = if focused { "? keys" } else { "alt+b" };
+        // the gear sits right after the title, however the skin dresses it
+        let title_w = crate::skin::title(title.clone(), t.accent, &t).width() as u16;
         let inner = ui::frame_ex(f, area, title, Some(clock), Some(sub), focused, &t);
         let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(1), ..inner };
         self.side_thumb = Rect::default();
+        // the settings gear sits in the top border, right after " bro "
+        if area.width >= 20 + title_w && area.height > 0 {
+            let gear = Rect { x: area.x + 1 + title_w, y: area.y, width: 3, height: 1 };
+            let style = if gear.contains(self.hover) { ui::bold_accent(&t).bg(current_tint(&t)) } else { muted(&t) };
+            ui::line(f, gear, vec![Span::styled(format!(" {} ", ui::icon("settings")), style)]);
+            self.side_hits.push((gear, SideHit::Settings));
+            // caveman mode, while it's on for new sessions: "⛏ ultracave", or just the pick when narrow
+            if let Some(l) = self.svc.settings().caveman.active() {
+                let full = format!(" {} {} ", ui::icon("caveman"), l.id());
+                let text = if area.width >= 16 + title_w + ui::width(&full) as u16 { full } else { format!(" {} ", ui::icon("caveman")) };
+                let badge = Rect { x: gear.right(), width: ui::width(&text) as u16, ..gear };
+                let style = if badge.contains(self.hover) { ui::bold_accent(&t).bg(current_tint(&t)) } else { fg(t.inline) };
+                ui::line(f, badge, vec![Span::styled(text, style)]);
+                self.side_hits.push((badge, SideHit::Settings));
+            }
+        }
 
         // footer first (fixed height), rows get the rest
         let usage = self.usage_lines();
         let foot_h = footer_height(usage.len() as u16, self.usage_expanded, inner.height);
-        // the new-session strip sits on top of the footer, with a blank line either side when there's room
-        let strip_h = if inner.height >= foot_h + 12 {
-            3
+        // the one-row session strip sits above the footer, with a blank line under it when there's room
+        let strip_h = if inner.height >= foot_h + 10 {
+            2
         } else if inner.height >= foot_h + 6 {
             1
         } else {
@@ -100,43 +118,64 @@ impl App {
             self.draw_footer(f, Rect { y: inner.bottom() - foot_h, height: foot_h, ..inner }, &usage, &t);
         }
         if strip_h > 0 {
-            self.draw_strip(f, Rect { y: list.bottom() + tile_h + strip_h / 2, height: 1, ..inner }, &t);
+            self.draw_strip(f, Rect { y: list.bottom() + tile_h, height: strip_h, ..inner }, &t);
         }
         if tile_h > 0 {
             let row = Rect { y: list.bottom(), height: 1, ..inner };
-            let all = self.tile_all && self.tile_project.is_none();
-            let label = if all { "tiled" } else { "tile all" };
-            let style = if all || row.contains(self.hover) { ui::bold_accent(&t) } else { muted(&t) };
-            ui::line_lr(f, row, vec![Span::styled(format!("▦ {label} · {sessions}"), style)],
-                vec![Span::styled(format!("{} ", self.keymap.primary(crate::keymap::Act::TileAll)), muted(&t))]);
-            self.side_hits.push((row, SideHit::TileAll));
+            if self.tile_all {
+                let minimized = format!("{} minimized {}", if self.show_minimized { "▾" } else { "▸" }, self.minimized.len());
+                let min_w = ui::width(&minimized) as u16;
+                let min_hit = Rect { x: row.right().saturating_sub(min_w), width: min_w.min(row.width), ..row };
+                let tile_hit = Rect { width: min_hit.x.saturating_sub(row.x), ..row };
+                let tile_style = if tile_hit.contains(self.hover) { ui::bold_accent(&t) } else { muted(&t) };
+                let min_style = if self.show_minimized || min_hit.contains(self.hover) { ui::bold_accent(&t) } else { muted(&t) };
+                ui::line_lr(f, row, vec![Span::styled(format!("▦ tiled {}", self.stack.len()), tile_style)],
+                    vec![Span::styled(minimized, min_style)]);
+                self.side_hits.push((tile_hit, SideHit::TileAll));
+                self.side_hits.push((min_hit, SideHit::Minimized));
+            } else {
+                let style = if row.contains(self.hover) { ui::bold_accent(&t) } else { muted(&t) };
+                ui::line_lr(f, row, vec![Span::styled(format!("▦ tile all · {sessions}"), style)],
+                    vec![Span::styled(format!("{} ", self.keymap.primary(crate::keymap::Act::TileAll)), muted(&t))]);
+                self.side_hits.push((row, SideHit::TileAll));
+            }
         }
 
+        let rows = self.rows();
+        self.side_sel = self.side_sel.min(rows.len().saturating_sub(1));
+        let focus_pane = self.focused();
+        let cur_key = self.current_project().map(|r| self.svc.project_for(&r).key);
         let mut y = list.y;
-        if self.side_filtering || !self.side.filter.is_empty() {
+        if (self.side_filtering || !self.side.filter.is_empty()) && y < list.bottom() {
             let cursor = if self.side_filtering { "▏" } else { "" };
             ui::line(f, Rect { y, height: 1, ..list }, vec![Span::styled("/ ", ui::bold_accent(&t)), Span::styled(format!("{}{cursor}", self.side.filter), ui::bold())]);
             y += 1;
         }
-        let rows = self.rows();
-        self.side_sel = self.side_sel.min(rows.len().saturating_sub(1));
         let room = list.bottom().saturating_sub(y);
-        if rows.is_empty() {
-            ui::line(f, Rect { y: y + 1, height: 1, ..list }, vec![Span::styled(" nothing matches", muted(&t))]);
+        let projects = &rows[..];
+        if projects.is_empty() {
+            self.side_scroll = 0;
+            if !self.side.filter.is_empty() && room > 0 {
+                ui::line(f, Rect { y, height: 1, ..list }, vec![Span::styled(" nothing matches", muted(&t))]);
+            }
+            return;
+        }
+        if room == 0 {
             return;
         }
         // rows have heights (projects: a gap line + two lines); scroll so the selection stays in view
-        let lines: Vec<(u16, u16)> = row_lines(&rows);
+        let lines: Vec<(u16, u16)> = row_lines(projects);
         let total = |a: usize, b: usize| lines[a..=b].iter().map(|(g, h)| g + h).sum::<u16>();
-        if self.side_focus {
-            if self.side_sel < self.side_scroll {
-                self.side_scroll = self.side_sel;
+        if self.side_focus && !self.side_manual_scroll {
+            let selected = self.side_sel;
+            if selected < self.side_scroll {
+                self.side_scroll = selected;
             }
-            while self.side_scroll < self.side_sel && total(self.side_scroll, self.side_sel) > room {
+            while self.side_scroll < selected && total(self.side_scroll, selected) > room {
                 self.side_scroll += 1;
             }
         }
-        let mut last_start = rows.len();
+        let mut last_start = projects.len();
         let mut acc = 0;
         while last_start > 0 && acc + lines[last_start - 1].0 + lines[last_start - 1].1 <= room {
             last_start -= 1;
@@ -154,7 +193,7 @@ impl App {
         {
             let span = |r: std::ops::Range<usize>| lines[r].iter().map(|(g, h)| g + h).sum::<u16>();
             let track = list.bottom().saturating_sub(y);
-            let (off, len) = thumb(track, room, span(0..rows.len()), span(0..self.side_scroll), span(0..last_start));
+            let (off, len) = thumb(track, room, span(0..projects.len()), span(0..self.side_scroll), span(0..last_start));
             let border = if focused { t.accent } else { t.frame };
             self.side_thumb = Rect { x: area.right() - 1, y: y + off, width: 1, height: len };
             for cy in self.side_thumb.y..self.side_thumb.bottom() {
@@ -163,12 +202,11 @@ impl App {
                 }
             }
         }
-        let focus_pane = self.focused();
-        let cur_key = self.current_project().map(|r| self.svc.project_for(&r).key);
-        for (i, row) in rows.iter().enumerate().skip(self.side_scroll) {
-            let (gap, h) = lines[i];
+        for (offset, row) in projects.iter().enumerate().skip(self.side_scroll) {
+            let i = offset;
+            let (gap, h) = lines[offset];
             // no gap above the first row on screen
-            let gap = if i == self.side_scroll { 0 } else { gap };
+            let gap = if offset == self.side_scroll { 0 } else { gap };
             if y + gap + h > list.bottom() {
                 break;
             }
@@ -209,16 +247,6 @@ impl App {
     fn draw_row(&self, f: &mut Frame, r: Rect, row: &Row, selected: bool, focus_pane: Option<crate::layout::PaneId>, cur_key: Option<&str>, t: &Theme, time: f64) {
         let w = r.width as usize;
         match row {
-            Row::Continue { count } => {
-                let key = self.keymap.primary(crate::keymap::Act::Continue);
-                let st = if selected { ui::bold_accent(t) } else { muted(t) };
-                ui::line_lr(f, r, vec![Span::styled("↻ continue session", st), Span::styled(format!("  {count}"), fg(t.frame))], vec![Span::styled(format!("{key} "), muted(t))]);
-            }
-            Row::OpenFolder => {
-                let key = self.keymap.primary(crate::keymap::Act::OpenProject);
-                let st = if selected { ui::bold_accent(t) } else { muted(t) };
-                ui::line_lr(f, r, vec![Span::styled("+ open project", st)], vec![Span::styled(format!("{key} "), muted(t))]);
-            }
             Row::Project { key, name, root, live, attention, last_age, .. } => {
                 // the current project (where new sessions start) gets a bar down both lines
                 let current = cur_key == Some(key.as_str());
@@ -305,58 +333,59 @@ impl App {
         }
     }
 
-    /// The new-session strip, Windows Terminal's new-tab buttons: a filled "+" (the launcher), then claude, codex
-    /// and a terminal as evenly spaced icons that start in one click. The key hint sits on the right and turns into
-    /// the name of whatever the mouse is over.
+    /// One quiet row: "+ New" and "↻ Continue" on the left, one-click claude / codex / terminal icons on the
+    /// right. Everything tints on hover; a hovered icon names itself in the gap between.
     fn draw_strip(&mut self, f: &mut Frame, r: Rect, t: &Theme) {
         use bro_core::Harness;
-        const BTN: u16 = 5;
-        let key = self.keymap.primary(crate::keymap::Act::NewSession);
-        let dark = ratatui::style::Color::Rgb(18, 18, 22);
-        let mut name = None;
+        const ICON: u16 = 3;
+        let row = Rect { height: 1, ..r };
+        let hover_bg = current_tint(t);
+        let agents: [(Option<Harness>, &str); 3] = [(Some(Harness::Claude), "Claude"), (Some(Harness::Codex), "Codex"), (None, "Terminal")];
+        let icons_w = ICON * agents.len() as u16;
+        // narrow sidebars drop the icons first, then Continue's word
+        let continue_text = if row.width >= 15 { "↻ Continue" } else { "↻" };
+        let left_w = ui::width("+ New") as u16 + 2 + ui::width(continue_text) as u16;
+        let show_icons = row.width >= left_w + 2 + icons_w;
 
-        // + : a solid button, so it's plain where new sessions start
-        let plus = Rect { width: BTN.min(r.width), ..r };
-        let hot = plus.contains(self.hover);
-        let fill = if t.is_light() { crate::theme::mix(t.accent, t.bg, if hot { 0.55 } else { 0.7 }) } else { crate::theme::mix(t.accent, dark, if hot { 0.4 } else { 0.58 }) };
-        f.buffer_mut().set_style(plus, Style::default().bg(fill));
-        ui::line(f, plus, vec![Span::styled("  +  ", Style::default().fg(t.shine).bg(fill).add_modifier(Modifier::BOLD))]);
-        self.side_hits.push((plus, SideHit::Launcher));
-        if hot {
-            name = Some(("launcher", "new"));
-        }
-
-        let agents: [(Option<Harness>, &str, &str); 3] = [(Some(Harness::Claude), "new claude", "claude"), (Some(Harness::Codex), "new codex", "codex"), (None, "new terminal", "term")];
-        let mut x = plus.right();
-        for (h, long, short) in agents {
-            if x + BTN > r.right() {
+        let mut x = row.x;
+        for (text, hit, base) in [("+ New", SideHit::Launcher, ui::bold_accent(t)), (continue_text, SideHit::Continue, ui::bold())] {
+            let w = (ui::width(text) as u16 + 1).min(row.right().saturating_sub(x));
+            if w == 0 {
                 break;
             }
-            let b = Rect { x, width: BTN, ..r };
+            let b = Rect { x, width: w, ..row };
             let hot = b.contains(self.hover);
             if hot {
-                f.buffer_mut().set_style(b, Style::default().bg(current_tint(t)));
-                name = Some((long, short));
+                f.buffer_mut().set_style(b, Style::default().bg(hover_bg));
             }
-            let color = if h.is_some() { ui::harness_color(h, t) } else { t.shine };
-            // glyph + the space after it (an image logo takes both cells)
-            ui::line(f, b, vec![Span::raw("  "), Span::styled(format!("{} ", ui::harness_glyph(h)), fg(color).add_modifier(Modifier::BOLD))]);
-            self.side_hits.push((b, SideHit::Quick(h)));
-            x += BTN;
+            ui::line(f, b, vec![Span::styled(text, if hot { ui::bold_accent(t) } else { base })]);
+            self.side_hits.push((b, hit));
+            x += w + 1;
+        }
+        if !show_icons {
+            return;
         }
 
-        // right: alt+n, or what's under the mouse
-        let room = r.right().saturating_sub(x + 1) as usize;
-        let (text, style) = match name {
-            Some((long, _)) if ui::width(long) < room => (long.to_string(), ui::bold()),
-            Some((_, short)) if ui::width(short) < room => (short.to_string(), ui::bold()),
-            _ => (key, muted(t)),
-        };
-        let w = ui::width(&text) + 1;
-        if w <= room {
-            let hint = Rect { x: r.right() - w as u16, width: w as u16, ..r };
-            ui::line(f, hint, vec![Span::styled(format!("{text} "), style)]);
-            self.side_hits.push((hint, SideHit::Launcher));
+        let mut ix = row.right() - icons_w;
+        let mut hovered = None;
+        for (h, label) in agents {
+            let b = Rect { x: ix, width: ICON, ..row };
+            let hot = b.contains(self.hover);
+            if hot {
+                f.buffer_mut().set_style(b, Style::default().bg(hover_bg));
+                hovered = Some(label);
+            }
+            let color = if h.is_some() { ui::harness_color(h, t) } else { t.shine };
+            ui::line(f, b, vec![Span::raw(" "), Span::styled(ui::harness_glyph(h), fg(color).add_modifier(Modifier::BOLD))]);
+            self.side_hits.push((b, SideHit::Quick(h)));
+            ix += ICON;
+        }
+        if let Some(label) = hovered {
+            let w = ui::width(label) as u16;
+            let end = row.right() - icons_w;
+            if end > x + w {
+                ui::line(f, Rect { x: end - w - 1, width: w, ..row }, vec![Span::styled(label, muted(t))]);
+            }
         }
     }
 
@@ -588,11 +617,11 @@ fn row_lines(rows: &[Row]) -> Vec<(u16, u16)> {
         .collect()
 }
 
-/// Background of the session you're in: a quiet tint of the accent.
+/// Hover background for sidebar actions: a quiet tint of the accent.
 fn current_tint(t: &Theme) -> ratatui::style::Color {
     if t.is_light() {
         crate::theme::mix(t.accent, t.bg, 0.9)
     } else {
-        crate::theme::mix(t.accent, ratatui::style::Color::Rgb(18, 18, 22), 0.84)
+        crate::theme::mix(t.accent, t.deep(), 0.84)
     }
 }

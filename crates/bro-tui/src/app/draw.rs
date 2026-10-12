@@ -83,6 +83,7 @@ impl App {
             }
         }
         self.pane_close.clear();
+        self.pane_minimize.clear();
         self.outer.clear();
         self.inner.clear();
         if self.tabs.is_empty() {
@@ -91,8 +92,37 @@ impl App {
             self.draw_panes(f);
         }
         self.draw_selection(f);
+        // the backdrop fills whatever is still empty; toasts and overlays then sit on top of it
+        let time = self.start.elapsed().as_secs_f64();
+        for (r, bd, skip) in self.backdrops(area) {
+            crate::skin::backdrop(f.buffer_mut(), r, &t, time, bd, &skip);
+        }
         self.draw_toasts(f, area);
         self.draw_overlay(f, area);
+        crate::skin::effects(f.buffer_mut(), area, &t);
+    }
+
+    /// Where backdrops go this frame, in order (earlier ones win the space), each with the rects it keeps out
+    /// of: the rain setting over the theme's own. In "working" mode rain falls in the sidebar and around the
+    /// sessions all the time, and inside a session only while its agent is mid-turn.
+    pub(super) fn backdrops(&self, area: Rect) -> Vec<(Rect, crate::skin::Backdrop, Vec<Rect>)> {
+        use crate::skin::Backdrop;
+        use bro_core::config::RainMode;
+        let own = self.theme.skin.backdrop;
+        match self.svc.settings().rain {
+            RainMode::Off => vec![(area, own, vec![])],
+            RainMode::Everywhere => vec![(area, Backdrop::Rain, vec![])],
+            RainMode::Working => {
+                // whole panes, frame included, so nothing lands on a resting session's edges
+                let resting: Vec<Rect> = self.outer.iter().filter(|(id, _)| !self.panes.get(id).is_some_and(|p| p.is_terminal() && p.busy())).map(|(_, r)| *r).collect();
+                vec![(area, Backdrop::Rain, resting), (area, if own == Backdrop::Rain { Backdrop::None } else { own }, vec![])]
+            }
+        }
+    }
+
+    /// The visible sessions whose agent is mid-turn.
+    pub(super) fn working_rects(&self) -> Vec<Rect> {
+        self.inner.iter().filter(|(id, _)| self.panes.get(id).is_some_and(|p| p.is_terminal() && p.busy())).map(|(_, r)| *r).collect()
     }
 
     fn draw_panes(&mut self, f: &mut Frame) {
@@ -103,10 +133,10 @@ impl App {
         // Tiled sessions from two or more projects: one colored frame per project around its sessions.
         let mut groups: Vec<(Rect, String, String, usize)> = vec![];
         let (focus, zoomed) = if self.stacked() {
-            let focus = self.focused().unwrap_or(self.stack[0]);
+            let focus = self.focused().unwrap_or(0);
             let by_project = if self.stack_zoom { vec![] } else { self.tile_groups() };
             rects = if self.stack_zoom {
-                vec![(focus, body)]
+                if focus == 0 { vec![] } else { vec![(focus, body)] }
             } else if by_project.len() >= 2 {
                 let weights: Vec<usize> = by_project.iter().map(|(_, _, ids)| ids.len()).collect();
                 let mut out = vec![];
@@ -134,6 +164,14 @@ impl App {
             (tab.focus, tab.zoom)
         };
         self.outer = rects.clone();
+        if self.tile_all && rects.is_empty() && !self.minimized.is_empty() {
+            let message = "All sessions minimized · show minimized in the sidebar";
+            let width = ui::width(message) as u16;
+            if body.width >= width && body.height > 0 {
+                let row = Rect { x: body.x + (body.width - width) / 2, y: body.y + body.height / 2, width, height: 1 };
+                ui::line(f, row, vec![Span::styled(message, ui::muted(&t))]);
+            }
+        }
         for (region, key, name, count) in &groups {
             let color = self.project_color(key);
             let holds_focus = rects.iter().any(|(id, r)| *id == focus && region.contains(r.as_position())) && !self.side_focus && !self.overlay.is_open();
@@ -153,7 +191,13 @@ impl App {
             let inner = if let Some(project) = project {
                 // inside a project frame the group title already names the project
                 let label = if grouped && groups.iter().any(|(region, ..)| region.contains(r.as_position())) { "" } else { project.name.as_str() };
-                ui::session_frame(f, r, title, status, sub.as_deref(), label, color, focused, &t)
+                let minimize = (self.tile_all && r.width >= 5).then_some(self.minimized.contains(&id));
+                let button = Rect { x: r.x + 1, y: r.y, width: 3, height: 1 };
+                let hot = minimize.is_some() && button.contains(self.hover);
+                if minimize.is_some() {
+                    self.pane_minimize.push((button, id));
+                }
+                ui::session_frame(f, r, title, status, sub.as_deref(), label, minimize, hot, color, focused, &t)
             } else {
                 ui::frame_ex(f, r, title, status, sub.as_deref(), focused, &t)
             };
@@ -233,7 +277,7 @@ impl App {
             let text = format!(" {} ", self.keymap.prefix_hint());
             let w = (ui::width(&text) as u16 + 4).min(area.width);
             let r = Rect { x: area.right().saturating_sub(w + 1), y: area.bottom().saturating_sub(4), width: w, height: 3 };
-            f.render_widget(Clear, r);
+            ui::clear(f, r, &t);
             let inner = ui::frame(f, r, &format!("{} …", self.keymap.prefix.display()), None, true, &t);
             ui::line(f, inner, vec![Span::styled(text, ui::accent(&t))]);
             return;

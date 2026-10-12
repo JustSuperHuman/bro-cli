@@ -71,6 +71,10 @@ pub struct LaunchCtx {
     /// Route native Claude / Codex logins through the proxy as their own login (request
     /// compression is on; see `ProxySettings::routes_native`). Ignored without `proxy_base`.
     pub route_native: bool,
+    /// Privacy / behaviour env for Claude launches (`Settings::claude_env`).
+    pub claude_env: crate::claude_env::ClaudeEnvSettings,
+    /// Caveman mode for Claude / Codex / Pi launches (`Settings::caveman`).
+    pub caveman: crate::caveman::CavemanSettings,
 }
 
 impl LaunchCtx {
@@ -104,6 +108,9 @@ pub struct CommandSpec {
     /// Temp files to delete when the session exits (staged cross-profile resumes);
     /// pass to [`crate::sessions::cleanup_staged`].
     pub cleanup: Vec<PathBuf>,
+    /// The caveman level this launch got, for the session's badge (None: off, or the harness
+    /// can't take it).
+    pub caveman: Option<crate::caveman::Level>,
 }
 
 impl CommandSpec {

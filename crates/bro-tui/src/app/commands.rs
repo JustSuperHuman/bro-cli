@@ -78,6 +78,7 @@ impl App {
                 self.sidebar = true;
                 self.side_focus = !self.side_focus;
                 if self.side_focus {
+                    self.side_manual_scroll = false;
                     self.select_focused_row();
                 }
             }
@@ -85,6 +86,7 @@ impl App {
             Act::Usage => self.open_view("usage"),
             Act::Profiles => self.open_view("profiles"),
             Act::Stats => self.open_view("stats"),
+            Act::Settings => self.open_view("settings"),
             Act::Proxy => self.open_view("proxy"),
             Act::Bridge => self.open_view("bridge"),
             Act::Help => self.overlay = Overlay::Help(Help::default()),
@@ -115,6 +117,10 @@ impl App {
                 self.svc.save_settings(s);
                 self.toast(Kind::Info, if on { "auto-resume on: agents that stop on an API error get `continue`" } else { "auto-resume off" });
             }
+            Act::ToggleCaveman => {
+                let s = self.svc.settings().caveman;
+                self.set_caveman((!s.on).then_some(s.level));
+            }
             Act::Continue => self.open_continue(),
             Act::CloseProject => {
                 if let Some(root) = self.current_project() {
@@ -123,7 +129,6 @@ impl App {
                     self.close_project(root, live);
                 }
             }
-            Act::OpenProject => self.open_folder(),
             Act::OpenedFile => self.show_last_opened(),
             Act::AgentFiles => self.show_agent_files(),
             Act::SwitchLogin => {
@@ -235,9 +240,15 @@ impl App {
 
     pub(crate) fn open_launcher(&mut self, cwd: Option<PathBuf>, place: Place) {
         self.svc.refresh_usage();
+        self.svc.refresh_sessions();
         let cwd = cwd.or_else(|| self.preferred_dir());
-        let data = launcher_data(self);
-        self.overlay = Overlay::Launcher(Box::new(Launcher::new(data, cwd, place)));
+        self.overlay = Overlay::Launcher(Box::new(self.session_launcher(cwd, place)));
+    }
+
+    fn session_launcher(&self, cwd: Option<PathBuf>, place: Place) -> Launcher {
+        let launcher = Launcher::new(launcher_data(self), cwd, place).with_projects(self.launcher_projects());
+        let project = self.svc.project_for(&launcher.dir);
+        launcher.with_continue(self.continue_entries(), Some((project.key, project.name)))
     }
 
     /// The sidebar's new-session strip: claude / codex straight away on your usual login (the launcher, on that
@@ -250,7 +261,7 @@ impl App {
             return;
         };
         self.svc.refresh_usage();
-        let l = Launcher::new(launcher_data(self), self.preferred_dir(), Place::Tab).with_harness(h);
+        let l = self.session_launcher(self.preferred_dir(), Place::Tab).with_harness(h);
         match l.quick_spec() {
             Some(spec) => {
                 self.launch_spec(spec, Place::Tab);
@@ -268,7 +279,7 @@ impl App {
             return;
         };
         self.svc.refresh_usage();
-        let launcher = Launcher::new(launcher_data(self), self.preferred_dir(), Place::Tab).with_harness(h);
+        let launcher = self.session_launcher(self.preferred_dir(), Place::Tab).with_harness(h);
         let Some(launcher) = launcher.with_profile(&profile) else {
             self.toast(Kind::Error, "that account is no longer available");
             return;
@@ -316,7 +327,21 @@ impl App {
 
     pub(crate) fn open_palette(&mut self, query: &str) {
         let themes = crate::theme::names();
-        self.overlay = Overlay::Palette(Box::new(Palette::new(&self.keymap, &self.recents, &themes, &self.theme.name, query)));
+        self.overlay = Overlay::Palette(Box::new(Palette::new(&self.keymap, &self.recents, &themes, &self.theme.name, query).with_presets(&self.svc.settings().claude_env.preset).with_caveman(self.svc.settings().caveman.active())));
+    }
+
+    /// Caveman mode for new sessions: a level, or None for off.
+    pub(crate) fn set_caveman(&mut self, level: Option<bro_core::caveman::Level>) {
+        let mut s = self.svc.settings();
+        if let Some(l) = level {
+            s.caveman.level = l;
+        }
+        s.caveman.set_on(level.is_some());
+        self.svc.save_settings(s);
+        self.toast(Kind::Info, match level {
+            Some(l) => format!("caveman mode: {} (new sessions; ⛏ marks them)", l.id()),
+            None => "caveman mode off (new sessions)".to_string(),
+        });
     }
 
     pub(crate) fn run_palette(&mut self, c: Cmd) {
@@ -326,6 +351,14 @@ impl App {
                 self.set_theme(&t, true);
                 self.toast(Kind::Info, format!("theme: {t}"));
             }
+            Cmd::ClaudePreset(id) => {
+                let mut s = self.svc.settings();
+                s.claude_env.use_preset(&id);
+                let label = s.claude_env.summary();
+                self.svc.save_settings(s);
+                self.toast(Kind::Info, format!("Claude preset: {label} (new launches)"));
+            }
+            Cmd::Caveman(level) => self.set_caveman(level),
             Cmd::Recent(i) => {
                 if let Some(r) = self.recents.get(i).cloned() {
                     let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: bro_core::launch::Permission::Skip, browser: r.browser, extra_args: vec![] };
@@ -360,20 +393,12 @@ impl App {
         self.svc.save_settings(s);
     }
 
-    /// "↻ continue session" / alt+r: earlier sessions, searchable, current project first.
+    /// Open the shared session dialog on its Continue tab.
     pub(crate) fn open_continue(&mut self) {
-        // show what we have now; a fresh scan lands a moment later and updates the open picker
-        self.svc.refresh_sessions();
-        let project = self.current_project().map(|r| {
-            let pk = self.svc.project_for(&r);
-            (pk.key, pk.name)
-        });
-        let entries = self.continue_entries();
-        if entries.is_empty() {
-            self.toast(Kind::Info, "no earlier sessions yet");
-            return;
+        self.open_launcher(None, Place::Tab);
+        if let Overlay::Launcher(l) = &mut self.overlay {
+            l.show_continue();
         }
-        self.overlay = Overlay::Continue(Box::new(crate::continue_picker::ContinuePicker::new(entries, project)));
     }
 
     /// Every earlier session (archived ones flagged), newest first.
@@ -429,8 +454,8 @@ impl App {
 
     pub(crate) fn refresh_continue(&mut self) {
         let entries = self.continue_entries();
-        if let Overlay::Continue(p) = &mut self.overlay {
-            p.set_entries(entries);
+        if let Overlay::Launcher(l) = &mut self.overlay {
+            l.set_continue_entries(entries);
         }
     }
 
@@ -444,8 +469,6 @@ impl App {
                 self.pick_project(root.clone());
                 self.toggle_project_tiles(key);
             }
-            Row::OpenFolder => self.open_folder(),
-            Row::Continue { .. } => self.open_continue(),
             Row::Live { info, .. } => self.go_session(info.pane),
         }
     }
@@ -467,7 +490,7 @@ impl App {
     /// l / →: step into a project.
     pub(crate) fn side_step_in(&mut self) {
         let rows = self.rows();
-        if matches!(rows.get(self.side_sel), Some(Row::Project { .. } | Row::OpenFolder | Row::Continue { .. })) {
+        if matches!(rows.get(self.side_sel), Some(Row::Project { .. })) {
             self.side_sel = (self.side_sel + 1).min(rows.len().saturating_sub(1));
         }
     }

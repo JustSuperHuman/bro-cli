@@ -18,6 +18,10 @@ use ratatui::{
 pub enum Cmd {
     Act(Act),
     Theme(String),
+    /// Switch the Claude env preset (`claude_env::PRESETS` id).
+    ClaudePreset(String),
+    /// Caveman mode for new sessions: a level, or None for off.
+    Caveman(Option<bro_core::caveman::Level>),
     Recent(usize),
 }
 
@@ -28,6 +32,8 @@ pub struct Item {
     pub label: String,
     pub hint: String,
     pub cmd: Cmd,
+    /// themes: (its background, a few of its colours), drawn on the right
+    pub swatch: Option<(ratatui::style::Color, [ratatui::style::Color; 5])>,
 }
 
 /// What a key did.
@@ -55,6 +61,7 @@ fn icon_for(a: Act) -> &'static str {
         Profiles => "account",
         Proxy => "proxy",
         Bridge => "bridge",
+        Settings => "settings",
         Themes => "theme",
         Help => "help",
         Quit => "quit",
@@ -75,24 +82,63 @@ impl Palette {
                 label: format!("launch {} · {who} · {} — {}", r.harness.label(), r.model.as_deref().map(crate::services::launch::short_model).unwrap_or_else(|| "default".into()), crate::util::short_path(&r.cwd, 30)),
                 hint: "recent".into(),
                 cmd: Cmd::Recent(i),
+                swatch: None,
             });
         }
         for a in Act::all() {
             if matches!(a, Act::Jump(n) if n > 3) {
                 continue; // jump 1–3 is enough to show the pattern
             }
-            items.push(Item { icon: icon_for(a), label: a.describe(), hint: km.primary(a), cmd: Cmd::Act(a) });
+            items.push(Item { icon: icon_for(a), label: a.describe(), hint: km.primary(a), cmd: Cmd::Act(a), swatch: None });
         }
         for t in themes {
             let mine = if crate::theme::is_custom(t) { " · yours" } else { "" };
             let now = if t == current_theme { " · current" } else { "" };
-            items.push(Item { icon: "theme", label: format!("theme {t}{mine}{now}"), hint: String::new(), cmd: Cmd::Theme(t.clone()) });
+            let th = crate::theme::get(t);
+            let kind = if th.is_light() { " · light" } else if th.painted() { " · dark" } else { "" };
+            let swatch = Some((th.bg, th.swatch()));
+            items.push(Item { icon: "theme", label: format!("theme {t}{kind}{mine}{now}"), hint: String::new(), cmd: Cmd::Theme(t.clone()), swatch });
         }
         Palette { query: query.to_string(), sel: 0, items, theme_before: current_theme.to_string() }
     }
 
+    /// Add one entry per Claude env preset (after the actions, before the themes).
+    pub fn with_presets(mut self, current: &str) -> Palette {
+        let at = self.items.iter().position(|i| matches!(i.cmd, Cmd::Theme(_))).unwrap_or(self.items.len());
+        let presets = bro_core::claude_env::PRESETS.iter().map(|p| Item {
+            icon: "key",
+            label: format!("claude preset {}{} — {}", p.label.to_lowercase(), if p.id == current { " · current" } else { "" }, p.help),
+            hint: String::new(),
+            cmd: Cmd::ClaudePreset(p.id.into()),
+            swatch: None,
+        });
+        self.items.splice(at..at, presets);
+        self
+    }
+
+    /// Add one entry per caveman level and "caveman off", before the themes.
+    pub fn with_caveman(mut self, current: Option<bro_core::caveman::Level>) -> Palette {
+        use bro_core::caveman::Level;
+        let at = self.items.iter().position(|i| matches!(i.cmd, Cmd::Theme(_))).unwrap_or(self.items.len());
+        let now = |l: Option<Level>| if l == current { " · current" } else { "" };
+        let off = Item { icon: "caveman", label: format!("caveman off{} — agents write normally", now(None)), hint: String::new(), cmd: Cmd::Caveman(None), swatch: None };
+        let levels = Level::ALL.into_iter().map(|l| Item {
+            icon: "caveman",
+            label: format!("caveman mode {}{} — {}", l.id(), now(Some(l)), l.help()),
+            hint: String::new(),
+            cmd: Cmd::Caveman(Some(l)),
+            swatch: None,
+        });
+        self.items.splice(at..at, levels.chain([off]));
+        self
+    }
+
     /// Indices of matching items, best first.
     pub fn matches(&self) -> Vec<usize> {
+        // the theme picker ("theme ") lists every theme in its own order: neutral, painted, accent, yours
+        if self.query.trim() == "theme" {
+            return self.items.iter().enumerate().filter(|(_, i)| matches!(i.cmd, Cmd::Theme(_))).map(|(n, _)| n).collect();
+        }
         fuzzy::filter(&self.query, &self.items, |i| format!("{} {}", i.label, i.hint))
     }
 
@@ -153,7 +199,17 @@ impl Palette {
             let on = start + row == self.sel;
             let style = if on { Style::default().fg(t.accent).add_modifier(Modifier::BOLD) } else { Style::default() };
             let left = vec![Span::styled(if on { "▌ " } else { "  " }, ui::accent(t)), Span::styled(ui::lead(it.icon), if on { ui::accent(t) } else { muted(t) }), Span::styled(it.label.clone(), style)];
-            let right = vec![Span::styled(format!("{} ", it.hint), if on { fg(t.shine).add_modifier(Modifier::BOLD) } else { muted(t) })];
+            let right = match it.swatch {
+                // the theme's own colours on its own background
+                Some((bg, colors)) => {
+                    let base = Style::default().bg(bg);
+                    let mut v = vec![Span::styled(" ", base)];
+                    v.extend(colors.iter().map(|c| Span::styled("● ", base.fg(*c))));
+                    v.push(Span::raw(" "));
+                    v
+                }
+                None => vec![Span::styled(format!("{} ", it.hint), if on { fg(t.shine).add_modifier(Modifier::BOLD) } else { muted(t) })],
+            };
             ui::line_lr(f, Rect { y: inner.y + 2 + row as u16, height: 1, ..inner }, left, right);
         }
         if m.is_empty() {

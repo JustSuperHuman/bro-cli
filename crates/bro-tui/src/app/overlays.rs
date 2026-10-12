@@ -20,8 +20,6 @@ pub enum Overlay {
     Palette(Box<Palette>),
     Help(Help),
     Resume(Box<ResumePicker>),
-    Folder(Box<crate::folder::FolderPicker>),
-    Continue(Box<crate::continue_picker::ContinuePicker>),
     Confirm(Confirm),
     /// A file's preview (a clicked path, or an agent's `bro open`).
     File(Box<crate::file_view::FileView>),
@@ -104,8 +102,6 @@ impl App {
             Overlay::Palette(p) => p.draw(f, area, &t),
             Overlay::Help(h) => h.draw(f, area, &self.keymap, &t, time),
             Overlay::Resume(p) => draw_resume(f, area, p, &t),
-            Overlay::Folder(p) => crate::folder::draw(f, area, p, &t),
-            Overlay::Continue(p) => crate::continue_picker::draw(f, area, p, &t),
             Overlay::Confirm(c) => self.confirm_hits = draw_confirm(f, area, c, self.hover, &t),
             Overlay::File(v) => crate::file_view::draw(f, area, v, self.hover, &t),
             Overlay::AgentFiles(v) => crate::agent_files::draw(f, area, v, &t),
@@ -205,7 +201,7 @@ fn draw_confirm(f: &mut Frame, area: Rect, c: &Confirm, hover: ratatui::layout::
         return vec![];
     }
     let row = inner.y + 3;
-    let ink = if t.is_light() { ratatui::style::Color::Rgb(255, 255, 255) } else { ratatui::style::Color::Rgb(18, 18, 22) };
+    let ink = if t.is_light() { ratatui::style::Color::Rgb(255, 255, 255) } else { t.deep() };
     let yes = Rect { x: inner.x, y: row, width: 11, height: 1 };
     let no = Rect { x: yes.right() + 2, y: row, width: 10, height: 1 };
     let yes_style = if yes.contains(hover) { fg(ink).bg(t.danger).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) } else { fg(ink).bg(t.danger).add_modifier(Modifier::BOLD) };

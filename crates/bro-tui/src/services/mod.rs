@@ -185,11 +185,16 @@ pub fn fallback_settings() -> Settings {
         usage_expanded: false,
         sidebar_width: None,
         icons: "auto".into(),
+        rain: Default::default(),
+        font: None,
         bridge: BridgeSettings::default(),
         proxy: ProxySettings::default(),
         voice: bro_core::config::VoiceSettings::default(),
         insights: bro_core::config::InsightsSettings::default(),
         auto_resume: bro_core::config::AutoResumeSettings::default(),
+        auto_approve: false,
+        claude_env: Default::default(),
+        caveman: Default::default(),
         keys: BTreeMap::new(),
     }
 }

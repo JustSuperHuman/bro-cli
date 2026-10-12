@@ -144,11 +144,22 @@ pub struct Settings {
     pub sidebar_width: Option<u16>,
     /// Harness logos as images: "auto" (detect the terminal), "sixel", "kitty", "iterm" or "text"
     pub icons: String,
+    /// Digital rain over any theme: off (the theme decides), everywhere, or only in sessions that are working
+    pub rain: RainMode,
+    /// A font bro bundles, by id ("departure-mono"), for bro's own window; None = the terminal's font
+    pub font: Option<String>,
     pub bridge: BridgeSettings,
     pub proxy: ProxySettings,
     pub voice: VoiceSettings,
     pub insights: InsightsSettings,
     pub auto_resume: AutoResumeSettings,
+    /// Answer Yes for you when Claude stops on a "Do you want to proceed?" permission prompt (the safety
+    /// checks bypass mode still asks, e.g. "Dangerous rm operation on statically-unresolvable target"). Off by default.
+    pub auto_approve: bool,
+    /// Privacy / update / behaviour env for Claude launches (preset + overrides).
+    pub claude_env: crate::claude_env::ClaudeEnvSettings,
+    /// Caveman mode: terse replies for new Claude / Codex / Pi sessions.
+    pub caveman: crate::caveman::CavemanSettings,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
     pub keys: BTreeMap<String, String>,
 }
@@ -227,6 +238,19 @@ pub struct VoiceSettings {
     pub live_model: Option<String>,
 }
 
+/// Where digital rain falls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RainMode {
+    /// only themes that bring their own (digital-rain)
+    #[default]
+    Off,
+    /// every empty corner, on any theme
+    Everywhere,
+    /// only inside sessions whose agent is working right now
+    Working,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProxySettings {
@@ -260,11 +284,16 @@ impl Default for Settings {
             usage_expanded: false,
             sidebar_width: None,
             icons: "auto".into(),
+            rain: RainMode::Off,
+            font: None,
             bridge: BridgeSettings::default(),
             proxy: ProxySettings::default(),
             voice: VoiceSettings::default(),
             insights: InsightsSettings::default(),
             auto_resume: AutoResumeSettings::default(),
+            auto_approve: false,
+            claude_env: Default::default(),
+            caveman: Default::default(),
             keys: BTreeMap::new(),
         }
     }
@@ -448,8 +477,16 @@ mod tests {
         s2.theme = "dark".into();
         s2.sidebar_width = Some(58);
         s2.keys.insert("palette".into(), "ctrl+k".into());
+        assert_eq!(s2.claude_env.preset, "standard");
+        s2.claude_env.use_preset("private");
+        s2.claude_env.overrides.insert("telemetry".into(), "default".into());
+        s2.claude_env.extra.insert("FOO".into(), "bar".into());
         s2.save().unwrap();
         let back = Settings::load();
+        assert_eq!(back.claude_env, s2.claude_env);
+        assert_eq!(back.rain, RainMode::Off);
+        let w: Settings = toml::from_str("rain = \"working\"").unwrap();
+        assert_eq!(w.rain, RainMode::Working);
         assert_eq!(back.theme, "dark");
         assert_eq!(back.sidebar_width, Some(58));
         assert_eq!(back.keys["palette"], "ctrl+k");

@@ -1,18 +1,22 @@
-//! The launcher: start an agent session in three decisions.
+//! The launcher: choose a project, an agent, and where it runs.
 //!
-//! 1. **Harness** — tabs across the top (←/→): claude, codex, pi, omp.
-//! 2. **Run on** — one list: recent combos for this harness, then its own logins (no model to pick — the CLI
+//! 1. **Project** — the path bar shows the current location and opens the project picker.
+//! 2. **Harness** — tabs across the top (←/→): claude, codex, pi, omp.
+//! 3. **Run on** — one list: recent combos for this harness, then its own logins (no model to pick — the CLI
 //!    uses its default and `/model` works inside), then other logins it can use through bro-proxy, then API
 //!    providers (OpenRouter's live catalogue, DeepSeek, …).
-//! 3. **Model** — only when the choice needs one (providers, cross-family logins): a second, filterable list.
+//! 4. **Model** — only when the choice needs one (providers, cross-family logins): a second, filterable list.
 //!
-//! Sessions start in the current project (the one selected in the sidebar). Enter on a row that needs a
-//! model moves to the model list; Enter there (or on anything else) launches. This file is the model + keys (pure, testable);
+//! Sessions start in the current project. The project row lets you switch to an open project or enter a new
+//! path with the folder picker's completion. Enter on a row that needs a model moves to the model list;
+//! Enter there (or on anything else) launches. This file is the model + keys (pure, testable);
 //! `view.rs` draws it.
 
 pub mod view;
 
 use crate::fuzzy;
+use crate::folder::{self, FolderPicker};
+use crate::continue_picker::{self, ContinuePicker};
 use crate::pane::Place;
 use crate::recents::Recent;
 use bro_core::Harness;
@@ -31,6 +35,12 @@ pub enum Focus {
     /// the "run on" list
     List,
     Models,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionTab {
+    New,
+    Continue,
 }
 
 /// Who a session runs as.
@@ -89,6 +99,10 @@ pub struct Data {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
     Profiles,
+    Project,
+    Tab(SessionTab),
+    ContinueScope(bool),
+    ContinueRow(usize),
     Harness(Harness),
     /// index into the selectable run-on rows
     Row(usize),
@@ -107,7 +121,12 @@ pub enum Outcome {
     None,
     Close,
     Profiles,
+    Project(PathBuf),
+    CreateProject(PathBuf, uuid::Uuid),
     Launch(LaunchSpec, Place),
+    Resume(usize),
+    Archive(String, bool),
+    UndoArchive,
 }
 
 /// Recent combos shown per harness.
@@ -125,6 +144,11 @@ pub struct Launcher {
     /// index into the filtered models
     pub model_sel: usize,
     pub dir: PathBuf,
+    /// Open projects and recent folders offered by the project picker.
+    pub projects: Vec<PathBuf>,
+    pub project_picker: Option<FolderPicker>,
+    pub tab: SessionTab,
+    pub continue_picker: ContinuePicker,
     pub permission: Permission,
     pub browser: BrowserMode,
     pub place: Place,
@@ -180,12 +204,71 @@ impl Launcher {
             list_sel: 0,
             model_sel: 0,
             dir,
+            projects: vec![],
+            project_picker: None,
+            tab: SessionTab::New,
+            continue_picker: ContinuePicker::new(vec![], None),
             permission,
             browser,
             place,
             hits: vec![],
             area: ratatui::layout::Rect::default(),
         }
+    }
+
+    pub fn with_projects(mut self, projects: Vec<PathBuf>) -> Launcher {
+        self.projects = projects;
+        self
+    }
+
+    pub fn with_continue(mut self, entries: Vec<continue_picker::Entry>, project: Option<(String, String)>) -> Launcher {
+        self.continue_picker = ContinuePicker::new(entries, project);
+        self
+    }
+
+    pub fn show_continue(&mut self) {
+        self.tab = SessionTab::Continue;
+        self.hits.clear();
+    }
+
+    pub fn set_continue_entries(&mut self, entries: Vec<continue_picker::Entry>) {
+        self.continue_picker.set_entries(entries);
+    }
+
+    fn continue_outcome(outcome: continue_picker::Outcome) -> Outcome {
+        match outcome {
+            continue_picker::Outcome::None => Outcome::None,
+            continue_picker::Outcome::Close => Outcome::Close,
+            continue_picker::Outcome::Resume(idx) => Outcome::Resume(idx),
+            continue_picker::Outcome::Archive(id, on) => Outcome::Archive(id, on),
+            continue_picker::Outcome::Undo => Outcome::UndoArchive,
+        }
+    }
+
+    fn open_project_picker(&mut self) {
+        let dirs = folder::dedup(std::iter::once(self.dir.clone()).chain(self.projects.iter().cloned()));
+        self.project_picker = Some(FolderPicker::new(dirs));
+    }
+
+    fn project_outcome(&mut self, outcome: folder::Outcome) -> Outcome {
+        match outcome {
+            folder::Outcome::None => Outcome::None,
+            folder::Outcome::Close => {
+                self.project_picker = None;
+                Outcome::None
+            }
+            folder::Outcome::Open(dir) => {
+                self.select_project(dir.clone());
+                Outcome::Project(dir)
+            }
+            folder::Outcome::Create(dir, request) => Outcome::CreateProject(dir, request),
+        }
+    }
+
+    pub fn select_project(&mut self, dir: PathBuf) {
+        self.dir = dir;
+        self.project_picker = None;
+        self.hits.clear();
     }
 
     /// Open on `h` instead of the most recent harness.
@@ -502,6 +585,14 @@ impl Launcher {
 
     /// Paste into the focused filter.
     pub fn paste(&mut self, s: &str) {
+        if let Some(p) = &mut self.project_picker {
+            p.paste(s);
+            return;
+        }
+        if self.tab == SessionTab::Continue {
+            self.continue_picker.paste(s);
+            return;
+        }
         self.filter_mut().push_str(s.trim());
         self.filter_changed();
     }
@@ -515,12 +606,24 @@ impl Launcher {
 
     /// A mouse click. Clicking the selected row again acts like Enter; clicking outside closes.
     pub fn click(&mut self, pos: ratatui::layout::Position) -> Outcome {
+        if let Some(p) = &mut self.project_picker {
+            let clicked_row = p.hits.iter().any(|(r, _)| r.contains(pos));
+            let mut outcome = p.click(pos);
+            if clicked_row && matches!(outcome, folder::Outcome::None) && p.error.is_none() {
+                outcome = p.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            return self.project_outcome(outcome);
+        }
         if !self.area.contains(pos) {
             return Outcome::Close;
         }
         let Some(&(_, hit)) = self.hits.iter().find(|(r, _)| r.contains(pos)) else { return Outcome::None };
         match hit {
             Hit::Profiles => return Outcome::Profiles,
+            Hit::Project => self.open_project_picker(),
+            Hit::Tab(tab) => self.tab = tab,
+            Hit::ContinueScope(all) => self.continue_picker.set_all(all),
+            Hit::ContinueRow(_) => return Self::continue_outcome(self.continue_picker.click(pos)),
             Hit::Harness(h) => {
                 while self.harness != h {
                     self.set_harness(1);
@@ -558,6 +661,18 @@ impl Launcher {
 
     /// Mouse wheel over the launcher: move in the list under the pointer.
     pub fn scroll(&mut self, pos: ratatui::layout::Position, down: bool) {
+        if let Some(p) = &mut self.project_picker {
+            for _ in 0..3 {
+                p.key(KeyEvent::new(if down { KeyCode::Down } else { KeyCode::Up }, KeyModifiers::NONE));
+            }
+            return;
+        }
+        if self.tab == SessionTab::Continue {
+            for _ in 0..3 {
+                self.continue_picker.key(KeyEvent::new(if down { KeyCode::Down } else { KeyCode::Up }, KeyModifiers::NONE));
+            }
+            return;
+        }
         if let Some(&(_, hit)) = self.hits.iter().find(|(r, _)| r.contains(pos)) {
             match hit {
                 Hit::Model(_) => self.focus = Focus::Models,
@@ -570,8 +685,26 @@ impl Launcher {
 
     /// Handle a key. The launcher is modal: it takes every key.
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
+        if let Some(p) = &mut self.project_picker {
+            let outcome = p.key(k);
+            return self.project_outcome(outcome);
+        }
+        if matches!(k.code, KeyCode::Char('p' | 'P')) && k.modifiers.contains(KeyModifiers::ALT) {
+            self.open_project_picker();
+            return Outcome::None;
+        }
         if k.code == KeyCode::Char('o') && k.modifiers == KeyModifiers::ALT {
             return Outcome::Profiles;
+        }
+        if k.modifiers.contains(KeyModifiers::ALT) {
+            match k.code {
+                KeyCode::Char('n' | 'N') => { self.tab = SessionTab::New; return Outcome::None; }
+                KeyCode::Char('r' | 'R') => { self.show_continue(); return Outcome::None; }
+                _ => {}
+            }
+        }
+        if self.tab == SessionTab::Continue {
+            return Self::continue_outcome(self.continue_picker.key(k));
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {

@@ -12,6 +12,8 @@ One terminal workspace for all your coding agents — Claude Code, Codex, Pi and
 - **Resumes anything** — pick up a past session, or fork it into another profile.
 - **Mixes models** — a built-in proxy lets Claude Code run on OpenAI-format models, and Codex / Pi / omp run on Claude.
 - **Reaches your phone** — a built-in bridge lets the Just Terminal mobile and web clients connect.
+- **Sets how Claude Code runs** — pick a preset (Quiet, Private, Lockdown, Incognito, Presenter, Marathon) in Settings (the ⚙ in the sidebar, `alt+,` or prefix `A`), next to theme, icons, auto-resume, recaps and compression, to control telemetry, updates, retries and more for every launch. See [docs/claude-env.md](docs/claude-env.md).
+- **Caveman mode** — terse replies that keep every technical fact ([Caveman](https://github.com/JuliusBrussee/caveman) rules: caveman, ultracave or megacave) for new Claude, Codex and Pi sessions. Turn it on in Settings or the palette ("caveman"); ⛏ in the sidebar and on each session's header shows it. Nothing to install. See [docs/caveman.md](docs/caveman.md).
 
 ## Install
 
@@ -37,6 +39,11 @@ Bro uses the original clipboard PNG when available; this avoids blank images
 from a browser's bitmap copy. Clipboard contents stay unchanged.
 
 On Windows the archive also contains `bro-app.exe`, which opens bro in its own window — pin it to the Start menu or taskbar.
+In that window (with the Just Terminal fork) Settings also has a **Font** choice that switches live: bro bundles
+JetBrains Mono, Fira Code, IBM Plex Mono, Maple Mono, Victor Mono, Monaspace Krypton and Radon, Space Mono,
+Share Tech Mono, Comic Mono, Departure Mono and VT323, video-game-era Kode Mono, Doto, Monocraft (Minecraft),
+IBM VGA 8x16 (DOS), Workbench (Amiga), Sixtyfour (C64) and Press Start 2P, plus the Nerd Font symbols for its icons —
+all open source, licences in [crates/bro-tui/assets/fonts/licenses](crates/bro-tui/assets/fonts/licenses).
 
 You need at least one agent installed (Claude Code, Codex, Pi or omp); bro launches the ones it finds.
 

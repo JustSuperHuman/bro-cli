@@ -62,6 +62,8 @@ pub struct Meta {
     pub route_id: Option<String>,
     /// Staged files to delete when it exits.
     pub cleanup: Vec<PathBuf>,
+    /// The caveman level it was launched with (the header's badge).
+    pub caveman: Option<bro_core::caveman::Level>,
 }
 
 /// What to run.
@@ -88,6 +90,28 @@ impl vt100::Callbacks for Cb {
 
 type Parser = vt100::Parser<Cb>;
 
+/// Small metadata published by the parser worker, independent of its screen lock.
+struct ProgramState {
+    title: Option<String>,
+    app_cursor: bool,
+    bracketed_paste: bool,
+    mouse_mode: vt100::MouseProtocolMode,
+    mouse_encoding: vt100::MouseProtocolEncoding,
+}
+
+impl ProgramState {
+    fn of(parser: &Parser) -> Self {
+        let screen = parser.screen();
+        ProgramState {
+            title: parser.callbacks().title.clone(),
+            app_cursor: screen.application_cursor(),
+            bracketed_paste: screen.bracketed_paste(),
+            mouse_mode: screen.mouse_protocol_mode(),
+            mouse_encoding: screen.mouse_protocol_encoding(),
+        }
+    }
+}
+
 struct Live {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -99,6 +123,10 @@ pub struct Term {
     spawn: Option<Spawn>,
     live: Option<Live>,
     parser: Arc<Mutex<Parser>>,
+    program_state: Arc<Mutex<ProgramState>>,
+    /// The last painted viewport, used while the output worker owns the parser.
+    frame_cache: Option<ratatui::buffer::Buffer>,
+    cached_cursor: Option<(u16, u16)>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     exited: Arc<AtomicBool>,
     /// Preserve the process status independently of whether the PTY output pipe has closed.
@@ -154,6 +182,8 @@ pub struct Term {
     typed: u64,
     /// Auto-resume typed its prompt: press enter at this time (a separate write, so it isn't read as a paste).
     enter_at: Option<Instant>,
+    /// When auto-approve last answered a prompt (one answer per prompt while the screen catches up).
+    approved_at: Option<Instant>,
 }
 
 impl Term {
@@ -165,11 +195,16 @@ impl Term {
     pub fn new(meta: Meta, spawn: Spawn, svc: Services) -> Term {
         let agent = meta.harness.is_some();
         let files = super::file_cache::FileCache::new(bro_bridge::file_preview::ResolveRoots { cwd: meta.cwd.clone(), project: Some(meta.project.root.clone()) });
+        let parser = vt100::Parser::new_with_callbacks(24, 80, 10_000, Cb::default());
+        let program_state = ProgramState::of(&parser);
         Term {
             meta,
             spawn: Some(spawn),
             live: None,
-            parser: Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(24, 80, 10_000, Cb::default()))),
+            parser: Arc::new(Mutex::new(parser)),
+            program_state: Arc::new(Mutex::new(program_state)),
+            frame_cache: None,
+            cached_cursor: None,
             writer: Arc::new(Mutex::new(None)),
             exited: Arc::new(AtomicBool::new(false)),
             exit_status: None,
@@ -203,6 +238,7 @@ impl Term {
             resume: Default::default(),
             typed: 0,
             enter_at: None,
+            approved_at: None,
         }
     }
 
@@ -210,7 +246,11 @@ impl Term {
     pub fn fixed(meta: Meta, transcript: &str, svc: Services) -> Term {
         let mut t = Term::new(meta, Spawn::default(), svc);
         t.spawn = None;
-        t.parser.lock().process(transcript.as_bytes());
+        {
+            let mut parser = t.parser.lock();
+            parser.process(transcript.as_bytes());
+            *t.program_state.lock() = ProgramState::of(&parser);
+        }
         t
     }
 
@@ -257,7 +297,7 @@ impl Term {
         drop(pair.slave);
         let writer = pair.master.take_writer().map_err(|e| format!("pty writer: {e}"))?;
         let reader = pair.master.try_clone_reader().map_err(|e| format!("pty reader: {e}"))?;
-        *self.writer.lock() = Some(writer);
+        *self.writer.lock() = Some(Box::new(super::writer::Writer::new(writer).map_err(|e| format!("pty input worker: {e}"))?));
         self.parser.lock().screen_mut().set_size(rows, cols);
         self.size = (rows, cols);
         self.base = (rows, cols);
@@ -365,6 +405,7 @@ impl Term {
 
     fn start_reader(&mut self, mut reader: Box<dyn Read + Send>, waker: Waker) {
         let parser = self.parser.clone();
+        let program_state = self.program_state.clone();
         let writer = self.writer.clone();
         let exited = self.exited.clone();
         let (last_output, born) = (self.last_output.clone(), self.born);
@@ -380,6 +421,7 @@ impl Term {
                         let reply = {
                             let mut p = parser.lock();
                             p.process(data);
+                            *program_state.lock() = ProgramState::of(&p);
                             // Device Status Report: ConPTY asks where the cursor is and waits for the answer
                             contains(data, b"\x1b[6n").then(|| {
                                 let (r, c) = p.screen().cursor_position();
@@ -479,7 +521,14 @@ impl Term {
     /// Tests: more output for a fixed pane.
     #[cfg(test)]
     pub fn feed(&self, bytes: &[u8]) {
-        self.parser.lock().process(bytes);
+        let mut parser = self.parser.lock();
+        parser.process(bytes);
+        *self.program_state.lock() = ProgramState::of(&parser);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parser_for_test(&self) -> Arc<Mutex<Parser>> {
+        self.parser.clone()
     }
 
     /// The pty is bigger than its local size because a remote client watches (or did within the grace).
@@ -569,14 +618,14 @@ impl Term {
 
     /// The program's own window title (OSC 0/2), e.g. Claude Code's task summary.
     pub fn program_title(&self) -> Option<String> {
-        self.parser.lock().callbacks().title.clone()
+        self.program_state.lock().title.clone()
     }
 
     /// Read the bottom of the screen for an agent's tell-tale lines: "esc to interrupt" while it works, a
     /// permission prompt or question when it's waiting on you.
     fn scan(&mut self) {
         let (text, question) = {
-            let p = self.parser.lock();
+            let Some(p) = self.parser.try_lock() else { return };
             let s = p.screen();
             let (_, cols) = s.size();
             let rows: Vec<String> = s.rows(0, cols).collect();
@@ -631,6 +680,27 @@ impl Term {
         }
     }
 
+    /// Answer Yes to a Claude permission prompt ("Do you want to proceed?") when the setting is on.
+    fn auto_approve(&mut self, cx: &mut Cx) {
+        if self.meta.harness != Some(Harness::Claude) || self.svc.is_demo() || self.status != Some(Activity::Blocked) || !self.svc.settings().auto_approve {
+            return;
+        }
+        // let the prompt finish drawing, and give the last answer time to clear it
+        let quiet_ms = (self.born.elapsed().as_millis() as u64).saturating_sub(self.last_output.load(Ordering::Relaxed));
+        if quiet_ms < 300 || self.approved_at.is_some_and(|t| t.elapsed() < Duration::from_millis(1500)) {
+            return;
+        }
+        let rows: Vec<String> = {
+            let Some(p) = self.parser.try_lock() else { return };
+            let (_, cols) = p.screen().size();
+            p.screen().rows(0, cols).collect()
+        };
+        let Some(what) = permission_prompt(&rows) else { return };
+        self.approved_at = Some(Instant::now());
+        self.write(b"1\r");
+        cx.toast(crate::alerts::Kind::Info, format!("{} · approved: {what}", self.display_name()));
+    }
+
     /// The API error the agent stopped on: from the transcript when bro reads one (Codex doesn't always
     /// record them, so its screen counts too), else from the screen.
     fn stall(&self, now: chrono::DateTime<chrono::Local>) -> Option<super::auto_resume::Stall> {
@@ -647,7 +717,7 @@ impl Term {
             }
         }
         let rows: Vec<String> = {
-            let p = self.parser.lock();
+            let p = self.parser.try_lock()?;
             let (_, cols) = p.screen().size();
             p.screen().rows(0, cols).collect()
         };
@@ -681,10 +751,14 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// A session colour in the current theme: default fg/bg follow a painted theme background, and ANSI white text
-/// is darkened on light themes.
+/// A session colour in the current theme: default fg/bg follow a painted theme background, the 16 ANSI colours
+/// come from its palette, ANSI white text is darkened on light themes, and on painted dark themes the greys CLIs
+/// shade with lean toward the theme's own background and text.
 fn themed(c: vt100::Color, fg: bool, t: &crate::theme::Theme) -> Color {
-    let painted = !matches!(t.bg, Color::Reset);
+    let painted = t.painted();
+    let dark_painted = painted && !t.is_light();
+    // a neutral grey (r ≈ g ≈ b) as 0..1 lightness
+    let grey = |r: u8, g: u8, b: u8| (r.max(g).max(b) - r.min(g).min(b) < 18).then(|| (r as f32 + g as f32 + b as f32) / 765.0);
     match c {
         vt100::Color::Default if painted => if fg { t.fg } else { t.bg },
         vt100::Color::Idx(7 | 15) if fg && t.is_light() => t.fg,
@@ -695,8 +769,16 @@ fn themed(c: vt100::Color, fg: bool, t: &crate::theme::Theme) -> Color {
         vt100::Color::Rgb(r, g, b) if !fg && t.is_light() && (r as u32 + g as u32 + b as u32) < 240 => {
             crate::theme::mix(Color::Rgb(r, g, b), t.bg, 0.82)
         }
+        vt100::Color::Idx(i @ 0..=15) if t.ansi.is_some() => t.ansi.map_or(Color::Indexed(i), |a| a[i as usize]),
+        vt100::Color::Idx(i @ 232..=255) if dark_painted => toward_theme((8.0 + 10.0 * (i - 232) as f32) / 255.0, t),
+        vt100::Color::Rgb(r, g, b) if dark_painted && grey(r, g, b).is_some() => toward_theme(grey(r, g, b).unwrap_or(0.0), t),
         other => color(other),
     }
+}
+
+/// A grey of `lightness` (0..1, as on a black terminal) re-cast between the theme's background and text.
+fn toward_theme(lightness: f32, t: &crate::theme::Theme) -> Color {
+    crate::theme::mix(t.bg, t.fg, ((lightness - 0.04) / 0.86).clamp(0.0, 1.0))
 }
 
 fn color(c: vt100::Color) -> Color {
@@ -758,6 +840,9 @@ impl Pane for Term {
         spans.push(Span::styled(label, Style::default().fg(brand).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(format!(" — {cwd} "), Style::default().fg(t.muted)));
         let mut right = vec![];
+        if let Some(l) = self.meta.caveman {
+            right.push(Span::styled(format!(" {} {} ", crate::ui::icon("caveman"), l.id()), Style::default().fg(t.inline)));
+        }
         if self.scroll > 0 {
             right.push(Span::styled(format!(" ↑{} ", self.scroll), Style::default().fg(t.inline)));
         }
@@ -788,8 +873,17 @@ impl Pane for Term {
         }
         screen
     }
+    fn busy(&self) -> bool {
+        // Claude / Codex say so themselves; otherwise the screen markers and the output timeout
+        if self.demo_activity.is_none()
+            && let Some(b) = self.insights.as_ref().and_then(|i| i.busy())
+        {
+            return b && self.activity() != Some(Activity::Blocked);
+        }
+        self.activity() == Some(Activity::Working)
+    }
     fn wants_mouse(&self) -> bool {
-        self.parser.lock().screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None
+        self.program_state.lock().mouse_mode != vt100::MouseProtocolMode::None
     }
     fn tick_every(&self) -> Option<Duration> {
         // Watch every running process, including hidden shell tabs. ConPTY may keep its
@@ -810,6 +904,7 @@ impl Pane for Term {
         }
         self.last_scan = Instant::now();
         self.scan();
+        self.auto_approve(cx);
         self.auto_resume(cx);
         // shells title their window with their own exe path — that's noise, keep bro's name for them
         let title = Some(self.display_name());
@@ -822,8 +917,8 @@ impl Pane for Term {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, cx: &mut Cx) {
-        self.links.clear();
         if area.width == 0 || area.height == 0 {
+            self.links.clear();
             return;
         }
         self.ensure_started(area.height, area.width, cx.waker());
@@ -841,7 +936,22 @@ impl Pane for Term {
         // A pty grown past the tile for a remote viewer shows its bottom-left (pinned to the end of
         // the content: right after growing, the rows below it are still blank until the program
         // redraws). Scrolling up first reveals the screen rows above, then the scrollback.
-        let mut p = self.parser.lock();
+        let Some(mut p) = self.parser.try_lock() else {
+            if let Some(cache) = &self.frame_cache {
+                let buf = f.buffer_mut();
+                for row in 0..area.height.min(cache.area.height) {
+                    for col in 0..area.width.min(cache.area.width) {
+                        buf[(area.x + col, area.y + row)] = cache[(col, row)].clone();
+                    }
+                }
+                if cx.focused && self.scroll == 0
+                    && let Some((row, col)) = self.cached_cursor.filter(|(r, c)| *r < area.height && *c < area.width)
+                {
+                    f.set_cursor_position(Position { x: area.x + col, y: area.y + row });
+                }
+            }
+            return;
+        };
         let hidden = if self.size.0 > self.base.0 && self.size.0 > area.height {
             p.screen_mut().set_scrollback(0);
             let s = p.screen();
@@ -893,10 +1003,26 @@ impl Pane for Term {
                 }
             }
         }
-        if cx.focused && !screen.hide_cursor() && self.scroll == 0 && self.live.is_some() {
+        self.cached_cursor = None;
+        if !screen.hide_cursor() && self.scroll == 0 && self.live.is_some() {
             let (r, c) = screen.cursor_position();
             if r >= top && r - top < area.height && c < area.width {
-                f.set_cursor_position(Position { x: area.x + c, y: area.y + r - top });
+                self.cached_cursor = Some((r - top, c));
+                if cx.focused {
+                    f.set_cursor_position(Position { x: area.x + c, y: area.y + r - top });
+                }
+            }
+        }
+        drop(p);
+        let local = Rect { x: 0, y: 0, ..area };
+        if self.frame_cache.as_ref().is_none_or(|cache| cache.area != local) {
+            self.frame_cache = Some(ratatui::buffer::Buffer::empty(local));
+        }
+        let cache = self.frame_cache.as_mut().unwrap();
+        let buf = f.buffer_mut();
+        for row in 0..area.height {
+            for col in 0..area.width {
+                cache[(col, row)] = buf[(area.x + col, area.y + row)].clone();
             }
         }
     }
@@ -912,7 +1038,7 @@ impl Pane for Term {
             }
             return true;
         }
-        let app_cursor = self.parser.lock().screen().application_cursor();
+        let app_cursor = self.program_state.lock().app_cursor;
         if let Some(bytes) = encode_key(key, app_cursor) {
             self.send(&bytes);
         }
@@ -920,7 +1046,7 @@ impl Pane for Term {
     }
 
     fn paste(&mut self, text: &str, _cx: &mut Cx) {
-        let bracketed = self.parser.lock().screen().bracketed_paste();
+        let bracketed = self.program_state.lock().bracketed_paste;
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         if bracketed {
             // an end marker inside the text would close the paste early and the rest would be typed
@@ -933,8 +1059,8 @@ impl Pane for Term {
 
     fn mouse(&mut self, ev: MouseEvent, area: Rect, _cx: &mut Cx) {
         let (mode, enc) = {
-            let p = self.parser.lock();
-            (p.screen().mouse_protocol_mode(), p.screen().mouse_protocol_encoding())
+            let state = self.program_state.lock();
+            (state.mouse_mode, state.mouse_encoding)
         };
         if mode == vt100::MouseProtocolMode::None {
             // the program doesn't want the mouse: the wheel scrolls our scrollback
@@ -1002,6 +1128,20 @@ mod title_tests {
     }
 }
 
+/// A Claude permission prompt at the bottom of the screen: a "Do you want to …?" question with "1. Yes"
+/// under it. Returns what it's about (the line above the question, else the question). Numbered questions
+/// Claude asks you (AskUserQuestion) don't offer a bare "Yes" first, so they're left alone.
+pub fn permission_prompt(rows: &[String]) -> Option<String> {
+    let clean = |r: &String| r.trim_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '╭' | '╰' | '─' | '╮' | '╯' | '┃')).to_string();
+    let tail: Vec<String> = rows.iter().rev().map(clean).filter(|r| !r.is_empty()).take(14).collect();
+    let q = tail.iter().position(|r| r.to_lowercase().starts_with("do you want to") && r.ends_with('?'))?;
+    let yes = tail[..q].iter().any(|r| {
+        let rest = r.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '❯' | '>' | '›'));
+        rest.strip_prefix("1.").is_some_and(|l| l.trim() == "Yes")
+    });
+    yes.then(|| tail.get(q + 1).filter(|r| prompt_option(r).is_none()).unwrap_or(&tail[q]).clone())
+}
+
 /// The option number on a prompt row: "❯ 1. Yes", "  2. Yes, and don't ask again", "› 3. No" -> "1"/"2"/"3".
 /// The same rows the bridge offers the phone as prompt options.
 pub fn prompt_option(line: &str) -> Option<String> {
@@ -1012,7 +1152,19 @@ pub fn prompt_option(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod prompt_option_tests {
-    use super::prompt_option;
+    use super::{permission_prompt, prompt_option};
+
+    #[test]
+    fn permission_prompts_are_told_from_questions() {
+        let rows = |s: &str| s.lines().map(str::to_string).collect::<Vec<_>>();
+        let rm = rows(" Bash command\n\n   rm -rf F:\\X\\*\n\n Dangerous rm operation on statically-unresolvable target: F:\\X\\*\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No, and tell Claude what to do differently (esc)\n\n");
+        assert_eq!(permission_prompt(&rm).as_deref(), Some(r"Dangerous rm operation on statically-unresolvable target: F:\X\*"));
+        let ask = rows(" Which database?\n ❯ 1. Postgres\n   2. SQLite\n");
+        assert_eq!(permission_prompt(&ask), None);
+        let me = rows(" Do you want me to keep going?\n ❯ 1. Yes\n   2. No\n");
+        assert_eq!(permission_prompt(&me), None, "Claude asking, not a permission check");
+        assert_eq!(permission_prompt(&rows(" Do you want to proceed?\n")), None, "no options drawn yet");
+    }
 
     #[test]
     fn option_rows_give_their_number() {

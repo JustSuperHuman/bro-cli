@@ -52,15 +52,16 @@ pub struct ContinuePicker {
     pub entries: Vec<Entry>,
     /// row rects from the last draw: (rect, position in the view)
     pub hits: Vec<(Rect, usize)>,
+    /// clickable project and all-session filters
+    pub scope_hits: Vec<(Rect, bool)>,
     view: Vec<usize>,
 }
 
 impl ContinuePicker {
     /// `entries` newest first.
     pub fn new(entries: Vec<Entry>, project: Option<(String, String)>) -> ContinuePicker {
-        // nothing earlier in this project? start on every project
-        let all = project.as_ref().is_none_or(|(k, _)| !entries.iter().any(|e| &e.project_key == k && !e.archived));
-        let mut p = ContinuePicker { filter: String::new(), sel: 0, all, show_archived: false, project, entries, hits: vec![], view: vec![] };
+        let all = project.is_none();
+        let mut p = ContinuePicker { filter: String::new(), sel: 0, all, show_archived: false, project, entries, hits: vec![], scope_hits: vec![], view: vec![] };
         p.refresh();
         p
     }
@@ -71,6 +72,19 @@ impl ContinuePicker {
         self.entries = entries;
         self.refresh();
         self.sel = sel.min(self.view.len().saturating_sub(1));
+    }
+
+    pub fn set_project(&mut self, project: Option<(String, String)>) {
+        self.project = project;
+        if self.project.is_none() {
+            self.all = true;
+        }
+        self.refresh();
+    }
+
+    pub fn set_all(&mut self, all: bool) {
+        self.all = all || self.project.is_none();
+        self.refresh();
     }
 
     fn refresh(&mut self) {
@@ -164,9 +178,7 @@ impl ContinuePicker {
     }
 }
 
-pub fn draw(f: &mut Frame, screen: Rect, p: &mut ContinuePicker, t: &Theme) {
-    let inner = ui::popup(f, screen, 100, 26, &format!("{}continue a session", ui::lead("history")), t);
-    let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
+pub fn draw_in(f: &mut Frame, inner: Rect, p: &mut ContinuePicker, t: &Theme) {
     // filter + scope
     let mut spans = vec![Span::styled("› ", ui::bold_accent(t))];
     if p.filter.is_empty() {
@@ -176,16 +188,23 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut ContinuePicker, t: &Theme) {
     }
     spans.push(Span::styled("▏", ui::accent(t)));
     let mut scope = vec![];
+    p.scope_hits.clear();
     if let Some((_, name)) = &p.project {
         let on = |b: bool| if b { Style::default().fg(t.accent).add_modifier(Modifier::BOLD | Modifier::REVERSED) } else { muted(t) };
-        scope.push(Span::styled(format!(" {name} "), on(!p.all)));
+        let project_label = format!(" {} ", ui::fit(name, 18));
+        scope.push(Span::styled(project_label.clone(), on(!p.all)));
         scope.push(Span::raw(" "));
-        scope.push(Span::styled(" all projects ", on(p.all)));
-        scope.push(Span::styled("  tab ", muted(t)));
+        let all_label = " All sessions ";
+        scope.push(Span::styled(all_label, on(p.all)));
+        scope.push(Span::styled("  Tab ", muted(t)));
+        let scope_width = ui::width(&project_label) + 1 + ui::width(all_label) + ui::width("  Tab ");
+        let start = inner.right().saturating_sub(scope_width as u16);
+        p.scope_hits.push((Rect { x: start, y: inner.y, width: ui::width(&project_label) as u16, height: 1 }, false));
+        p.scope_hits.push((Rect { x: start + ui::width(&project_label) as u16 + 1, y: inner.y, width: ui::width(all_label) as u16, height: 1 }, true));
     }
     ui::line_lr(f, Rect { height: 1, ..inner }, spans, scope);
 
-    let rows = inner.height.saturating_sub(4) as usize;
+    let rows = inner.height.saturating_sub(3) as usize;
     let view: Vec<Entry> = p.view().into_iter().cloned().collect();
     let start = p.sel.saturating_sub(rows.saturating_sub(1));
     p.hits.clear();
@@ -224,7 +243,7 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut ContinuePicker, t: &Theme) {
         p.hits.push((r, k));
     }
     if view.is_empty() {
-        let msg = if p.entries.is_empty() { "  no earlier sessions yet" } else if p.all { "  nothing matches" } else { "  nothing here — tab shows every project" };
+        let msg = if p.entries.is_empty() { "  No earlier sessions yet" } else if p.all { "  Nothing matches" } else { "  No sessions here. Press Tab for all sessions." };
         ui::line(f, Rect { y: inner.y + 2, height: 1, ..inner }, vec![Span::styled(msg, muted(t))]);
     }
     let archived = if p.show_archived { "hide archived" } else { "show archived" };
@@ -258,8 +277,9 @@ mod tests {
         }
         assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::Resume(1)));
         assert!(matches!(key(&mut p, KeyCode::Delete), Outcome::Archive(ref id, true) if id == "id1"));
-        // a project with nothing earlier starts on every project
+        // An empty project still stays scoped until the user chooses all sessions.
         let p = ContinuePicker::new(entries, Some(("zzz".into(), "zzz".into())));
-        assert!(p.all);
+        assert!(!p.all);
+        assert!(p.view().is_empty());
     }
 }

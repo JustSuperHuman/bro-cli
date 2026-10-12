@@ -44,6 +44,8 @@ pub enum Act {
     Bridge,
     /// Token totals per login (the ⓘ on the sidebar's usage).
     Stats,
+    /// Claude Code privacy / update / behaviour presets.
+    Settings,
     Help,
     Rename,
     Themes,
@@ -52,11 +54,12 @@ pub enum Act {
     ToggleTrim,
     /// Retry agents that stop on an API error, on / off.
     ToggleAutoResume,
+    /// Caveman mode (terse replies) for new sessions, on / off.
+    ToggleCaveman,
     RefreshUsage,
     UsageDetails,
     Continue,
     SwitchLogin,
-    OpenProject,
     CloseProject,
     /// Show the file an agent last opened (`bro open`).
     OpenedFile,
@@ -92,12 +95,12 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, OpenProject, CloseProject, Continue, SwitchLogin, OpenedFile, AgentFiles, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, SwitchLogin, OpenedFile, AgentFiles, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, RefreshUsage]);
-        v.extend([Palette, Help, Themes, ToggleIcons, ToggleAutoResume, Quit]);
+        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, RefreshUsage]);
+        v.extend([Palette, Help, Themes, ToggleIcons, ToggleAutoResume, ToggleCaveman, Quit]);
         v
     }
 
@@ -137,17 +140,18 @@ impl Act {
             Proxy => "proxy".into(),
             Bridge => "bridge".into(),
             Stats => "stats".into(),
+            Settings => "settings".into(),
             Help => "help".into(),
             Rename => "rename".into(),
             Themes => "themes".into(),
             ToggleIcons => "toggle_icons".into(),
             ToggleTrim => "toggle_trim".into(),
             ToggleAutoResume => "toggle_auto_resume".into(),
+            ToggleCaveman => "toggle_caveman".into(),
             RefreshUsage => "refresh_usage".into(),
             UsageDetails => "usage_details".into(),
             Continue => "continue".into(),
             SwitchLogin => "switch_login".into(),
-            OpenProject => "open_project".into(),
             CloseProject => "close_project".into(),
             OpenedFile => "opened_file".into(),
             AgentFiles => "agent_files".into(),
@@ -196,17 +200,18 @@ impl Act {
             Proxy => "proxy: routes and live requests".into(),
             Bridge => "bridge: phone / web pairing".into(),
             Stats => "stats: tokens per login — lifetime, last 24h / 7d / 30d".into(),
+            Settings => "settings: bro options and Claude Code privacy, updates and long-run presets".into(),
             Help => "keys and help".into(),
             Rename => "rename the focused session".into(),
             Themes => "pick a theme (live preview)".into(),
             ToggleIcons => "toggle nerd font icons".into(),
             ToggleTrim => "compress requests (llmtrim) on / off".into(),
             ToggleAutoResume => "auto-resume agents after API errors on / off".into(),
+            ToggleCaveman => "caveman mode on / off: terse replies in new sessions".into(),
             RefreshUsage => "refresh usage now".into(),
             UsageDetails => "sidebar usage: totals / every profile".into(),
             Continue => "continue an earlier session (search, resume in any login)".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
-            OpenProject => "open a project".into(),
             CloseProject => "close the current project (and its sessions)".into(),
             OpenedFile => "show the file an agent last opened (bro open)".into(),
             AgentFiles => "agent files: what it sent you and the files it touched".into(),
@@ -217,11 +222,11 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | OpenProject | CloseProject | OpenedFile | AgentFiles => Group::Sessions,
+            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | CloseProject | OpenedFile | AgentFiles => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | RefreshUsage => Group::Views,
-            Palette | Help | Themes | ToggleIcons | ToggleAutoResume | Quit => Group::App,
+            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | RefreshUsage => Group::Views,
+            Palette | Help | Themes | ToggleIcons | ToggleAutoResume | ToggleCaveman | Quit => Group::App,
         }
     }
 
@@ -257,10 +262,10 @@ impl Act {
             UsageDetails => vec!["alt+U"],
             SwitchLogin => vec!["alt+L"],
             Continue => vec!["alt+r"],
-            OpenProject => vec!["alt+O"],
             Profiles => vec!["alt+o"],
             Proxy => vec!["alt+y"],
             Bridge => vec!["alt+g"],
+            Settings => vec!["alt+,"],
             Help => vec!["f1"],
             _ => vec![],
         }
@@ -299,9 +304,9 @@ impl Act {
             Usage => vec!["u"],
             UsageDetails => vec!["U"],
             Stats => vec!["S"],
+            Settings => vec!["A"],
             Continue => vec!["R"],
             SwitchLogin => vec!["P"],
-            OpenProject => vec!["O"],
             CloseProject => vec!["X"],
             OpenedFile => vec!["f"],
             AgentFiles => vec!["F"],
@@ -314,7 +319,7 @@ impl Act {
             ToggleIcons => vec!["i"],
             RefreshUsage => vec!["r"],
             Quit => vec!["q"],
-            Split | ToggleTrim | ToggleAutoResume => vec![],
+            Split | ToggleTrim | ToggleAutoResume | ToggleCaveman => vec![],
         }
     }
 }

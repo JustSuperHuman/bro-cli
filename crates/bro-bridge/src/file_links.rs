@@ -37,6 +37,11 @@ static BARE: LazyLock<Regex> = LazyLock::new(|| {
     ))
     .unwrap()
 });
+static SPACED_LOCATION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?:[a-zA-Z]:[\\/]|\.{1,2}[\\/]|/|[\p{L}\p{N}_@~+.\[\]-]+[/\\])[^/\\\r\n`"'<>;|]*?(?:[/\\][^/\\\r\n`"'<>;|]*?)+\.[\p{L}\p{N}_-]+(?::\d+(?::\d+)?|#L\d+(?:C\d+)?|\(\d+,\d+\))"#).unwrap()
+});
+static SPACED_PROSE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\.[\p{L}\p{N}_-]+(?::[^/\s]+)?\s").unwrap());
 static LOCATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?::([0-9]+)(?::([0-9]+))?|#L([0-9]+)(?:C([0-9]+))?|\(([0-9]+),([0-9]+)\))$")
         .unwrap()
@@ -216,6 +221,32 @@ pub fn find_file_links(text: &str) -> Vec<FileLinkMatch> {
             inner.as_str(),
         );
     }
+    // A line suffix bounds an unquoted path whose folders or file name have
+    // spaces. Stop before another path in ordinary prose.
+    for found in SPACED_LOCATION.find_iter(text) {
+        let raw = found.as_str();
+        let before = text[..found.start()].chars().next_back();
+        let before_final = raw
+            .rfind(|c: char| c == '/' || c == '\\')
+            .map(|at| &raw[..at])
+            .unwrap_or("");
+        if !raw.chars().any(char::is_whitespace)
+            || before.is_some_and(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '/' | '\\' | ':')
+            })
+            || SPACED_PROSE.is_match(before_final)
+        {
+            continue;
+        }
+        add(
+            &mut result,
+            &mut occupied,
+            found.start(),
+            found.end(),
+            raw,
+            raw,
+        );
+    }
     for found in BARE.find_iter(text) {
         let start = found.start();
         let raw = found.as_str().trim_end_matches(['.', ',', ';', '!', '?']);
@@ -277,6 +308,24 @@ mod tests {
             (
                 "`F:\\My Project\\read me.md:7`",
                 "F:\\My Project\\read me.md",
+                Some(7),
+                None,
+            ),
+            (
+                "F:\\My Project\\read me.md:7",
+                "F:\\My Project\\read me.md",
+                Some(7),
+                None,
+            ),
+            (
+                "See /Users/james/My Project/read me.md#L12",
+                "/Users/james/My Project/read me.md",
+                Some(12),
+                None,
+            ),
+            (
+                "docs/My Notes/read me.md:7",
+                "docs/My Notes/read me.md",
                 Some(7),
                 None,
             ),
@@ -344,6 +393,13 @@ mod tests {
         ] {
             assert_eq!(find_file_links(text), vec![], "{text}");
         }
+        assert_eq!(
+            find_file_links("F:\\repo\\main.ts and src/other.ts:9")
+                .into_iter()
+                .map(|link| link.path)
+                .collect::<Vec<_>>(),
+            ["F:\\repo\\main.ts", "src/other.ts"]
+        );
     }
 
     #[test]

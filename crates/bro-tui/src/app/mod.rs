@@ -86,11 +86,15 @@ pub(crate) enum SideHit {
     Fable,
     Proxy,
     Bridge,
+    /// the new-session strip's gear: the settings view
+    Settings,
     /// the new-session strip's icons: claude / codex, or a terminal (None)
     Quick(Option<bro_core::Harness>),
     /// the new-session strip's "+" and key hint: the launcher
     Launcher,
+    Continue,
     TileAll,
+    Minimized,
 }
 
 /// Startup options.
@@ -129,6 +133,7 @@ pub struct App {
     body: Rect,
     side_hits: Vec<(Rect, SideHit)>,
     pane_close: Vec<(Rect, PaneId)>,
+    pane_minimize: Vec<(Rect, PaneId)>,
     drag: Option<(Vec<bool>, Dir, Rect)>,
     side_area: Rect,
     side_drag: bool,
@@ -160,6 +165,8 @@ pub struct App {
     pub(crate) side_filtering: bool,
     pub(crate) renaming: Option<(PaneId, String)>,
     side_scroll: usize,
+    /// Wheel scrolling holds its viewport until the next keyboard navigation.
+    side_manual_scroll: bool,
     /// when the sidebar last scrolled or its selection moved (the scrollbar shows for a moment)
     pub(crate) side_nav_at: Option<Instant>,
     /// `side_scroll` as last drawn, to notice scrolling that wasn't a key or the wheel
@@ -191,6 +198,10 @@ pub struct App {
     pub(crate) stack_focus: Option<PaneId>,
     /// Keep newly opened sessions in the all-sessions grid.
     tile_all: bool,
+    /// Sessions kept out of the grid while minimized sessions are hidden.
+    minimized: Vec<PaneId>,
+    /// Show minimized sessions in the full grid without restoring their state.
+    show_minimized: bool,
     /// The grid shows only this project's sessions (click a project in the sidebar).
     pub(crate) tile_project: Option<String>,
     stack_zoom: bool,
@@ -227,6 +238,7 @@ impl App {
             body: Rect::default(),
             side_hits: vec![],
             pane_close: vec![],
+            pane_minimize: vec![],
             drag: None,
             side_area: Rect::default(),
             side_drag: false,
@@ -250,6 +262,7 @@ impl App {
             side_filtering: false,
             renaming: None,
             side_scroll: 0,
+            side_manual_scroll: false,
             side_nav_at: None,
             side_drawn_scroll: 0,
             side_thumb: Rect::default(),
@@ -267,6 +280,8 @@ impl App {
             stack: vec![],
             stack_focus: None,
             tile_all: false,
+            minimized: vec![],
+            show_minimized: false,
             tile_project: None,
             stack_zoom: false,
             term_focused: true,
@@ -315,7 +330,7 @@ impl App {
 
     /// Showing several sessions at once (shift+click in the sidebar).
     pub(crate) fn stacked(&self) -> bool {
-        self.stack.len() >= 2
+        self.tile_all || self.stack.len() >= 2
     }
 
     fn clear_stack(&mut self) {
@@ -324,15 +339,54 @@ impl App {
         self.stack_zoom = false;
         self.tile_all = false;
         self.tile_project = None;
+        self.minimized.clear();
+        self.show_minimized = false;
     }
 
     /// Live sessions in sidebar order: all of them, or one project's.
     fn tile_ids(&self, project: Option<&str>) -> Vec<PaneId> {
         let live = self.live_infos();
         let ids = crate::sidebar::live_order(&live, &self.past_infos(), &self.open_infos());
-        match project {
+        let ids: Vec<PaneId> = match project {
             Some(key) => ids.into_iter().filter(|id| live.iter().any(|l| l.pane == *id && l.project_key == key)).collect(),
             None => ids,
+        };
+        if self.show_minimized { ids } else { ids.into_iter().filter(|id| !self.minimized.contains(id)).collect() }
+    }
+
+    /// Rebuild the grid after changing which minimized sessions are visible.
+    fn retile(&mut self, preferred: Option<PaneId>) {
+        self.stack = self.tile_ids(self.tile_project.as_deref());
+        self.stack_focus = preferred.filter(|id| self.stack.contains(id))
+            .or_else(|| self.stack_focus.filter(|id| self.stack.contains(id)))
+            .or_else(|| self.stack.first().copied());
+        self.stack_zoom = false;
+    }
+
+    fn minimize_pane(&mut self, id: PaneId) {
+        if !self.tile_all || !self.panes.get(&id).is_some_and(|p| p.is_terminal()) {
+            return;
+        }
+        if self.minimized.contains(&id) {
+            self.minimized.retain(|pane| *pane != id);
+        } else {
+            // A new minimization hides the newest session and releases the earlier ones.
+            if self.show_minimized {
+                self.minimized.clear();
+                self.show_minimized = false;
+            }
+            self.minimized.push(id);
+        }
+        self.retile(Some(id));
+        self.sel = None;
+        self.side_focus = false;
+        self.last_pane_click = None;
+    }
+
+    fn toggle_minimized_visibility(&mut self) {
+        if self.tile_all {
+            self.show_minimized = !self.show_minimized;
+            self.retile(None);
         }
     }
 
@@ -362,7 +416,7 @@ impl App {
         } else {
             // from one session or one project's grid: every session
             let ids = self.tile_ids(None);
-            if ids.len() < 2 {
+            if ids.len() < 2 && self.minimized.is_empty() {
                 self.toast(Kind::Info, "open two sessions to tile them");
                 return;
             }
@@ -384,9 +438,11 @@ impl App {
         let ids = self.tile_ids(Some(key));
         let Some(&first) = ids.first() else { return };
         let focus = self.focused().filter(|id| ids.contains(id)).unwrap_or(first);
-        self.clear_stack();
-        self.focus_pane(focus);
-        if ids.len() >= 2 {
+        if !self.tile_all {
+            self.clear_stack();
+            self.focus_pane(focus);
+        }
+        if ids.len() >= 2 || self.tile_all {
             self.stack = ids;
             self.stack_focus = Some(focus);
             self.tile_all = true;
@@ -402,6 +458,8 @@ impl App {
         }
         self.tile_all = false;
         self.tile_project = None;
+        self.minimized.clear();
+        self.show_minimized = false;
         self.stack_zoom = false;
         if self.stack.is_empty()
             && let Some(cur) = self.focused()
@@ -460,15 +518,20 @@ impl App {
     /// Close a pane: end its session (bridge, proxy route, staged files) and drop it from its tab.
     pub(crate) fn close(&mut self, id: PaneId) {
         let mut remaining = None;
+        self.minimized.retain(|pane| *pane != id);
         if self.stack.contains(&id) {
             self.stack.retain(|x| *x != id);
             if self.stack_focus == Some(id) {
                 self.stack_focus = self.stack.last().copied();
             }
-            if self.stack.len() < 2 {
+            if self.stack.len() < 2 && self.minimized.is_empty() {
                 remaining = self.stack.first().copied();
                 self.clear_stack();
             }
+        }
+        if self.tile_all && self.stack.len() < 2 && self.minimized.is_empty() {
+            remaining = self.stack.first().copied();
+            self.clear_stack();
         }
         if let Some(mut p) = self.panes.remove(&id) {
             if let Some(t) = p.as_term() {
@@ -519,6 +582,15 @@ impl App {
 
     /// Switch to the tab holding `id` and focus it (inside a stack, just move the focus there).
     pub(crate) fn focus_pane(&mut self, id: PaneId) {
+        if self.tile_all && self.minimized.contains(&id) && !self.stack.contains(&id) {
+            self.minimized.retain(|pane| *pane != id);
+            if self.tile_project.as_deref().is_some_and(|key| {
+                self.panes.get(&id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.project.key != key)
+            }) {
+                self.tile_project = None;
+            }
+            self.retile(Some(id));
+        }
         if self.stacked() && self.stack.contains(&id) {
             self.stack_focus = Some(id);
             self.done.remove(&id);
@@ -589,6 +661,7 @@ impl App {
                 Action::Close => self.close(from),
                 Action::Toast(k, s) => self.toast(k, s),
                 Action::LaunchUsage(h, profile) => self.launch_usage(h, profile),
+                Action::Run(a) => self.run_act(a),
             }
         }
     }
@@ -597,12 +670,16 @@ impl App {
 
     pub fn run(&mut self, term: &mut DefaultTerminal, rx: Receiver<Event>) -> anyhow::Result<()> {
         crate::icons::init(&self.svc.settings().icons, self.theme.is_light());
+        if let Some(font) = self.svc.settings().font {
+            crate::fonts::apply(Some(&font), &self.tx);
+        }
         loop {
             term.draw(|f| {
                 self.draw(f);
                 crate::icons::place(f.buffer_mut());
             })?;
             crate::icons::flush(term)?;
+            crate::fonts::flush(term.backend_mut())?;
             let timeout = self.next_deadline();
             let ev = match rx.recv_timeout(timeout) {
                 Ok(e) => e,
@@ -623,6 +700,7 @@ impl App {
                 break;
             }
         }
+        let _ = crate::fonts::restore(term.backend_mut());
         self.shutdown();
         Ok(())
     }
@@ -674,6 +752,16 @@ impl App {
         if (self.theme.animated && self.tabs.is_empty()) || spinning {
             d = d.min(Duration::from_millis(125));
         }
+        // digital rain keeps moving
+        let own = self.theme.skin.backdrop;
+        let moving = match self.svc.settings().rain {
+            bro_core::config::RainMode::Off => own.animated(),
+            // "working" rain always falls in the sidebar and around the sessions
+            bro_core::config::RainMode::Everywhere | bro_core::config::RainMode::Working => true,
+        };
+        if moving {
+            d = d.min(Duration::from_millis(110));
+        }
         if let Some(t) = self.toasts.next_expiry() {
             d = d.min(t + Duration::from_millis(10));
         }
@@ -707,8 +795,9 @@ impl App {
                 self.drag = None;
             }
             Event::Input(_) => {}
-            Event::Wake(id) => {
-                self.with_pane(id, |p, cx| p.poll(cx));
+            Event::Wake(wake) => {
+                wake.acknowledge();
+                self.with_pane(wake.id, |p, cx| p.poll(cx));
             }
             Event::Tick => {
                 let ids: Vec<PaneId> = self.panes.keys().copied().collect();
@@ -730,8 +819,8 @@ impl App {
                         l.set_data(data);
                     }
                 }
-                // new data (e.g. the re-scan the continue picker asked for): refresh its list in place
-                if matches!(self.overlay, Overlay::Continue(_)) {
+                // New session and Continue share the same live session list.
+                if matches!(self.overlay, Overlay::Launcher(_)) {
                     self.refresh_continue();
                 }
             }
@@ -806,8 +895,6 @@ impl App {
         self.sel = None;
         match &mut self.overlay {
             Overlay::Launcher(l) => return l.paste(s),
-            Overlay::Folder(p) => return p.paste(s),
-            Overlay::Continue(p) => return p.paste(s),
             Overlay::Palette(p) => {
                 p.query.extend(s.chars().filter(|c| !c.is_control()));
                 p.sel = 0;

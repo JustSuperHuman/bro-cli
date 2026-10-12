@@ -2,7 +2,7 @@
 //! the sidebar draws and navigates. No I/O, no drawing.
 //!
 //! Order: projects with open sessions first, preserving project order within each group. Earlier
-//! sessions aren't rows: "continue session" opens a picker for them.
+//! sessions aren't rows: Continue is available in the session dialog.
 
 use crate::pane::{Activity, PaneId};
 use bro_core::Harness;
@@ -54,13 +54,9 @@ pub struct SideState {
     pub filter: String,
 }
 
-/// One sidebar row. Earlier sessions aren't listed — "continue session" opens a picker for them.
+/// One sidebar row. Earlier sessions are available from the Continue tab.
 #[derive(Clone, Debug)]
 pub enum Row {
-    /// "+ open project"
-    OpenFolder,
-    /// "↻ continue session" (when there are earlier sessions)
-    Continue { count: usize },
     Project {
         key: String,
         name: String,
@@ -74,10 +70,9 @@ pub enum Row {
 }
 
 impl Row {
-    /// The project a row belongs to (empty for the action rows).
+    /// The project a row belongs to.
     pub fn project_key(&self) -> &str {
         match self {
-            Row::OpenFolder | Row::Continue { .. } => "",
             Row::Project { key, .. } => key,
             Row::Live { info, .. } => &info.project_key,
         }
@@ -136,12 +131,6 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo], st: &SideS
     let q = st.filter.trim().to_lowercase();
     let numbering: HashMap<PaneId, usize> = live_order(live, past, open).into_iter().enumerate().map(|(i, p)| (p, i + 1)).collect();
     let mut rows = vec![];
-    if q.is_empty() {
-        rows.push(Row::OpenFolder);
-        if !past.is_empty() {
-            rows.push(Row::Continue { count: past.len() });
-        }
-    }
     for g in groups(live, past, open) {
         let project_hit = !q.is_empty() && matches(&[&g.name], &q);
         let live_rows: Vec<&LiveInfo> = g
@@ -195,8 +184,6 @@ mod tests {
     fn kinds(rows: &[Row]) -> String {
         rows.iter()
             .map(|r| match r {
-                Row::OpenFolder => "o".to_string(),
-                Row::Continue { count } => format!("c{count}"),
                 Row::Project { name, .. } => format!("P:{name}"),
                 Row::Live { info, n } => format!("L{}#{}", info.pane, n.unwrap_or(0)),
             })
@@ -209,13 +196,12 @@ mod tests {
         let l = vec![live(10, "b", 2, None), live(11, "x", 1, Some(Activity::Blocked))];
         let p = vec![past(0, "c", "never opened", 900), past(1, "b", "fix it", 100), past(2, "a", "newer", 50)];
         let rows = build(&l, &p, &opened(&["a", "b"]), &SideState::default());
-        // earlier sessions aren't rows: one "continue" entry instead
-        assert_eq!(kinds(&rows), "o c3 P:b L10#1 P:x L11#2 P:a");
-        assert!(matches!(&rows[6], Row::Project { last_age: Some(50), .. }));
-        assert!(matches!(&rows[4], Row::Project { attention: true, .. }));
+        assert_eq!(kinds(&rows), "P:b L10#1 P:x L11#2 P:a");
+        assert!(matches!(&rows[4], Row::Project { last_age: Some(50), .. }));
+        assert!(matches!(&rows[2], Row::Project { attention: true, .. }));
         assert_eq!(live_order(&l, &p, &opened(&["a", "b"])), vec![10, 11]);
         assert_eq!(project_order(&l, &p, &opened(&["a", "b"])), vec!["b", "x", "a"]);
-        assert_eq!(kinds(&build(&l, &[], &opened(&["a"]), &SideState::default())), "o P:x L11#1 P:b L10#2 P:a", "no continue row without history");
+        assert_eq!(kinds(&build(&l, &[], &opened(&["a"]), &SideState::default())), "P:x L11#1 P:b L10#2 P:a");
     }
 
     #[test]
@@ -237,11 +223,11 @@ mod tests {
         let l = vec![live(1, "a", 1, None), live(2, "b", 2, None)];
         let open = opened(&["a", "b"]);
         let mut st = SideState::default();
-        assert_eq!(kinds(&build(&l, &[], &open, &st)), "o P:a L1#1 P:b L2#2");
+        assert_eq!(kinds(&build(&l, &[], &open, &st)), "P:a L1#1 P:b L2#2");
         st.filter = "b".into();
         assert_eq!(kinds(&build(&l, &[], &open, &st)), "P:b L2#2");
         st.filter = "zzz".into();
-        assert!(build(&l, &[], &open, &st).is_empty());
+        assert_eq!(kinds(&build(&l, &[], &open, &st)), "", "the project list honors its filter");
     }
 
     #[test]

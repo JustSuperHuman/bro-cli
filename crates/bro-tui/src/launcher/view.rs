@@ -1,8 +1,8 @@
-//! Drawing the launcher: harness tabs, the "run on" list (with the model list beside it only when needed),
-//! the project line, toggles and key hints.
+//! Drawing the launcher: project path, harness tabs, the "run on" list (with the model list beside
+//! it only when needed), toggles and key hints.
 
-use super::{AccountKind, Focus, Hit, Item, Launcher};
-use crate::theme::Theme;
+use super::{AccountKind, Focus, Hit, Item, Launcher, SessionTab};
+use crate::theme::{self, Theme};
 use crate::ui::{self, fg, muted};
 use bro_core::Harness;
 use bro_core::browser::BrowserMode;
@@ -12,7 +12,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Clear,
+    widgets::{Block, Borders},
 };
 
 /// Draw the launcher centered on `screen`.
@@ -21,12 +21,15 @@ pub fn draw(f: &mut Frame, screen: Rect, l: &mut Launcher, t: &Theme, time: f64)
     let area = draw_inner(f, screen, l, t, time, &mut hits);
     l.hits = hits;
     l.area = area;
+    if let Some(p) = &mut l.project_picker {
+        crate::folder::draw_for_session(f, screen, p, &l.dir, t);
+    }
 }
 
-fn draw_inner(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64, hits: &mut Vec<(Rect, Hit)>) -> Rect {
-    let r = ui::centered(screen, 100, 26);
-    f.render_widget(Clear, r);
-    let title = Line::from(vec![Span::raw(" "), Span::styled("new session", ui::bold_accent(t)), Span::raw(" ")]);
+fn draw_inner(f: &mut Frame, screen: Rect, l: &mut Launcher, t: &Theme, _time: f64, hits: &mut Vec<(Rect, Hit)>) -> Rect {
+    let r = ui::centered(screen, 100, 28);
+    ui::clear(f, r, t);
+    let title = Line::from(vec![Span::raw(" "), Span::styled("sessions", ui::bold_accent(t)), Span::raw(" ")]);
     let inner = ui::frame_ex(f, r, title, None, None, true, t);
     // a close button in the top-right corner (esc does the same)
     let close = Rect { x: r.right().saturating_sub(5), y: r.y, width: 3, height: 1 };
@@ -40,6 +43,39 @@ fn draw_inner(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64, 
     let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     let row = |y: u16| Rect { y, height: 1, ..inner };
     let mut y = inner.y;
+
+    // The project path sits where a file browser's address bar would be.
+    let compact = inner.height < 16;
+    let project_h = if compact { 1 } else { 3 };
+    draw_project_bar(f, Rect { y, height: project_h, ..inner }, l, t, hits);
+    y += project_h;
+    if !compact {
+        y += 1;
+    }
+
+    let mut tab_x = inner.x;
+    for (tab, label) in [(SessionTab::New, " + New session "), (SessionTab::Continue, " ↻ Continue ")] {
+        let on = l.tab == tab;
+        let style = if on { Style::default().fg(t.shine).bg(t.user).add_modifier(Modifier::BOLD) } else { muted(t) };
+        let width = ui::width(label) as u16;
+        if tab_x + width <= inner.right() {
+            ui::line(f, Rect { x: tab_x, y, width, height: 1 }, vec![Span::styled(label, style)]);
+            hits.push((Rect { x: tab_x, y, width, height: 1 }, Hit::Tab(tab)));
+            tab_x += width + 2;
+        }
+    }
+    y += 2;
+    if l.tab == SessionTab::Continue {
+        let body = Rect { y, height: inner.bottom().saturating_sub(y), ..inner };
+        crate::continue_picker::draw_in(f, body, &mut l.continue_picker, t);
+        for (rect, all) in &l.continue_picker.scope_hits {
+            hits.push((*rect, Hit::ContinueScope(*all)));
+        }
+        for (rect, index) in &l.continue_picker.hits {
+            hits.push((*rect, Hit::ContinueRow(*index)));
+        }
+        return r;
+    }
 
     // 1. harness tabs
     let mut tabs = vec![];
@@ -69,25 +105,20 @@ fn draw_inner(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64, 
     y += 1;
 
     // 2. lists
-    let list_h = inner.height.saturating_sub(9);
+    let list_h = inner.bottom().saturating_sub(y).saturating_sub(5);
     let body = Rect { y, height: list_h, ..inner };
     let needs = l.needs_model();
     let left_w = if needs { body.width * 45 / 100 } else { body.width };
-    draw_run_on(f, Rect { width: left_w, ..body }, l, t, hits);
-    if needs {
-        draw_models(f, Rect { x: body.x + left_w + 1, width: body.width.saturating_sub(left_w + 1), ..body }, l, t, hits);
+    if list_h > 0 {
+        draw_run_on(f, Rect { width: left_w, ..body }, l, t, hits);
+        if needs {
+            draw_models(f, Rect { x: body.x + left_w + 1, width: body.width.saturating_sub(left_w + 1), ..body }, l, t, hits);
+        }
     }
     y += list_h;
 
-    // 3. project + summary + toggles
+    // 3. summary + toggles
     ui::rule(f, row(y), "", t);
-    y += 1;
-    ui::line_lr(
-        f,
-        row(y),
-        vec![Span::styled("in ", muted(t)), Span::styled(crate::util::short_path(&l.dir, 70), ui::bold())],
-        vec![Span::styled("pick another project in the sidebar ", muted(t))],
-    );
     y += 1;
     let summary = match l.spec() {
         Some(s) => {
@@ -143,6 +174,38 @@ fn draw_inner(f: &mut Frame, screen: Rect, l: &Launcher, t: &Theme, _time: f64, 
         hits.push((Rect { x: row(y).x, y, width: 3 + ui::width(enter) as u16, height: 1 }, Hit::Launch));
     }
     r
+}
+
+fn draw_project_bar(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let tint = theme::project_tint(t.shine, t);
+    let content = if area.height >= 3 {
+        let box_style = Style::default().bg(tint);
+        let border = Block::default()
+            .borders(Borders::ALL)
+            .border_set(t.skin.border)
+            .border_style(fg(t.frame))
+            .style(box_style)
+            .title(Line::from(Span::styled(" PROJECT ", muted(t).add_modifier(Modifier::BOLD))));
+        f.render_widget(border, area);
+        Rect { x: area.x + 2, y: area.y + 1, width: area.width.saturating_sub(4), height: 1 }
+    } else {
+        f.render_widget(Block::default().style(Style::default().bg(tint)), area);
+        area
+    };
+    let action = if content.width >= 46 { " Change project  Alt+P " } else if content.width >= 24 { " Change " } else { "" };
+    let action_width = ui::width(action);
+    let path_width = (content.width as usize).saturating_sub(action_width + 4);
+    let path = crate::util::short_path(&l.dir, path_width);
+    ui::line_lr(
+        f,
+        content,
+        vec![Span::styled(format!(" {}  ", ui::icon("folder")), fg(t.shine)), Span::styled(path, ui::bold())],
+        vec![Span::styled(action, fg(t.shine).bg(t.user).add_modifier(Modifier::BOLD))],
+    );
+    hits.push((area, Hit::Project));
 }
 
 /// A filter line: "› text▏" or a muted prompt.

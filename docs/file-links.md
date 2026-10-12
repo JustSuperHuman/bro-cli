@@ -12,15 +12,17 @@ and for **reading it**; clients only find candidates in text.
 ## 1. Candidate detection (clients)
 
 Every client finds candidates with the same rules as
-`just-terminal/src/lib/fileLinks.ts::findFileLinks` (Markdown link targets,
-quoted/backticked paths, bare paths with a separator, bare `name.ext`, the
+`bro-cli-mobile/src/lib/fileLinks.ts::findFileLinks` (Markdown link targets,
+quoted/backticked paths, bare paths with a separator, bare paths with spaces
+and a line suffix, bare `name.ext`, the
 location suffixes `:L`, `:L:C`, `#L12`, `#L12C3`, `(L,C)`, `file://` URLs).
 Wrapped terminal rows are joined into one logical line before matching; hard
 newlines end a candidate.
 
-Candidates are **not** shown as links until the bridge confirms they exist
-(section 2). Hosts that predate this contract (404 on `links/resolve`) fall
-back to showing every candidate (the old behaviour).
+In the mobile app, candidates can be tapped while the bridge checks them; the
+file preview endpoint validates a path before reading it. Confirmed missing
+paths return to plain text. Hosts that predate `links/resolve` keep every
+candidate tappable.
 
 ## 2. REST (all under the existing token auth; loopback needs no token)
 
@@ -159,14 +161,14 @@ escape). Control characters, UNC paths and non-`file` URLs are rejected.
 * The TUI detects candidates on the visible screen alongside URLs. It checks
   existence off the UI thread and caches the result, and only confirmed files
   get the link affordance.
-* Clicking a file opens an in-TUI preview overlay: syntax highlighted, scrolled to
+* Clicking a text file opens an in-TUI preview overlay: syntax highlighted, scrolled to
   and highlighting the line. Keys: `e` opens it in the editor, `c` copies the path,
   `Esc`/`q` closes, plus scrolling.
 * The editor is `$BRO_EDITOR`, else `$VISUAL`/`$EDITOR`, else VS Code (`code -g
   file:line:col`), else the OS default app.
-* Video and audio files can't play in a terminal. The overlay shows the name, type, size and
-  duration if cheap to get, and `Enter`/`e` opens the file in the OS default player.
-* `BridgeCommand::OpenFile` (the agent or a remote client asked) opens the overlay
+* Images, video, audio, binary and oversized files open immediately in the OS default app.
+  Missing files show an error in Bro.
+* `BridgeCommand::OpenFile` (the agent or a remote client asked) opens the file
   when that session is focused, else shows a status message.
 
 ## 6. Agent open (`bro open`)

@@ -88,13 +88,17 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
         }
         let ctx = {
             let st = svc.state();
+            let claude_env = st.settings.claude_env.clone();
+            let caveman = st.settings.caveman.clone();
             match st.proxy.status.ready() {
                 Some(p) => LaunchCtx {
                     proxy_base: Some(p.base.clone()),
                     proxy_token: Some(p.token.clone()),
                     route_native: st.settings.proxy.routes_native(),
+                    claude_env,
+                    caveman,
                 },
-                None => LaunchCtx::default(),
+                None => LaunchCtx { claude_env, caveman, ..LaunchCtx::default() },
             }
         };
         let mut cmd = match guard("launch::build", || bro_core::launch::build(&spec, &ctx)) {
@@ -239,7 +243,7 @@ pub fn fallback_command(spec: &LaunchSpec, st: &State) -> Result<CommandSpec, St
         _ => {}
     }
     args.extend(spec.extra_args.iter().cloned());
-    Ok(CommandSpec { program: h.label().into(), args, env, env_remove: vec![], cwd: spec.cwd.clone(), label: label_for(spec), route: None, cleanup: vec![] })
+    Ok(CommandSpec { program: h.label().into(), args, env, env_remove: vec![], cwd: spec.cwd.clone(), label: label_for(spec), route: None, cleanup: vec![], caveman: None })
 }
 
 #[cfg(test)]

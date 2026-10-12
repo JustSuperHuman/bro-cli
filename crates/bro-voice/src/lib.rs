@@ -44,8 +44,8 @@ pub struct VoiceConfig {
     /// `insert` (= `help`), `f13`..`f24`, `apps`, or `vk:0xNN` (Windows VK).
     /// Not every key exists on every platform; `start` says so.
     pub hotkey: String,
-    /// The hotkey never reaches other apps while it is used for talking (a tap
-    /// or a chord is replayed so they still work).
+    /// The hotkey never reaches other apps while it is used for talking.
+    /// Chords and non-Win taps are replayed; a solo Win press stays with voice.
     pub swallow: bool,
     /// Environment variable holding the API key (process env, then registry).
     pub api_key_env: String,
@@ -58,7 +58,8 @@ pub struct VoiceConfig {
     /// Words to spell exactly (session and project names). Sent as
     /// `keywords[]` to `gpt-transcribe`, folded into the prompt for other models.
     pub keywords: Vec<String>,
-    /// Holds shorter than this are taps (the key does its normal thing).
+    /// Holds shorter than this are taps. On Windows, a solo Win-key tap is
+    /// reserved for voice and does not open Start.
     pub min_ms: u32,
     /// Recording stops and is transcribed after this long.
     pub max_secs: u32,

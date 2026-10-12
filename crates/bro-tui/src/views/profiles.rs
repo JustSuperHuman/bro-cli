@@ -99,6 +99,7 @@ impl ProfilesView {
                     started: std::time::Instant::now(),
                     route_id: None,
                     cleanup: vec![],
+                    caveman: None,
                 };
                 let term = Term::new(meta, Spawn { program: c.program, args: c.args, env: c.env, env_remove: c.env_remove }, cx.svc.clone());
                 cx.act(Action::Open(Box::new(term), Place::Tab));

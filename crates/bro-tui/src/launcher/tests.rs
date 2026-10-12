@@ -161,3 +161,37 @@ fn toggles_and_esc() {
     assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::None), "esc clears the filter first");
     assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::Close));
 }
+
+#[test]
+fn changing_project_keeps_the_session_choices_and_uses_folder_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    let nested = root.path().join("second project");
+    for dir in [&first, &second, &nested] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    let mut l = Launcher::new(data(), Some(first.clone()), Place::Tab).with_projects(vec![first.clone(), second.clone()]).with_harness(Harness::Codex);
+    typ(&mut l, "team");
+    let account = l.current();
+    l.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT));
+    let picker = l.project_picker.as_ref().unwrap();
+    assert_eq!(picker.view()[0].0, first);
+    assert_eq!(picker.view()[1].0, second);
+    key(&mut l, KeyCode::Down);
+    assert!(matches!(key(&mut l, KeyCode::Enter), Outcome::Project(ref dir) if *dir == second));
+    assert_eq!(l.dir, second);
+    assert!(l.project_picker.is_none());
+    assert_eq!(l.harness, Harness::Codex);
+    assert_eq!(l.list_filter, "team");
+    assert_eq!(format!("{:?}", l.current()), format!("{account:?}"));
+    assert_eq!(l.spec().unwrap().cwd, second);
+
+    l.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT));
+    l.paste(&format!("{}{}second p", root.path().display(), std::path::MAIN_SEPARATOR));
+    assert!(l.project_picker.as_ref().unwrap().view().iter().any(|(path, kind)| *path == nested && *kind == folder::Kind::Completion));
+    key(&mut l, KeyCode::Tab);
+    assert!(l.project_picker.as_ref().unwrap().filter.ends_with(&format!("second project{}", std::path::MAIN_SEPARATOR)));
+    assert!(matches!(key(&mut l, KeyCode::Enter), Outcome::Project(ref dir) if *dir == nested));
+    assert_eq!(l.spec().unwrap().cwd, nested);
+}

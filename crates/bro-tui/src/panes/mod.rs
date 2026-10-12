@@ -7,3 +7,4 @@ pub mod insights;
 pub mod links;
 pub mod remote_min;
 pub mod term;
+mod writer;

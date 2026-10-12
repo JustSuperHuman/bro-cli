@@ -4,6 +4,8 @@
 //! ctrl+tab and friends reach bro — and bro's icon on the window and taskbar). Without the fork it falls back
 //! to Windows Terminal in a new window, then to a plain console window. `BRO_TERMINAL=<path to wt.exe>` picks
 //! the terminal; arguments are passed on to bro (e.g. a folder to open).
+//! Each launch uses `--new` and the newest local bro executable; in the fork bro also gets `--app-window`, which
+//! turns on its font choice (the fork switches fonts with OSC 50).
 //!
 //! A windows-subsystem program, so launching it never flashes a console of its own.
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -15,16 +17,17 @@ use std::process::Command;
 const ICON: &[u8] = include_bytes!("../../assets/bro.ico");
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = new_instance_args(std::env::args().skip(1).collect());
     let bro = find_bro();
     let cwd = std::env::current_dir().unwrap_or_else(|_| dirs::home_dir().unwrap_or_default());
     let icon = icon_file();
+    let relaunch = std::env::current_exe().ok().map(|launcher| relaunch_command(&launcher, &cwd, &args));
     let terminal = std::env::var_os("BRO_TERMINAL").map(PathBuf::from).filter(|p| present(p)).or_else(fork_terminal);
 
     let started = match &terminal {
         Some(wt) if supports_app_mode(wt) => {
             let mut cmd = Command::new(wt);
-            cmd.args(app_mode_args(&bro, &cwd, icon.as_deref(), &args));
+            cmd.args(app_mode_args(&bro, &cwd, icon.as_deref(), relaunch.as_deref(), &args));
             // the side-by-side build keeps its own phone-bridge data (like the fork's launch:next script)
             if wt.file_name().is_some_and(|n| n.eq_ignore_ascii_case("wtdn.exe"))
                 && std::env::var_os("TERMINAL_WEB_DATA_ROOT").is_none()
@@ -42,10 +45,32 @@ fn main() {
     }
 }
 
-/// `bro.exe` next to this launcher, else on PATH.
+/// Always start a fresh process, even when an older bro is still running.
+fn new_instance_args(mut args: Vec<String>) -> Vec<String> {
+    if !args.iter().any(|a| a == "--new") {
+        args.insert(0, "--new".into());
+    }
+    args
+}
+
+/// Compare the sibling, Cargo install and every PATH copy by modification time.
+/// Start menu launches can inherit a PATH that predates the latest Cargo install.
 fn find_bro() -> PathBuf {
-    let here = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(exe("bro"))));
-    here.filter(|p| p.is_file()).or_else(|| which(&exe("bro"))).unwrap_or_else(|| PathBuf::from(exe("bro")))
+    let name = exe("bro");
+    let here = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(&name)));
+    let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".cargo")));
+    let installed = cargo_home.map(|d| d.join("bin").join(&name));
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let candidates = here.into_iter().chain(installed).chain(std::env::split_paths(&path).map(|d| d.join(&name)));
+    newest_bro(candidates).unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// Keep the first candidate on a tie so a matching sibling remains preferred.
+fn newest_bro(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    candidates.into_iter().filter_map(|path| {
+        let metadata = path.metadata().ok()?;
+        metadata.is_file().then(|| (path, metadata.modified().unwrap_or(std::time::UNIX_EPOCH)))
+    }).reduce(|best, candidate| if candidate.1 > best.1 { candidate } else { best }).map(|(path, _)| path)
 }
 
 /// The fork: the side-by-side build (`wtdn.exe`, where new fork features land first), else the everyday
@@ -68,14 +93,50 @@ fn supports_app_mode(_wt: &Path) -> bool {
     true
 }
 
-fn app_mode_args(bro: &Path, cwd: &Path, icon: Option<&Path>, args: &[String]) -> Vec<String> {
+fn app_mode_args(bro: &Path, cwd: &Path, icon: Option<&Path>, relaunch: Option<&str>, args: &[String]) -> Vec<String> {
     let mut v = vec!["-w".into(), "new".into(), "--app".into(), "--title".into(), "bro".into()];
     if let Some(i) = icon {
         v.extend(["--app-icon".into(), i.display().to_string()]);
     }
-    v.extend(["-d".into(), cwd.display().to_string(), "--".into(), bro.display().to_string()]);
+    if let Some(command) = relaunch {
+        v.extend(["--app-relaunch".into(), escape_wt(command)]);
+    }
+    // in the fork bro may switch the window's font (OSC 50), so it offers the choice
+    v.extend(["-d".into(), cwd.display().to_string(), "--".into(), bro.display().to_string(), "--app-window".into()]);
     v.extend(args.iter().map(|a| escape_wt(a)));
     v
+}
+
+/// A taskbar pin must reopen the launcher, which resolves bro again and adds --new.
+/// Include the original folder because Explorer may relaunch from a different cwd.
+fn relaunch_command(launcher: &Path, cwd: &Path, args: &[String]) -> String {
+    let mut command = vec![launcher.display().to_string()];
+    command.extend_from_slice(args);
+    if args.iter().all(|a| a.starts_with('-') || matches!(a.as_str(), "demo" | "help" | "version")) {
+        command.push(cwd.display().to_string());
+    }
+    command.iter().map(|a| quote_windows_arg(a)).collect::<Vec<_>>().join(" ")
+}
+
+/// Quote one argument for Windows ShellExecute / CommandLineToArgvW.
+fn quote_windows_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.into();
+    }
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for ch in arg.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        quoted.push_str(&"\\".repeat(if ch == '"' { backslashes * 2 + 1 } else { backslashes }));
+        backslashes = 0;
+        quoted.push(ch);
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 /// Terminal splits its command line into commands at `;` — keep bro's arguments whole.
@@ -120,12 +181,95 @@ mod tests {
 
     #[test]
     fn app_mode_command_line() {
-        let a = app_mode_args(Path::new("C:/bin/bro.exe"), Path::new("F:/code/x"), Some(Path::new("C:/u/.bro/bro.ico")), &["F:/code/x".into()]);
+        let args = new_instance_args(vec!["F:/code/x".into()]);
+        let relaunch = relaunch_command(Path::new("C:/bin/bro-app.exe"), Path::new("F:/code/x"), &args);
+        let a = app_mode_args(Path::new("C:/bin/bro.exe"), Path::new("F:/code/x"), Some(Path::new("C:/u/.bro/bro.ico")), Some(&relaunch), &args);
         assert_eq!(a[..5], ["-w", "new", "--app", "--title", "bro"]);
         assert!(a.windows(2).any(|w| w[0] == "--app-icon"));
+        assert!(a.windows(2).any(|w| w[0] == "--app-relaunch" && w[1] == "C:/bin/bro-app.exe --new F:/code/x"));
         let dash = a.iter().position(|s| s == "--").unwrap();
         assert_eq!(a[dash + 1], "C:/bin/bro.exe");
+        assert_eq!(a[dash + 2], "--app-window", "bro knows it's in the fork's window");
+        assert_eq!(a[dash + 3], "--new");
         assert_eq!(a.last().unwrap(), "F:/code/x");
         assert_eq!(escape_wt("a;b"), r"a\;b");
+    }
+
+    #[test]
+    fn pin_reopens_launcher_in_original_folder() {
+        let launcher = Path::new(r"C:\Program Files\bro\bro-app.exe");
+        let cwd = Path::new(r"F:\my project");
+        assert_eq!(relaunch_command(launcher, cwd, &new_instance_args(vec![])), r#""C:\Program Files\bro\bro-app.exe" --new "F:\my project""#);
+        let args = new_instance_args(vec![r"J:\another project".into()]);
+        assert_eq!(relaunch_command(launcher, cwd, &args), r#""C:\Program Files\bro\bro-app.exe" --new "J:\another project""#);
+    }
+
+    #[test]
+    fn windows_argument_quoting_handles_quotes_and_trailing_slashes() {
+        assert_eq!(quote_windows_arg(""), r#""""#);
+        assert_eq!(quote_windows_arg(r"F:\project"), r"F:\project");
+        assert_eq!(quote_windows_arg(r"F:\my project\"), r#""F:\my project\\""#);
+        assert_eq!(quote_windows_arg("a\"b"), r#""a\"b""#);
+    }
+
+    #[test]
+    fn terminal_keeps_semicolons_inside_pin_relaunch_command() {
+        let args = new_instance_args(vec![]);
+        let cwd = Path::new("F:/code/a;b project");
+        let relaunch = relaunch_command(Path::new("C:/bin/bro-app.exe"), cwd, &args);
+        let a = app_mode_args(Path::new("C:/bin/bro.exe"), cwd, None, Some(&relaunch), &args);
+        let pin = a.iter().position(|s| s == "--app-relaunch").unwrap();
+        assert_eq!(a[pin + 1], r#"C:/bin/bro-app.exe --new "F:/code/a\;b project""#);
+    }
+
+    #[test]
+    fn every_launch_gets_new_without_duplicating_it() {
+        assert_eq!(new_instance_args(vec![]), ["--new"]);
+        let args = vec!["--new".into(), "--demo".into(), "F:/code/my project".into()];
+        assert_eq!(new_instance_args(args.clone()), args);
+        assert_eq!(new_instance_args(vec!["--demo".into(), "F:/code/my project".into()]), ["--new", "--demo", "F:/code/my project"]);
+    }
+
+    #[test]
+    fn plain_terminal_preserves_new_and_folder_arguments() {
+        let args = new_instance_args(vec!["F:/code/a;b project".into()]);
+        let a = plain_wt_args(Path::new("C:/bin/bro.exe"), Path::new("F:/code/x"), &args);
+        let dash = a.iter().position(|s| s == "--").unwrap();
+        assert_eq!(&a[dash + 1..], ["C:/bin/bro.exe", "--new", r"F:/code/a\;b project"]);
+    }
+
+    fn executable(dir: &Path, name: &str, seconds: u64) -> PathBuf {
+        let path = dir.join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))).unwrap();
+        path
+    }
+
+    #[test]
+    fn newer_install_or_path_copy_wins_over_stale_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let sibling = executable(dir.path(), "sibling.exe", 100);
+        let installed = executable(dir.path(), "installed.exe", 200);
+        let path_copy = executable(dir.path(), "path.exe", 300);
+        assert_eq!(newest_bro([sibling.clone(), installed.clone()]), Some(installed.clone()));
+        assert_eq!(newest_bro([sibling, installed, path_copy.clone()]), Some(path_copy));
+    }
+
+    #[test]
+    fn newer_sibling_wins_and_equal_copies_keep_search_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let sibling = executable(dir.path(), "sibling.exe", 300);
+        let installed = executable(dir.path(), "installed.exe", 200);
+        let equal = executable(dir.path(), "equal.exe", 300);
+        assert_eq!(newest_bro([sibling.clone(), installed, equal]), Some(sibling));
+    }
+
+    #[test]
+    fn missing_executables_and_directories_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.exe");
+        let valid = executable(dir.path(), "bro.exe", 100);
+        assert_eq!(newest_bro([missing.clone(), dir.path().to_path_buf(), valid.clone()]), Some(valid));
+        assert_eq!(newest_bro([missing, dir.path().to_path_buf()]), None);
     }
 }

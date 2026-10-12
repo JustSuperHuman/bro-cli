@@ -14,6 +14,7 @@ mod clip;
 mod editor;
 mod file_view;
 mod folder;
+mod fonts;
 mod fuzzy;
 mod help;
 mod instance;
@@ -31,6 +32,7 @@ mod panes;
 mod recents;
 mod services;
 mod sidebar;
+mod skin;
 mod testkit;
 mod theme;
 mod ui;
@@ -40,7 +42,12 @@ mod views;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // bro-app opened us in the Just Terminal fork: its font switching (OSC 50) is available
+    if let Some(i) = args.iter().position(|a| a == "--app-window") {
+        args.remove(i);
+        fonts::APP_WINDOW.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     match cli::parse(&args) {
         Ok(cli::Command::Help) => {
             print!("{}", cli::HELP.replace("{version}", env!("CARGO_PKG_VERSION")));
@@ -128,7 +135,8 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
     };
 
     let input_tx = tx.clone();
-    std::thread::spawn(move || paste_burst::pump(paste_burst::Console, |ev| input_tx.send(pane::Event::Input(ev)).is_ok()));
+    std::thread::Builder::new().name("bro-input".into())
+        .spawn(move || paste_burst::pump(paste_burst::Console, |ev| input_tx.send(pane::Event::Input(ev)).is_ok()))?;
 
     let _instance = if demo { None } else { instance::serve(tx.clone()) };
     let mut app = app::App::new(svc, tx, app::Opts { demo, fixed_demo: false, load_recents: !demo });

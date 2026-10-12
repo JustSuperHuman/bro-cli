@@ -127,10 +127,18 @@ impl App {
                     self.overlay = Overlay::None;
                     self.open_view("profiles");
                 }
+                Outcome::Project(dir) => self.select_launcher_project(dir),
+                Outcome::CreateProject(dir, request) => self.create_project_folder(dir, request),
                 Outcome::Launch(spec, place) => {
                     self.overlay = Overlay::None;
                     self.launch_spec(spec, place);
                 }
+                Outcome::Resume(idx) => {
+                    self.overlay = Overlay::None;
+                    self.open_resume(idx);
+                }
+                Outcome::Archive(id, on) => self.continue_archive(id, on),
+                Outcome::UndoArchive => self.undo_archive(),
             },
             Overlay::Palette(p) => {
                 let out = p.key(k);
@@ -162,25 +170,6 @@ impl App {
                 }
             }
             Overlay::Resume(_) => self.resume_key(k),
-            Overlay::Continue(p) => match p.key(k) {
-                crate::continue_picker::Outcome::None => {}
-                crate::continue_picker::Outcome::Close => self.overlay = Overlay::None,
-                crate::continue_picker::Outcome::Resume(idx) => {
-                    self.overlay = Overlay::None;
-                    self.open_resume(idx);
-                }
-                crate::continue_picker::Outcome::Archive(id, on) => self.continue_archive(id, on),
-                crate::continue_picker::Outcome::Undo => self.undo_archive(),
-            },
-            Overlay::Folder(p) => match p.key(k) {
-                crate::folder::Outcome::None => {}
-                crate::folder::Outcome::Close => self.overlay = Overlay::None,
-                crate::folder::Outcome::Open(dir) => {
-                    self.overlay = Overlay::None;
-                    self.add_project(dir);
-                }
-                crate::folder::Outcome::Create(dir, request) => self.create_project_folder(dir, request),
-            },
             Overlay::Confirm(_) => self.confirm_key(k),
             Overlay::File(v) => {
                 let o = v.key(k);
@@ -240,10 +229,16 @@ impl App {
             }
             _ => {}
         }
+        if k.code != KeyCode::Esc {
+            self.side_sel = 0;
+            self.side_scroll = 0;
+            self.side_manual_scroll = false;
+        }
     }
 
     /// Keys while the sidebar has focus (alt+b).
     fn sidebar_key(&mut self, k: KeyEvent) {
+        self.side_manual_scroll = false;
         let rows = self.rows();
         let n = rows.len();
         let sel = self.side_sel.min(n.saturating_sub(1));
@@ -289,7 +284,6 @@ impl App {
                 Some(Row::Project { root, live, .. }) => self.close_project(root.clone(), *live),
                 _ => {}
             },
-            KeyCode::Char('o') => self.open_folder(),
             KeyCode::Char('n') => {
                 let dir = self.preferred_dir();
                 self.open_launcher(dir, crate::pane::Place::Tab);

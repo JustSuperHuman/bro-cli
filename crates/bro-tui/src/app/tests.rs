@@ -208,7 +208,7 @@ fn tile_all_shortcut_preserves_splits_focus_and_zoom() {
     shot(&mut a, "tiled-projects");
     assert_eq!(a.outer.len(), 5);
     let (other, r) = a.outer.iter().find(|(id, _)| !a.tabs[a.cur].root.contains(*id)).copied().unwrap();
-    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 5, row: r.y, modifiers: KeyModifiers::NONE });
     assert_eq!(a.focused(), Some(other));
     key(&mut a, KeyCode::Char('z'), KeyModifiers::ALT);
     draw(&mut a);
@@ -226,6 +226,96 @@ fn tile_all_shortcut_preserves_splits_focus_and_zoom() {
     key(&mut a, KeyCode::Char(' '), KeyModifiers::CONTROL);
     key(&mut a, KeyCode::Char('T'), KeyModifiers::SHIFT);
     assert!(a.tile_all, "prefix T is an alternative when a host captures Alt");
+}
+
+#[test]
+fn tiled_minimize_button_and_sidebar_visibility_keep_only_the_latest_minimized() {
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    let before: Vec<_> = a.tabs.iter().map(|t| format!("{:?}", t.root)).collect();
+    assert!(draw(&mut a).contains("minimized 0"));
+    assert_eq!(a.pane_minimize.len(), 5);
+    let first = a.pane_minimize[0];
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: first.0.x + 1, row: first.0.y, modifiers: KeyModifiers::NONE });
+    assert_eq!(a.minimized, vec![first.1]);
+    assert!(!a.stack.contains(&first.1));
+    assert_eq!(a.stack.len(), 4);
+    let screen = draw(&mut a);
+    assert!(screen.contains("minimized 1"));
+    assert!(a.outer.iter().all(|(id, _)| *id != first.1));
+
+    let minimized = a.side_hits.iter().find_map(|(r, hit)| matches!(hit, SideHit::Minimized).then_some(*r)).unwrap();
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: minimized.x + 1, row: minimized.y, modifiers: KeyModifiers::NONE });
+    assert!(a.show_minimized);
+    assert_eq!(a.stack.len(), 5);
+    draw(&mut a);
+    assert!(a.outer.iter().any(|(id, _)| *id == first.1));
+
+    let second = a.pane_minimize.iter().find(|(_, id)| *id != first.1).copied().unwrap();
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: second.0.x + 1, row: second.0.y, modifiers: KeyModifiers::NONE });
+    assert_eq!(a.minimized, vec![second.1], "visible mode releases earlier minimized sessions");
+    assert!(!a.show_minimized, "a new minimization returns to hidden mode");
+    assert_eq!(a.stack.len(), 4);
+    assert!(a.stack.contains(&first.1));
+    assert!(!a.stack.contains(&second.1));
+    a.toggle_minimized_visibility();
+    assert!(a.show_minimized);
+    assert_eq!(a.stack.len(), 5);
+    a.toggle_minimized_visibility();
+    assert!(!a.show_minimized);
+    assert_eq!(a.stack.len(), 4);
+    assert!(a.stack.contains(&first.1));
+    assert!(!a.stack.contains(&second.1));
+    a.go_session(second.1);
+    assert!(a.minimized.is_empty(), "selecting a hidden session restores it");
+    assert_eq!(a.stack.len(), 5);
+    a.run_act(Act::TileAll);
+    assert!(!a.tile_all);
+    assert_eq!(before, a.tabs.iter().map(|t| format!("{:?}", t.root)).collect::<Vec<_>>());
+}
+
+#[test]
+fn all_tiled_sessions_can_be_minimized_and_shown_again() {
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    let ids = a.stack.clone();
+    for id in &ids {
+        a.minimize_pane(*id);
+    }
+    assert!(a.tile_all && a.stack.is_empty());
+    assert_eq!(a.minimized.len(), ids.len());
+    assert!(a.visible().is_empty());
+    assert!(draw(&mut a).contains("All sessions minimized"));
+    a.toggle_minimized_visibility();
+    assert_eq!(a.visible().len(), ids.len());
+    assert_eq!(a.minimized.len(), ids.len());
+    a.toggle_minimized_visibility();
+    a.go_session(ids[0]);
+    assert_eq!(a.visible(), vec![ids[0]]);
+    assert_eq!(a.minimized.len(), ids.len() - 1);
+}
+
+#[test]
+fn a_new_session_joins_the_grid_when_the_others_are_minimized() {
+    use crate::panes::term::Term;
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    let ids = a.stack.clone();
+    let meta = a.panes[&ids[0]].as_term_ref().unwrap().meta.clone();
+    for id in &ids {
+        a.minimize_pane(*id);
+    }
+    let added = a.new_tab(Box::new(Term::fixed(meta, "new session", a.svc.clone())));
+    assert!(a.tile_all);
+    assert_eq!(a.visible(), vec![added]);
+    assert_eq!(a.minimized.len(), ids.len());
+    a.close(added);
+    assert!(a.tile_all && a.visible().is_empty());
+    a.toggle_minimized_visibility();
+    assert_eq!(a.visible().len(), ids.len());
+    a.close(ids[0]);
+    assert!(!a.minimized.contains(&ids[0]));
+    assert_eq!(a.visible().len(), ids.len() - 1);
 }
 
 #[test]
@@ -297,7 +387,8 @@ fn project_chrome_matches_sidebar_and_focus_is_distinct_in_dark_and_light_themes
             let color = a.project_color(&project.key);
             let buf = term.backend().buffer();
             let corner = &buf[(area.x, area.y)];
-            let head = &buf[(area.x + 1, area.y)];
+            assert_eq!(buf[(area.x + 2, area.y)].symbol(), "−");
+            let head = &buf[(area.x + 4, area.y)];
             if id == focus {
                 assert_eq!(corner.symbol(), "┏");
                 assert_eq!(corner.fg, color);
@@ -385,13 +476,13 @@ fn double_clicking_a_pane_goes_full_screen_and_back() {
     let click = |a: &mut App, x, y| a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
     let release = |a: &mut App, x, y| a.mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
     // One click only focuses.
-    click(&mut a, r.x + 3, r.y);
-    release(&mut a, r.x + 3, r.y);
+    click(&mut a, r.x + 5, r.y);
+    release(&mut a, r.x + 5, r.y);
     assert_eq!(a.focused(), Some(other));
     assert!(!a.stack_zoom);
     // A second click on the header: full screen.
-    click(&mut a, r.x + 3, r.y);
-    release(&mut a, r.x + 3, r.y);
+    click(&mut a, r.x + 5, r.y);
+    release(&mut a, r.x + 5, r.y);
     assert!(a.stack_zoom, "double-click zooms");
     draw(&mut a);
     assert_eq!(a.outer.len(), 1);
@@ -408,9 +499,9 @@ fn double_clicking_a_pane_goes_full_screen_and_back() {
     assert!(a.tile_all && a.stacked());
     // Two single clicks too far apart in time are not a double-click.
     let (_, r) = a.outer.iter().find(|(id, _)| *id == other).copied().unwrap();
-    click(&mut a, r.x + 3, r.y);
+    click(&mut a, r.x + 5, r.y);
     a.last_pane_click = a.last_pane_click.map(|(at, id, pos)| (at - std::time::Duration::from_millis(600), id, pos));
-    click(&mut a, r.x + 3, r.y);
+    click(&mut a, r.x + 5, r.y);
     assert!(!a.stack_zoom);
     // Split tabs zoom the same way.
     key(&mut a, KeyCode::Char('T'), KeyModifiers::ALT);
@@ -581,7 +672,7 @@ fn sidebar_with_three_projects() {
     for p in ["bro-cli-v2", "justgains", "terminal"] {
         assert!(s.contains(p), "project {p} missing\n{s}");
     }
-    assert!(s.contains("  +  ") && s.contains("alt+n"), "new-session strip
+    assert!(s.contains("+ New  ↻ Continue"), "session actions
 {s}");
     assert!(s.contains("usage left"), "{s}");
     assert!(!s.contains("+ new  alt+n"), "no tab bar\n{s}");
@@ -724,8 +815,6 @@ fn keyboard_navigation() {
     key(&mut a, KeyCode::Char('b'), KeyModifiers::ALT);
     assert!(a.side_focus);
     key(&mut a, KeyCode::Char('g'), KeyModifiers::NONE);
-    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
-    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE); // past "+ open project", "continue" onto the first project
     let header = a.side_sel;
     key(&mut a, KeyCode::Char('l'), KeyModifiers::NONE);
     assert_eq!(a.side_sel, header + 1);
@@ -802,6 +891,128 @@ fn sidebar_scrollbar_fades_then_hides() {
     assert_eq!(bar_alpha(Duration::ZERO), Some(1.0));
     assert!(bar_alpha(Duration::from_millis(900)).is_some_and(|a| a > 0.0 && a < 1.0));
     assert_eq!(bar_alpha(Duration::from_millis(1100)), None);
+}
+
+#[test]
+fn sidebar_session_actions_stay_visible_and_clickable_after_scrolling() {
+    let mut a = app(true);
+    let positions = |a: &App| {
+        a.side_hits.iter().filter_map(|(r, hit)| {
+            match hit {
+                SideHit::Launcher => Some((0, *r)),
+                SideHit::Continue => Some((1, *r)),
+                _ => None,
+            }
+        }).collect::<Vec<_>>()
+    };
+    draw_buf(&mut a, 140, 20);
+    let initial = positions(&a);
+    assert_eq!(initial.len(), 2);
+    a.side_focus = true;
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    draw_buf(&mut a, 140, 20);
+    assert!(a.side_scroll > 0);
+    assert_eq!(positions(&a), initial);
+    assert!(a.side_thumb.bottom() <= initial[0].1.y, "the scrollbar belongs to the project viewport");
+    crate::testkit::snapshot("sidebar-session-actions", 140, 20, |f| a.draw(f));
+    let open = initial[0].1;
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: open.x + 2, row: open.y, modifiers: KeyModifiers::NONE });
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.tab == crate::launcher::SessionTab::New));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    let history = initial[1].1;
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: history.x + 2, row: history.y, modifiers: KeyModifiers::NONE });
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.tab == crate::launcher::SessionTab::Continue));
+}
+
+#[test]
+fn sidebar_actions_remain_available_while_filtering_and_in_short_windows() {
+    let mut a = app(true);
+    a.side_focus = true;
+    let initial = draw_buf(&mut a, 140, 24);
+    let action = |a: &App| a.side_hits.iter().find_map(|(r, hit)| matches!(hit, SideHit::Continue).then_some(*r)).unwrap();
+    let position = action(&a);
+    key(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
+    for c in "justgains".chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    let filtered = draw_buf(&mut a, 140, 24);
+    assert_eq!(action(&a), position);
+    assert!(matches!(a.rows().get(a.side_sel), Some(crate::sidebar::Row::Project { .. })), "filtering selects the first matching project");
+    assert!(crate::testkit::dump(&initial).contains("Continue") && crate::testkit::dump(&filtered).contains("Continue"));
+    a.side.filter = "no matching project".into();
+    assert!(crate::testkit::dump(&draw_buf(&mut a, 140, 24)).contains("nothing matches"));
+    a.side.filter.clear();
+    a.side_filtering = false;
+    for height in [2, 3, 4, 5, 8, 12, 22] {
+        a.side_scroll = 50;
+        a.side_manual_scroll = true;
+        a.side_nav();
+        draw_buf(&mut a, 140, height);
+    }
+}
+
+#[test]
+fn sidebar_wheel_keeps_its_viewport_when_keyboard_focus_stays_in_the_sidebar() {
+    let mut a = app(true);
+    a.side_focus = true;
+    a.side_sel = 0;
+    draw_buf(&mut a, 120, 22);
+    let row = a.side_hits.iter().find_map(|(r, hit)| matches!(hit, SideHit::Row(0)).then_some(*r)).unwrap();
+    a.mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: row.x + 3, row: row.y, modifiers: KeyModifiers::NONE });
+    draw_buf(&mut a, 120, 22);
+    assert!(a.side_scroll > 0, "wheel scrolling must not snap back to the selected row");
+    assert!(a.side_focus, "scrolling must not send subsequent keys to an agent");
+    let scrolled = a.side_scroll;
+    draw_buf(&mut a, 120, 22);
+    assert_eq!(a.side_scroll, scrolled, "the viewport stays where the wheel left it");
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+    draw_buf(&mut a, 120, 22);
+    assert_eq!(a.side_scroll, 0, "keyboard navigation reveals its selection again");
+}
+
+#[test]
+fn sidebar_wheel_works_over_the_gaps_between_projects() {
+    let mut a = app(true);
+    draw_buf(&mut a, 120, 22);
+    let rows = a.rows();
+    let gap = a.side_hits.iter().find_map(|(r, hit)| {
+        let SideHit::Row(i) = hit else { return None };
+        let pos = ratatui::layout::Position { x: r.x + 3, y: r.y.saturating_sub(1) };
+        (matches!(rows.get(*i), Some(crate::sidebar::Row::Project { .. })) && !a.side_hits.iter().any(|(hit, _)| hit.contains(pos))).then_some(pos)
+    }).unwrap();
+    a.mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: gap.x, row: gap.y, modifiers: KeyModifiers::NONE });
+    draw_buf(&mut a, 120, 22);
+    assert!(a.side_scroll > 0, "blank space in the sidebar must receive wheel events");
+}
+
+#[test]
+fn sidebar_scroll_and_terminal_paint_do_not_wait_for_the_output_parser() {
+    let mut a = app(true);
+    a.side_focus = true;
+    a.side_sel = 0;
+    let before = draw_buf(&mut a, 120, 22);
+    let id = a.focused().unwrap();
+    let area = a.inner.iter().find(|(pane, _)| *pane == id).unwrap().1;
+    let symbols = |buf: &ratatui::buffer::Buffer| {
+        (area.y..area.bottom()).flat_map(|y| (area.x..area.right()).map(move |x| buf[(x, y)].symbol().to_string())).collect::<Vec<_>>()
+    };
+    let parser = a.panes[&id].as_term_ref().unwrap().parser_for_test();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _guard = parser.lock();
+        ready_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(2)).is_ok()
+    });
+    ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let row = a.side_hits.iter().find_map(|(r, hit)| matches!(hit, SideHit::Row(0)).then_some(*r)).unwrap();
+    a.mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: row.x + 3, row: row.y, modifiers: KeyModifiers::NONE });
+    a.after_events();
+    let during = draw_buf(&mut a, 120, 22);
+    let _ = release_tx.send(());
+    assert!(worker.join().unwrap(), "the UI waited for the terminal parser worker to release its lock");
+    assert!(a.side_scroll > 0);
+    assert_eq!(symbols(&during), symbols(&before), "keep the last terminal frame while its parser is busy");
 }
 
 #[test]
@@ -943,38 +1154,68 @@ fn usage_block_collapses_to_claude_and_codex_totals() {
 }
 
 #[test]
-fn earlier_sessions_live_in_the_continue_picker_not_the_sidebar() {
-    use crate::continue_picker::ContinuePicker;
-    use crate::sidebar::Row;
+fn earlier_sessions_live_in_the_continue_tab_not_the_sidebar() {
     let mut a = app(true);
-    // the sidebar only has running sessions, plus one "continue" entry
-    let rows = a.rows();
-    assert!(rows.iter().any(|r| matches!(r, Row::Continue { .. })));
     let s = draw(&mut a);
-    assert!(s.contains("continue session") && !s.contains("port the oriel event loop"), "{s}");
-    // alt+r opens the picker for the current project
+    assert!(s.contains("Continue") && !s.contains("port the oriel event loop"), "{s}");
+    // alt+r opens the shared dialog on Continue, scoped to the current project
     key(&mut a, KeyCode::Char('r'), KeyModifiers::ALT);
     let count = |a: &App| match &a.overlay {
-        Overlay::Continue(p) => {
-            let p: &ContinuePicker = p;
-            p.view().len()
-        }
-        _ => panic!("continue picker"),
+        Overlay::Launcher(l) => l.continue_picker.view().len(),
+        _ => panic!("session dialog"),
     };
     let before = count(&a);
     assert!(before > 0);
     let s = shot(&mut a, "continue-picker");
-    assert!(s.contains("continue a session"), "{s}");
+    assert!(s.contains("Continue") && s.contains("All sessions"), "{s}");
     // del archives, ctrl+z brings it back
     key(&mut a, KeyCode::Delete, KeyModifiers::NONE);
     assert_eq!(count(&a), before - 1);
     key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
     assert_eq!(count(&a), before);
-    // tab: every project
+    // Tab: every project
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     assert!(count(&a) >= before);
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.continue_picker.all));
+    draw(&mut a);
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
+    let scoped = l.hits.iter().find_map(|(r, hit)| matches!(hit, crate::launcher::Hit::ContinueScope(false)).then_some(*r)).unwrap();
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: scoped.x + 1, row: scoped.y, modifiers: KeyModifiers::NONE });
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if !l.continue_picker.all && l.continue_picker.view().len() == before));
+    // New Session remains reachable from the same window.
+    draw(&mut a);
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
+    let new_tab = l.hits.iter().find_map(|(r, hit)| (*hit == crate::launcher::Hit::Tab(crate::launcher::SessionTab::New)).then_some(*r)).unwrap();
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: new_tab.x + 2, row: new_tab.y, modifiers: KeyModifiers::NONE });
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.tab == crate::launcher::SessionTab::New));
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(matches!(a.overlay, Overlay::None));
+}
+
+#[test]
+fn all_sessions_resumes_in_the_selected_sessions_project() {
+    use super::overlays::ResumeFrom;
+    let (mut a, rx) = usage_launch_app();
+    a.open_continue();
+    let Overlay::Launcher(l) = &mut a.overlay else { panic!("session dialog") };
+    let selected_project = l.continue_picker.project.as_ref().unwrap().0.clone();
+    assert!(!l.continue_picker.all);
+    assert!(l.continue_picker.view().iter().all(|e| e.project_key == selected_project));
+    l.continue_picker.set_all(true);
+    let foreign = l.continue_picker.view().iter().position(|e| e.project_key != selected_project && e.harness == bro_core::Harness::Claude).expect("another project's Claude session");
+    l.continue_picker.sel = foreign;
+    let entry = l.continue_picker.view()[foreign].clone();
+    let past = a.svc.state().past.ready().and_then(|sessions| sessions.get(entry.idx).cloned()).unwrap();
+    let expected_dir = past.cwd.clone().or_else(|| past.project.as_ref().map(|p| p.root.clone())).unwrap();
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let Overlay::Resume(p) = &mut a.overlay else { panic!("login picker") };
+    assert!(matches!(&p.from, ResumeFrom::Past(s) if s.id == entry.id));
+    p.sel = p.targets.iter().position(|t| t.current).expect("original login");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let launch = usage_launch_result(&rx);
+    assert_eq!(launch.spec.resume.as_ref().unwrap().session_id, entry.id);
+    assert_eq!(launch.spec.cwd, expected_dir);
+    assert_eq!(a.svc.project_for(&launch.spec.cwd).key, entry.project_key);
 }
 
 #[test]
@@ -984,8 +1225,9 @@ fn resuming_offers_every_login_of_that_kind() {
     let mut a = app(true);
     // an earlier claude session from the continue picker: Enter asks which login, current one first
     key(&mut a, KeyCode::Char('r'), KeyModifiers::ALT);
-    let Overlay::Continue(c) = &mut a.overlay else { panic!("continue picker") };
-    c.all = true;
+    let Overlay::Launcher(l) = &mut a.overlay else { panic!("session dialog") };
+    let c = &mut l.continue_picker;
+    c.set_all(true);
     let pos = c.view().iter().position(|e| e.harness == bro_core::Harness::Claude && e.login.is_some()).unwrap();
     c.sel = pos;
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -1022,10 +1264,11 @@ fn projects_are_opened_explicitly_and_new_sessions_start_in_the_current_one() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("fresh");
     std::fs::create_dir_all(&project).unwrap();
-    // o opens the folder picker; a typed path opens that folder
+    // The path bar opens the folder picker; a typed path opens that folder.
     a.run_act(Act::FocusSidebar);
-    key(&mut a, KeyCode::Char('o'), KeyModifiers::NONE);
-    assert!(matches!(a.overlay, Overlay::Folder(_)));
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('p'), KeyModifiers::ALT);
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.project_picker.is_some()));
     a.paste(&project.to_string_lossy());
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(a.open_projects.contains(&a.svc.project_for(&project).root));
@@ -1042,18 +1285,19 @@ fn projects_are_opened_explicitly_and_new_sessions_start_in_the_current_one() {
 }
 
 #[test]
-fn clicking_a_project_opens_its_session_picker_and_cancel_keeps_the_project() {
+fn clicking_a_project_in_the_path_bar_updates_the_session_dialog() {
     let mut a = app(true);
     let project = tempfile::tempdir().unwrap();
     let root = a.svc.project_for(project.path()).root;
     let panes = a.panes.len();
-    a.open_folder();
+    open_project_picker(&mut a);
     a.paste(&project.path().to_string_lossy());
     draw(&mut a);
-    let Overlay::Folder(p) = &a.overlay else { panic!("folder picker") };
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
+    let p = l.project_picker.as_ref().expect("project picker");
     let r = p.hits.iter().find(|(_, i)| *i == p.sel).unwrap().0;
     a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
-    let Overlay::Launcher(l) = &a.overlay else { panic!("session picker") };
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
     assert_eq!(l.dir, root);
     assert_eq!(l.place, Place::Tab);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
@@ -1061,6 +1305,74 @@ fn clicking_a_project_opens_its_session_picker_and_cancel_keeps_the_project() {
     assert!(a.open_projects.contains(&root));
     assert_eq!(a.panes.len(), panes, "cancel does not start a session");
     assert_eq!(a.preferred_dir(), Some(root));
+}
+
+#[test]
+fn session_dialog_switches_to_an_open_project_without_resetting_the_agent() {
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    a.open_projects.roots.clear();
+    a.open_projects.add(first.clone());
+    a.open_projects.add(second.clone());
+    a.pick_project(first.clone());
+    a.open_launcher(Some(first.clone()), Place::Tab);
+    let rendered = draw(&mut a);
+    assert!(rendered.contains("╭ PROJECT") && rendered.contains("Change project  Alt+P") && rendered.contains("first"), "the session dialog shows the selected project in a path box\n{rendered}");
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
+    let row = l.hits.iter().find_map(|(r, hit)| (*hit == crate::launcher::Hit::Project).then_some(*r)).unwrap();
+    let tabs = l.hits.iter().find_map(|(r, hit)| matches!(hit, crate::launcher::Hit::Harness(_)).then_some(*r)).unwrap();
+    assert!(row.bottom() < tabs.y, "the project path sits above the agent tabs");
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: row.x + 2, row: row.y, modifiers: KeyModifiers::NONE });
+    let chooser = draw(&mut a);
+    assert!(chooser.contains("choose project") && chooser.contains("current"));
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
+    let picker = l.project_picker.as_ref().unwrap();
+    let second_row = picker.hits.iter().find_map(|(r, i)| (picker.view()[*i].0 == second).then_some(*r)).unwrap();
+    let harness = l.harness;
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: second_row.x + 2, row: second_row.y, modifiers: KeyModifiers::NONE });
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog stays open") };
+    assert_eq!(l.dir, second);
+    assert_eq!(l.harness, harness);
+    assert_eq!(l.spec().unwrap().cwd, second);
+    let second_key = a.svc.project_for(&second).key;
+    assert_eq!(l.continue_picker.project.as_ref().unwrap().0, second_key);
+    assert!(!l.continue_picker.all && l.continue_picker.view().is_empty());
+    assert_eq!(a.preferred_dir(), Some(second));
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::ALT);
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.continue_picker.all && !l.continue_picker.view().is_empty()));
+    let compact = crate::testkit::dump(&draw_buf(&mut a, 66, 16));
+    assert!(compact.contains("second") && compact.contains("Change"), "the project path stays visible in a short window\n{compact}");
+    a.select_launcher_project(first);
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.continue_picker.all), "all sessions stays global when the path bar changes");
+}
+
+#[test]
+fn session_dialog_path_opens_a_new_project_after_creation() {
+    let (mut a, rx) = folder_creation_app();
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first");
+    let new_project = root.path().join("new project");
+    std::fs::create_dir(&first).unwrap();
+    a.open_projects.add(first.clone());
+    a.pick_project(first.clone());
+    a.open_launcher(Some(first.clone()), Place::Tab);
+    key(&mut a, KeyCode::Char('p'), KeyModifiers::ALT);
+    a.paste(&new_project.to_string_lossy());
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.project_picker.as_ref().is_some_and(|p| p.pending.is_some())));
+    assert!(!new_project.exists());
+    finish_folder_creation(&mut a, &rx);
+    assert!(new_project.is_dir());
+    assert!(a.open_projects.contains(&new_project));
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog stays open") };
+    assert!(l.project_picker.is_none());
+    assert_eq!(l.spec().unwrap().cwd, new_project);
+    assert_eq!(a.preferred_dir(), Some(new_project));
 }
 
 fn folder_creation_app() -> (App, std::sync::mpsc::Receiver<Event>) {
@@ -1080,10 +1392,17 @@ fn finish_folder_creation(a: &mut App, rx: &std::sync::mpsc::Receiver<Event>) {
     }
 }
 
+fn open_project_picker(a: &mut App) {
+    a.open_launcher(None, Place::Tab);
+    key(a, KeyCode::Char('p'), KeyModifiers::ALT);
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.project_picker.is_some()));
+}
+
 fn choose_folder(a: &mut App, mouse: bool) {
     if mouse {
         draw(a);
-        let Overlay::Folder(p) = &a.overlay else { panic!("folder picker") };
+        let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
+        let p = l.project_picker.as_ref().expect("project picker");
         let r = p.hits.iter().find(|(_, i)| *i == p.sel).unwrap().0;
         a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
     } else {
@@ -1102,20 +1421,20 @@ fn creating_a_project_folder_uses_it_for_the_session_and_launch_command() {
                 std::fs::create_dir(dir.path().join(".git")).unwrap();
             }
             let project = dir.path().join("new parent").join("project with spaces 日本語");
-            a.open_folder();
+            open_project_picker(&mut a);
             let suffix = if mouse { std::path::MAIN_SEPARATOR.to_string() } else { String::new() };
             a.paste(&format!("\"{}{suffix}\"", project.display()));
-            assert!(draw(&mut a).contains("create and open"));
+            assert!(draw(&mut a).contains("create and use"));
             assert!(!project.exists(), "typing a path does not create it");
             choose_folder(&mut a, mouse);
-            assert!(matches!(a.overlay, Overlay::Folder(ref p) if p.pending.is_some()));
+            assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.project_picker.as_ref().is_some_and(|p| p.pending.is_some())));
             assert_eq!(a.open_projects.roots, projects, "creation must finish before the project is added");
             finish_folder_creation(&mut a, &rx);
             assert!(project.is_dir(), "missing parents and the selected folder are created");
             let root = a.svc.project_for(&project).root;
             assert!(a.open_projects.contains(&root));
             if in_repo { assert_eq!(root, dir.path()); }
-            let Overlay::Launcher(l) = &a.overlay else { panic!("new folder opens its session picker") };
+            let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
             assert_eq!(l.dir, project, "a git ancestor must not replace the selected working directory");
             assert_eq!(l.spec().unwrap().cwd, project);
             key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -1136,13 +1455,14 @@ fn folder_creation_errors_keep_the_modal_open_and_allow_a_corrected_path() {
             let file = dir.path().join("existing file");
             std::fs::write(&file, "keep this content").unwrap();
             let blocked = if blocked_parent { file.join("child") } else { file.clone() };
-            a.open_folder();
+            open_project_picker(&mut a);
             a.paste(&blocked.to_string_lossy());
             choose_folder(&mut a, mouse);
-            if matches!(a.overlay, Overlay::Folder(ref p) if p.pending.is_some()) {
+            if matches!(a.overlay, Overlay::Launcher(ref l) if l.project_picker.as_ref().is_some_and(|p| p.pending.is_some())) {
                 finish_folder_creation(&mut a, &rx);
             }
-            let Overlay::Folder(p) = &a.overlay else { panic!("a failed folder stays in the picker") };
+            let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
+            let p = l.project_picker.as_ref().expect("a failed folder stays in the picker");
             assert_eq!(p.filter, blocked.to_string_lossy());
             assert!(p.pending.is_none() && p.error.is_some());
             let error = p.error.as_ref().unwrap().clone();
@@ -1168,18 +1488,19 @@ fn cancelling_folder_creation_ignores_its_completion_in_a_new_modal() {
     let projects = a.open_projects.roots.clone();
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("cancelled project");
-    a.open_folder();
+    open_project_picker(&mut a);
     a.paste(&project.to_string_lossy());
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    let Overlay::Folder(p) = &a.overlay else { panic!("creating folder") };
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
+    let p = l.project_picker.as_ref().expect("creating folder");
     let request = p.pending.unwrap();
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     a.paste("ignored while creating");
-    assert!(matches!(a.overlay, Overlay::Folder(ref p) if p.pending == Some(request) && p.filter == project.to_string_lossy()));
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.project_picker.as_ref().is_some_and(|p| p.pending == Some(request) && p.filter == project.to_string_lossy())));
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
-    a.open_folder();
+    open_project_picker(&mut a);
     finish_folder_creation(&mut a, &rx);
-    assert!(matches!(a.overlay, Overlay::Folder(ref p) if p.pending.is_none() && p.error.is_none() && p.filter.is_empty()));
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.project_picker.as_ref().is_some_and(|p| p.pending.is_none() && p.error.is_none() && p.filter.is_empty())));
     assert_eq!(a.open_projects.roots, projects, "a dismissed request cannot open a project later");
     assert!(rx.try_iter().all(|event| !matches!(event, Event::FolderCreated(_, _))), "repeated Enter did not start another worker");
 }
@@ -1192,7 +1513,7 @@ fn conpty_session_starts_in_the_folder_created_by_the_modal() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("native project 日本語");
     let proof = dir.path().join("native-cwd.txt");
-    a.open_folder();
+    open_project_picker(&mut a);
     a.paste(&project.to_string_lossy());
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     finish_folder_creation(&mut a, &rx);
@@ -1432,7 +1753,7 @@ fn clipboard_shortcuts_and_terminal_paste_open_a_copied_project_path() {
     ];
     for shortcut in shortcuts {
         let mut a = app(false);
-        a.open_folder();
+        open_project_picker(&mut a);
         a.paste("old search");
         if let Some((code, modifiers)) = shortcut {
             key(&mut a, code, modifiers);
@@ -1451,13 +1772,14 @@ fn clipboard_shortcuts_and_terminal_paste_open_a_copied_project_path() {
 #[test]
 fn delayed_clipboard_reads_do_not_paste_into_a_new_popup() {
     let mut a = app(false);
-    a.open_folder();
+    open_project_picker(&mut a);
     key(&mut a, KeyCode::Char('v'), KeyModifiers::CONTROL);
     let request = a.clipboard_request.unwrap();
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
-    a.open_folder();
+    open_project_picker(&mut a);
     a.handle(Event::ClipboardText(request, Some("C:\\wrong-project".into())));
-    let Overlay::Folder(p) = &a.overlay else { panic!("folder picker") };
+    let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
+    let p = l.project_picker.as_ref().expect("project picker");
     assert!(p.filter.is_empty(), "a dismissed input must not receive a late paste");
 }
 
@@ -1628,7 +1950,7 @@ fn projects_close_from_their_x_with_a_confirm_when_sessions_run() {
 fn new_session_strip_above_usage() {
     let mut a = app(true);
     let s = shot(&mut a, "new-session-strip");
-    assert!(s.contains("  +  ") && s.contains("alt+n"), "{s}");
+    assert!(s.contains("+ New  ↻ Continue"), "{s}");
     let hit = |a: &App, want: SideHit| a.side_hits.iter().find(|(_, h)| format!("{h:?}") == format!("{want:?}")).map(|x| x.0).expect("strip button");
     let click = |a: &mut App, r: ratatui::layout::Rect| a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
     // the strip sits right above the usage block
@@ -1639,7 +1961,7 @@ fn new_session_strip_above_usage() {
     }
     // hovering an icon names it where the key hint was
     a.mouse(MouseEvent { kind: MouseEventKind::Moved, column: term.x + 2, row: term.y, modifiers: KeyModifiers::NONE });
-    assert!(draw(&mut a).contains("new terminal"));
+    assert!(draw(&mut a).contains("Terminal"));
     // terminal: a new shell tab
     let n = a.panes.len();
     click(&mut a, term);
@@ -1724,6 +2046,34 @@ fn file_paths_link_once_confirmed_and_open_the_preview_and_agents_can_open_files
     a.side_focus = false;
     a.run_act(Act::OpenedFile);
     assert!(matches!(&a.overlay, Overlay::File(v) if v.line == Some(9)));
+}
+
+#[test]
+fn files_without_a_terminal_preview_open_in_the_system_viewer_without_enter() {
+    use bro_bridge::file_preview::ResolveRoots;
+
+    let mut a = app(true);
+    let (tx, rx) = std::sync::mpsc::channel();
+    a.tx = tx;
+    let dir = tempfile::tempdir().unwrap();
+    let roots = ResolveRoots { cwd: dir.path().to_path_buf(), project: None };
+
+    for (name, bytes) in [("photo.png", &b"image"[..]), ("archive.bin", &b"\0binary"[..])] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        a.open_file_view(None, roots.clone(), name.into(), None, None, None);
+        let Event::FileView(loaded) = rx.recv_timeout(Duration::from_secs(10)).unwrap() else { panic!("file load") };
+        a.handle(Event::FileView(loaded));
+        assert!(!a.overlay.is_open(), "{name} should open without a second keypress");
+        let Event::OpenLink(uri) = rx.recv_timeout(Duration::from_secs(10)).unwrap() else { panic!("system viewer request") };
+        assert_eq!(uri, crate::panes::links::file_uri(&path, None, None).unwrap());
+    }
+
+    a.open_file_view(None, roots, "missing.pdf".into(), None, None, None);
+    let Event::FileView(loaded) = rx.recv_timeout(Duration::from_secs(10)).unwrap() else { panic!("missing file result") };
+    a.handle(Event::FileView(loaded));
+    assert!(matches!(&a.overlay, Overlay::File(v) if matches!(v.body, crate::file_view::Body::Failed { path: None, .. })));
+    assert!(rx.try_recv().is_err(), "a missing file must not open the system viewer");
 }
 
 /// A Claude pane over a fixture transcript (no process): `lines` as JSONL, fixed `activity`.
@@ -1980,7 +2330,7 @@ fn hidden_panes_get_the_remote_minimum_without_being_drawn() {
     assert!(!a.visible().contains(&id) && a.visible().contains(&other));
     // A phone opens the hidden session: the tick that polls hidden panes grows it.
     term_of(&mut a, id).test_viewers = Some(1);
-    a.handle(Event::Wake(id));
+    a.handle(Event::Wake(id.into()));
     assert_eq!(term_of(&mut a, id).size(), (50, inner.width));
     // A remote resize request for a hidden pane is its new local size, still grown to the minimum.
     let sid = term_of(&mut a, id).meta.sid.clone();
@@ -1988,7 +2338,7 @@ fn hidden_panes_get_the_remote_minimum_without_being_drawn() {
     assert_eq!(term_of(&mut a, id).size(), (50, 80));
     term_of(&mut a, id).test_viewers = Some(0);
     term_of(&mut a, id).test_skew = std::time::Duration::from_secs(16);
-    a.handle(Event::Wake(id));
+    a.handle(Event::Wake(id.into()));
     assert_eq!(term_of(&mut a, id).size(), (20, 60), "the phone left: what was asked for");
 }
 
@@ -2024,7 +2374,10 @@ fn usage_info_icon_opens_token_stats_in_two_tabs() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("the scan finishes") {
-            Event::Wake(w) if w == id => break,
+            Event::Wake(w) if w.id == id => {
+                w.acknowledge();
+                break;
+            }
             _ => {}
         }
     }
@@ -2033,4 +2386,159 @@ fn usage_info_icon_opens_token_stats_in_two_tabs() {
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     let s = draw(&mut a);
     assert!(s.contains("24h") && s.contains("1.50M") && s.contains("4.00M"), "{s}");
+}
+
+#[test]
+fn settings_view_switches_presets_and_overrides_switches() {
+    let mut a = app(false);
+    a.run_act(Act::Settings);
+    let id = a.focused().expect("settings pane");
+    assert_eq!(a.panes[&id].view(), Some("settings"));
+    let screen = draw(&mut a);
+    assert!(screen.contains("Auto-resume") && screen.contains("Standard") && screen.contains("Usage telemetry"), "{screen}");
+    // bro's own options come first: auto-approve (off by default) and recaps toggle in place
+    assert!(screen.contains("Auto-approve prompts"), "{screen}");
+    let recaps = a.svc.settings().insights.generate_recaps;
+    for _ in 0..4 {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    }
+    assert!(!a.svc.settings().auto_approve);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().auto_approve);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // recaps
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().insights.generate_recaps, !recaps);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // compression
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // caveman mode
+    assert!(!draw(&mut a).contains("⛏ caveman"), "no badge while off");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // off → caveman
+    assert_eq!(a.svc.settings().caveman.active(), Some(bro_core::caveman::Level::Caveman));
+    { let s = draw(&mut a); assert!(s.contains("⛏ caveman"), "the sidebar shows it: {s}"); }
+    key(&mut a, KeyCode::Left, KeyModifiers::NONE); // back to off
+    assert_eq!(a.svc.settings().caveman.active(), None);
+    assert!(a.svc.settings().caveman.used);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // subagents
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().caveman.subagents);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
+    assert_eq!(a.svc.settings().claude_env.preset, "quiet");
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // error reports: preset says off
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // → Claude default, an override
+    assert_eq!(a.svc.settings().claude_env.summary(), "Quiet + 1 change");
+    let screen = shot(&mut a, "settings");
+    assert!(screen.contains("+ 1 change"), "{screen}");
+    // the launch preview sits below the last switch
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    let screen = draw(&mut a);
+    assert!(screen.contains("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"), "{screen}");
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+    for _ in 0..10 {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // back to error reports
+    }
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().claude_env.summary(), "Quiet");
+    a.run_palette(crate::palette::Cmd::ClaudePreset("presenter".into()));
+    assert_eq!(a.svc.settings().claude_env.preset, "presenter");
+}
+
+#[test]
+fn caveman_from_palette_and_toggle() {
+    use bro_core::caveman::Level;
+    let mut a = app(false);
+    a.run_palette(crate::palette::Cmd::Caveman(Some(Level::Ultracave)));
+    assert_eq!(a.svc.settings().caveman.active(), Some(Level::Ultracave));
+    a.run_act(Act::ToggleCaveman);
+    assert_eq!(a.svc.settings().caveman.active(), None);
+    a.run_act(Act::ToggleCaveman);
+    assert_eq!(a.svc.settings().caveman.active(), Some(Level::Ultracave), "the toggle brings back the last level");
+    a.open_palette("caveman");
+    let screen = draw(&mut a);
+    assert!(screen.contains("caveman mode ultracave · current"), "{screen}");
+}
+
+#[test]
+fn sidebar_gear_opens_settings() {
+    let mut a = app(false);
+    draw(&mut a);
+    let gear = a.side_hits.iter().find_map(|(r, hit)| matches!(hit, SideHit::Settings).then_some(*r)).expect("gear in the sidebar");
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: gear.x + 1, row: gear.y, modifiers: KeyModifiers::NONE });
+    let id = a.focused().expect("settings pane");
+    assert_eq!(a.panes[&id].view(), Some("settings"));
+}
+
+#[test]
+fn painted_themes_recolour_the_whole_window() {
+    let mut a = app(true);
+    for name in ["tokyo-night", "catppuccin-mocha", "catppuccin-latte", "rose-pine", "rose-pine-dawn", "gruvbox", "nord", "kanagawa", "everforest", "nebula", "phosphor", "outrun", "blueprint", "cyber", "digital-rain", "vaporwave"] {
+        a.set_theme(name, false);
+        let s = shot(&mut a, &format!("theme-{name}"));
+        assert!(s.contains("bro"), "{name}");
+    }
+    a.set_theme("tokyo-night", false);
+    a.open_palette("theme ");
+    let s = shot(&mut a, "theme-picker");
+    assert!(s.contains("nebula") && s.contains("· light"), "{s}");
+}
+
+#[test]
+fn rain_falls_everywhere_or_only_in_working_sessions() {
+    use crate::skin::Backdrop;
+    use bro_core::config::RainMode;
+    let mut a = app(true);
+    let set = |a: &mut App, m: RainMode| {
+        let mut s = a.svc.settings();
+        s.rain = m;
+        a.svc.save_settings(s);
+    };
+    let area = ratatui::layout::Rect::new(0, 0, W, H);
+    let _ = draw(&mut a);
+    assert_eq!(a.backdrops(area), vec![(area, Backdrop::None, vec![])], "off: the theme decides");
+    set(&mut a, RainMode::Everywhere);
+    assert_eq!(a.backdrops(area), vec![(area, Backdrop::Rain, vec![])]);
+    // working: rain everywhere but the sessions that are resting (the demo has one working, the others not)
+    set(&mut a, RainMode::Working);
+    let working = a.working_rects();
+    assert!(!working.is_empty() && working.len() < a.inner.len(), "{} of {}", working.len(), a.inner.len());
+    let bds = a.backdrops(area);
+    let (r, b, skip) = &bds[0];
+    assert_eq!((*r, *b), (area, Backdrop::Rain));
+    assert_eq!(skip.len(), a.inner.len() - working.len(), "every resting session is kept clear");
+    assert!(skip.iter().all(|s| working.iter().all(|w| !s.intersects(*w))), "no working session is kept clear");
+    assert_eq!(bds.last(), Some(&(area, Backdrop::None, vec![])));
+    let s = shot(&mut a, "rain-working");
+    assert!(s.contains("wire the launcher"), "{s}");
+    // the digital-rain theme's own rain follows the same rule
+    a.set_theme("digital-rain", false);
+    assert_eq!(a.backdrops(area).last(), Some(&(area, Backdrop::None, vec![])));
+    set(&mut a, RainMode::Off);
+    assert_eq!(a.backdrops(area), vec![(area, Backdrop::Rain, vec![])]);
+}
+
+#[test]
+fn font_row_only_where_the_terminal_can_switch_and_steps_through_fonts() {
+    let mut a = app(false);
+    a.run_act(Act::Settings);
+    assert!(!draw(&mut a).contains("terminal's own"), "no font choice outside the fork's window");
+    crate::fonts::TEST_APP_WINDOW.with(|w| w.set(true));
+    let screen = draw(&mut a);
+    assert!(screen.contains("Font") && screen.contains("terminal's own"), "{screen}");
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Font
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().font.as_deref(), Some("jetbrains-mono"));
+    key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().font.as_deref(), Some("press-start-2p"), "wraps round to the wildest");
+    let screen = draw(&mut a);
+    assert!(screen.contains("8-bit arcade"), "{screen}");
+}
+
+#[test]
+fn caveman_sessions_carry_a_header_badge() {
+    // the demo's first Claude session was "launched" with caveman; the setting itself is off,
+    // so the sidebar shows no badge and this one is the pane header's
+    let mut a = app(true);
+    assert!(a.svc.settings().caveman.active().is_none());
+    let screen = draw(&mut a);
+    assert!(screen.contains("⛏ caveman"), "{screen}");
 }

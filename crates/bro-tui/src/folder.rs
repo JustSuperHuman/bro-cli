@@ -234,13 +234,14 @@ fn shorten_home(p: &Path) -> String {
     p.display().to_string()
 }
 
-pub fn draw(f: &mut Frame, screen: Rect, p: &mut FolderPicker, t: &Theme) {
+/// Project search and path completion inside the session dialog.
+pub fn draw_for_session(f: &mut Frame, screen: Rect, p: &mut FolderPicker, current: &Path, t: &Theme) {
     let mut hits = vec![];
-    let inner = ui::popup(f, screen, 84, 22, "open project", t);
+    let inner = ui::popup(f, screen, 84, 22, "choose project", t);
     let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     let mut spans = vec![Span::styled("› ", ui::bold_accent(t))];
     if p.filter.is_empty() {
-        spans.push(Span::styled("type to filter recent folders, or paste a directory (ctrl+v)", muted(t)));
+        spans.push(Span::styled("find a project, or type a path (ctrl+v to paste)", muted(t)));
     } else {
         spans.push(Span::styled(p.filter.clone(), ui::bold()));
     }
@@ -267,6 +268,9 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut FolderPicker, t: &Theme) {
             Kind::Suggested => {}
         }
         s.push(Span::styled(format!("{name}  "), if on { ui::bold_accent(t) } else { ui::bold() }));
+        if same_path(current, path) {
+            s.push(Span::styled("current  ", fg(t.shine)));
+        }
         s.push(Span::styled(crate::util::short_path(path.parent().unwrap_or(path), 60), muted(t)));
         ui::line(f, Rect { y, height: 1, ..inner }, s);
         hits.push((Rect { y, height: 1, ..inner }, k));
@@ -278,7 +282,9 @@ pub fn draw(f: &mut Frame, screen: Rect, p: &mut FolderPicker, t: &Theme) {
     if p.pending.is_some() {
         ui::hint_line(f, inner, &[("esc", "cancel")], t);
     } else {
-        let action = if p.view().get(p.sel).is_some_and(|(path, kind)| *kind == Kind::Typed && !path.exists()) { "create and open" } else { "open project" };
+        let action = if p.view().get(p.sel).is_some_and(|(path, kind)| *kind == Kind::Typed && !path.exists()) {
+            "create and use"
+        } else { "use project" };
         ui::hint_line(f, inner, &[("⏎", action), ("ctrl+v", "paste path"), ("tab", "complete"), ("↑↓", "move"), ("esc", "cancel")], t);
     }
 }

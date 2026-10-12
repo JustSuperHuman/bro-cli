@@ -1,7 +1,7 @@
 //! The file preview overlay: a file path clicked in a terminal (or one an agent opened with `bro open`), loaded
 //! and highlighted on a worker thread, scrolled to its line. Big files page in as you scroll; keys open it in
-//! your editor, copy its path or mention it to the agent. Video, audio and images can't show in a terminal:
-//! the overlay describes them and ⏎ hands them to the default app.
+//! your editor, copy its path or mention it to the agent. Files the terminal can't display open
+//! directly in the system's default app.
 
 use crate::layout::PaneId;
 use crate::pane::Event;
@@ -50,7 +50,7 @@ impl Doc {
     }
 }
 
-/// Video, audio, images: described, opened by the system.
+/// Video, audio, images: handed to the system after loading.
 pub struct Media {
     pub path: PathBuf,
     pub relative: String,
@@ -157,7 +157,7 @@ impl FileView {
         });
     }
 
-    /// A worker finished. Returns [`Outcome::Fallback`] when the link should go to the OS instead.
+    /// A worker finished. Files without a terminal preview go to the system viewer.
     pub fn apply(&mut self, loaded: Loaded) -> Outcome {
         if loaded.req != self.req {
             return Outcome::None;
@@ -172,6 +172,7 @@ impl FileView {
             Ok(Payload::Media(m)) => {
                 self.target = m.path.to_string_lossy().into_owned();
                 self.body = Body::Media(m);
+                return Outcome::System;
             }
             // a page that didn't load: keep what's shown
             Err(_) if matches!(self.body, Body::Text(_)) => {}
@@ -182,7 +183,11 @@ impl FileView {
                 {
                     return Outcome::Fallback(uri);
                 }
+                let open_in_system = path.is_some();
                 self.body = Body::Failed { message, path };
+                if open_in_system {
+                    return Outcome::System;
+                }
             }
         }
         Outcome::None

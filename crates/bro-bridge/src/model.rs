@@ -1,5 +1,5 @@
 //! Wire types shared with the Just Terminal clients
-//! (`tools/just-terminal/src/types.ts`, `tools/terminal-web/src/lib/types.ts`).
+//! (`bro-cli-mobile/src/types.ts`, `tools/terminal-web/src/lib/types.ts`).
 //! Field names are camelCase on the wire; optional fields are omitted when
 //! absent, exactly like the reference host.
 

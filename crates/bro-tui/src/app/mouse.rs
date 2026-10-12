@@ -47,33 +47,23 @@ impl App {
                             self.overlay = Overlay::None;
                             self.open_view("profiles");
                         }
+                        crate::launcher::Outcome::Project(dir) => self.select_launcher_project(dir),
+                        crate::launcher::Outcome::CreateProject(dir, request) => self.create_project_folder(dir, request),
                         crate::launcher::Outcome::Launch(spec, place) => {
                             self.overlay = Overlay::None;
                             self.launch_spec(spec, place);
                         }
+                        crate::launcher::Outcome::Resume(idx) => {
+                            self.overlay = Overlay::None;
+                            self.open_resume(idx);
+                        }
+                        crate::launcher::Outcome::Archive(id, on) => self.continue_archive(id, on),
+                        crate::launcher::Outcome::UndoArchive => self.undo_archive(),
                     }
                     return;
                 }
                 Overlay::Launcher(l) if wheel => {
                     l.scroll(pos, down);
-                    return;
-                }
-                Overlay::Folder(p) if left => {
-                    match p.click(pos) {
-                        crate::folder::Outcome::Open(dir) => {
-                            self.overlay = Overlay::None;
-                            self.add_project(dir);
-                        }
-                        crate::folder::Outcome::Create(dir, request) => self.create_project_folder(dir, request),
-                        _ => {}
-                    }
-                    return;
-                }
-                Overlay::Continue(p) if left => {
-                    if let crate::continue_picker::Outcome::Resume(idx) = p.click(pos) {
-                        self.overlay = Overlay::None;
-                        self.open_resume(idx);
-                    }
                     return;
                 }
                 Overlay::Resume(p) if left => {
@@ -133,6 +123,18 @@ impl App {
             return;
         }
         // sidebar
+        if self.side_area.width > 0 && self.side_area.contains(pos)
+            && matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp)
+        {
+            self.side_manual_scroll = true;
+            self.side_scroll = if matches!(m.kind, MouseEventKind::ScrollDown) {
+                self.side_scroll.saturating_add(1)
+            } else {
+                self.side_scroll.saturating_sub(1)
+            };
+            self.side_nav();
+            return;
+        }
         if let Some((r, hit)) = self.side_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
             let _ = r;
             match m.kind {
@@ -159,9 +161,12 @@ impl App {
                         SideHit::Stats => self.open_view("stats"),
                         SideHit::Proxy => self.open_view("proxy"),
                         SideHit::Bridge => self.open_view("bridge"),
+                        SideHit::Settings => self.open_view("settings"),
                         SideHit::Quick(h) => self.quick_launch(h),
                         SideHit::Launcher => self.open_launcher(None, crate::pane::Place::Tab),
+                        SideHit::Continue => self.open_continue(),
                         SideHit::TileAll => self.run_act(crate::keymap::Act::TileAll),
+                        SideHit::Minimized => self.toggle_minimized_visibility(),
                     }
                 }
                 MouseEventKind::Down(MouseButton::Middle) => {
@@ -170,25 +175,21 @@ impl App {
                             self.ask_close(info.pane);
                         }
                 }
-                MouseEventKind::ScrollDown => {
-                    self.side_scroll += 2;
-                    self.side_nav();
-                }
-                MouseEventKind::ScrollUp => {
-                    self.side_scroll = self.side_scroll.saturating_sub(2);
-                    self.side_nav();
-                }
                 _ => {}
             }
             return;
         }
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            if let Some(&(_, id)) = self.pane_minimize.iter().find(|(r, _)| r.contains(pos)) {
+                self.minimize_pane(id);
+                return;
+            }
             if let Some(&(_, id)) = self.pane_close.iter().find(|(r, _)| r.contains(pos)) {
                 self.ask_close(id);
                 return;
             }
             // a split divider: start dragging
-            if let Some(t) = self.tabs.get(self.cur).filter(|t| !t.zoom && self.stack.len() < 2) {
+            if let Some(t) = self.tabs.get(self.cur).filter(|t| !t.zoom && !self.stacked()) {
                 let mut out = vec![];
                 t.root.borders(self.body_panes(), &mut vec![], &mut out);
                 for (area, dir, path) in out.into_iter().rev() {

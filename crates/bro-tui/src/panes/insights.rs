@@ -26,6 +26,9 @@ pub struct Snapshot {
     pub session_id: Option<String>,
     /// A `/recap` bro generated that still matches the transcript
     pub generated: Option<CachedRecap>,
+    /// The agent's own word on whether a turn is running: Claude's `sessions/<pid>.json` status, Codex's
+    /// `task_started` / `task_complete`. None = unknown (fall back to the screen).
+    pub busy: Option<bool>,
     /// Bumped on every change
     pub rev: u64,
 }
@@ -76,6 +79,11 @@ impl Insights {
         self.inner.snap.lock().clone()
     }
 
+    /// [`Snapshot::busy`] without cloning the rest.
+    pub fn busy(&self) -> Option<bool> {
+        self.inner.snap.lock().busy
+    }
+
     #[cfg(test)]
     pub fn rev(&self) -> u64 {
         self.inner.snap.lock().rev
@@ -107,6 +115,7 @@ impl Insights {
         let mut binder = Binder::new(spec);
         let mut tail: Option<Tail> = None;
         let mut facts: Option<AgentFacts> = None;
+        let mut busy = None;
         while !self.inner.stop.load(Ordering::SeqCst) {
             let step = crate::services::guard("insights::step", || step(harness, &mut binder, &mut tail, &mut facts));
             match step {
@@ -117,6 +126,20 @@ impl Insights {
                     tail = None;
                     facts = None;
                 }
+            }
+            let now = match harness {
+                Harness::Claude => binder.claude_busy(),
+                Harness::Codex => facts.as_ref().and_then(|f| f.turn_open),
+                Harness::Pi | Harness::Omp => None,
+            };
+            if now != busy {
+                busy = now;
+                {
+                    let mut s = self.inner.snap.lock();
+                    s.busy = now;
+                    s.rev += 1;
+                }
+                self.wake();
             }
             // sleep in short slices so a closed pane's worker ends promptly
             let until = Instant::now() + EVERY;

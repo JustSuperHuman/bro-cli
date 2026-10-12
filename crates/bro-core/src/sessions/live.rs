@@ -150,6 +150,8 @@ pub struct Binder {
     spec: BindSpec,
     path: Option<PathBuf>,
     session_id: Option<String>,
+    /// Claude: the pid of the session file that matched (the real agent, when bro spawned a shim)
+    status_pid: Option<u32>,
     next: Option<Instant>,
     attempts: u32,
 }
@@ -168,6 +170,7 @@ impl Binder {
             spec,
             path: None,
             session_id: None,
+            status_pid: None,
             next: None,
             attempts: 0,
         }
@@ -185,6 +188,19 @@ impl Binder {
     /// The agent's own session id, when known (Claude: from `sessions/<pid>.json`).
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// Claude's own live status from `sessions/<pid>.json`: Some(true) while a turn runs ("busy"),
+    /// Some(false) when it's waiting ("idle"), None when there's no file or another value. Reads one small
+    /// file; call it from a worker thread.
+    pub fn claude_busy(&self) -> Option<bool> {
+        (self.spec.harness == Harness::Claude).then_some(())?;
+        let pid = self.status_pid.or(self.spec.pid)?;
+        match read_claude_session_file(&self.config_dir(), pid)?.status.as_deref()? {
+            "busy" => Some(true),
+            "idle" | "waiting" => Some(false),
+            _ => None,
+        }
     }
 
     /// The pid the binder looks up (it can change if the pane restarts its agent).
@@ -270,6 +286,9 @@ impl Binder {
                 .max_by_key(|f| f.started_at_ms)
         });
         if let Some(f) = file {
+            if f.pid != 0 {
+                self.status_pid = Some(f.pid);
+            }
             let cwd = f.cwd.clone().unwrap_or_else(|| self.spec.cwd.clone());
             if let Some(p) = claude_transcript_path(&dir, &f.session_id, Some(&cwd)) {
                 return Some((p, Some(f.session_id)));
@@ -518,6 +537,9 @@ pub struct AgentFacts {
     pub last_activity_ms: Option<i64>,
     /// The turn stopped on an API error, still unanswered
     pub api_error: Option<ApiError>,
+    /// Codex: a turn is running (`task_started` seen, no `task_complete` / `turn_aborted` / error since).
+    /// None until the transcript says either way.
+    pub turn_open: Option<bool>,
     /// The agent's session id as recorded in the transcript
     pub session_id: Option<String>,
     pub cwd: Option<PathBuf>,
@@ -540,11 +562,19 @@ impl AgentFacts {
             last_assistant: None,
             last_activity_ms: None,
             api_error: None,
+            turn_open: None,
             session_id: None,
             cwd: None,
             revision: 0,
             open: vec![],
             patches: HashMap::new(),
+        }
+    }
+
+    fn set_turn_open(&mut self, open: bool) {
+        if self.turn_open != Some(open) {
+            self.turn_open = Some(open);
+            self.revision += 1;
         }
     }
 
@@ -1030,6 +1060,7 @@ impl AgentFacts {
             Some("event_msg") => match kind {
                 Some("user_message") => self.user_prompt(),
                 Some("error") => {
+                    self.set_turn_open(false);
                     let text = payload
                         .get("message")
                         .and_then(Value::as_str)
@@ -1043,8 +1074,14 @@ impl AgentFacts {
                         at_ms: at,
                     });
                 }
-                Some("task_started") | Some("agent_message") => self.api_error = None,
+                Some("task_started") | Some("agent_message") => {
+                    if kind == Some("task_started") {
+                        self.set_turn_open(true);
+                    }
+                    self.api_error = None
+                }
                 Some("task_complete") | Some("turn_aborted") => {
+                    self.set_turn_open(false);
                     self.open.clear();
                     self.refresh_pending();
                 }
@@ -1518,6 +1555,10 @@ mod tests {
             Some("stream disconnected before completion")
         );
         c.ingest(&[json!({"type": "event_msg", "timestamp": "2026-10-01T09:00:05Z", "payload": {"type": "task_started"}}).to_string()]);
+        assert_eq!(c.turn_open, Some(true), "a Codex turn is running");
+        c.ingest(&[json!({"type": "event_msg", "timestamp": "2026-10-01T09:00:06Z", "payload": {"type": "task_complete"}}).to_string()]);
+        assert_eq!(c.turn_open, Some(false), "and done");
+        c.ingest(&[json!({"type": "event_msg", "timestamp": "2026-10-01T09:00:07Z", "payload": {"type": "task_started"}}).to_string()]);
         assert!(c.api_error.is_none());
     }
 
@@ -1952,6 +1993,7 @@ mod tests {
         let t0 = Instant::now();
         assert!(!b.poll(t0), "no transcript yet");
         assert_eq!(b.session_id(), Some(id1));
+        assert_eq!(b.claude_busy(), Some(true), "Claude's own status");
         std::fs::write(proj.join(format!("{id1}.jsonl")), "{}\n").unwrap();
         assert!(!b.poll(t0 + Duration::from_secs(1)), "rate limited");
         assert!(b.poll(t0 + CLAUDE_EVERY));
@@ -1983,6 +2025,13 @@ mod tests {
         });
         assert!(b2.poll(Instant::now()));
         assert!(b2.path().unwrap().ends_with(format!("{id1}.jsonl")));
+        assert_eq!(b2.claude_busy(), None, "status follows the matched file's pid, which has none");
+        std::fs::write(
+            cfg.join("sessions").join("777.json"),
+            json!({"pid": 777, "sessionId": id1, "cwd": cwd, "startedAt": ms, "status": "idle"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(b2.claude_busy(), Some(false), "read live, not cached");
 
         // Pi panes are never bound.
         let mut b3 = Binder::new(BindSpec {

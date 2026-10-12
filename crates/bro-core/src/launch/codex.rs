@@ -97,6 +97,22 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         args.extend(["--model".into(), m.to_string()]);
     }
     args.extend(provider);
+    if let Some(level) = ctx.caveman.active() {
+        // `-c` replaces the login's own developer_instructions, so those come first.
+        let own = std::fs::read_to_string(home.join("config.toml"))
+            .ok()
+            .and_then(|s| s.parse::<toml::Table>().ok())
+            .and_then(|t| t.get("developer_instructions").and_then(|v| v.as_str()).map(str::to_string))
+            .filter(|s| !s.trim().is_empty());
+        let text = match own {
+            Some(own) => format!("{}
+
+{}", own.trim_end(), level.rules()),
+            None => level.rules().to_string(),
+        };
+        args.extend(["-c".into(), format!("developer_instructions={}", toml_str(&text))]);
+        cmd.caveman = Some(level);
+    }
     args.extend(spec.extra_args.iter().cloned());
     (cmd.program, cmd.args) = super::program_and_args("codex", args);
     cmd.label = label(Harness::Codex, &who, spec.model.as_deref());

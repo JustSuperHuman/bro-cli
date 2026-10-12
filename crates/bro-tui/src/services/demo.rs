@@ -311,7 +311,7 @@ pub fn shell_command(h: Option<Harness>, label: &str, cwd: PathBuf) -> CommandSp
         ("sh".into(), vec!["-c".into(), format!("cat '{}'; exec \"${{SHELL:-sh}}\"", f.replace('\'', "'\\''"))])
     };
     let cwd = if cwd.is_dir() { cwd } else { dirs::home_dir().unwrap_or_else(std::env::temp_dir) };
-    CommandSpec { program, args, env: vec![], env_remove: vec![], cwd, label: label.into(), route: None, cleanup: vec![] }
+    CommandSpec { program, args, env: vec![], env_remove: vec![], cwd, label: label.into(), route: None, cleanup: vec![], caveman: None }
 }
 
 /// Launcher model lists for the demo (never reads the real OpenRouter cache).

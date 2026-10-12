@@ -8,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -42,6 +42,8 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("rocket", "\u{F0463}", "»"),
     ("help", "\u{F02D7}", "?"),
     ("key", "\u{F0306}", "⌘"),
+    ("settings", "\u{F0493}", "⚙"),
+    ("caveman", "⛏", "⛏"),
     ("history", "\u{F02DA}", "↺"),
     ("branch", "\u{E725}", "⎇"),
 ];
@@ -88,7 +90,9 @@ pub fn harness_glyph(h: Option<Harness>) -> &'static str {
 /// top edge and an optional subtitle bottom-right. Returns the inner rect.
 pub fn frame_ex(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<Line<'_>>, subtitle: Option<&str>, focused: bool, t: &Theme) -> Rect {
     let border = if focused { t.accent } else { t.frame };
-    let mut block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(border)).title(title);
+    let set = if focused { t.skin.focus } else { t.skin.border };
+    let title = crate::skin::title(title, border, t);
+    let mut block = Block::default().borders(Borders::ALL).border_set(set).border_style(Style::default().fg(border)).title(title);
     if let Some(s) = status {
         block = block.title(s.right_aligned());
     }
@@ -110,10 +114,10 @@ pub fn frame(f: &mut Frame, area: Rect, title: &str, subtitle: Option<&str>, foc
 /// Project-colored session chrome. The active pane has a heavy outline and a full-width
 /// title band; terminal output keeps its own colors and every original row/column.
 #[allow(clippy::too_many_arguments)]
-pub fn session_frame(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<Line<'_>>, subtitle: Option<&str>, project: &str, color: Color, focused: bool, t: &Theme) -> Rect {
+pub fn session_frame(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<Line<'_>>, subtitle: Option<&str>, project: &str, minimize: Option<bool>, minimize_hot: bool, color: Color, focused: bool, t: &Theme) -> Rect {
     let border = if focused { color } else { mix(color, t.frame, 0.45) };
     let block = Block::default().borders(Borders::ALL)
-        .border_type(if focused { BorderType::Thick } else { BorderType::Rounded })
+        .border_set(if focused { t.skin.session_focus } else { t.skin.border })
         .border_style(fg(border));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -121,13 +125,19 @@ pub fn session_frame(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<
         return inner;
     }
     let head = Rect { x: area.x + 1, y: area.y, width: area.width - 2, height: 1 };
-    let ink = if t.is_light() { Color::Rgb(255, 255, 255) } else { Color::Rgb(18, 18, 22) };
+    let ink = if t.is_light() { Color::Rgb(255, 255, 255) } else { t.deep() };
     let style = if focused { fg(ink).bg(color).add_modifier(Modifier::BOLD) } else { fg(color).bg(crate::theme::project_tint(color, t)) };
     f.render_widget(Block::default().style(style), head);
-    let marker = if focused { "▶" } else { " " };
+    let marker = if focused { t.skin.marker } else { " " };
     // the title brings its own leading space
     let lead = if project.is_empty() { marker.to_string() } else { format!("{marker} {} ·", fit(project, (head.width as usize / 3).max(6))) };
-    let mut spans = vec![Span::styled(lead, style)];
+    let mut spans = vec![];
+    if let Some(minimized) = minimize {
+        let button = if minimized { " + " } else { " − " };
+        let button_style = if minimize_hot { style.add_modifier(Modifier::REVERSED) } else { style };
+        spans.push(Span::styled(button, button_style));
+    }
+    spans.push(Span::styled(lead, style));
     spans.extend(title.spans.into_iter().map(|s| Span::styled(s.content, style)));
     line(f, head, spans);
     // Status stays in its semantic color on the bottom edge. Reserve the close button on the right.
@@ -142,7 +152,7 @@ pub fn session_frame(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<
 /// strength, the others softened so the eye finds the active project.
 pub fn group_frame(f: &mut Frame, area: Rect, project: &str, sessions: usize, color: Color, focused: bool, t: &Theme) {
     let border = if focused { color } else { mix(color, t.frame, 0.5) };
-    f.render_widget(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(fg(border)), area);
+    f.render_widget(Block::default().borders(Borders::ALL).border_set(t.skin.border).border_style(fg(border)), area);
     if area.width < 8 {
         return;
     }
@@ -159,8 +169,16 @@ pub fn group_frame(f: &mut Frame, area: Rect, project: &str, sessions: usize, co
 /// A centered floating box (palette, launcher, dialogs). Clears what's under it and returns the inner rect.
 pub fn popup(f: &mut Frame, screen: Rect, w: u16, h: u16, title: &str, t: &Theme) -> Rect {
     let r = centered(screen, w, h);
-    f.render_widget(Clear, r);
+    clear(f, r, t);
     frame(f, r, title, None, true, t)
+}
+
+/// Blank `r` for an overlay: the terminal's own background, or a painted theme's.
+pub fn clear(f: &mut Frame, r: Rect, t: &Theme) {
+    f.render_widget(Clear, r);
+    if t.painted() {
+        f.render_widget(Block::default().style(Style::default().bg(t.bg).fg(t.fg)), r);
+    }
 }
 
 /// The rect of a `w`×`h` box centered horizontally, a third of the way down.

@@ -5,15 +5,14 @@
 //! worker, and which keystrokes to re-inject (sent from the hook thread's
 //! message loop, never from inside the hook proc).
 //!
-//! With `swallow` the hotkey's down/up never reach Windows while talking, so a
-//! Win hotkey can't open Start or get "stuck". A quick tap re-injects down+up
-//! (Start still opens on a tap); a chord (Win+E) cancels talking and re-injects
-//! the hotkey down *followed by* the chord key, so the chord works and the
-//! physical hotkey up then passes through normally. Without `swallow` a long
-//! Win/Alt hold is masked on release with a dummy key so Start / the menu bar
-//! don't activate.
+//! With `swallow`, a solo Windows-key press belongs to voice even when it is
+//! shorter than `min_ms`: its release is masked instead of replayed to Start.
+//! Other hotkeys still replay a quick tap. A chord (Win+E) cancels talking and
+//! re-injects the hotkey down *followed by* the chord key, so the chord works
+//! and the physical hotkey up then passes through normally. Without `swallow`,
+//! a long Win/Alt hold is masked on release with a dummy key.
 
-use super::{VK_CONTROL_L, VK_MASK, VK_MENU_R, is_extended, needs_mask};
+use super::{VK_CONTROL_L, VK_MASK, VK_MENU_R, VK_WIN_L, VK_WIN_R, is_extended, needs_mask};
 
 /// One key event as seen by the hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +125,17 @@ impl Machine {
                     let held_ms = ev.time.wrapping_sub(since);
                     let long = held_ms >= self.min_ms;
                     out.signal = Some(Signal::Up { held_ms });
-                    if self.swallow && !os.hotkey_down {
+                    if self.swallow && self.mask && matches!(self.hotkey, VK_WIN_L | VK_WIN_R) {
+                        // A quick Windows-key tap is still a voice press. Always
+                        // close it with a masked key-up: if an earlier down
+                        // escaped the hook, this releases it without Start.
+                        out.swallow = true;
+                        out.inject = vec![
+                            Stroke::key(VK_MASK, false),
+                            Stroke::key(VK_MASK, true),
+                            Stroke::key(self.hotkey, true),
+                        ];
+                    } else if self.swallow && !os.hotkey_down {
                         out.swallow = true;
                         if !long {
                             out.inject = vec![Stroke::key(self.hotkey, false), Stroke::key(self.hotkey, true)];
@@ -165,7 +174,7 @@ impl Machine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hotkey::VK_WIN_R;
+    use crate::hotkey::{VK_F13, VK_WIN_R};
 
 
     const E: u32 = 0x45;
@@ -179,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn long_hold_is_swallowed_without_injection() {
+    fn long_win_hold_is_masked_on_release() {
         let mut m = Machine::new(VK_WIN_R, true, 300);
         let o = m.on_key(key(VK_WIN_R, true, 1000), free());
         assert_eq!(o, Outcome { swallow: true, signal: Some(Signal::Down), inject: vec![] });
@@ -187,18 +196,28 @@ mod tests {
         let o = m.on_key(key(VK_WIN_R, true, 1500), free());
         assert_eq!(o, Outcome { swallow: true, signal: None, inject: vec![] });
         let o = m.on_key(key(VK_WIN_R, false, 3000), free());
-        assert_eq!(o, Outcome { swallow: true, signal: Some(Signal::Up { held_ms: 2000 }), inject: vec![] });
+        assert_eq!(o, Outcome { swallow: true, signal: Some(Signal::Up { held_ms: 2000 }), inject: vec![
+            Stroke::key(VK_MASK, false), Stroke::key(VK_MASK, true), Stroke::key(VK_WIN_R, true),
+        ] });
     }
 
     #[test]
-    fn tap_reinjects_the_key() {
+    fn short_win_tap_does_not_reopen_start_even_if_down_escaped() {
         let mut m = Machine::new(VK_WIN_R, true, 300);
         m.on_key(key(VK_WIN_R, true, u32::MAX - 50), free());
-        let o = m.on_key(key(VK_WIN_R, false, 50), free()); // timestamp wrapped
+        let o = m.on_key(key(VK_WIN_R, false, 50), KeyState { hotkey_down: true, ..free() }); // timestamp wrapped
         assert_eq!(o.signal, Some(Signal::Up { held_ms: 101 }));
         assert!(o.swallow);
-        assert_eq!(o.inject, vec![Stroke::key(VK_WIN_R, false), Stroke::key(VK_WIN_R, true)]);
-        assert!(o.inject[0].extended);
+        assert_eq!(o.inject, vec![Stroke::key(VK_MASK, false), Stroke::key(VK_MASK, true), Stroke::key(VK_WIN_R, true)]);
+        assert!(o.inject.iter().all(|s| s.vk != VK_WIN_R || s.up));
+    }
+
+    #[test]
+    fn short_non_win_tap_still_reinjects_the_key() {
+        let mut m = Machine::new(VK_F13, true, 300);
+        m.on_key(key(VK_F13, true, 100), free());
+        let o = m.on_key(key(VK_F13, false, 200), free());
+        assert_eq!(o.inject, vec![Stroke::key(VK_F13, false), Stroke::key(VK_F13, true)]);
     }
 
     #[test]

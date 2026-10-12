@@ -71,6 +71,7 @@ impl App {
             started: Instant::now(),
             route_id,
             cleanup: cmd.cleanup.clone(),
+            caveman: cmd.caveman,
         };
         let sid = meta.sid.clone();
         let term = Term::new(meta, Spawn { program: cmd.program, args: cmd.args, env: cmd.env, env_remove: cmd.env_remove }, self.svc.clone());
@@ -97,7 +98,7 @@ impl App {
     /// Spawn a term pane right away at the body size (it isn't on screen yet).
     pub(super) fn start_now(&mut self, id: PaneId) {
         let (rows, cols) = (self.body.height.saturating_sub(2).max(10), self.body.width.saturating_sub(2).max(40));
-        let waker = Waker { id, tx: self.tx.clone() };
+        let waker = Waker::new(id, self.tx.clone());
         if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
             t.ensure_started(rows, cols, waker);
         }
@@ -109,7 +110,7 @@ impl App {
         let (prog, args) = crate::util::default_shell(settings.shell.as_deref());
         let cwd = cwd.or_else(|| self.focused_cwd()).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
         let name = std::path::Path::new(&prog).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| prog.clone());
-        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: name, name: None, renamed: false, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
+        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: name, name: None, renamed: false, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], caveman: None };
         let term = Term::new(meta, Spawn { program: prog, args, ..Spawn::default() }, self.svc.clone());
         self.open(Box::new(term), place)
     }
@@ -175,7 +176,7 @@ impl App {
                         let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all);
                         let id = match req.shell.clone() {
                             Some(shell) => {
-                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: req.title.is_some(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![] };
+                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: req.title.is_some(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], caveman: None };
                                 let term = Term::new(meta, Spawn { program: shell, args: req.args.clone(), ..Spawn::default() }, self.svc.clone());
                                 self.new_tab(Box::new(term))
                             }
@@ -278,12 +279,8 @@ impl App {
     }
 
     /// The project a sidebar row belongs to.
-    pub(crate) fn row_root(&self, rows: &[Row], r: &Row) -> Option<std::path::PathBuf> {
+    pub(crate) fn row_root(&self, _rows: &[Row], r: &Row) -> Option<std::path::PathBuf> {
         match r {
-            Row::OpenFolder | Row::Continue { .. } => {
-                let _ = rows;
-                None
-            }
             Row::Project { root, .. } => Some(root.clone()),
             Row::Live { info, .. } => Some(info.project_root.clone()),
         }
@@ -304,13 +301,35 @@ impl App {
             .or_else(|| self.open_projects.roots.first().cloned())
     }
 
-    /// "+ open project" / o: pick a folder to open as a project.
-    pub(crate) fn open_folder(&mut self) {
-        let mut cands: Vec<std::path::PathBuf> = self.past_infos().into_iter().map(|p| p.project_root).collect();
-        cands.extend(crate::recents::dirs(&self.recents));
-        cands.extend(std::env::current_dir().ok());
-        let cands: Vec<_> = crate::folder::dedup(cands).into_iter().filter(|p| !self.open_projects.contains(p)).collect();
-        self.overlay = Overlay::Folder(Box::new(crate::folder::FolderPicker::new(cands)));
+    /// Open projects first, then folders from earlier sessions for the launcher's project chooser.
+    pub(crate) fn launcher_projects(&self) -> Vec<PathBuf> {
+        let mut dirs = self.open_projects.roots.clone();
+        dirs.extend(self.past_infos().into_iter().map(|p| p.project_root));
+        dirs.extend(crate::recents::dirs(&self.recents));
+        dirs.extend(std::env::current_dir().ok());
+        crate::folder::dedup(dirs)
+    }
+
+    /// Use a project in the current launcher without resetting its agent, login, or model choices.
+    pub(crate) fn select_launcher_project(&mut self, dir: PathBuf) {
+        let project = self.svc.project_for(&dir);
+        let root = project.root.clone();
+        let added = self.open_projects.add(root.clone());
+        if added {
+            self.open_projects.save(self.persist);
+        }
+        self.pick_project(root.clone());
+        if let Some(i) = self.rows().iter().position(|r| matches!(r, Row::Project { root: r, .. } if *r == root)) {
+            self.side_sel = i;
+        }
+        if let Overlay::Launcher(l) = &mut self.overlay {
+            l.select_project(dir);
+            l.continue_picker.set_project(Some((project.key, project.name)));
+        }
+        if added {
+            let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            self.toast(Kind::Info, format!("opened {name}"));
+        }
     }
 
     /// Create a typed folder before it becomes a project or a session's working directory.
@@ -326,14 +345,17 @@ impl App {
     }
 
     pub(crate) fn project_folder_created(&mut self, request: uuid::Uuid, result: Result<PathBuf, String>) {
-        let Overlay::Folder(p) = &mut self.overlay else { return };
-        if p.pending != Some(request) {
+        if let Overlay::Launcher(l) = &mut self.overlay {
+            let Some(p) = &mut l.project_picker else { return };
+            if p.pending != Some(request) {
+                return;
+            }
+            p.pending = None;
+            match result {
+                Ok(dir) => self.select_launcher_project(dir),
+                Err(error) => p.error = Some(error),
+            }
             return;
-        }
-        p.pending = None;
-        match result {
-            Ok(dir) => self.add_project(dir),
-            Err(error) => p.error = Some(error),
         }
     }
 
@@ -381,7 +403,7 @@ impl App {
                 self.cur_project = None;
             }
             let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            self.toast(Kind::Info, format!("closed {name} \u{b7} o opens it again"));
+            self.toast(Kind::Info, format!("closed {name} · choose it from New session"));
         }
     }
 
@@ -594,6 +616,7 @@ impl App {
                 started: Instant::now() - std::time::Duration::from_secs([420, 1_900, 60, 5_400, 12_000][i % 5]),
                 route_id: None,
                 cleanup: vec![],
+                caveman: (i == 0 && d.harness == Some(bro_core::Harness::Claude)).then_some(bro_core::caveman::Level::Caveman),
             };
             let mut term = if self.opts.fixed_demo {
                 Term::fixed(meta, &crate::services::demo::transcript(d.harness), self.svc.clone())

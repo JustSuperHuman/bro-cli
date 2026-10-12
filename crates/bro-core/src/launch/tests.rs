@@ -8,7 +8,7 @@ use std::path::Path;
 const PROXY: &str = "http://127.0.0.1:3458";
 
 fn ctx() -> LaunchCtx {
-    LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: Some("tok".into()), route_native: false }
+    LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: Some("tok".into()), route_native: false, ..Default::default() }
 }
 
 fn spec(harness: Harness, profile: Option<&str>, provider: Option<&str>, model: Option<&str>) -> LaunchSpec {
@@ -139,7 +139,7 @@ fn claude_openai_provider_routes_through_proxy() {
 #[test]
 fn claude_on_codex_login_and_pool() {
     let _sb = setup();
-    let c = build(&spec(Harness::Claude, None, Some("codex:smol"), Some("gpt-5.3-codex")), &LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: None, route_native: false }).unwrap();
+    let c = build(&spec(Harness::Claude, None, Some("codex:smol"), Some("gpt-5.3-codex")), &LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: None, route_native: false, ..Default::default() }).unwrap();
     assert_eq!(c.route.as_ref().unwrap().upstream, "codex:smol");
     assert_eq!(env(&c, "ANTHROPIC_AUTH_TOKEN"), Some("bro"));
     assert_eq!(env(&c, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), Some("1"));
@@ -447,4 +447,126 @@ fn launches_install_the_bro_open_skill_in_the_harness_home() {
     let c = build(&spec(Harness::Codex, Some("codex:smol"), None, None), &ctx()).unwrap();
     let codex_home = Path::new(env(&c, "CODEX_HOME").unwrap());
     assert!(crate::skills::bro_open_skill_path(codex_home).is_file());
+}
+
+#[test]
+fn claude_env_preset_applies_and_provider_env_wins() {
+    let _sb = setup();
+    let mut ctx = ctx();
+    ctx.claude_env.use_preset("private");
+    ctx.claude_env.extra.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "0".into());
+    let c = build(&spec(Harness::Claude, Some("claude:work"), None, None), &ctx).unwrap();
+    assert_eq!(env(&c, "DISABLE_TELEMETRY"), Some("1"));
+    assert!(env(&c, "ENABLE_TOOL_SEARCH").is_none(), "direct login: Claude Code keeps tool search itself");
+    // Backend vars the launch already decided aren't overridden by `extra`.
+    let z = build(&spec(Harness::Claude, None, Some("zai"), Some("glm-5.3")), &ctx).unwrap();
+    assert_eq!(env(&z, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), Some("1"));
+    assert!(env(&z, "ENABLE_TOOL_SEARCH").is_none());
+    // Through the proxy to a Claude upstream, tool search is turned back on; not for OpenAI upstreams.
+    let p = build(&spec(Harness::Claude, None, Some("pool"), None), &ctx).unwrap();
+    assert_eq!(env(&p, "ENABLE_TOOL_SEARCH"), Some("true"));
+    let o = build(&spec(Harness::Claude, None, Some("openai"), Some("gpt-4o")), &ctx).unwrap();
+    assert!(env(&o, "ENABLE_TOOL_SEARCH").is_none());
+    assert_eq!(env(&o, "DISABLE_TELEMETRY"), Some("1"));
+}
+
+fn caveman_ctx(level: crate::caveman::Level) -> LaunchCtx {
+    let mut c = ctx();
+    c.caveman.level = level;
+    c.caveman.set_on(true);
+    c
+}
+
+/// The value after `flag`.
+fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+}
+
+#[test]
+fn caveman_off_changes_nothing() {
+    let _sb = setup();
+    let c = build(&spec(Harness::Claude, None, None, None), &ctx()).unwrap();
+    assert!(c.caveman.is_none());
+    assert!(!c.args.iter().any(|a| a == "--append-system-prompt-file" || a == "--settings"), "{:?}", c.args);
+    assert!(env(&c, "CAVEMAN_DEFAULT_MODE").is_none());
+}
+
+#[test]
+fn caveman_claude_gets_rules_hooks_and_quiets_the_plugin() {
+    let _sb = setup();
+    let c = build(&spec(Harness::Claude, None, None, None), &caveman_ctx(crate::caveman::Level::Ultracave)).unwrap();
+    assert_eq!(c.caveman, Some(crate::caveman::Level::Ultracave));
+    let prompt = arg_after(&c.args, "--append-system-prompt-file").unwrap();
+    assert_eq!(std::fs::read_to_string(prompt).unwrap(), crate::caveman::Level::Ultracave.rules());
+    let settings: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").unwrap()).unwrap()).unwrap();
+    assert!(settings["hooks"]["SubagentStart"].is_array());
+    assert_eq!(env(&c, "CAVEMAN_DEFAULT_MODE"), Some("off"));
+}
+
+#[test]
+fn caveman_merges_with_other_prompt_files() {
+    let sb = setup();
+    let mine = sb.home().join("mine.md");
+    std::fs::write(&mine, "MY RULES").unwrap();
+    let mut s = spec(Harness::Claude, None, None, None);
+    s.extra_args = vec!["--append-system-prompt-file".into(), mine.to_string_lossy().into_owned(), "--".into(), "--append-system-prompt-file".into()];
+    let c = build(&s, &caveman_ctx(crate::caveman::Level::Caveman)).unwrap();
+    let dashdash = c.args.iter().position(|a| a == "--").unwrap();
+    let flags: Vec<usize> = c.args.iter().enumerate().filter(|(_, a)| *a == "--append-system-prompt-file").map(|(i, _)| i).collect();
+    assert_eq!(flags.len(), 2, "one merged flag, plus the prompt text after -- left alone: {:?}", c.args);
+    assert!(flags[0] < dashdash && flags[1] > dashdash);
+    let merged = std::fs::read_to_string(&c.args[flags[0] + 1]).unwrap();
+    assert!(merged.starts_with("MY RULES\n\n# Caveman mode"), "{merged}");
+
+    // Without caveman, a single file of yours passes through untouched.
+    let c = build(&s, &ctx()).unwrap();
+    assert_eq!(arg_after(&c.args, "--append-system-prompt-file"), Some(mine.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn caveman_respects_your_own_settings_flag() {
+    let _sb = setup();
+    let mut s = spec(Harness::Claude, None, None, None);
+    s.extra_args = vec!["--settings".into(), "mine.json".into()];
+    let c = build(&s, &caveman_ctx(crate::caveman::Level::Caveman)).unwrap();
+    assert_eq!(c.args.iter().filter(|a| *a == "--settings").count(), 1);
+    assert!(c.caveman.is_some(), "the system prompt still carries it");
+}
+
+#[test]
+fn caveman_resume_with_it_off_says_so() {
+    let _sb = setup();
+    let mut c = ctx();
+    c.caveman.used = true;
+    let mut s = spec(Harness::Claude, None, None, None);
+    assert!(build(&s, &c).unwrap().args.iter().all(|a| a != "--settings"), "fresh session: nothing to undo");
+    s.resume = Some(Resume { session_id: "abc".into(), fork: false });
+    let cmd = build(&s, &c).unwrap();
+    let settings = std::fs::read_to_string(arg_after(&cmd.args, "--settings").unwrap()).unwrap();
+    assert!(settings.contains("resume-off.json"), "{settings}");
+    assert!(cmd.caveman.is_none());
+}
+
+#[test]
+fn caveman_codex_keeps_your_developer_instructions() {
+    let _sb = setup();
+    let home = crate::paths::codex_local_dir();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "developer_instructions = \"Use tabs.\"\n").unwrap();
+    let c = build(&spec(Harness::Codex, None, None, None), &caveman_ctx(crate::caveman::Level::Caveman)).unwrap();
+    let v = c.args.iter().find_map(|a| a.strip_prefix("developer_instructions=")).unwrap();
+    let parsed: toml::Table = format!("v = {v}").parse().unwrap();
+    let text = parsed["v"].as_str().unwrap();
+    assert!(text.starts_with("Use tabs.\n\n# Caveman mode"), "{text}");
+    assert_eq!(c.caveman, Some(crate::caveman::Level::Caveman));
+}
+
+#[test]
+fn caveman_pi_and_omp_append_the_rules_file() {
+    let _sb = setup();
+    let c = build(&spec(Harness::Pi, None, None, None), &caveman_ctx(crate::caveman::Level::Megacave)).unwrap();
+    let f = arg_after(&c.args, "--append-system-prompt").unwrap();
+    assert!(f.ends_with("megacave.md"), "{f}");
+    let c = build(&spec(Harness::Omp, None, None, None), &caveman_ctx(crate::caveman::Level::Caveman)).unwrap();
+    assert!(c.args.iter().any(|a| a.starts_with("--append-system-prompt=") && a.ends_with("caveman.md")), "{:?}", c.args);
 }

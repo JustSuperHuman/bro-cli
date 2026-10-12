@@ -8,6 +8,7 @@ use crate::theme::Theme;
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{Frame, layout::Rect, text::Line};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 
 pub use crate::layout::PaneId;
@@ -16,7 +17,7 @@ pub use crate::layout::PaneId;
 pub enum Event {
     Input(crossterm::event::Event),
     /// A pane's background work produced something: redraw and call `Pane::poll`.
-    Wake(PaneId),
+    Wake(WakeSignal),
     /// The deadline passed (animations, agent re-scans).
     Tick,
     /// Services published new state (usage, proxy events, bridge status…): redraw.
@@ -69,6 +70,8 @@ pub enum Action {
     Toast(Kind, String),
     /// Start a new session from an account shown in the usage view.
     LaunchUsage(bro_core::Harness, Option<String>),
+    /// Run an app action (the settings view's theme picker and toggles).
+    Run(crate::keymap::Act),
 }
 
 /// Agent activity scraped from the screen.
@@ -99,7 +102,7 @@ impl Cx<'_> {
     }
     /// A handle a background thread can use to wake this pane.
     pub fn waker(&self) -> Waker {
-        Waker { id: self.id, tx: self.tx.clone() }
+        Waker::new(self.id, self.tx.clone())
     }
 }
 
@@ -108,11 +111,68 @@ impl Cx<'_> {
 pub struct Waker {
     pub id: PaneId,
     pub tx: Sender<Event>,
+    pending: Arc<AtomicBool>,
 }
 
 impl Waker {
+    pub fn new(id: PaneId, tx: Sender<Event>) -> Waker {
+        Waker { id, tx, pending: Arc::new(AtomicBool::new(false)) }
+    }
+
     pub fn wake(&self) {
-        let _ = self.tx.send(Event::Wake(self.id));
+        if !self.pending.swap(true, Ordering::AcqRel)
+            && self.tx.send(Event::Wake(WakeSignal { id: self.id, pending: self.pending.clone() })).is_err()
+        {
+            self.pending.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// One pending redraw per worker; acknowledge before polling so a concurrent update can wake again.
+pub struct WakeSignal {
+    pub id: PaneId,
+    pending: Arc<AtomicBool>,
+}
+
+impl WakeSignal {
+    pub fn acknowledge(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+}
+
+impl From<PaneId> for WakeSignal {
+    fn from(id: PaneId) -> Self {
+        WakeSignal { id, pending: Arc::new(AtomicBool::new(false)) }
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+    use crossterm::event::{Event as Input, KeyCode, KeyModifiers};
+
+    #[test]
+    fn output_floods_do_not_queue_thousands_of_redraws_ahead_of_input() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waker = Waker::new(7, tx.clone());
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let worker = waker.clone();
+                scope.spawn(move || {
+                    for _ in 0..5_000 {
+                        worker.wake();
+                    }
+                });
+            }
+        });
+        tx.send(Event::Input(Input::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)))).unwrap();
+        let Event::Wake(wake) = rx.try_recv().unwrap() else { panic!("one output notification") };
+        assert_eq!(wake.id, 7);
+        assert!(matches!(rx.try_recv(), Ok(Event::Input(Input::Key(k))) if k.code == KeyCode::Down), "input immediately follows the coalesced notification");
+        assert!(rx.try_recv().is_err());
+        wake.acknowledge();
+        waker.wake();
+        assert!(matches!(rx.try_recv(), Ok(Event::Wake(w)) if w.id == 7), "an update after acknowledgement is not lost");
     }
 }
 
@@ -150,6 +210,10 @@ pub trait Pane {
     /// True if the pane wants raw keys (terminal): only global chords are intercepted.
     fn is_terminal(&self) -> bool {
         false
+    }
+    /// The agent is in the middle of a turn. Terminals ask the agent itself when they can.
+    fn busy(&self) -> bool {
+        self.activity() == Some(Activity::Working)
     }
     /// For panes running a coding agent: what it's doing.
     fn activity(&self) -> Option<Activity> {

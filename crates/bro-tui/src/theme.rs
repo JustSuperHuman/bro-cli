@@ -1,7 +1,12 @@
-//! Colour themes (ported from z4-oriel). A theme sets a handful of colours; background and body text come from
-//! the terminal itself (`Color::Reset`) so bro looks native anywhere.
+//! Colour themes (ported from z4-oriel). An accent theme sets a handful of colours; background and body text
+//! come from the terminal itself (`Color::Reset`) so bro looks native anywhere. A painted theme also brings
+//! its own background, text and 16-colour terminal palette, so the agents' output is recoloured with it.
 //!
-//! * built-in palettes: `graphite` (the calm, neutral default), `paper` (light), oriel's and `ultra`
+//! * built-in accent palettes: `graphite` (the calm, neutral default), oriel's and `ultra`
+//! * painted: `paper`, `tokyo-night`, `catppuccin-mocha`, `catppuccin-latte`, `rose-pine`, `rose-pine-dawn`,
+//!   `gruvbox`, `nord`, `kanagawa`, `everforest` and bro's own `nebula`
+//! * skinned (painted, plus borders, titles, a backdrop and screen effects — see [`crate::skin`]): `phosphor`,
+//!   `outrun`, `blueprint`, `cyber`, `digital-rain`, `vaporwave`
 //! * `terminal`: ANSI colours only, so it follows the terminal's own theme
 //! * your own: `~/.bro/themes/<name>.toml`, live-reloaded when the file changes:
 //!
@@ -9,6 +14,9 @@
 //! base = "ultra"      # start from any theme; only list what you change
 //! accent = "#ff79c6"
 //! rainbow = false
+//! ansi = ["#000000", "#ff5555", ...]  # optional: all 16 terminal colours (black..white, then bright)
+//! skin = "cyber"      # optional: borrow a built-in theme's borders, titles, backdrop and effects
+//! borders = "double"  # optional: rounded, plain, double, thick, dashed, heavy-dashed, ascii, block
 //! ```
 
 use ratatui::style::Color;
@@ -38,6 +46,11 @@ pub struct Theme {
     pub good: Color,
     /// rainbow logo + title (ultra)
     pub animated: bool,
+    /// The sessions' 16 ANSI colours (black, red, green, yellow, blue, magenta, cyan, white, then bright);
+    /// None leaves them to the terminal.
+    pub ansi: Option<[Color; 16]>,
+    /// Borders, titles, backdrop and screen effects.
+    pub skin: crate::skin::Skin,
 }
 
 // name, accent, shine, frame, muted, user, inline, good, danger
@@ -60,6 +73,147 @@ const PALETTES: &[Palette] = &[
     ("mono", "#e0e0e0", "#ffffff", "#444444", "#777777", "#5a5a5a", "#cfcfcf", "#d8d8d8", "#8c8c8c"),
 ];
 
+/// A theme that paints everything: its own background, text and terminal palette.
+struct Painted {
+    name: &'static str,
+    bg: &'static str,
+    fg: &'static str,
+    accent: &'static str,
+    shine: &'static str,
+    frame: &'static str,
+    muted: &'static str,
+    user: &'static str,
+    inline: &'static str,
+    good: &'static str,
+    danger: &'static str,
+    rainbow: bool,
+    /// black, red, green, yellow, blue, magenta, cyan, white, then the bright eight
+    ansi: [&'static str; 16],
+}
+
+#[rustfmt::skip]
+const PAINTED: &[Painted] = &[
+    Painted {
+        name: "tokyo-night",
+        bg: "#1a1b26", fg: "#c0caf5", accent: "#7aa2f7", shine: "#bb9af7", frame: "#3b4261", muted: "#565f89",
+        user: "#283457", inline: "#e0af68", good: "#9ece6a", danger: "#f7768e", rainbow: false,
+        ansi: ["#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+               "#414868", "#ff899d", "#9fe044", "#faba4a", "#8db0ff", "#c7a9ff", "#a4daff", "#c0caf5"],
+    },
+    Painted {
+        name: "catppuccin-mocha",
+        bg: "#1e1e2e", fg: "#cdd6f4", accent: "#cba6f7", shine: "#89dceb", frame: "#45475a", muted: "#7f849c",
+        user: "#313244", inline: "#fab387", good: "#a6e3a1", danger: "#f38ba8", rainbow: false,
+        ansi: ["#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
+               "#585b70", "#f37799", "#89d88b", "#ebd391", "#74a8fc", "#f2aede", "#6bd7ca", "#a6adc8"],
+    },
+    Painted {
+        name: "rose-pine",
+        bg: "#191724", fg: "#e0def4", accent: "#c4a7e7", shine: "#ebbcba", frame: "#403d52", muted: "#6e6a86",
+        user: "#2a283e", inline: "#f6c177", good: "#9ccfd8", danger: "#eb6f92", rainbow: false,
+        ansi: ["#26233a", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4",
+               "#6e6a86", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4"],
+    },
+    Painted {
+        name: "kanagawa",
+        bg: "#1f1f28", fg: "#dcd7ba", accent: "#7e9cd8", shine: "#7fb4ca", frame: "#54546d", muted: "#727169",
+        user: "#2d4f67", inline: "#e6c384", good: "#98bb6c", danger: "#ff5d62", rainbow: false,
+        ansi: ["#16161d", "#c34043", "#76946a", "#c0a36e", "#7e9cd8", "#957fb8", "#6a9589", "#c8c093",
+               "#727169", "#e82424", "#98bb6c", "#e6c384", "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba"],
+    },
+    Painted {
+        name: "gruvbox",
+        bg: "#282828", fg: "#ebdbb2", accent: "#fe8019", shine: "#8ec07c", frame: "#504945", muted: "#928374",
+        user: "#3c3836", inline: "#fabd2f", good: "#b8bb26", danger: "#fb4934", rainbow: false,
+        ansi: ["#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+               "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2"],
+    },
+    Painted {
+        name: "nord",
+        bg: "#2e3440", fg: "#d8dee9", accent: "#88c0d0", shine: "#81a1c1", frame: "#4c566a", muted: "#7b88a1",
+        user: "#434c5e", inline: "#ebcb8b", good: "#a3be8c", danger: "#bf616a", rainbow: false,
+        ansi: ["#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+               "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4"],
+    },
+    Painted {
+        name: "everforest",
+        bg: "#2d353b", fg: "#d3c6aa", accent: "#a7c080", shine: "#83c092", frame: "#4f585e", muted: "#859289",
+        user: "#3d484d", inline: "#dbbc7f", good: "#a7c080", danger: "#e67e80", rainbow: false,
+        ansi: ["#343f44", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
+               "#859289", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa"],
+    },
+    // bro's own: deep space, neon edges, the rainbow logo
+    Painted {
+        name: "nebula",
+        bg: "#0e0b1e", fg: "#e6defe", accent: "#a682ff", shine: "#5ce1ff", frame: "#2f2756", muted: "#7a70a8",
+        user: "#261f4a", inline: "#ffb86b", good: "#6dffb3", danger: "#ff5c8a", rainbow: true,
+        ansi: ["#1b1636", "#ff5c8a", "#6dffb3", "#ffd76b", "#6b9bff", "#c77dff", "#5ce1ff", "#d8d0f5",
+               "#4a4078", "#ff85a8", "#9dffcc", "#ffe599", "#97b8ff", "#dca8ff", "#8debff", "#ffffff"],
+    },
+    // CRT terminal: everything in green phosphor, scanlines, a dark vignette
+    Painted {
+        name: "phosphor",
+        bg: "#020a04", fg: "#3dff7d", accent: "#8affab", shine: "#c4ffd6", frame: "#1d6b35", muted: "#2f9a52",
+        user: "#0c3018", inline: "#b0ffc6", good: "#3dff7d", danger: "#d8ffe4", rainbow: false,
+        ansi: ["#03140a", "#a8ffbe", "#3dff7d", "#c4ffd6", "#2fc864", "#7dffa6", "#5cff92", "#3dff7d",
+               "#1d6b35", "#c4ffd6", "#6dff9a", "#e0ffe9", "#4ae07a", "#9dffbb", "#7dffa6", "#e8fff0"],
+    },
+    // synthwave sunset: a purple gradient sky full of stars, neon edges
+    Painted {
+        name: "outrun",
+        bg: "#12002b", fg: "#f5e6ff", accent: "#ff2e97", shine: "#00e5ff", frame: "#5a2380", muted: "#a07cc0",
+        user: "#2e0a4a", inline: "#ffd319", good: "#3cf0a0", danger: "#ff3864", rainbow: true,
+        ansi: ["#2b0a3d", "#fe4450", "#72f1b8", "#fede5d", "#03edf9", "#ff7edb", "#36f9f6", "#f5e6ff",
+               "#614d85", "#ff6b78", "#9bf7d0", "#ffeb8f", "#5cf3fb", "#ffa6e8", "#7afbf8", "#ffffff"],
+    },
+    // engineering drawing: white ink on blueprint blue, graph paper, dashed construction lines
+    Painted {
+        name: "blueprint",
+        bg: "#0b2e5c", fg: "#e8f1ff", accent: "#ffffff", shine: "#8fd3ff", frame: "#5b8cc8", muted: "#9ab9e0",
+        user: "#174a85", inline: "#ffe08a", good: "#9ef0c0", danger: "#ff9a8a", rainbow: false,
+        ansi: ["#0a2548", "#ff9a8a", "#9ef0c0", "#ffe08a", "#8fd3ff", "#d7b8ff", "#7fe8e8", "#e8f1ff",
+               "#5d86bb", "#ffb8ab", "#bff7d6", "#fff0b8", "#b9e4ff", "#e6d1ff", "#a8f2f2", "#ffffff"],
+    },
+    // night city HUD: black and hazard yellow, solid title tabs, heavy frames
+    Painted {
+        name: "cyber",
+        bg: "#07070c", fg: "#e6f7ff", accent: "#fcee0a", shine: "#00f0ff", frame: "#4a4a24", muted: "#8494a3",
+        user: "#25250c", inline: "#ff9e00", good: "#00ff9c", danger: "#ff003c", rainbow: false,
+        ansi: ["#0d0d14", "#ff003c", "#00ff9c", "#fcee0a", "#00b8ff", "#ff00e5", "#00f0ff", "#d0e0ea",
+               "#3a3f4b", "#ff4d73", "#5cffc0", "#fff35c", "#5cd0ff", "#ff5cf0", "#7af7ff", "#ffffff"],
+    },
+    // there is no spoon: katakana rain falls through every empty corner
+    Painted {
+        name: "digital-rain",
+        bg: "#000400", fg: "#b8ffc8", accent: "#00ff41", shine: "#a6ffbf", frame: "#11592a", muted: "#45995c",
+        user: "#072a10", inline: "#d7ff6b", good: "#00ff41", danger: "#ff4545", rainbow: false,
+        ansi: ["#001a06", "#ff4545", "#00ff41", "#d7ff6b", "#3cb8ff", "#c084ff", "#4dffd2", "#b8ffc8",
+               "#1e5e2e", "#ff7a7a", "#66ff88", "#e8ffa0", "#7ad0ff", "#d6b0ff", "#8affe3", "#eaffef"],
+    },
+    // ａｅｓｔｈｅｔｉｃ: pastel neon on a dusk gradient, double frames, full-width titles
+    Painted {
+        name: "vaporwave",
+        bg: "#1c1433", fg: "#fdf2ff", accent: "#ff71ce", shine: "#01cdfe", frame: "#6a4c9c", muted: "#ad94d6",
+        user: "#3a2560", inline: "#fffb96", good: "#05ffa1", danger: "#ff4d8d", rainbow: true,
+        ansi: ["#2a1c4a", "#ff4d8d", "#05ffa1", "#fffb96", "#01cdfe", "#ff71ce", "#7af9ff", "#fdf2ff",
+               "#6b55a0", "#ff7fab", "#6dffc6", "#fffdc4", "#6be3ff", "#ffa3e0", "#b2fcff", "#ffffff"],
+    },
+    Painted {
+        name: "catppuccin-latte",
+        bg: "#eff1f5", fg: "#4c4f69", accent: "#8839ef", shine: "#1e66f5", frame: "#bcc0cc", muted: "#7c7f93",
+        user: "#ccd0da", inline: "#fe640b", good: "#40a02b", danger: "#d20f39", rainbow: false,
+        ansi: ["#5c5f77", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#acb0be",
+               "#6c6f85", "#de293e", "#49af3d", "#eea02d", "#456eff", "#fe85d8", "#2d9fa8", "#bcc0cc"],
+    },
+    Painted {
+        name: "rose-pine-dawn",
+        bg: "#faf4ed", fg: "#575279", accent: "#907aa9", shine: "#d7827e", frame: "#dfdad9", muted: "#797593",
+        user: "#f2e9e1", inline: "#ea9d34", good: "#56949f", danger: "#b4637a", rainbow: false,
+        ansi: ["#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+               "#9893a5", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279"],
+    },
+];
+
 /// The default theme name.
 pub const DEFAULT: &str = "graphite";
 
@@ -76,8 +230,9 @@ pub fn names() -> Vec<String> {
 
 /// The themes that come with bro.
 pub fn builtin_names() -> Vec<String> {
-    let mut v: Vec<String> = PALETTES.iter().map(|p| p.0.to_string()).collect();
-    v.insert(1, "paper".into());
+    let mut v: Vec<String> = vec![PALETTES[0].0.to_string(), "paper".into()];
+    v.extend(PAINTED.iter().map(|p| p.name.to_string()));
+    v.extend(PALETTES[1..].iter().map(|p| p.0.to_string()));
     v.push("terminal".into());
     v
 }
@@ -115,6 +270,11 @@ pub fn project_color(slot: usize, t: &Theme) -> Color {
     if t.name == "mono" || t.name == "terminal" {
         return t.accent;
     }
+    // painted themes pick from their own palette (never red, which reads as an error): blue, magenta, cyan,
+    // yellow, green, bright blue, bright magenta, bright cyan
+    if let Some(a) = t.ansi {
+        return a[[4, 5, 6, 3, 2, 12, 13, 14][slot % 8]];
+    }
     let colors = if t.is_light() {
         [0x2864ad, 0x8761b4, 0x237d78, 0xa66028, 0xa84d76, 0x587c2c, 0x4e62ad, 0x96701f]
     } else {
@@ -125,7 +285,7 @@ pub fn project_color(slot: usize, t: &Theme) -> Color {
 }
 
 pub fn project_tint(color: Color, t: &Theme) -> Color {
-    mix(color, if t.is_light() { t.bg } else { Color::Rgb(18, 18, 22) }, if t.is_light() { 0.9 } else { 0.83 })
+    mix(color, if t.is_light() { t.bg } else { t.deep() }, if t.is_light() { 0.9 } else { 0.83 })
 }
 
 /// Look a theme up by name (unknown names fall back to the default palette).
@@ -148,6 +308,9 @@ fn builtin(name: &str) -> Theme {
     if name == "paper" {
         return paper();
     }
+    if let Some(p) = PAINTED.iter().find(|p| p.name == name) {
+        return painted(p);
+    }
     let p = PALETTES.iter().find(|p| p.0 == name).unwrap_or(&PALETTES[0]);
     let c = |s| hex(s).unwrap_or(Color::Reset);
     // borders and hints lean grey so the theme colour is saved for what matters
@@ -165,6 +328,28 @@ fn builtin(name: &str) -> Theme {
         good: c(p.7),
         danger: c(p.8),
         animated: p.0 == "ultra",
+        ansi: None,
+        skin: Default::default(),
+    }
+}
+
+fn painted(p: &Painted) -> Theme {
+    let c = |s| hex(s).unwrap_or(Color::Reset);
+    Theme {
+        name: p.name.into(),
+        bg: c(p.bg),
+        fg: c(p.fg),
+        accent: c(p.accent),
+        shine: c(p.shine),
+        frame: c(p.frame),
+        muted: c(p.muted),
+        user: c(p.user),
+        inline: c(p.inline),
+        good: c(p.good),
+        danger: c(p.danger),
+        animated: p.rainbow,
+        ansi: Some(p.ansi.map(c)),
+        skin: crate::skin::for_theme(p.name),
     }
 }
 
@@ -184,6 +369,8 @@ fn paper() -> Theme {
         good: c("#1a7f37"),
         danger: c("#cf222e"),
         animated: false,
+        ansi: None,
+        skin: Default::default(),
     }
 }
 
@@ -194,6 +381,21 @@ impl Theme {
             Color::Rgb(r, g, b) => (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000 > 140,
             _ => false,
         }
+    }
+
+    /// Paints its own background.
+    pub fn painted(&self) -> bool {
+        !matches!(self.bg, Color::Reset)
+    }
+
+    /// The darkest surface: a painted dark theme's background, else a near-black that suits any dark terminal.
+    pub fn deep(&self) -> Color {
+        if self.painted() && !self.is_light() { self.bg } else { Color::Rgb(18, 18, 22) }
+    }
+
+    /// A few colours that sum the theme up, for swatches.
+    pub fn swatch(&self) -> [Color; 5] {
+        [self.accent, self.shine, self.good, self.inline, self.danger]
     }
 }
 
@@ -212,6 +414,8 @@ fn terminal() -> Theme {
         danger: Color::Red,
         good: Color::Green,
         animated: false,
+        ansi: None,
+        skin: Default::default(),
     }
 }
 
@@ -349,10 +553,27 @@ fn custom(name: &str, depth: usize) -> Option<Theme> {
     if let Some(b) = tbl.get("rainbow").and_then(|v| v.as_bool()) {
         t.animated = b;
     }
+    if let Some(a) = tbl.get("ansi").and_then(ansi_of) {
+        t.ansi = Some(a);
+    }
+    if let Some(s) = tbl.get("skin").and_then(|v| v.as_str()) {
+        t.skin = crate::skin::for_theme(s);
+    }
+    if let Some(b) = tbl.get("borders").and_then(|v| v.as_str()).and_then(crate::skin::border_named) {
+        t.skin.border = b;
+        t.skin.focus = b;
+    }
     let mut last = LAST_GOOD.lock();
     last.retain(|(n, _)| n != name);
     last.push((name.to_string(), t.clone()));
     Some(t)
+}
+
+/// A theme file's `ansi = [16 colours]`.
+fn ansi_of(v: &toml::Value) -> Option<[Color; 16]> {
+    let v = v.as_array()?;
+    let cs: Vec<Color> = v.iter().filter_map(|c| c.as_str().and_then(color)).collect();
+    (v.len() == 16 && cs.len() == 16).then(|| std::array::from_fn(|i| cs[i]))
 }
 
 /// Anything wrong with a theme file, in words ("mine.toml: 'acent' isn't a setting").
@@ -366,6 +587,9 @@ pub fn problems(name: &str) -> Vec<String> {
             .filter_map(|(k, v)| match k.as_str() {
                 "base" => v.as_str().filter(|b| !names().iter().any(|n| n == b)).map(|b| format!("{file}: there's no theme called '{b}'")),
                 "rainbow" => (!v.is_bool()).then(|| format!("{file}: rainbow is true or false")),
+                "ansi" => ansi_of(v).is_none().then(|| format!("{file}: ansi is a list of 16 colours")),
+                "skin" => v.as_str().filter(|s| builtin_names().iter().any(|n| n == s)).is_none().then(|| format!("{file}: there's no theme called '{v}' to borrow a skin from")),
+                "borders" => v.as_str().and_then(crate::skin::border_named).is_none().then(|| format!("{file}: borders is rounded, plain, double, thick, dashed, heavy-dashed, ascii or block")),
                 k if KEYS.contains(&k) => v.as_str().and_then(color).is_none().then(|| format!("{file}: '{k}' isn't a colour")),
                 _ => Some(format!("{file}: '{k}' isn't a setting")),
             })
@@ -396,6 +620,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn painted_themes_are_complete_and_readable() {
+        let names = builtin_names();
+        let lum = |c: Color| match c {
+            Color::Rgb(r, g, b) => (r as f32 * 0.299 + g as f32 * 0.587 + b as f32 * 0.114) / 255.0,
+            _ => 0.0,
+        };
+        for p in PAINTED {
+            assert!(names.iter().any(|n| n == p.name), "{} listed", p.name);
+            let t = get(p.name);
+            assert_eq!(t.name, p.name);
+            assert!(t.painted() && t.ansi.is_some());
+            for c in [t.bg, t.fg, t.accent, t.shine, t.frame, t.muted, t.user, t.inline, t.good, t.danger].into_iter().chain(t.ansi.unwrap()) {
+                assert!(matches!(c, Color::Rgb(..)), "{}: every colour parses", p.name);
+            }
+            // body text and hints stand clear of the background
+            assert!((lum(t.fg) - lum(t.bg)).abs() > 0.4, "{}: text contrast", p.name);
+            assert!((lum(t.muted) - lum(t.bg)).abs() > 0.2, "{}: hint contrast", p.name);
+        }
+        let mut seen = std::collections::HashSet::new();
+        assert!(names.iter().all(|n| seen.insert(n)), "no duplicate names");
+    }
+
+    #[test]
     fn builtins_and_custom_files() {
         let dir = tempfile::tempdir().unwrap();
         TEST_DIR.with(|d| *d.borrow_mut() = Some(dir.path().to_path_buf()));
@@ -411,6 +658,18 @@ mod tests {
         assert!(is_custom("mine"));
         assert_eq!(problems("mine").len(), 1);
         assert_eq!(color("#abc"), Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
+        let sixteen = (0..16).map(|i| format!("\"#0000{i:02x}\"")).collect::<Vec<_>>().join(", ");
+        std::fs::write(dir.path().join("pal.toml"), format!("base = \"nord\"\nansi = [{sixteen}]\n")).unwrap();
+        assert_eq!(get("pal").ansi.unwrap()[15], Color::Rgb(0, 0, 15));
+        assert!(problems("pal").is_empty(), "{:?}", problems("pal"));
+        std::fs::write(dir.path().join("pal.toml"), "ansi = [\"#000000\"]\n").unwrap();
+        assert_eq!(problems("pal").len(), 1);
+        std::fs::write(dir.path().join("pal.toml"), "base = \"nord\"\nskin = \"cyber\"\nborders = \"ascii\"\n").unwrap();
+        let t = get("pal");
+        assert!(t.skin.invert_titles && t.skin.border == crate::skin::ASCII, "borrowed skin, own borders");
+        assert!(problems("pal").is_empty(), "{:?}", problems("pal"));
+        std::fs::write(dir.path().join("pal.toml"), "skin = \"nope\"\nborders = \"wiggly\"\n").unwrap();
+        assert_eq!(problems("pal").len(), 2);
         TEST_DIR.with(|d| *d.borrow_mut() = None);
     }
 }

@@ -24,6 +24,8 @@ pub mod browser;
 pub mod skills;
 pub mod claude_shared;
 pub mod catalogue;
+pub mod claude_env;
+pub mod caveman;
 
 use serde::{Deserialize, Serialize};
 
