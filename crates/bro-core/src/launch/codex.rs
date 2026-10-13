@@ -43,6 +43,9 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     if ctx.justtools_skill {
         let _ = crate::justtools::write_skill(&home);
     }
+    if ctx.justwatch_skill {
+        let _ = crate::justwatch::write_skill(&home);
+    }
 
     let mut provider = Vec::new();
     let who = match &r.target {

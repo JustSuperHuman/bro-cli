@@ -77,6 +77,8 @@ pub struct LaunchCtx {
     pub caveman: crate::caveman::CavemanSettings,
     /// Claude / Codex launches get the JustTools skill (`Settings::justtools`).
     pub justtools_skill: bool,
+    /// Claude / Codex launches get the JustWatch skill (`Settings::justwatch`).
+    pub justwatch_skill: bool,
 }
 
 impl LaunchCtx {

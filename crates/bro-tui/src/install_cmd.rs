@@ -1,4 +1,4 @@
-//! `bro install [tools…] [--force] [--wait]` — Quick Install from the command line: JustTools, Git,
+//! `bro install [tools…] [--force] [--wait]` — Quick Install from the command line: JustTools, JustWatch, Git,
 //! Node.js, Bun, Python, the .NET SDKs, the agent CLIs bro launches and a few utilities. With no
 //! tools named it lists them and asks which to install (Enter: the recommended ones that are missing).
 
@@ -30,6 +30,7 @@ usage
 
 tools
   justtools  JustTools: media, PDF, QR, port commands, JustCommit, JustReady
+  justwatch  JustWatch: keeps your dev servers running, plus its agent skill (Windows)
   git        Git                        gh        GitHub CLI
   node       Node.js LTS                bun       Bun
   python     Python 3                   uv        uv (Python packages)
@@ -51,9 +52,9 @@ pub fn parse(args: &[String]) -> Result<Option<InstallArgs>, String> {
             "-h" | "--help" => return Ok(None),
             "-f" | "--force" | "--update" => out.force = true,
             "--wait" => out.wait = true,
-            "all" => out.tools.extend(Tool::ALL),
+            "all" => out.tools.extend(Tool::here()),
             "agents" => out.tools.extend(Harness::ALL.map(Tool::Agent)),
-            "recommended" | "rec" => out.tools.extend(Tool::ALL.into_iter().filter(|t| t.recommended())),
+            "recommended" | "rec" => out.tools.extend(Tool::here().into_iter().filter(|t| t.recommended())),
             s => out.tools.push(Tool::from_id(s).ok_or_else(|| format!("unknown tool '{a}' (bro install --help lists them)"))?),
         }
     }
@@ -78,7 +79,7 @@ fn pick(answer: &str, default: &[Tool]) -> Result<Vec<Tool>, String> {
 
 fn list(status: &Status) {
     let mut group = None;
-    for t in Tool::ALL {
+    for t in Tool::here() {
         if group != Some(t.group()) {
             group = Some(t.group());
             println!("{}{}", if t.group() == Group::Main { "" } else { "\n" }, t.group().label());
@@ -132,9 +133,29 @@ fn install_justtools() -> Result<(), String> {
     Ok(())
 }
 
+/// JustWatch with its own installer, then its skill. Inside bro (`BRO_SESSION_ID` is set) the Quick
+/// Install view switches the skill on itself, so its settings aren't saved over.
+fn install_justwatch() -> Result<(), String> {
+    quick_install::install(Tool::JustWatch, |line| println!("{line}"))?;
+    match bro_core::justwatch::fetch_skill() {
+        Ok(()) if std::env::var_os("BRO_SESSION_ID").is_some() => {}
+        Ok(()) => {
+            let mut s = bro_core::config::Settings::load();
+            if !s.justwatch.skill {
+                s.justwatch.skill = true;
+                let _ = s.save();
+            }
+            println!("  new Claude and Codex sessions get its skill");
+        }
+        Err(e) => println!("  couldn't get its skill: {e:#}"),
+    }
+    Ok(())
+}
+
 fn install_one(t: Tool) -> Result<(), String> {
     match t {
         Tool::JustTools => install_justtools(),
+        Tool::JustWatch => install_justwatch(),
         Tool::Agent(h) => agent_install::install(h, |line| println!("{line}")).map(|_| ()),
         _ => quick_install::install(t, |line| println!("{line}")),
     }
@@ -165,7 +186,7 @@ fn install(args: &InstallArgs) -> Result<(), String> {
     let mut tools = args.tools.clone();
     if tools.is_empty() {
         list(&status);
-        let missing: Vec<Tool> = Tool::ALL.into_iter().filter(|t| !status.contains_key(t)).collect();
+        let missing: Vec<Tool> = Tool::here().into_iter().filter(|t| !status.contains_key(t)).collect();
         if missing.is_empty() && !args.force {
             println!("\nEverything's installed. `bro install <tool> --force` reinstalls one.");
             return Ok(());
@@ -227,7 +248,8 @@ mod tests {
         assert_eq!(p(&[]), Ok(Some(InstallArgs { tools: vec![], force: false, wait: false })));
         // install order, not the order given, and no repeats
         assert_eq!(p(&["codex", "Node", "claude", "codex"]).unwrap().unwrap().tools, vec![Tool::Node, Tool::Agent(Harness::Claude), Tool::Agent(Harness::Codex)]);
-        assert_eq!(p(&["all", "-f", "--wait"]), Ok(Some(InstallArgs { tools: Tool::ALL.to_vec(), force: true, wait: true })));
+        assert_eq!(p(&["all", "-f", "--wait"]), Ok(Some(InstallArgs { tools: Tool::here(), force: true, wait: true })));
+        assert_eq!(p(&["justwatch"]).unwrap().unwrap().tools, vec![Tool::JustWatch]);
         assert_eq!(p(&["agents"]).unwrap().unwrap().tools, Harness::ALL.map(Tool::Agent).to_vec());
         assert_eq!(p(&["recommended"]).unwrap().unwrap().tools[0], Tool::JustTools);
         assert_eq!(p(&["dotnet-9", "net11"]).unwrap().unwrap().tools, vec![Tool::Dotnet9, Tool::Dotnet11]);

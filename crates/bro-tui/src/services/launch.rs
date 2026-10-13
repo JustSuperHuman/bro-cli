@@ -91,6 +91,7 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
             let claude_env = st.settings.claude_env.clone();
             let caveman = st.settings.caveman.clone();
             let justtools_skill = st.settings.justtools.skill;
+            let justwatch_skill = st.settings.justwatch.skill;
             match st.proxy.status.ready() {
                 Some(p) => LaunchCtx {
                     proxy_base: Some(p.base.clone()),
@@ -99,8 +100,9 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
                     claude_env,
                     caveman,
                     justtools_skill,
+                    justwatch_skill,
                 },
-                None => LaunchCtx { claude_env, caveman, justtools_skill, ..LaunchCtx::default() },
+                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, ..LaunchCtx::default() },
             }
         };
         let mut cmd = match guard("launch::build", || bro_core::launch::build(&spec, &ctx)) {

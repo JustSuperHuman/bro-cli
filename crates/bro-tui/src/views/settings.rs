@@ -1,5 +1,5 @@
 //! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), caveman
-//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill and Quick Install) and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
+//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install and the JustWatch skill) and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
 //! part applies to sessions launched from now on.
 
@@ -146,6 +146,8 @@ enum ToolOpt {
     QuickInstall,
     Skill,
     AutoUpdate,
+    /// the JustWatch skill (Windows only: JustWatch is a Windows app)
+    WatchSkill,
 }
 
 /// What an install is doing at `step`.
@@ -179,7 +181,9 @@ fn rows() -> Vec<Row> {
     bro_opts()
         .into_iter()
         .map(Row::Bro)
-        .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate), Row::Preset])
+        .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
+        .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
+        .chain([Row::Preset])
         .chain((0..KNOBS.len()).map(Row::Knob))
         .collect()
 }
@@ -219,6 +223,12 @@ impl SettingsView {
                 cx.svc.save_settings(s);
             }
             ToolOpt::QuickInstall => cx.act(Action::Run(Act::QuickInstall)),
+            ToolOpt::WatchSkill => {
+                cx.svc.set_justwatch_skill_on(!s.justwatch.skill);
+                if s.justwatch.skill {
+                    cx.toast(Kind::Info, "JustWatch skill off · bro took its copies back out");
+                }
+            }
             _ if jt.job.is_some() => {}
             // a first install starts from the checklist, with JustTools ticked
             ToolOpt::Install if jt.installed.is_none() => cx.act(Action::Run(Act::QuickInstall)),
@@ -400,7 +410,7 @@ impl Pane for SettingsView {
         lines.push((Some(i), vec![
             name(i, "Quick install"),
             Span::styled(ui::pad("open ›", 16), fg(t.inline)),
-            Span::styled(" tick what to install: JustTools, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…", muted(t)),
+            Span::styled(" tick what to install: JustTools, JustWatch, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…", muted(t)),
         ]));
         let i = idx(Row::Tool(ToolOpt::Skill));
         let (v, style) = match &jt.job {
@@ -416,6 +426,15 @@ impl Pane for SettingsView {
             Span::styled(ui::pad(if jts.auto_update { "on" } else { "off" }, 16), if jts.auto_update { fg(t.inline) } else { muted(t) }),
             Span::styled(" when bro opens, looks on GitHub for a newer release and installs it", muted(t)),
         ]));
+        if bro_core::justwatch::supported() {
+            let i = idx(Row::Tool(ToolOpt::WatchSkill));
+            let on = cx.svc.settings().justwatch.skill;
+            lines.push((Some(i), vec![
+                name(i, "JustWatch skill"),
+                Span::styled(ui::pad(if on { "on" } else { "off" }, 16), if on { fg(t.inline) } else { muted(t) }),
+                Span::styled(" lets new Claude and Codex sessions check, restart and tail your dev servers through JustWatch", muted(t)),
+            ]));
+        }
 
         lines.push((None, vec![]));
         lines.push((None, heading("Claude Code · applies to sessions launched from now on", t)));
@@ -538,8 +557,9 @@ mod tests {
         assert_eq!(r[bro_opts().len()], Row::Cave(CaveOpt::Mode));
         assert_eq!(r[bro_opts().len() + 2], Row::Tool(ToolOpt::Install));
         assert_eq!(r[bro_opts().len() + 3], Row::Tool(ToolOpt::QuickInstall));
-        assert_eq!(r[bro_opts().len() + 6], Row::Preset);
-        assert_eq!(r.len(), bro_opts().len() + 7 + KNOBS.len());
+        let watch = usize::from(bro_core::justwatch::supported());
+        assert_eq!(r[bro_opts().len() + 6 + watch], Row::Preset);
+        assert_eq!(r.len(), bro_opts().len() + 7 + watch + KNOBS.len());
     }
 
     #[test]

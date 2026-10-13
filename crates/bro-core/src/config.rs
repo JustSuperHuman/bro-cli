@@ -164,6 +164,8 @@ pub struct Settings {
     pub caveman: crate::caveman::CavemanSettings,
     /// JustTools integration: its skill in new Claude / Codex sessions.
     pub justtools: crate::justtools::JustToolsSettings,
+    /// JustWatch integration: its skill in new Claude / Codex sessions.
+    pub justwatch: crate::justwatch::JustWatchSettings,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
     pub keys: BTreeMap<String, String>,
 }
@@ -300,6 +302,7 @@ impl Default for Settings {
             claude_env: Default::default(),
             caveman: Default::default(),
             justtools: Default::default(),
+            justwatch: Default::default(),
             keys: BTreeMap::new(),
         }
     }

@@ -49,11 +49,15 @@ bro install dotnet9 dotnet10 dotnet11
 bro install codex --force          # reinstall / update one
 ```
 
-Tools: `justtools`, `git`, `gh`, `node`, `bun`, `python`, `uv`, `dotnet9`, `dotnet10`, `dotnet11`,
+Tools: `justtools`, `justwatch` (Windows), `git`, `gh`, `node`, `bun`, `python`, `uv`, `dotnet9`, `dotnet10`, `dotnet11`,
 `claude`, `codex`, `pi`, `omp`, `rg`, `ffmpeg`. Windows installs with WinGet, macOS with Homebrew
 (installed first if missing), Linux with apt, dnf, pacman, zypper or apk. Bun, uv and .NET on
 macOS / Linux (into `~/.dotnet`) use their official install scripts; JustTools, Claude Code, Codex,
-Pi and omp use their own installers.
+Pi, omp and JustWatch use their own installers.
+
+JustWatch keeps your local dev servers running from the Windows tray. Installing it also turns on
+its `justwatch` skill, so new Claude and Codex sessions can check, restart and tail those services
+through its API on `localhost:6767`. Switch the skill off or on in settings → integrations.
 
 In bro, Quick Install is a checklist: settings → integrations → Quick install (or Enter on JustTools
 when it isn't installed), the palette, or `prefix I`. Tick tools with space and press `i`: JustTools

@@ -1,4 +1,4 @@
-//! Quick Install: the tools a coding machine wants (JustTools first, then Git, Node.js, Bun, Python,
+//! Quick Install: the tools a coding machine wants (JustTools first, JustWatch on Windows, then Git, Node.js, Bun, Python,
 //! the .NET SDKs, the agent CLIs and a few utilities), which of them are already here, and how to
 //! install the rest on this OS.
 //!
@@ -17,6 +17,8 @@ use std::process::{Command, Stdio};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
     JustTools,
+    /// Windows only
+    JustWatch,
     Git,
     GitHubCli,
     Node,
@@ -44,7 +46,7 @@ pub enum Group {
 impl Group {
     pub fn label(self) -> &'static str {
         match self {
-            Group::Main => "JustTools",
+            Group::Main => "Just apps",
             Group::Essentials => "essentials",
             Group::Runtimes => "runtimes & SDKs",
             Group::Agents => "coding agents",
@@ -55,8 +57,9 @@ impl Group {
 
 impl Tool {
     /// Every tool, in install order: what others need (Node.js, Bun) comes before them.
-    pub const ALL: [Tool; 16] = [
+    pub const ALL: [Tool; 17] = [
         Tool::JustTools,
+        Tool::JustWatch,
         Tool::Git,
         Tool::GitHubCli,
         Tool::Node,
@@ -78,6 +81,7 @@ impl Tool {
     pub fn id(self) -> &'static str {
         match self {
             Tool::JustTools => "justtools",
+            Tool::JustWatch => "justwatch",
             Tool::Git => "git",
             Tool::GitHubCli => "gh",
             Tool::Node => "node",
@@ -98,6 +102,7 @@ impl Tool {
         let n = name.trim().to_ascii_lowercase();
         let alias = match n.as_str() {
             "just" | "just-tools" => Some(Tool::JustTools),
+            "just-watch" | "watch" => Some(Tool::JustWatch),
             "github-cli" | "github" => Some(Tool::GitHubCli),
             "nodejs" | "node.js" | "npm" => Some(Tool::Node),
             "python3" | "py" => Some(Tool::Python),
@@ -126,6 +131,7 @@ impl Tool {
     pub fn name(self) -> &'static str {
         match self {
             Tool::JustTools => "JustTools",
+            Tool::JustWatch => "JustWatch",
             Tool::Git => "Git",
             Tool::GitHubCli => "GitHub CLI",
             Tool::Node => "Node.js LTS",
@@ -147,6 +153,7 @@ impl Tool {
     pub fn blurb(self) -> &'static str {
         match self {
             Tool::JustTools => "image, video, PDF, QR and port commands, JustCommit and JustReady in one binary",
+            Tool::JustWatch => "tray app that keeps your dev servers running; agents restart them and read their logs",
             Tool::Git => "version control; agents expect it",
             Tool::GitHubCli => "issues, pull requests and releases from the terminal",
             Tool::Node => "JavaScript runtime and npm; Codex and Pi install with it",
@@ -167,12 +174,22 @@ impl Tool {
 
     pub fn group(self) -> Group {
         match self {
-            Tool::JustTools => Group::Main,
+            Tool::JustTools | Tool::JustWatch => Group::Main,
             Tool::Git | Tool::GitHubCli => Group::Essentials,
             Tool::Node | Tool::Bun | Tool::Python | Tool::Uv | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => Group::Runtimes,
             Tool::Agent(_) => Group::Agents,
             Tool::Ripgrep | Tool::Ffmpeg => Group::Utilities,
         }
+    }
+
+    /// It can be installed on this OS (JustWatch is Windows-only).
+    pub fn supported(self) -> bool {
+        self != Tool::JustWatch || crate::justwatch::supported()
+    }
+
+    /// Every tool this OS can install, in install order.
+    pub fn here() -> Vec<Tool> {
+        Tool::ALL.into_iter().filter(|t| t.supported()).collect()
     }
 
     /// Ticked by default when it's missing.
@@ -207,7 +224,7 @@ impl Tool {
             },
             Tool::Ripgrep => &["rg"],
             Tool::Ffmpeg => &["ffmpeg"],
-            Tool::JustTools | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => &[],
+            Tool::JustTools | Tool::JustWatch | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => &[],
         }
     }
 }
@@ -249,7 +266,7 @@ fn expand_vars(s: &str) -> String {
 
 /// The value of a `reg query … /v Path` answer.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn reg_value(out: &str) -> Option<String> {
+pub(crate) fn reg_value(out: &str) -> Option<String> {
     out.lines().find_map(|l| {
         let l = l.trim();
         let (_, rest) = l.split_once("REG_")?;
@@ -374,6 +391,9 @@ pub fn detect() -> Status {
     let mut status = Status::new();
     if let Some(found) = crate::justtools::installed() {
         status.insert(Tool::JustTools, found.version.unwrap_or_else(|| "installed".into()));
+    }
+    if let Some(found) = crate::justwatch::installed() {
+        status.insert(Tool::JustWatch, found.version.unwrap_or_else(|| "installed".into()));
     }
     let sdks = dotnet_sdks(&dirs);
     for tool in Tool::ALL {
@@ -522,6 +542,12 @@ pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
     if matches!(tool, Tool::JustTools | Tool::Agent(_)) {
         return Ok(vec![]);
     }
+    if tool == Tool::JustWatch {
+        return match os {
+            Os::Windows { .. } => Ok(vec![powershell(crate::justwatch::installer_command())]),
+            _ => Err("JustWatch is a Windows app".into()),
+        };
+    }
     // official scripts, the same everywhere
     match (tool, os) {
         (Tool::Bun, Os::Windows { .. }) => return Ok(vec![powershell("irm https://bun.sh/install.ps1 | iex")]),
@@ -616,6 +642,8 @@ pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
 pub fn how(tool: Tool, os: &Os) -> String {
     match tool {
         Tool::JustTools => "JustTools' own installer; the download is checked against its SHA-256".into(),
+        Tool::JustWatch if !matches!(os, Os::Windows { .. }) => "JustWatch is a Windows app".into(),
+        Tool::JustWatch => format!("{} · then its skill for new sessions", crate::justwatch::installer_command()),
         Tool::Agent(h) => match crate::agent_install::plan(h) {
             Ok(steps) => steps.iter().map(|s| s.display.as_str()).collect::<Vec<_>>().join(" && "),
             Err(e) => e,
@@ -707,6 +735,9 @@ mod tests {
         assert!(plan(Tool::Bun, &os).unwrap()[0].display.contains("bun.sh/install.ps1"));
         assert!(plan(Tool::Git, &Os::Windows { winget: false }).unwrap_err().contains("App Installer"));
         assert!(plan(Tool::JustTools, &os).unwrap().is_empty() && plan(Tool::Agent(Harness::Pi), &os).unwrap().is_empty());
+        assert!(plan(Tool::JustWatch, &os).unwrap()[0].display.contains("JustWatch/main/install.ps1"));
+        assert!(plan(Tool::JustWatch, &Os::Linux { pkg: Some(Pkg::Apt), root: false }).is_err());
+        assert_eq!(Tool::here().contains(&Tool::JustWatch), cfg!(windows));
     }
 
     #[test]

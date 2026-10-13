@@ -7,6 +7,7 @@
 pub mod demo;
 pub mod guard;
 pub mod justtools;
+pub mod justwatch;
 pub mod launch;
 mod workers;
 
@@ -199,6 +200,7 @@ pub fn fallback_settings() -> Settings {
         claude_env: Default::default(),
         caveman: Default::default(),
         justtools: Default::default(),
+        justwatch: Default::default(),
         keys: BTreeMap::new(),
     }
 }

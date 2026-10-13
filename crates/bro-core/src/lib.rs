@@ -29,6 +29,8 @@ pub mod claude_env;
 pub mod caveman;
 pub mod agent_install;
 pub mod quick_install;
+pub mod justwatch;
+pub mod managed_skill;
 
 use serde::{Deserialize, Serialize};
 

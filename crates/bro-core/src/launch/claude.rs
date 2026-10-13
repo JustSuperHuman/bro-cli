@@ -46,6 +46,9 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     if ctx.justtools_skill {
         let _ = crate::justtools::write_skill(&config_dir);
     }
+    if ctx.justwatch_skill {
+        let _ = crate::justwatch::write_skill(&config_dir);
+    }
     match login {
         Some(p) if p.kind == ProfileKind::ClaudeAccount => cmd.set_env("CLAUDE_CONFIG_DIR", p.dir.to_string_lossy()),
         _ => cmd.remove_env("CLAUDE_CONFIG_DIR"),

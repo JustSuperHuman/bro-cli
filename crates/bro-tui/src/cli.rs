@@ -36,7 +36,7 @@ usage
                    from inside a bro session: show a file (at a line) in bro's preview and
                    on connected phones / browsers, or open it in the desktop editor
   bro install [tools… | recommended | agents | all] [--force]
-                   Quick Install: JustTools, Git, Node.js, Bun, Python, .NET 9/10/11,
+                   Quick Install: JustTools, JustWatch, Git, Node.js, Bun, Python, .NET 9/10/11,
                    Claude Code, Codex, Pi, omp… (no names: pick from a list)
   bro --version    print the version
   bro --help       this help

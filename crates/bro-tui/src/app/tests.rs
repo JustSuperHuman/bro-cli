@@ -2515,6 +2515,14 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert!(a.svc.settings().justtools.auto_update);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().justtools.auto_update);
+    if bro_core::justwatch::supported() {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustWatch skill: off until you turn it on
+        assert!(!a.svc.settings().justwatch.skill);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.svc.settings().justwatch.skill);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!a.svc.settings().justwatch.skill);
+    }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
     assert_eq!(a.svc.settings().claude_env.preset, "quiet");
@@ -2528,7 +2536,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     let screen = draw(&mut a);
     assert!(screen.contains("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"), "{screen}");
     key(&mut a, KeyCode::Home, KeyModifiers::NONE);
-    for _ in 0..13 {
+    for _ in 0..13 + usize::from(bro_core::justwatch::supported()) {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // back to error reports
     }
     key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
@@ -2760,7 +2768,9 @@ fn quick_install_ticks_the_missing_recommended_tools_and_toggles_them() {
     assert!(draw(&mut a).contains("nothing ticked to install"));
     key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE); // every missing tool
     let s = shot(&mut a, "quick_install");
-    assert!(s.contains("[x] .NET 11 SDK") && s.contains("Install 16"), "{s}");
+    let every = bro_core::quick_install::Tool::here().len();
+    assert!(s.contains("[x] .NET 11 SDK") && s.contains(&format!("Install {every}")), "{s}");
+    assert_eq!(s.contains("[x] JustWatch"), bro_core::justwatch::supported(), "JustWatch is listed on Windows only: {s}");
     key(&mut a, KeyCode::Char('i'), KeyModifiers::NONE); // the demo installs nothing
     assert_eq!(a.focused(), Some(id), "no install tab in the demo");
 }

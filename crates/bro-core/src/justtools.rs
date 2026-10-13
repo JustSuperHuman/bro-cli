@@ -3,7 +3,6 @@
 //!
 //! The skill is downloaded once into `~/.bro/justtools-skill` and copied from there at
 //! launch, beside `bro-open`. A `justtools` skill bro did not write is never touched.
-use crate::paths;
 use crate::util::{atomic_write, home_dir};
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
@@ -19,9 +18,6 @@ pub const SKILL_NAME: &str = "justtools";
 
 /// The skill's files, relative to `skills/justtools` in the repository.
 const SKILL_FILES: [&str; 3] = ["SKILL.md", "references/commands.md", "agents/openai.yaml"];
-
-/// Marks a skill directory bro wrote, so it can be refreshed and removed again.
-const MARKER: &str = ".bro-managed";
 
 /// `[justtools]` in `~/.bro/v2.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -221,7 +217,7 @@ pub fn install(on_step: &dyn Fn(Step)) -> anyhow::Result<Installed> {
 
 /// `~/.bro/justtools-skill`: the downloaded skill, copied into harness homes at launch.
 pub fn skill_cache_dir() -> PathBuf {
-    paths::bro_dir().join("justtools-skill")
+    crate::managed_skill::cache_dir(SKILL_NAME)
 }
 
 pub fn skill_cached() -> bool {
@@ -254,51 +250,31 @@ pub fn fetch_skill(version: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn skill_dir(home: &Path) -> PathBuf {
-    home.join("skills").join(SKILL_NAME)
+    crate::managed_skill::skill_dir(home, SKILL_NAME)
 }
 
 /// `home` holds a `justtools` skill bro didn't write (yours, e.g. from `npx skills add`).
 pub fn has_own_skill(home: &Path) -> bool {
-    let dir = skill_dir(home);
-    std::fs::symlink_metadata(&dir).is_ok() && !dir.join(MARKER).is_file()
+    crate::managed_skill::has_own(home, SKILL_NAME)
 }
 
 /// Copies the cached skill under `home` (a no-op when unchanged). False when there is
 /// nothing cached yet, or `home` has a `justtools` skill of its own, which is left as it is.
 pub fn write_skill(home: &Path) -> std::io::Result<bool> {
-    if !skill_cached() || has_own_skill(home) {
-        return Ok(false);
-    }
-    let (cache, dir) = (skill_cache_dir(), skill_dir(home));
-    for name in SKILL_FILES {
-        let Ok(body) = std::fs::read_to_string(cache.join(name)) else { continue };
-        crate::browser::write_if_changed(&dir.join(name), &body)?;
-    }
-    crate::browser::write_if_changed(&dir.join(MARKER), "written by bro; turn it off in bro's settings\n")?;
-    Ok(true)
+    crate::managed_skill::write(home, SKILL_NAME, &SKILL_FILES)
 }
 
 /// Removes the copy bro wrote under `home`. A link is skipped (what it points at is
 /// removed where it really lives); your own skill is never removed.
 pub fn remove_skill(home: &Path) {
-    let dir = skill_dir(home);
-    let linked = std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink());
-    if !linked && dir.join(MARKER).is_file() {
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-fn subdirs(dir: PathBuf) -> impl Iterator<Item = PathBuf> {
-    std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir())
+    crate::managed_skill::remove(home, SKILL_NAME)
 }
 
 /// Takes the skill back out of every Claude and Codex home bro launches.
 pub fn remove_skill_everywhere() {
-    let homes = [paths::claude_local_dir(), paths::codex_local_dir()].into_iter().chain(subdirs(paths::claude_accounts_dir())).chain(subdirs(paths::codex_profiles_dir()));
-    for home in homes {
-        remove_skill(&home);
-    }
+    crate::managed_skill::remove_everywhere(SKILL_NAME)
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
-//! Quick Install view: a checklist of the tools a coding machine wants — JustTools first, then Git,
+//! Quick Install view: a checklist of the tools a coding machine wants — JustTools first, JustWatch on Windows, then Git,
 //! Node.js, Bun, Python, the .NET SDKs, the agent CLIs and a few utilities — with what's already
 //! installed. JustTools installs in the background like in settings; the rest run in a new tab
 //! (`bro install --wait …`) so each installer's progress and its password / UAC prompts are visible.
+//! Once a JustWatch installed from here shows up, its skill is switched on for new sessions.
 
 use super::settings::{spinner, step_label};
 use crate::alerts::Kind;
@@ -68,7 +69,7 @@ enum Row {
 }
 
 fn rows() -> Vec<Row> {
-    Tool::ALL.into_iter().map(Row::Tool).chain([Row::Install]).collect()
+    Tool::here().into_iter().map(Row::Tool).chain([Row::Install]).collect()
 }
 
 #[derive(Default)]
@@ -87,6 +88,8 @@ pub struct QuickInstallView {
     watching: Option<Instant>,
     /// a JustTools job is running: keep its spinner moving
     busy: bool,
+    /// what the last install started here asked for
+    started: HashSet<Tool>,
 }
 
 impl QuickInstallView {
@@ -129,7 +132,7 @@ impl QuickInstallView {
     fn pick_defaults(&mut self) {
         if self.picked.is_none() {
             let status = self.found.as_ref().map(|f| &f.status);
-            self.picked = Some(Tool::ALL.into_iter().filter(|t| t.recommended() && !status.is_some_and(|s| s.contains_key(t))).collect());
+            self.picked = Some(Tool::here().into_iter().filter(|t| t.recommended() && !status.is_some_and(|s| s.contains_key(t))).collect());
         }
     }
 
@@ -143,7 +146,7 @@ impl QuickInstallView {
     /// Ticked and not installed yet, in install order.
     fn to_install(&self, cx: &Cx) -> Vec<Tool> {
         let picked = self.picked.clone().unwrap_or_default();
-        Tool::ALL.into_iter().filter(|t| picked.contains(t) && !self.installed(*t, cx)).collect()
+        Tool::here().into_iter().filter(|t| picked.contains(t) && !self.installed(*t, cx)).collect()
     }
 
     fn toggle(&mut self, t: Tool, cx: &mut Cx) {
@@ -160,7 +163,7 @@ impl QuickInstallView {
 
     /// Tick every missing tool, or none.
     fn tick_all(&mut self, on: bool, cx: &Cx) {
-        let all: HashSet<Tool> = if on { Tool::ALL.into_iter().filter(|t| !self.installed(*t, cx)).collect() } else { HashSet::new() };
+        let all: HashSet<Tool> = if on { Tool::here().into_iter().filter(|t| !self.installed(*t, cx)).collect() } else { HashSet::new() };
         self.picked = Some(all);
     }
 
@@ -180,6 +183,7 @@ impl QuickInstallView {
             let cwd = std::env::current_dir().unwrap_or_default();
             cx.act(Action::Open(Box::new(install_term(cx.svc, cwd, &rest)), Place::Tab));
         }
+        self.started.extend(tools);
         self.watching = Some(Instant::now());
     }
 
@@ -211,6 +215,13 @@ impl Pane for QuickInstallView {
             self.pending = None;
             self.found = Some(found);
             self.pick_defaults();
+            // JustWatch landed: new sessions get its skill (once)
+            if self.started.contains(&Tool::JustWatch) && self.installed(Tool::JustWatch, cx) {
+                self.started.remove(&Tool::JustWatch);
+                if !cx.svc.settings().justwatch.skill {
+                    cx.svc.set_justwatch_skill_on(true);
+                }
+            }
         }
         if self.watching.is_some_and(|w| w.elapsed() > WATCH_FOR) {
             self.watching = None;
@@ -382,7 +393,7 @@ mod tests {
     fn rows_are_every_tool_then_the_install_button() {
         let r = rows();
         assert_eq!(r[0], Row::Tool(Tool::JustTools));
-        assert_eq!(r.len(), Tool::ALL.len() + 1);
+        assert_eq!(r.len(), Tool::here().len() + 1);
         assert_eq!(*r.last().unwrap(), Row::Install);
     }
 }
