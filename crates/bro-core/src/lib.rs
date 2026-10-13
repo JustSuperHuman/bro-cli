@@ -31,6 +31,7 @@ pub mod agent_install;
 pub mod quick_install;
 pub mod justwatch;
 pub mod managed_skill;
+pub mod self_update;
 
 use serde::{Deserialize, Serialize};
 

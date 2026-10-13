@@ -169,6 +169,25 @@ fn wait_for_enter() {
     }
 }
 
+/// `bro update`: install the newest release over this bro (`check_only`: just say whether there is one).
+pub fn update(check_only: bool) -> Result<(), String> {
+    use bro_core::self_update::{self, CURRENT};
+    self_update::clean_up_old();
+    let latest = self_update::latest_version().map_err(|e| format!("couldn't reach GitHub: {e:#}"))?;
+    if !self_update::is_newer(&latest) {
+        println!("bro {CURRENT} is the newest release.");
+        return Ok(());
+    }
+    println!("bro {latest} is out (you have {CURRENT}).");
+    if check_only {
+        println!("Run `bro update` to install it.");
+        return Ok(());
+    }
+    let dir = self_update::install(&latest, &|step| println!("  {}…", step.label())).map_err(|e| format!("{e:#}"))?;
+    println!("bro {latest} installed in {}. Restart bro to use it.", dir.display());
+    Ok(())
+}
+
 /// Run it; Err when an install failed.
 pub fn run(args: InstallArgs) -> Result<(), String> {
     let result = install(&args);

@@ -1,5 +1,5 @@
 //! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), caveman
-//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install and the JustWatch skill) and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
+//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install and the JustWatch skill), bro's own updates and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
 //! part applies to sessions launched from now on.
 
@@ -150,6 +150,15 @@ enum ToolOpt {
     WatchSkill,
 }
 
+/// bro's own updates' rows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum UpdOpt {
+    /// the running version: enter checks now, or installs a newer release
+    Version,
+    /// look when bro opens and every 12 hours
+    Check,
+}
+
 /// What an install is doing at `step`.
 pub(crate) fn step_label(step: Step) -> &'static str {
     match step {
@@ -173,6 +182,7 @@ enum Row {
     Bro(BroOpt),
     Cave(CaveOpt),
     Tool(ToolOpt),
+    Update(UpdOpt),
     Preset,
     Knob(usize),
 }
@@ -183,7 +193,7 @@ fn rows() -> Vec<Row> {
         .map(Row::Bro)
         .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
-        .chain([Row::Preset])
+        .chain([Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check), Row::Preset])
         .chain((0..KNOBS.len()).map(Row::Knob))
         .collect()
 }
@@ -201,6 +211,8 @@ pub struct SettingsView {
     tools_checked: bool,
     /// a JustTools job is running: keep its spinner and timer moving
     tools_busy: bool,
+    /// bro is updating itself or looking for a release: keep the spinner moving
+    update_busy: bool,
 }
 
 impl SettingsView {
@@ -251,6 +263,21 @@ impl SettingsView {
         match self.row() {
             Row::Bro(o) => return o.change(dir, cx),
             Row::Tool(o) => return self.tool(o, cx),
+            Row::Update(UpdOpt::Version) => {
+                let u = cx.svc.state().updates.clone();
+                match () {
+                    _ if u.job.is_some() => {}
+                    _ if u.available().is_some() => cx.svc.install_bro_update(),
+                    _ => cx.svc.check_bro_update(false),
+                }
+                return;
+            }
+            Row::Update(UpdOpt::Check) => {
+                s.updates.check = !s.updates.check;
+                if s.updates.check {
+                    cx.svc.check_bro_update(true);
+                }
+            }
             Row::Cave(CaveOpt::Mode) => {
                 let all = cave_choices();
                 let i = all.iter().position(|c| *c == s.caveman.active()).unwrap_or(0) as isize;
@@ -279,7 +306,7 @@ impl SettingsView {
     fn reset(&self, cx: &mut Cx) {
         let mut s = cx.svc.settings();
         match self.row() {
-            Row::Bro(_) | Row::Cave(_) | Row::Tool(_) => return,
+            Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Update(_) => return,
             Row::Preset => s.claude_env.overrides.clear(),
             Row::Knob(k) => {
                 s.claude_env.overrides.remove(KNOBS[k].id);
@@ -437,6 +464,44 @@ impl Pane for SettingsView {
         }
 
         lines.push((None, vec![]));
+        lines.push((None, heading("updates · new bro releases from GitHub", t)));
+        let u = cx.svc.state().updates.clone();
+        self.update_busy = u.job.is_some() || u.checking;
+        let current = bro_core::self_update::CURRENT;
+        let i = idx(Row::Update(UpdOpt::Version));
+        let bold = |c| fg(c).add_modifier(Modifier::BOLD);
+        let (v, style, help): (String, Style, String) = match (&u.job, &u.installed, u.available()) {
+            (Some(job), _, _) => (format!("{} updating", spinner(job.started)), bold(t.shine), String::new()),
+            (_, Some(new), _) => (format!("{new} installed"), fg(t.good), "restart bro to run it".into()),
+            _ if u.checking => ("checking…".into(), muted(t), String::new()),
+            (_, _, Some(_)) if bro_core::self_update::target().is_none() => (current.into(), fg(t.inline), "a new release is out; there's no prebuilt bro for this platform, so build it from source".into()),
+            (_, _, Some(new)) => (format!("{current} → {new}"), bold(t.shine), "a new release is out · enter installs it (checked against its SHA-256)".into()),
+            _ if u.offline => (current.into(), fg(t.inline), "couldn't reach GitHub to look for a newer release · enter tries again".into()),
+            _ if u.latest.is_some() => (current.into(), fg(t.inline), "the newest release · enter checks again".into()),
+            _ => (current.into(), fg(t.inline), "enter checks GitHub for a newer release now".into()),
+        };
+        lines.push((Some(i), vec![name(i, "bro version"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
+        if let Some(job) = &u.job {
+            let at = bro_core::self_update::Step::ALL.iter().position(|s| *s == job.step).unwrap_or(0) + 1;
+            let all = bro_core::self_update::Step::ALL.len();
+            lines.push((None, vec![
+                Span::raw(format!("  {:<26}", "")),
+                Span::styled("━━━━".repeat(at), fg(t.accent)),
+                Span::styled("━━━━".repeat(all - at), fg(t.frame)),
+                Span::styled(format!("  {at} of {all} · {} · {}s", job.step.label(), job.started.elapsed().as_secs()), muted(t)),
+            ]));
+        } else if let Some(e) = &u.error {
+            lines.push(note(format!("✗ {e} · enter tries again"), fg(t.danger)));
+        }
+        let i = idx(Row::Update(UpdOpt::Check));
+        let check = cx.svc.settings().updates.check;
+        lines.push((Some(i), vec![
+            name(i, "Check for updates"),
+            Span::styled(ui::pad(if check { "on" } else { "off" }, 16), if check { fg(t.inline) } else { muted(t) }),
+            Span::styled(" when bro opens and every 12 hours; a new release is announced once, nothing installs on its own", muted(t)),
+        ]));
+
+        lines.push((None, vec![]));
         lines.push((None, heading("Claude Code · applies to sessions launched from now on", t)));
         let p = claude_env::preset(&env.preset);
         let i = idx(Row::Preset);
@@ -503,7 +568,7 @@ impl Pane for SettingsView {
         }
     }
     fn tick_every(&self) -> Option<Duration> {
-        self.tools_busy.then_some(Duration::from_millis(100))
+        (self.tools_busy || self.update_busy).then_some(Duration::from_millis(100))
     }
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         let last = rows().len() - 1;
@@ -558,8 +623,9 @@ mod tests {
         assert_eq!(r[bro_opts().len() + 2], Row::Tool(ToolOpt::Install));
         assert_eq!(r[bro_opts().len() + 3], Row::Tool(ToolOpt::QuickInstall));
         let watch = usize::from(bro_core::justwatch::supported());
-        assert_eq!(r[bro_opts().len() + 6 + watch], Row::Preset);
-        assert_eq!(r.len(), bro_opts().len() + 7 + watch + KNOBS.len());
+        assert_eq!(r[bro_opts().len() + 6 + watch], Row::Update(UpdOpt::Version));
+        assert_eq!(r[bro_opts().len() + 8 + watch], Row::Preset);
+        assert_eq!(r.len(), bro_opts().len() + 9 + watch + KNOBS.len());
     }
 
     #[test]

@@ -57,6 +57,18 @@ pub fn get_text(url: &str, timeout: Duration) -> anyhow::Result<(u16, String)> {
     Ok((status, text))
 }
 
+/// `GET url` into the file at `to` (any size; ureq's text readers stop at 10 MB). Errors on a
+/// non-2xx status.
+pub fn download(url: &str, to: &std::path::Path, timeout: Duration) -> anyhow::Result<u64> {
+    let resp = agent(timeout).get(url).header("user-agent", "bro").call().with_context(|| format!("GET {url}"))?;
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        anyhow::bail!("GET {url}: HTTP {status}");
+    }
+    let mut file = std::fs::File::create(to).with_context(|| format!("creating {}", to.display()))?;
+    std::io::copy(&mut resp.into_body().into_reader(), &mut file).with_context(|| format!("downloading {url}"))
+}
+
 /// `POST url` with a JSON body.
 pub fn post_json(url: &str, body: &Value, timeout: Duration) -> anyhow::Result<JsonResponse> {
     let resp = agent(timeout)

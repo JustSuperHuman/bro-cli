@@ -18,6 +18,8 @@ pub enum Command {
     /// `bro install [tools…]` — Quick Install: JustTools, Git, Node.js, .NET, the agents….
     Install(crate::install_cmd::InstallArgs),
     InstallHelp,
+    /// `bro update [--check]` — install the newest bro release over this one (or only look).
+    Update { check_only: bool },
 }
 
 /// Usage text (`{version}` is substituted).
@@ -35,6 +37,8 @@ usage
   bro open <path>[:line] [--editor]
                    from inside a bro session: show a file (at a line) in bro's preview and
                    on connected phones / browsers, or open it in the desktop editor
+  bro update [--check]
+                   install the newest bro release over this one (--check: only look)
   bro install [tools… | recommended | agents | all] [--force]
                    Quick Install: JustTools, JustWatch, Git, Node.js, Bun, Python, .NET 9/10/11,
                    Claude Code, Codex, Pi, omp… (no names: pick from a list)
@@ -52,6 +56,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
     if args.first().map(String::as_str) == Some("open") {
         return crate::open_cmd::parse(&args[1..]).map(|a| a.map_or(Command::OpenHelp, Command::Open));
+    }
+    if args.first().map(String::as_str) == Some("update") {
+        return match args.get(1).map(String::as_str) {
+            None => Ok(Command::Update { check_only: false }),
+            Some("--check" | "-c") if args.len() == 2 => Ok(Command::Update { check_only: true }),
+            Some(other) => Err(format!("bro update: unknown argument '{other}' (bro update [--check])")),
+        };
     }
     if args.first().map(String::as_str) == Some("install") {
         return crate::install_cmd::parse(&args[1..]).map(|a| a.map_or(Command::InstallHelp, Command::Install));
@@ -92,5 +103,8 @@ mod tests {
         assert!(p(&["open"]).is_err());
         assert!(matches!(p(&["install", "claude"]), Ok(Command::Install(ref a)) if a.tools == [bro_core::quick_install::Tool::Agent(bro_core::Harness::Claude)]));
         assert_eq!(p(&["install", "-h"]), Ok(Command::InstallHelp));
+        assert_eq!(p(&["update"]), Ok(Command::Update { check_only: false }));
+        assert_eq!(p(&["update", "--check"]), Ok(Command::Update { check_only: true }));
+        assert!(p(&["update", "now"]).is_err());
     }
 }

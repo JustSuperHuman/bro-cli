@@ -32,11 +32,18 @@ curl -fsSL https://raw.githubusercontent.com/JustSuperHuman/bro-cli/main/install
 The installer downloads the latest release for your platform, verifies its SHA-256 checksum and
 installs bro to `%LOCALAPPDATA%\Programs\bro` (added to your user `PATH`) or `~/.local/bin`.
 Set `BRO_VERSION` (e.g. `v2.0.11`) to pin a release or `BRO_INSTALL_DIR` to change the location.
-Rerun it to update.
-
-It then lists the Quick Install tools and asks which to install (Enter: the recommended ones that
+On a fresh install it then lists the Quick Install tools and asks which to install (Enter: the recommended ones that
 are missing). Set `BRO_TOOLS` to skip the question: e.g. `justtools git node claude`, `recommended`,
 `all` or `none`.
+
+Rerun it to update: with bro already installed it updates that copy in place, even while it's
+running, and skips the Quick Install question.
+
+bro also looks for a new release when it opens and every 12 hours, and tells you once when there is
+one. Settings → updates → bro version installs it (or checks right away); `bro update` does the same
+from a terminal and `bro update --check` only looks. Either way the download is checked against the
+release's `SHA256SUMS.txt` and the new version runs after a restart. Turn "Check for updates" off in
+settings to stop looking.
 
 ### Quick Install
 

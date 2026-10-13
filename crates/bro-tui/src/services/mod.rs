@@ -8,6 +8,7 @@ pub mod demo;
 pub mod guard;
 pub mod justtools;
 pub mod justwatch;
+pub mod updates;
 pub mod launch;
 mod workers;
 
@@ -107,6 +108,7 @@ pub struct State {
     pub proxy: ProxyState,
     pub bridge: BridgeState,
     pub justtools: justtools::JustToolsState,
+    pub updates: updates::UpdateState,
     /// Things that didn't work at startup, shown once as toasts and in the views.
     pub issues: Vec<String>,
 }
@@ -201,6 +203,7 @@ pub fn fallback_settings() -> Settings {
         caveman: Default::default(),
         justtools: Default::default(),
         justwatch: Default::default(),
+        updates: Default::default(),
         keys: BTreeMap::new(),
     }
 }
@@ -245,6 +248,7 @@ impl Services {
             bridge: BridgeState { status: Avail::Loading, qr: None, enabled: settings.bridge.enabled },
             settings,
             justtools: Default::default(),
+            updates: Default::default(),
             config: None,
             profiles: Avail::Loading,
             providers: Avail::Loading,

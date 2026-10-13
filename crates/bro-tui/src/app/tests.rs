@@ -2523,6 +2523,12 @@ fn settings_view_switches_presets_and_overrides_switches() {
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert!(!a.svc.settings().justwatch.skill);
     }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // bro version: the demo never looks
+    { let s = draw(&mut a); assert!(s.contains("updates") && s.contains(bro_core::self_update::CURRENT), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // check for updates: on unless you turn it off
+    assert!(a.svc.settings().updates.check);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().updates.check);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
     assert_eq!(a.svc.settings().claude_env.preset, "quiet");
@@ -2536,7 +2542,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     let screen = draw(&mut a);
     assert!(screen.contains("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"), "{screen}");
     key(&mut a, KeyCode::Home, KeyModifiers::NONE);
-    for _ in 0..13 + usize::from(bro_core::justwatch::supported()) {
+    for _ in 0..15 + usize::from(bro_core::justwatch::supported()) {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // back to error reports
     }
     key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);

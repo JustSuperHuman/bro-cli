@@ -86,6 +86,13 @@ fn main() -> ExitCode {
             print!("{}", install_cmd::HELP);
             ExitCode::SUCCESS
         }
+        Ok(cli::Command::Update { check_only }) => match install_cmd::update(check_only) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro update: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(cli::Command::Install(args)) => match install_cmd::run(args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
