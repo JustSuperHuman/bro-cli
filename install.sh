@@ -34,7 +34,11 @@ if [ -z "$dir" ]; then
   if found=$(command -v bro 2>/dev/null) && [ -n "$found" ]; then
     dir=$(dirname "$found")
   else
+    # not on this shell's PATH: try the usual homes before installing a second copy
     dir="$HOME/.local/bin"
+    for d in "$HOME/.local/bin" "$HOME/.cargo/bin" /usr/local/bin /opt/homebrew/bin; do
+      if [ -x "$d/bro" ]; then dir="$d"; break; fi
+    done
   fi
 fi
 current=""

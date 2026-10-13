@@ -16,10 +16,20 @@
     $target = 'x86_64-pc-windows-msvc'
 
     # an existing bro is updated where it is
+    $default = Join-Path $env:LOCALAPPDATA 'Programs\bro'
     $dir = $env:BRO_INSTALL_DIR
     if (-not $dir) {
         $found = Get-Command bro.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        $dir = if ($found) { Split-Path $found.Source } else { Join-Path $env:LOCALAPPDATA 'Programs\bro' }
+        if ($found) {
+            $dir = Split-Path $found.Source
+        } else {
+            # this session's PATH may be stale or trimmed: try the saved PATH and the usual homes too
+            $saved = @([Environment]::GetEnvironmentVariable('Path', 'User'), [Environment]::GetEnvironmentVariable('Path', 'Machine')) -join ';'
+            $places = @($saved -split ';' | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_) }) +
+                @($default, (Join-Path $HOME '.cargo\bin'))
+            $dir = $places | Where-Object { Test-Path (Join-Path $_ 'bro.exe') } | Select-Object -First 1
+            if (-not $dir) { $dir = $default }
+        }
     }
     $bro = Join-Path $dir 'bro.exe'
     $current = if (Test-Path $bro) { ("$(& $bro --version)" -replace '^bro\s+', '').Trim() } else { '' }
@@ -75,7 +85,8 @@
 
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $onPath = ($env:Path -split ';') -contains $dir -or ($userPath -split ';') -contains $dir
-    if (-not $onPath) {
+    # a fresh install goes on PATH; an update leaves PATH as it found it
+    if (-not $update -and -not $onPath) {
         [Environment]::SetEnvironmentVariable('Path', ($(if ($userPath) { "$userPath;" }) + $dir), 'User')
         $env:Path = "$env:Path;$dir"
         Write-Host "Added $dir to your user PATH. Open a new terminal if 'bro' is not found."
