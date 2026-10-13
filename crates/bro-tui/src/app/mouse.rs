@@ -59,6 +59,10 @@ impl App {
                         }
                         crate::launcher::Outcome::Archive(id, on) => self.continue_archive(id, on),
                         crate::launcher::Outcome::UndoArchive => self.undo_archive(),
+                        crate::launcher::Outcome::Install(h) => {
+                    self.overlay = Overlay::None;
+                    self.install_agent(h);
+                }
                     }
                     return;
                 }

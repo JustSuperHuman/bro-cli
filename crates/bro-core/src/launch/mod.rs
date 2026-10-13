@@ -17,7 +17,7 @@ mod which;
 
 pub use pi::{omp_models_path, pi_models_path, write_omp_config, write_pi_config};
 pub use route::{UpstreamTarget, resolve_upstream, route_id};
-pub use which::{program_and_args, which};
+pub use which::{extra_bin_dirs, program_and_args, which};
 
 use crate::Harness;
 use crate::profiles::{self, Profile};

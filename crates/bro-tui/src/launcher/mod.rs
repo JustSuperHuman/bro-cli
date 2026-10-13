@@ -112,6 +112,8 @@ pub enum Hit {
     Browser,
     Place,
     Launch,
+    /// "install it" under an agent that isn't installed
+    Install,
     /// the × in the corner
     Close,
 }
@@ -127,6 +129,8 @@ pub enum Outcome {
     Resume(usize),
     Archive(String, bool),
     UndoArchive,
+    /// Install this agent (it isn't on PATH).
+    Install(Harness),
 }
 
 /// Recent combos shown per harness.
@@ -659,6 +663,7 @@ impl Launcher {
             Hit::Place => {
                 self.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
             }
+            Hit::Install => return Outcome::Install(self.harness),
             Hit::Launch => return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Hit::Close => return Outcome::Close,
         }
@@ -724,6 +729,7 @@ impl Launcher {
                     return Outcome::Close;
                 }
             }
+            KeyCode::Enter if !self.installed(self.harness) => return Outcome::Install(self.harness),
             KeyCode::Enter => match self.focus {
                 Focus::List if self.needs_model() => {
                     self.focus = Focus::Models;

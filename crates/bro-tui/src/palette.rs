@@ -61,7 +61,7 @@ fn icon_for(a: Act) -> &'static str {
         Profiles => "account",
         Proxy => "proxy",
         Bridge => "bridge",
-        Settings => "settings",
+        Settings | QuickInstall => "settings",
         Themes => "theme",
         Help => "help",
         Quit => "quit",

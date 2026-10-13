@@ -100,7 +100,9 @@ fn draw_inner(f: &mut Frame, screen: Rect, l: &mut Launcher, t: &Theme, _time: f
     ui::line_lr(f, row(y), tabs, vec![Span::styled("← → agent ", muted(t))]);
     y += 1;
     if !l.installed(l.harness) {
-        ui::line(f, row(y), vec![Span::styled(format!("  {} isn't on your PATH — install it first", l.harness.label()), fg(t.danger))]);
+        let text = format!("  {} isn't installed — enter or click to install it", l.harness.label());
+        hits.push((Rect { width: ui::width(&text) as u16, ..row(y) }, Hit::Install));
+        ui::line(f, row(y), vec![Span::styled(text, fg(t.danger))]);
     }
     y += 1;
 

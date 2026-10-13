@@ -1,6 +1,7 @@
 # bro installer for Windows.
 #   irm https://raw.githubusercontent.com/JustSuperHuman/bro-cli/main/install.ps1 | iex
-# Env: BRO_VERSION (tag, default latest), BRO_INSTALL_DIR (default %LOCALAPPDATA%\Programs\bro).
+# Env: BRO_VERSION (tag, default latest), BRO_INSTALL_DIR (default %LOCALAPPDATA%\Programs\bro),
+#      BRO_TOOLS (Quick Install too, e.g. "justtools git node claude", "recommended", "all" or "none"; default: ask).
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -46,4 +47,18 @@ if (-not (($userPath -split ';') -contains $dir)) {
     $env:Path = "$env:Path;$dir"
     Write-Host "Added $dir to your user PATH. Open a new terminal if 'bro' is not found."
 }
-Write-Host "bro $tag installed. Run: bro"
+Write-Host "bro $tag installed."
+
+# Offer Quick Install (JustTools, Git, Node.js, Bun, Python, .NET, the coding agents…); releases before `bro install` skip this.
+$bro = Join-Path $dir 'bro.exe'
+if ((& $bro --help) -match 'bro install') {
+    $tools = "$env:BRO_TOOLS".Trim()
+    if ($tools -eq 'none') {
+    } elseif ($tools) {
+        & $bro install @($tools -split '[\s,]+' | Where-Object { $_ })
+    } elseif ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+        Write-Host ""
+        & $bro install
+    }
+}
+Write-Host "Run: bro"

@@ -1,5 +1,5 @@
 //! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), caveman
-//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools and its skill) and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
+//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill and Quick Install) and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
 //! part applies to sessions launched from now on.
 
@@ -142,12 +142,14 @@ fn cave_choices() -> Vec<Option<Level>> {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ToolOpt {
     Install,
+    /// opens the Quick Install checklist
+    QuickInstall,
     Skill,
     AutoUpdate,
 }
 
 /// What an install is doing at `step`.
-fn step_label(step: Step) -> &'static str {
+pub(crate) fn step_label(step: Step) -> &'static str {
     match step {
         Step::Installer => "fetching the installer",
         Step::Download => "downloading the release",
@@ -158,7 +160,7 @@ fn step_label(step: Step) -> &'static str {
 }
 
 /// A spinner frame for a job that began at `started`.
-fn spinner(started: Instant) -> &'static str {
+pub(crate) fn spinner(started: Instant) -> &'static str {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     FRAMES[(started.elapsed().as_millis() / 100) as usize % FRAMES.len()]
 }
@@ -177,7 +179,7 @@ fn rows() -> Vec<Row> {
     bro_opts()
         .into_iter()
         .map(Row::Bro)
-        .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate), Row::Preset])
+        .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate), Row::Preset])
         .chain((0..KNOBS.len()).map(Row::Knob))
         .collect()
 }
@@ -206,7 +208,8 @@ impl SettingsView {
         rows()[self.sel.min(rows().len() - 1)]
     }
 
-    /// Enter on a JustTools row: install, update or check for a release; switch its skill or auto-update.
+    /// Enter on a JustTools row: open Quick Install (JustTools isn't installed), update or check for a release;
+    /// switch its skill or auto-update.
     fn tool(&self, o: ToolOpt, cx: &mut Cx) {
         let jt = cx.svc.state().justtools.clone();
         let mut s = cx.svc.settings();
@@ -215,9 +218,12 @@ impl SettingsView {
                 s.justtools.auto_update = !s.justtools.auto_update;
                 cx.svc.save_settings(s);
             }
+            ToolOpt::QuickInstall => cx.act(Action::Run(Act::QuickInstall)),
             _ if jt.job.is_some() => {}
+            // a first install starts from the checklist, with JustTools ticked
+            ToolOpt::Install if jt.installed.is_none() => cx.act(Action::Run(Act::QuickInstall)),
             ToolOpt::Install if cx.svc.is_demo() => cx.toast(Kind::Info, "the demo doesn't install anything"),
-            ToolOpt::Install if jt.installed.is_none() || jt.update().is_some() => cx.svc.install_justtools(),
+            ToolOpt::Install if jt.update().is_some() => cx.svc.install_justtools(),
             ToolOpt::Install => cx.svc.check_justtools(),
             ToolOpt::Skill if s.justtools.skill => {
                 cx.svc.set_justtools_skill_on(false);
@@ -365,7 +371,7 @@ impl Pane for SettingsView {
         let (v, style, help): (String, Style, &str) = match (installing, &version, jt.update()) {
             (Some(job), _, _) => (format!("{} {}", spinner(job.started), if job.kind == JobKind::Update { "updating" } else { "installing" }), fg(t.shine).add_modifier(Modifier::BOLD), ""),
             _ if jt.checking || !jt.checked => ("checking…".into(), muted(t), ""),
-            (_, None, _) => ("not installed".into(), muted(t), "enter installs it · image, video, PDF and port commands in one binary"),
+            (_, None, _) => ("not installed".into(), muted(t), "enter opens Quick Install · image, video, PDF and port commands in one binary"),
             (_, Some(v), Some(new)) => (format!("{v} → {new}"), fg(t.shine).add_modifier(Modifier::BOLD), "a newer release is out · enter updates"),
             (_, Some(v), None) if jt.offline => (v.clone(), fg(t.inline), "couldn't reach GitHub to look for a newer release · enter tries again"),
             (_, Some(v), None) => (v.clone(), fg(t.inline), "the newest release · enter checks again"),
@@ -390,6 +396,12 @@ impl Pane for SettingsView {
         } else if jt.checked && version.is_none() {
             lines.push(note("github.com/JustGains/JustTools · the download is checked against its SHA-256 before it installs".into(), muted(t)));
         }
+        let i = idx(Row::Tool(ToolOpt::QuickInstall));
+        lines.push((Some(i), vec![
+            name(i, "Quick install"),
+            Span::styled(ui::pad("open ›", 16), fg(t.inline)),
+            Span::styled(" tick what to install: JustTools, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…", muted(t)),
+        ]));
         let i = idx(Row::Tool(ToolOpt::Skill));
         let (v, style) = match &jt.job {
             Some(job) if job.kind == JobKind::Skill => (format!("{} adding", spinner(job.started)), fg(t.shine).add_modifier(Modifier::BOLD)),
@@ -525,8 +537,9 @@ mod tests {
         assert_eq!(r[0], Row::Bro(BroOpt::Theme));
         assert_eq!(r[bro_opts().len()], Row::Cave(CaveOpt::Mode));
         assert_eq!(r[bro_opts().len() + 2], Row::Tool(ToolOpt::Install));
-        assert_eq!(r[bro_opts().len() + 5], Row::Preset);
-        assert_eq!(r.len(), bro_opts().len() + 6 + KNOBS.len());
+        assert_eq!(r[bro_opts().len() + 3], Row::Tool(ToolOpt::QuickInstall));
+        assert_eq!(r[bro_opts().len() + 6], Row::Preset);
+        assert_eq!(r.len(), bro_opts().len() + 7 + KNOBS.len());
     }
 
     #[test]

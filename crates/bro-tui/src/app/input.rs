@@ -139,6 +139,10 @@ impl App {
                 }
                 Outcome::Archive(id, on) => self.continue_archive(id, on),
                 Outcome::UndoArchive => self.undo_archive(),
+                Outcome::Install(h) => {
+                    self.overlay = Overlay::None;
+                    self.install_agent(h);
+                }
             },
             Overlay::Palette(p) => {
                 let out = p.key(k);

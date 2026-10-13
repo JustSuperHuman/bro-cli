@@ -27,6 +27,8 @@ pub mod claude_shared;
 pub mod catalogue;
 pub mod claude_env;
 pub mod caveman;
+pub mod agent_install;
+pub mod quick_install;
 
 use serde::{Deserialize, Serialize};
 

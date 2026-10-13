@@ -93,6 +93,7 @@ impl App {
             Act::Profiles => self.open_view("profiles"),
             Act::Stats => self.open_view("stats"),
             Act::Settings => self.open_view("settings"),
+            Act::QuickInstall => self.open_view("quick-install"),
             Act::Proxy => self.open_view("proxy"),
             Act::Bridge => self.open_view("bridge"),
             Act::Help => self.overlay = Overlay::Help(Help::default()),

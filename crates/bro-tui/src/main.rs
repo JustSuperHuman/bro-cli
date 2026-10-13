@@ -29,6 +29,7 @@ mod pane;
 mod paste_burst;
 mod priority;
 mod projects;
+mod install_cmd;
 mod open_cmd;
 mod proxy_cmd;
 mod panes;
@@ -78,6 +79,17 @@ fn main() -> ExitCode {
             }
             Err(e) => {
                 eprintln!("bro open: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(cli::Command::InstallHelp) => {
+            print!("{}", install_cmd::HELP);
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Command::Install(args)) => match install_cmd::run(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro install: {e}");
                 ExitCode::FAILURE
             }
         },

@@ -50,6 +50,8 @@ pub enum Act {
     Stats,
     /// Claude Code privacy / update / behaviour presets.
     Settings,
+    /// Quick Install: JustTools, Git, Node.js, .NET, the agents… as a checklist.
+    QuickInstall,
     Help,
     Rename,
     Themes,
@@ -103,7 +105,7 @@ impl Act {
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, RefreshUsage]);
+        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, QuickInstall, RefreshUsage]);
         v.extend([Palette, Help, Themes, ToggleIcons, ToggleAutoResume, ToggleCaveman, Quit]);
         v
     }
@@ -147,6 +149,7 @@ impl Act {
             Bridge => "bridge".into(),
             Stats => "stats".into(),
             Settings => "settings".into(),
+            QuickInstall => "quick_install".into(),
             Help => "help".into(),
             Rename => "rename".into(),
             Themes => "themes".into(),
@@ -209,6 +212,7 @@ impl Act {
             Bridge => "bridge: phone / web pairing".into(),
             Stats => "stats: tokens per login — lifetime, last 24h / 7d / 30d".into(),
             Settings => "settings: bro options and Claude Code privacy, updates and long-run presets".into(),
+            QuickInstall => "quick install: JustTools, Git, Node.js, Bun, Python, .NET and the coding agents".into(),
             Help => "keys and help".into(),
             Rename => "rename the focused session".into(),
             Themes => "pick a theme (live preview)".into(),
@@ -233,7 +237,7 @@ impl Act {
             NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | CloseProject | OpenedFile | AgentFiles => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | RefreshUsage => Group::Views,
+            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | QuickInstall | RefreshUsage => Group::Views,
             Palette | Help | Themes | ToggleIcons | ToggleAutoResume | ToggleCaveman | Quit => Group::App,
         }
     }
@@ -331,6 +335,7 @@ impl Act {
             ToggleIcons => vec!["i"],
             RefreshUsage => vec!["r"],
             Quit => vec!["q"],
+            QuickInstall => vec!["I"],
             Split | ToggleTrim | ToggleAutoResume | ToggleCaveman => vec![],
         }
     }

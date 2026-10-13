@@ -195,3 +195,15 @@ fn changing_project_keeps_the_session_choices_and_uses_folder_completion() {
     assert!(matches!(key(&mut l, KeyCode::Enter), Outcome::Project(ref dir) if *dir == nested));
     assert_eq!(l.spec().unwrap().cwd, nested);
 }
+
+#[test]
+fn enter_on_a_missing_agent_installs_it() {
+    let mut d = data();
+    d.installed = vec![(Harness::Claude, true), (Harness::Codex, false)];
+    let mut l = Launcher::new(d, None, Place::Tab);
+    assert!(!matches!(key(&mut l, KeyCode::Enter), Outcome::Install(_)), "claude is installed");
+    while l.harness != Harness::Codex {
+        key(&mut l, KeyCode::Right);
+    }
+    assert!(matches!(key(&mut l, KeyCode::Enter), Outcome::Install(Harness::Codex)));
+}

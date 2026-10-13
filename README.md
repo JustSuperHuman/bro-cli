@@ -34,6 +34,32 @@ installs bro to `%LOCALAPPDATA%\Programs\bro` (added to your user `PATH`) or `~/
 Set `BRO_VERSION` (e.g. `v2.0.11`) to pin a release or `BRO_INSTALL_DIR` to change the location.
 Rerun it to update.
 
+It then lists the Quick Install tools and asks which to install (Enter: the recommended ones that
+are missing). Set `BRO_TOOLS` to skip the question: e.g. `justtools git node claude`, `recommended`,
+`all` or `none`.
+
+### Quick Install
+
+```
+bro install                        # list everything with what's installed; pick what to install
+bro install justtools git node bun # install those (already installed ones are skipped)
+bro install recommended            # JustTools, Git, Node.js, Bun, Claude Code, Codex
+bro install agents                 # claude codex pi omp
+bro install dotnet9 dotnet10 dotnet11
+bro install codex --force          # reinstall / update one
+```
+
+Tools: `justtools`, `git`, `gh`, `node`, `bun`, `python`, `uv`, `dotnet9`, `dotnet10`, `dotnet11`,
+`claude`, `codex`, `pi`, `omp`, `rg`, `ffmpeg`. Windows installs with WinGet, macOS with Homebrew
+(installed first if missing), Linux with apt, dnf, pacman, zypper or apk. Bun, uv and .NET on
+macOS / Linux (into `~/.dotnet`) use their official install scripts; JustTools, Claude Code, Codex,
+Pi and omp use their own installers.
+
+In bro, Quick Install is a checklist: settings → integrations → Quick install (or Enter on JustTools
+when it isn't installed), the palette, or `prefix I`. Tick tools with space and press `i`: JustTools
+installs in the background, the rest run in a new tab so you can follow them and answer prompts.
+Picking an agent that isn't installed in the new-session picker installs it the same way.
+
 Or install by hand:
 
 1. Download the archive for your system from the [latest release](https://github.com/JustSuperHuman/bro-cli/releases/latest).

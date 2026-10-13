@@ -1,7 +1,8 @@
 #!/bin/sh
 # bro installer for macOS and Linux.
 #   curl -fsSL https://raw.githubusercontent.com/JustSuperHuman/bro-cli/main/install.sh | sh
-# Env: BRO_VERSION (tag, default latest), BRO_INSTALL_DIR (default ~/.local/bin).
+# Env: BRO_VERSION (tag, default latest), BRO_INSTALL_DIR (default ~/.local/bin),
+#      BRO_TOOLS (Quick Install too, e.g. "justtools git node claude", "recommended", "all" or "none"; default: ask).
 set -eu
 
 repo="JustSuperHuman/bro-cli"
@@ -55,6 +56,21 @@ chmod 755 "$dir/.bro.new"
 mv -f "$dir/.bro.new" "$dir/bro"
 
 echo "bro $tag installed to $dir/bro"
+
+# Offer Quick Install (JustTools, Git, Node.js, Bun, Python, .NET, the coding agents…); releases before `bro install` skip this.
+# curl | sh feeds this script on stdin, so the question is asked on the terminal.
+if "$dir/bro" --help 2>/dev/null | grep -q 'bro install'; then
+  tools=$(printf '%s' "${BRO_TOOLS:-}" | tr ',' ' ')
+  if [ "$tools" = "none" ]; then
+    :
+  elif [ -n "$tools" ]; then
+    # shellcheck disable=SC2086
+    "$dir/bro" install $tools || true
+  elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    echo
+    "$dir/bro" install </dev/tty || true
+  fi
+fi
 case ":$PATH:" in
   *":$dir:"*) echo "Run: bro" ;;
   *) echo "Add $dir to your PATH, e.g.:"

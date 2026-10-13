@@ -2501,7 +2501,11 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert!(!a.svc.settings().caveman.subagents);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustTools: the demo never installs or looks for it
     { let s = draw(&mut a); assert!(s.contains("integrations") && s.contains("not installed"), "{s}"); }
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // not installed: opens Quick Install with it ticked
+    { let s = draw(&mut a); assert!(s.contains("QUICK INSTALL") && s.contains("[x] JustTools") && s.contains(".NET 11 SDK"), "{s}"); }
+    key(&mut a, KeyCode::Char('i'), KeyModifiers::NONE); // the demo installs nothing
+    a.run_act(Act::Settings); // back to settings, still on the JustTools row
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Quick install
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // its skill
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(a.svc.settings().justtools.skill);
@@ -2739,4 +2743,24 @@ fn back_and_forward_step_through_viewed_sessions_keeping_full_screen_tiles_and_t
     nav(&mut a, true);
     assert!(!a.overlay.is_open());
     assert_eq!(a.focused(), Some(tiled[1]));
+}
+
+#[test]
+fn quick_install_ticks_the_missing_recommended_tools_and_toggles_them() {
+    let mut a = app(true);
+    a.run_act(Act::QuickInstall);
+    let id = a.focused().expect("quick install pane");
+    assert_eq!(a.panes[&id].view(), Some("quick-install"));
+    let s = draw(&mut a);
+    // the demo has nothing installed: the recommended tools start ticked, the rest don't
+    assert!(s.contains("[x] JustTools") && s.contains("[x] Node.js LTS") && s.contains("[ ] .NET 9 SDK") && s.contains("[ ] Python 3"), "{s}");
+    assert!(s.contains("Install 6 · JustTools, Git, Node.js LTS, Bun, Claude Code, Codex CLI"), "{s}");
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE); // untick JustTools
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE); // none
+    assert!(draw(&mut a).contains("nothing ticked to install"));
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE); // every missing tool
+    let s = shot(&mut a, "quick_install");
+    assert!(s.contains("[x] .NET 11 SDK") && s.contains("Install 16"), "{s}");
+    key(&mut a, KeyCode::Char('i'), KeyModifiers::NONE); // the demo installs nothing
+    assert_eq!(a.focused(), Some(id), "no install tab in the demo");
 }

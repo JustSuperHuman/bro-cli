@@ -115,6 +115,18 @@ impl App {
         self.open(Box::new(term), place)
     }
 
+    /// Install an agent in a new tab running `bro install <agent>`, so its installer's output and
+    /// prompts are visible. The launcher sees it as soon as it lands on PATH (or a known shim dir).
+    pub(crate) fn install_agent(&mut self, h: Harness) -> Option<PaneId> {
+        if self.svc.is_demo() {
+            self.toast(Kind::Info, "the demo doesn't install anything");
+            return None;
+        }
+        let cwd = self.focused_cwd().or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+        let term = crate::views::quick_install::install_term(&self.svc, cwd, &[h.label()]);
+        Some(self.open(Box::new(term), Place::Tab))
+    }
+
     /// The cwd of the focused session, if it is one.
     pub(crate) fn focused_cwd(&self) -> Option<PathBuf> {
         self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.cwd.clone())

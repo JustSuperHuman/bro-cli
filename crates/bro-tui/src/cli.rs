@@ -15,6 +15,9 @@ pub enum Command {
     /// `bro open <path>[:line]` — show a file to the user (from inside a bro pane).
     Open(crate::open_cmd::OpenArgs),
     OpenHelp,
+    /// `bro install [tools…]` — Quick Install: JustTools, Git, Node.js, .NET, the agents….
+    Install(crate::install_cmd::InstallArgs),
+    InstallHelp,
 }
 
 /// Usage text (`{version}` is substituted).
@@ -32,6 +35,9 @@ usage
   bro open <path>[:line] [--editor]
                    from inside a bro session: show a file (at a line) in bro's preview and
                    on connected phones / browsers, or open it in the desktop editor
+  bro install [tools… | recommended | agents | all] [--force]
+                   Quick Install: JustTools, Git, Node.js, Bun, Python, .NET 9/10/11,
+                   Claude Code, Codex, Pi, omp… (no names: pick from a list)
   bro --version    print the version
   bro --help       this help
 
@@ -46,6 +52,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
     if args.first().map(String::as_str) == Some("open") {
         return crate::open_cmd::parse(&args[1..]).map(|a| a.map_or(Command::OpenHelp, Command::Open));
+    }
+    if args.first().map(String::as_str) == Some("install") {
+        return crate::install_cmd::parse(&args[1..]).map(|a| a.map_or(Command::InstallHelp, Command::Install));
     }
     let (mut demo, mut new, mut dir) = (false, false, None);
     for a in args {
@@ -81,5 +90,7 @@ mod tests {
         assert!(matches!(p(&["open", "src/a.rs:3"]), Ok(Command::Open(ref a)) if a.target == "src/a.rs:3"));
         assert_eq!(p(&["open", "--help"]), Ok(Command::OpenHelp));
         assert!(p(&["open"]).is_err());
+        assert!(matches!(p(&["install", "claude"]), Ok(Command::Install(ref a)) if a.tools == [bro_core::quick_install::Tool::Agent(bro_core::Harness::Claude)]));
+        assert_eq!(p(&["install", "-h"]), Ok(Command::InstallHelp));
     }
 }
