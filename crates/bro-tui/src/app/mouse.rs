@@ -189,7 +189,7 @@ impl App {
                 return;
             }
             // a split divider: start dragging
-            if let Some(t) = self.tabs.get(self.cur).filter(|t| !t.zoom && !self.stacked()) {
+            if let Some(t) = self.tabs.get(self.cur).filter(|t| !t.zoom && !self.stacked() && !self.grown) {
                 let mut out = vec![];
                 t.root.borders(self.body_panes(), &mut vec![], &mut out);
                 for (area, dir, path) in out.into_iter().rev() {
@@ -257,6 +257,16 @@ impl App {
             && (!wants || m.modifiers.contains(KeyModifiers::CONTROL)) {
                 self.panes.get(&id).and_then(|p| p.link_at(pos.y - inner.y, pos.x - inner.x))
             } else { None };
+        // Ctrl+click a session (anywhere but on a link, which ctrl+click still opens): it grows to a working
+        // size, and the same again snaps it back.
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind
+            && link.is_none()
+            && m.modifiers.contains(KeyModifiers::CONTROL)
+            && !m.modifiers.contains(KeyModifiers::SHIFT)
+        {
+            self.toggle_priority(id);
+            return;
+        }
         // A click on an option of the prompt an agent is waiting on answers it (the key, then Enter, as the
         // phone's prompt buttons do).
         if let MouseEventKind::Down(MouseButton::Left) = m.kind
@@ -313,6 +323,24 @@ impl App {
         }
         if inner.contains(pos) && !(m.modifiers.contains(KeyModifiers::SHIFT) && wants) {
             self.with_pane(id, |p, cx| p.mouse(m, inner, cx));
+        }
+    }
+
+    /// Grow `id` to a working size (focusing it), or snap it back if it already is the one grown. Only one
+    /// session holds the priority: another ctrl+click moves it.
+    pub(crate) fn toggle_priority(&mut self, id: crate::pane::PaneId) {
+        self.sel = None;
+        self.last_pane_click = None;
+        self.side_focus = false;
+        if self.priority == Some(id) {
+            self.priority = None;
+            return;
+        }
+        self.priority = Some(id);
+        if self.stacked() {
+            self.stack_focus = Some(id);
+        } else if let Some(t) = self.tabs.get_mut(self.cur) {
+            t.focus = id;
         }
     }
 

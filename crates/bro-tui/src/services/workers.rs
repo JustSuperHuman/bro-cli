@@ -42,6 +42,7 @@ pub(super) fn load_profiles(svc: &Services) {
         st.profiles = avail(profiles, &mut st.issues);
         if let Some(ps) = st.profiles.ready() {
             st.usage.retain(|id, _| ps.iter().any(|p| &p.id == id));
+            bro_core::usage::cache::retain(&ps.iter().map(|p| p.id.as_str()).collect::<Vec<_>>());
         }
     });
     svc.push_bridge_profiles();
@@ -127,25 +128,37 @@ fn avail<T>(r: Result<T, String>, issues: &mut Vec<String>) -> Avail<T> {
     }
 }
 
-/// Usage every 60 s, or when kicked (`Services::refresh_usage`).
+/// Checks usage every 60 s, or when kicked (`Services::refresh_usage`). Each login is read at most every
+/// `cache::REFRESH_EVERY` (`cache::MANUAL_MIN_AGE` when kicked) and not at all while backing off after an
+/// error, so opening the launcher or a view repeatedly never hammers the usage endpoints.
 fn spawn_usage_loop(svc: &Services) {
+    use bro_core::usage::cache::{MANUAL_MIN_AGE, REFRESH_EVERY};
     let (ktx, krx) = channel::<()>();
     svc.set_usage_kick(ktx);
     let svc = svc.clone();
     std::thread::spawn(move || {
-        while let Ok(()) | Err(RecvTimeoutError::Timeout) = krx.recv_timeout(Duration::from_secs(60)) {
+        loop {
+            let min_age = match krx.recv_timeout(Duration::from_secs(60)) {
+                Ok(()) => MANUAL_MIN_AGE,
+                Err(RecvTimeoutError::Timeout) => REFRESH_EVERY,
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
             while krx.try_recv().is_ok() {} // collapse a burst of kicks
-            fetch_usage(&svc);
+            fetch_usage(&svc, min_age);
         }
     });
 }
 
-fn fetch_usage(svc: &Services) {
-    fetch_usage_with(svc, &|p| guard_res("usage::fetch", || bro_core::usage::fetch(p)));
+fn fetch_usage(svc: &Services, min_age: Duration) {
+    fetch_usage_with(svc, &|p| bro_core::usage::cache::due(p, min_age), &|p| guard_res("usage::fetch", || bro_core::usage::fetch(p)));
 }
 
-fn fetch_usage_with(svc: &Services, fetch: &(impl Fn(&bro_core::profiles::Profile) -> Result<bro_core::usage::Usage, String> + Sync)) {
-    let profiles: Vec<_> = svc.state().profiles.ready().cloned().unwrap_or_default().into_iter().filter(|p| p.authenticated).collect();
+fn fetch_usage_with(
+    svc: &Services,
+    due: &dyn Fn(&bro_core::profiles::Profile) -> bool,
+    fetch: &(impl Fn(&bro_core::profiles::Profile) -> Result<bro_core::usage::Usage, String> + Sync),
+) {
+    let profiles: Vec<_> = svc.state().profiles.ready().cloned().unwrap_or_default().into_iter().filter(|p| p.authenticated && due(p)).collect();
     if profiles.is_empty() {
         return;
     }
@@ -156,19 +169,15 @@ fn fetch_usage_with(svc: &Services, fetch: &(impl Fn(&bro_core::profiles::Profil
     });
     // Publish each account as it finishes; another account's timeout cannot hold it up.
     let pending = parking_lot::Mutex::new(profiles.iter());
-    let claude_cands: Vec<_> = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         // Bound simultaneous CLI processes / HTTP requests even with a large account pool.
-        let jobs: Vec<_> = (0..profiles.len().min(4)).map(|_| scope.spawn(|| {
-            let mut candidates = vec![];
-            loop {
+        for _ in 0..profiles.len().min(4) {
+            scope.spawn(|| loop {
                 let Some(p) = pending.lock().next() else { break };
                 let r = fetch(p);
                 let entry = match r {
                     Ok(u) => {
                         let head = guard("usage::headroom", || bro_core::usage::headroom(p, &u)).ok();
-                        if p.is_claude() {
-                            candidates.push((p.clone(), u.clone()));
-                        }
                         UsageEntry { usage: Some(u), headroom: head, error: None, fetching: false }
                     }
                     Err(e) => {
@@ -179,11 +188,22 @@ fn fetch_usage_with(svc: &Services, fetch: &(impl Fn(&bro_core::profiles::Profil
                 svc.update(|st| {
                     st.usage.insert(p.id.clone(), entry);
                 });
-            }
-            candidates
-        })).collect();
-        jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect()
+            });
+        }
     });
+    // Rank every Claude login by its latest reading, not just the ones read this round.
+    let claude_cands: Vec<_> = {
+        let st = svc.state();
+        let profiles = st.profiles.ready().cloned().unwrap_or_default();
+        profiles
+            .into_iter()
+            .filter(|p| p.authenticated && p.is_claude())
+            .filter_map(|p| {
+                let u = st.usage.get(&p.id)?.usage.clone()?;
+                Some((p, u))
+            })
+            .collect()
+    };
     let large = guard("usage::pick_by_size", || bro_core::usage::pick_by_size(&claude_cands, true)).ok().flatten();
     let small = guard("usage::pick_by_size", || bro_core::usage::pick_by_size(&claude_cands, false)).ok().flatten();
     svc.update(|st| {
@@ -217,7 +237,7 @@ mod usage_tests {
         let blocked = parking_lot::Mutex::new(blocked);
         let (started, ready) = channel();
         std::thread::scope(|scope| {
-            let job = scope.spawn(|| fetch_usage_with(&svc, &|p| {
+            let job = scope.spawn(|| fetch_usage_with(&svc, &|_| true, &|p| {
                 match p.name.as_str() {
                     "slow" => {
                         started.send(()).unwrap();
@@ -253,7 +273,7 @@ mod usage_tests {
             assert!(!st.usage.contains_key("codex:logged-out"));
             assert!(st.usage_at.is_some());
         }
-        fetch_usage_with(&svc, &|_| Ok(usage(40.0)));
+        fetch_usage_with(&svc, &|_| true, &|_| Ok(usage(40.0)));
         let st = svc.state();
         assert!(st.usage.values().all(|e| e.error.is_none() && !e.fetching));
         assert_eq!(st.usage["codex:slow"].usage.as_ref().unwrap().five_hour.as_ref().unwrap().used_pct, 40.0);

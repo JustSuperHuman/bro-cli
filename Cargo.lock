@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "bro-bridge"
-version = "2.0.10"
+version = "2.0.11"
 dependencies = [
  "anyhow",
  "axum",
@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "bro-core"
-version = "2.0.10"
+version = "2.0.11"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "bro-proxy"
-version = "2.0.10"
+version = "2.0.11"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "bro-tui"
-version = "2.0.10"
+version = "2.0.11"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "bro-voice"
-version = "2.0.10"
+version = "2.0.11"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

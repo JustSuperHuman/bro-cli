@@ -419,3 +419,31 @@ fn fixed_port_scans_upward() {
     .unwrap();
     assert!(second.port() > first.port() && second.port() <= first.port() + 20);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn usage_route_reports_pool_accounts_without_upstream_calls() {
+    let e = env().await;
+    e.proxy.upsert_route(route(
+        "pool",
+        Upstream::ClaudePool {
+            config_dirs: vec!["C:/pool/a".into(), "C:/pool/b".into()],
+        },
+        None,
+        None,
+    ));
+    let u: Value = e
+        .client
+        .get(format!("{}/usage", e.proxy.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(u["logins"].is_array(), "{u}");
+    assert_eq!(u["pools"][0]["route"], "pool");
+    let accounts = u["pools"][0]["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 2);
+    assert_eq!(accounts[0]["name"], "a");
+    assert_eq!(e.mock.count("/"), 0, "reading usage must not call upstream");
+}

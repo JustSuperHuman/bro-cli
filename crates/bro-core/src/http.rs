@@ -18,6 +18,8 @@ fn agent(timeout: Duration) -> ureq::Agent {
 pub struct JsonResponse {
     pub status: u16,
     pub body: Value,
+    /// `retry-after` in seconds, when the server sent one as a number
+    pub retry_after: Option<u64>,
 }
 
 impl JsonResponse {
@@ -28,8 +30,13 @@ impl JsonResponse {
 
 fn finish(resp: ureq::http::Response<ureq::Body>) -> JsonResponse {
     let status = resp.status().as_u16();
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
     let text = resp.into_body().read_to_string().unwrap_or_default();
-    JsonResponse { status, body: serde_json::from_str(&text).unwrap_or(Value::Null) }
+    JsonResponse { status, body: serde_json::from_str(&text).unwrap_or(Value::Null), retry_after }
 }
 
 /// `GET url` with extra headers.

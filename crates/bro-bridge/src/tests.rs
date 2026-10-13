@@ -1512,3 +1512,84 @@ async fn remote_viewers_follow_subscriptions_slots_and_disconnects() {
     assert_eq!(viewers_become(&harness, "s2", 0).await, 0);
     assert!(harness.bridge.state().viewers.lock().is_empty(), "no leaked entries");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cleanup_usage_and_fleet_tools() {
+    let harness = Harness::start();
+    for id in ["alpha", "bravo", "charlie"] {
+        harness.register(id, None, None);
+    }
+    let client = reqwest::Client::new();
+    let kills = |harness: &Harness| {
+        let mut ids: Vec<String> = harness
+            .seen
+            .lock()
+            .iter()
+            .filter_map(|seen| match seen {
+                Seen::Kill(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    // REST cleanup, keeping one session.
+    let outcome: Value = client
+        .post(harness.url("/api/sessions/cleanup"))
+        .json(&json!({ "except": ["bravo"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(outcome["closed"].as_array().unwrap().len(), 2, "{outcome}");
+    assert_eq!(kills(&harness), ["alpha", "charlie"]);
+
+    // An empty DELETE closes everything.
+    harness.seen.lock().clear();
+    let deleted = client.delete(harness.url("/api/sessions")).send().await.unwrap();
+    assert_eq!(deleted.status(), 200);
+    assert_eq!(kills(&harness), ["alpha", "bravo", "charlie"]);
+    let bad = client
+        .post(harness.url("/api/sessions/cleanup"))
+        .body("{nope")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+
+    // Usage is served from bro's cache.
+    let usage: Value = client
+        .get(harness.url("/api/usage"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(usage["logins"].is_array(), "{usage}");
+
+    // The same over MCP.
+    let call = |id: u64, name: &str, arguments: Value| {
+        let client = client.clone();
+        let url = harness.url("/mcp");
+        let body = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        async move {
+            let answer: Value = client.post(url).json(&body).send().await.unwrap().json().await.unwrap();
+            assert_eq!(answer["result"]["isError"], false, "{answer}");
+            serde_json::from_str::<Value>(answer["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        }
+    };
+    let waited = call(1, "wait_for_sessions", json!({ "sessionIds": ["alpha", "bravo title"], "timeoutSeconds": 10 })).await;
+    assert_eq!(waited["outcome"], "every tab finished", "{waited}");
+    assert_eq!(waited["sessions"][1]["id"], "bravo");
+    assert_eq!(waited["sessions"][0]["state"], "idle");
+    let usage = call(2, "get_usage", json!({})).await;
+    assert!(usage["picks"].is_object());
+    harness.seen.lock().clear();
+    let closed = call(3, "close_all_sessions", json!({ "except": ["charlie"] })).await;
+    assert_eq!(closed["closed"].as_array().unwrap().len(), 2, "{closed}");
+    assert_eq!(kills(&harness), ["alpha", "bravo"]);
+}

@@ -72,6 +72,9 @@ pub fn fetch(config_dir: &Path) -> anyhow::Result<Usage> {
     if resp.status == 401 {
         resp = request(&creds::claude_access_token(config_dir, true)?)?;
     }
+    if resp.status == 429 {
+        return Err(super::cache::RateLimited { retry_after: resp.retry_after }.into());
+    }
     if !resp.ok() {
         bail!("usage request failed ({})", resp.status);
     }

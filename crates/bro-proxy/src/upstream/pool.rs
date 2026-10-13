@@ -179,15 +179,25 @@ impl PoolManager {
             if !exclude.contains(&prior)
                 && let Some((n, d, u)) = accounts.iter().find(|(n, _, _)| *n == prior)
                 && !u.cooling(now)
+                && !meter_exhausted(d)
             {
                 return Some((n.clone(), d.clone()));
             }
             inner.affinity.remove(s);
         }
-        let available: Vec<&(String, PathBuf, AccountUsage)> = accounts
+        let usable: Vec<&(String, PathBuf, AccountUsage)> = accounts
             .iter()
             .filter(|(n, _, u)| !u.cooling(now) && !exclude.contains(n))
             .collect();
+        // Skip logins whose last meter reading (bro_core's usage cache, no request
+        // made here) shows a spent window; if that leaves nobody, the readings may be
+        // stale, so let the upstream decide.
+        let fresh: Vec<_> = usable
+            .iter()
+            .copied()
+            .filter(|(_, d, _)| !meter_exhausted(d))
+            .collect();
+        let available = if fresh.is_empty() { usable } else { fresh };
         let min = available.iter().map(|(_, _, u)| u.window_requests).min()?;
         let tied: Vec<_> = available
             .iter()
@@ -247,6 +257,11 @@ impl PoolManager {
         });
         self.inner.lock().affinity.retain(|_, v| v != name);
     }
+}
+
+/// The account's cached subscription meters show a window at 100% that has not reset.
+fn meter_exhausted(dir: &Path) -> bool {
+    bro_core::usage::cache::for_config_dir(dir).is_some_and(|u| bro_core::usage::cache::exhausted(&u))
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

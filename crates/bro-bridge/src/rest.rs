@@ -36,6 +36,16 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
+/// bro addition: every login's subscription meters and headroom, from bro's usage
+/// cache (refreshed by bro itself; reading this never calls the usage endpoints).
+pub(crate) async fn usage() -> Json<Value> {
+    Json(
+        tokio::task::spawn_blocking(bro_core::usage::cache::report)
+            .await
+            .unwrap_or_else(|_| json!({ "error": "usage report failed" })),
+    )
+}
+
 pub(crate) async fn notifications(
     Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,

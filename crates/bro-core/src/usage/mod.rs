@@ -1,5 +1,6 @@
 //! Live subscription meters (v1 claude-usage.js / codex-usage.js / usage.js /
 //! usage-history.js / task-size.js).
+pub mod cache;
 pub mod claude;
 pub mod codex;
 pub mod history;
@@ -37,8 +38,21 @@ impl Usage {
 }
 
 /// Blocking fetch (Claude OAuth usage endpoint / `codex app-server` rateLimits).
-/// Records a reading into `~/.bro/usage-history.json`.
+/// Records a reading into `~/.bro/usage-history.json` and [`cache`].
+///
+/// While the login is backing off after a failure (429 included) this returns an
+/// error without making a request; pair it with [`cache::due`] to also respect the
+/// refresh interval.
 pub fn fetch(profile: &crate::profiles::Profile) -> anyhow::Result<Usage> {
+    if let Some(wait) = cache::backing_off(profile) {
+        anyhow::bail!("usage paused after an error; next try in {wait}s");
+    }
+    let result = fetch_uncached(profile);
+    cache::record(profile, &result);
+    result
+}
+
+fn fetch_uncached(profile: &crate::profiles::Profile) -> anyhow::Result<Usage> {
     let mut usage = if profile.is_claude() { claude::fetch(&profile.dir)? } else { codex::fetch(&profile.dir)? };
     if usage.plan.is_none() {
         usage.plan = profile.plan.clone();

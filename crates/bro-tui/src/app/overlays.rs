@@ -213,7 +213,7 @@ fn draw_confirm(f: &mut Frame, area: Rect, c: &Confirm, hover: ratatui::layout::
 
 /// Build launcher data from services + app state (dirs: the preferred cwd first).
 pub(super) fn launcher_data(app: &App) -> launcher::Data {
-    let installed = bro_core::Harness::ALL.iter().map(|h| (*h, app.svc.is_demo() || cfg!(test) || crate::util::which(h.label()).is_some())).collect();
+    let installed = bro_core::Harness::ALL.iter().map(|h| (*h, app.svc.is_demo() || cfg!(test) || bro_core::launch::which(h.label()).is_some())).collect();
     launcher_data_with_installed(app, installed)
 }
 

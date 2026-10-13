@@ -41,6 +41,12 @@ impl App {
                     t.zoom = !t.zoom;
                 }
             }
+            Act::Grow => {
+                if let Some(id) = self.focused() {
+                    self.toggle_priority(id);
+                }
+            }
+            Act::Shrink => self.priority = None,
             Act::TileAll => self.toggle_tiles(),
             Act::FocusLeft => self.move_focus(-1, 0),
             Act::FocusRight => self.move_focus(1, 0),

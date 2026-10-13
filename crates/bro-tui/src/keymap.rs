@@ -17,6 +17,10 @@ pub enum Act {
     SplitDown,
     Close,
     Zoom,
+    /// Grow the focused session to a working size (neighbours give way); again: snap back.
+    Grow,
+    /// Snap a grown session back to its place in the layout.
+    Shrink,
     TileAll,
     FocusLeft,
     FocusRight,
@@ -98,7 +102,7 @@ impl Act {
         let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, SwitchLogin, OpenedFile, AgentFiles, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
-        v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
+        v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
         v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, RefreshUsage]);
         v.extend([Palette, Help, Themes, ToggleIcons, ToggleAutoResume, ToggleCaveman, Quit]);
         v
@@ -116,6 +120,8 @@ impl Act {
             SplitDown => "split_down".into(),
             Close => "close".into(),
             Zoom => "zoom".into(),
+            Grow => "grow".into(),
+            Shrink => "shrink".into(),
             TileAll => "tile_all".into(),
             FocusLeft => "focus_left".into(),
             FocusRight => "focus_right".into(),
@@ -176,6 +182,8 @@ impl Act {
             SplitDown => "split down with a shell".into(),
             Close => "close the focused pane".into(),
             Zoom => "zoom / unzoom the focused pane".into(),
+            Grow => "grow the focused session to a working size (neighbours give way) / snap back".into(),
+            Shrink => "snap a grown session back".into(),
             TileAll => "tile all sessions / return to the focused session".into(),
             FocusLeft => "focus the pane to the left".into(),
             FocusRight => "focus the pane to the right".into(),
@@ -224,7 +232,7 @@ impl Act {
         match self {
             NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | CloseProject | OpenedFile | AgentFiles => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
-            Split | SplitRight | SplitDown | TileAll | Zoom | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
+            Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | RefreshUsage => Group::Views,
             Palette | Help | Themes | ToggleIcons | ToggleAutoResume | ToggleCaveman | Quit => Group::App,
         }
@@ -239,6 +247,8 @@ impl Act {
             Split => vec!["alt+enter", "alt+\\"],
             Close => vec!["ctrl+w", "alt+w"],
             Zoom => vec!["alt+z"],
+            Grow => vec!["ctrl+up", "alt+="],
+            Shrink => vec!["ctrl+down", "alt+-"],
             TileAll => vec!["alt+shift+t"],
             FocusLeft => vec!["alt+left"],
             FocusRight => vec!["alt+right"],
@@ -281,6 +291,8 @@ impl Act {
             SplitDown => vec!["\"", "-"],
             Close => vec!["x"],
             Zoom => vec!["z"],
+            Grow => vec!["="],
+            Shrink => vec!["_"],
             TileAll => vec!["T"],
             FocusLeft => vec!["h", "left"],
             FocusRight => vec!["l", "right"],

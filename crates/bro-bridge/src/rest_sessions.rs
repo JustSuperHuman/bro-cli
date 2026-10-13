@@ -58,6 +58,64 @@ pub(crate) async fn kill(Path(id): Path<String>, State(state): State<AppState>) 
     }
 }
 
+/// Which sessions a cleanup closes. Every field is optional: an empty body closes
+/// every session.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct Cleanup {
+    /// Only sessions in this project (`projectId` from the session list).
+    pub project_id: Option<String>,
+    /// Session ids to keep open.
+    pub except: Vec<String>,
+    /// Also close sessions whose agent is mid-turn (default true over REST).
+    pub include_busy: Option<bool>,
+}
+
+/// Ends the matching sessions' processes; returns what was closed and skipped.
+pub(crate) fn close_sessions(state: &AppState, cleanup: &Cleanup, include_busy_default: bool) -> Value {
+    let include_busy = cleanup.include_busy.unwrap_or(include_busy_default);
+    let mut closed = Vec::new();
+    let mut skipped = Vec::new();
+    for session in state.summaries() {
+        if cleanup.except.contains(&session.id)
+            || cleanup
+                .project_id
+                .as_ref()
+                .is_some_and(|project| session.project_id.as_ref() != Some(project))
+        {
+            continue;
+        }
+        let busy = session.agent_activity.as_deref() == Some("working");
+        if busy && !include_busy {
+            skipped.push(json!({ "id": session.id, "title": session.title, "reason": "busy" }));
+            continue;
+        }
+        match state.dispatch(&session.id, COMMAND_KILL, "", 0, 0) {
+            Ok(()) => closed.push(json!({ "id": session.id, "title": session.title })),
+            Err(reason) => {
+                skipped.push(json!({ "id": session.id, "title": session.title, "reason": reason }))
+            }
+        }
+    }
+    json!({ "closed": closed, "skipped": skipped })
+}
+
+/// bro addition: `POST /api/sessions/cleanup` (and `DELETE /api/sessions`) closes
+/// every session, or those matching the optional [`Cleanup`] body.
+pub(crate) async fn cleanup(State(state): State<AppState>, body: Bytes) -> Response {
+    let cleanup = if body.iter().all(u8::is_ascii_whitespace) {
+        Cleanup::default()
+    } else {
+        match serde_json::from_slice::<Cleanup>(&body) {
+            Ok(cleanup) => cleanup,
+            Err(error) => {
+                return api_error(StatusCode::BAD_REQUEST, format!("Invalid cleanup body: {error}"));
+            }
+        }
+    };
+    Json(close_sessions(&state, &cleanup, true)).into_response()
+}
+
 /// bro addition: bring the session to the foreground in the TUI.
 pub(crate) async fn focus(Path(id): Path<String>, State(state): State<AppState>) -> Response {
     if state.summary(&id).is_none() {

@@ -148,6 +148,32 @@ pub fn definitions() -> Vec<Value> {
             &["sessionId"],
         ),
         tool(
+            "close_all_sessions",
+            "Clean up: close every tab, or only one project's tabs, keeping any listed in except. Tabs whose agent is mid-turn are skipped unless includeBusy is true. Returns what was closed and skipped. Confirm with the user before closing tabs they did not ask you to close.",
+            json!({
+                "project": { "type": "string", "description": "Only tabs in this project (projectId, or a project name/folder from list_projects)." },
+                "except": { "type": "array", "items": { "type": "string" }, "description": "Tabs to keep (ids or names)." },
+                "includeBusy": { "type": "boolean", "description": "Also close tabs whose agent is working (default false)." }
+            }),
+            &[],
+        ),
+        tool(
+            "wait_for_sessions",
+            "Wait for several tabs at once: returns when all (mode \"all\", default) or any (mode \"any\") of them have stopped working and gone quiet, or at the timeout, with each tab's state (idle, working, awaiting a prompt answer, closed). Default: every tab running an agent. Use it to supervise parallel agents, then read_session / read_chat the ones that finished.",
+            json!({
+                "sessionIds": { "type": "array", "items": { "type": "string" }, "description": "Tabs to watch (ids or names). Default: every agent tab." },
+                "mode": { "type": "string", "enum": ["all", "any"] },
+                "timeoutSeconds": { "type": "integer", "description": "Maximum wait (default 30, max 45)." }
+            }),
+            &[],
+        ),
+        tool(
+            "get_usage",
+            "Subscription usage for every Claude and Codex login bro knows: 5-hour and weekly meters (% used, reset time), headroom left, which logins are exhausted, Claude pool accounts, and bro's pick for large and small tasks. Use it before starting heavy work or to choose a login (pass the login id as open_session's agent, e.g. claude:work). Reads bro's cached readings; it never polls the providers.",
+            json!({}),
+            &[],
+        ),
+        tool(
             "rename_session",
             "Rename a tab.",
             json!({ "sessionId": { "type": "string" }, "title": { "type": "string" } }),
@@ -331,6 +357,12 @@ pub fn summarize(app: &AppState, name: &str, args: &Value) -> String {
                 .unwrap_or_default()
         ),
         "close_session" => format!("Closed {}", target()),
+        "close_all_sessions" => match string_arg(args, "project") {
+            Some(project) => format!("Closed the tabs in {project}"),
+            None => "Closed every tab".into(),
+        },
+        "wait_for_sessions" => "Waited for the tabs to finish".into(),
+        "get_usage" => "Checked subscription usage".into(),
         "rename_session" => format!(
             "Renamed {} to \"{}\"",
             target(),
@@ -615,6 +647,58 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             app.dispatch(&id, COMMAND_KILL, "", 0, 0)?;
             Ok(format!("Closed \"{label}\"."))
         }
+        "close_all_sessions" => {
+            let mut except = Vec::new();
+            for wanted in string_list(args, "except") {
+                except.push(resolve_session(app, &json!({ "sessionId": wanted }))?);
+            }
+            let project_id = match string_arg(args, "project") {
+                None => None,
+                Some(project) => Some(resolve_project(app, &project)?),
+            };
+            let cleanup = crate::rest_sessions::Cleanup {
+                project_id,
+                except,
+                include_busy: args.get("includeBusy").and_then(Value::as_bool),
+            };
+            let outcome = crate::rest_sessions::close_sessions(app, &cleanup, false);
+            Ok(serde_json::to_string_pretty(&outcome).unwrap_or_default())
+        }
+        "wait_for_sessions" => {
+            let mut ids = Vec::new();
+            for wanted in string_list(args, "sessionIds") {
+                ids.push(resolve_session(app, &json!({ "sessionId": wanted }))?);
+            }
+            if ids.is_empty() {
+                let summaries = app.summaries();
+                let agents: Vec<String> = summaries
+                    .iter()
+                    .filter(|session| session.agent.is_some())
+                    .map(|session| session.id.clone())
+                    .collect();
+                ids = if agents.is_empty() {
+                    summaries.into_iter().map(|session| session.id).collect()
+                } else {
+                    agents
+                };
+            }
+            if ids.is_empty() {
+                return Err("There are no tabs to wait for.".into());
+            }
+            let any = string_arg(args, "mode").is_some_and(|mode| mode.eq_ignore_ascii_case("any"));
+            let timeout = Duration::from_secs(
+                integer_arg(args, "timeoutSeconds")
+                    .unwrap_or(30)
+                    .clamp(1, MAX_WAIT_SECONDS),
+            );
+            Ok(wait_for_sessions(app, &ids, any, timeout).await)
+        }
+        "get_usage" => {
+            let report = tokio::task::spawn_blocking(bro_core::usage::cache::report)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
+        }
         "rename_session" => {
             let id = resolve_session(app, args)?;
             let title = string_arg(args, "title").ok_or("title is required.")?;
@@ -652,6 +736,118 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
         }
         other => Err(format!("Unknown tool \"{other}\".")),
     }
+}
+
+fn string_list(args: &Value, key: &str) -> Vec<String> {
+    match args.get(key) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Some(Value::String(one)) if !one.trim().is_empty() => vec![one.trim().to_owned()],
+        _ => Vec::new(),
+    }
+}
+
+/// A project as the session list names it: its id, or a name or folder that
+/// matches exactly one project tabs are grouped under.
+fn resolve_project(app: &AppState, wanted: &str) -> Result<String, String> {
+    let projects = app.projects();
+    if projects.iter().any(|project| project.id == wanted) {
+        return Ok(wanted.to_string());
+    }
+    let lower = wanted.to_lowercase();
+    let folder = |cwd: &str| {
+        cwd.trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_lowercase()
+    };
+    let matches: Vec<&str> = projects
+        .iter()
+        .filter(|project| {
+            project.name.to_lowercase() == lower
+                || project.cwd.to_lowercase() == lower
+                || folder(&project.cwd) == lower
+        })
+        .map(|project| project.id.as_str())
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one.to_string()),
+        [] => Err(format!(
+            "No project matches \"{wanted}\". Call list_projects for names."
+        )),
+        _ => Err(format!("\"{wanted}\" matches several projects; pass its id.")),
+    }
+}
+
+/// Polls `ids` until all (or any) have stopped working and gone quiet.
+async fn wait_for_sessions(app: &AppState, ids: &[String], any: bool, timeout: Duration) -> String {
+    const QUIET: Duration = Duration::from_millis(1500);
+    let started = Instant::now();
+    let mut last: Vec<(Option<u64>, Instant)> = ids
+        .iter()
+        .map(|id| (app.session_seq(id), Instant::now()))
+        .collect();
+    let settled = |id: &str, changed: Instant| match app.session_view(id) {
+        None => true,
+        Some(view) => {
+            view.summary.agent_activity.as_deref() != Some("working") && changed.elapsed() >= QUIET
+        }
+    };
+    let outcome = loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        for (id, (seq, changed)) in ids.iter().zip(last.iter_mut()) {
+            let now = app.session_seq(id);
+            if now != *seq {
+                *seq = now;
+                *changed = Instant::now();
+            }
+        }
+        let done = ids
+            .iter()
+            .zip(&last)
+            .filter(|(id, (_, changed))| settled(id, *changed))
+            .count();
+        if (any && done > 0) || done == ids.len() {
+            break if any { "a tab finished" } else { "every tab finished" };
+        }
+        if started.elapsed() >= timeout {
+            break "timed out";
+        }
+    };
+    let sessions: Vec<Value> = ids
+        .iter()
+        .zip(&last)
+        .map(|(id, (_, changed))| match app.session_view(id) {
+            None => json!({ "id": id, "state": "closed" }),
+            Some(view) => {
+                let state = match view.summary.agent_activity.as_deref() {
+                    Some("working") => "working",
+                    Some("awaiting") => "awaiting",
+                    _ if changed.elapsed() < QUIET => "printing",
+                    _ => "idle",
+                };
+                json!({
+                    "id": id,
+                    "title": view.summary.title,
+                    "agent": view.summary.agent,
+                    "state": state,
+                    "waitingOn": view.prompt.as_ref().and_then(|prompt| prompt.get("title")).cloned(),
+                })
+            }
+        })
+        .collect();
+    serde_json::to_string_pretty(&json!({
+        "outcome": outcome,
+        "elapsedSeconds": (started.elapsed().as_secs_f32() * 10.0).round() / 10.0,
+        "sessions": sessions,
+    }))
+    .unwrap_or_default()
 }
 
 /// Types `text` into a tab the way a person pasting would: one bracketed

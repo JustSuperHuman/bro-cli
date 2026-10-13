@@ -404,9 +404,11 @@ fn project_chrome_matches_sidebar_and_focus_is_distinct_in_dark_and_light_themes
             let inner = a.inner.iter().find(|(i, _)| *i == id).unwrap().1;
             assert_ne!(buf[(inner.x, inner.y)].bg, color, "project chrome doesn't recolor terminal output");
         }
-        let unique: std::collections::HashSet<_> = a.project_colors.values().collect();
-        assert_eq!(unique.len(), a.project_colors.len(), "small workspaces don't reuse project colors");
         assert_ne!(a.project_color("a"), Color::Reset);
+        // the folder name alone decides: same name, same color, wherever it lives and whatever else is open
+        assert_eq!(a.project_color("f:/work/justgains"), a.project_color("c:/users/james/JustGains"));
+        assert_eq!(a.project_color("f:/work/justgains"), crate::theme::project_color("d:/elsewhere/JUSTGAINS", &crate::theme::get(name)));
+        assert_ne!(a.project_color("f:/work/justgains"), a.project_color("f:/work/bro-cli-v2"));
         shot(&mut a, &format!("tiled-{name}"));
     }
 }
@@ -463,6 +465,80 @@ fn clicking_an_agents_prompt_option_answers_it() {
     let lit = buf[(inner.x + 1, inner.y + row_of("1. Yes"))].bg;
     let plain = buf[(inner.x + 1, inner.y + row_of("2. Yes"))].bg;
     assert_ne!(lit, plain, "the hovered option stands out");
+}
+
+#[test]
+fn ctrl_clicking_a_session_grows_it_and_snaps_back() {
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    let base = a.outer.clone();
+    assert!(base.len() >= 3);
+    let ids = |v: &[(PaneId, Rect)]| v.iter().map(|x| x.0).collect::<Vec<_>>();
+    let at = |a: &App, id: PaneId| a.outer.iter().find(|(p, _)| *p == id).unwrap().1;
+    let ctrl = |a: &mut App, r: Rect| a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 8, row: r.y, modifiers: KeyModifiers::CONTROL });
+    let (small, r) = *base.iter().min_by_key(|(_, r)| r.width as u32 * r.height as u32).unwrap();
+    ctrl(&mut a, r);
+    assert_eq!((a.priority, a.focused()), (Some(small), Some(small)), "ctrl+click grows and focuses");
+    let screen = draw(&mut a);
+    let grown = at(&a, small);
+    assert!(grown.width > r.width || grown.height > r.height, "{r:?} -> {grown:?}");
+    assert_eq!(ids(&a.outer), ids(&base), "no session moves to another slot");
+    assert!(screen.contains("grown ·") && screen.contains("restores"), "hint names the snap-back key");
+    // again: back to exactly what it was
+    ctrl(&mut a, grown);
+    assert_eq!(a.priority, None);
+    draw(&mut a);
+    assert_eq!(a.outer, base);
+    // ctrl+click another session: the priority moves there
+    ctrl(&mut a, r);
+    draw(&mut a);
+    let (other, _) = *base.iter().find(|(p, _)| *p != small).unwrap();
+    let r2 = at(&a, other);
+    ctrl(&mut a, r2);
+    a.after_events();
+    assert_eq!(a.priority, Some(other));
+    draw(&mut a);
+    // a plain click elsewhere focuses that session and the grown one snaps back
+    let (third, _) = *base.iter().find(|(p, _)| *p != small && *p != other).unwrap();
+    let r3 = at(&a, third);
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r3.x + 8, row: r3.y, modifiers: KeyModifiers::NONE });
+    a.after_events();
+    assert_eq!((a.priority, a.focused()), (None, Some(third)));
+    draw(&mut a);
+    assert_eq!(a.outer, base);
+}
+
+#[test]
+fn ctrl_up_grows_the_focused_session_and_moving_on_snaps_it_back() {
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    let base = a.outer.clone();
+    let focus = a.focused().unwrap();
+    key(&mut a, KeyCode::Up, KeyModifiers::CONTROL);
+    a.after_events();
+    assert_eq!(a.priority, Some(focus), "ctrl+up grows the focused session");
+    draw(&mut a);
+    key(&mut a, KeyCode::Up, KeyModifiers::CONTROL);
+    a.after_events();
+    assert_eq!(a.priority, None, "ctrl+up again snaps back");
+    draw(&mut a);
+    assert_eq!(a.outer, base);
+    key(&mut a, KeyCode::Up, KeyModifiers::CONTROL);
+    key(&mut a, KeyCode::Down, KeyModifiers::CONTROL);
+    a.after_events();
+    assert_eq!(a.priority, None, "ctrl+down snaps back");
+    // Grown, then move to another session: the grow resets.
+    key(&mut a, KeyCode::Up, KeyModifiers::CONTROL);
+    a.after_events();
+    assert_eq!(a.priority, Some(focus));
+    a.run_act(Act::NextSession);
+    a.after_events();
+    assert_ne!(a.focused(), Some(focus));
+    assert_eq!(a.priority, None, "moving to another session resets the grow");
+    draw(&mut a);
+    assert_eq!(a.outer, base);
 }
 
 #[test]
@@ -2587,4 +2663,80 @@ fn caveman_sessions_carry_a_header_badge() {
     assert!(a.svc.settings().caveman.active().is_none());
     let screen = draw(&mut a);
     assert!(screen.contains("⛏ caveman"), "{screen}");
+}
+
+#[test]
+fn back_and_forward_step_through_viewed_sessions_keeping_full_screen_tiles_and_the_new_session_screen() {
+    let mut a = app(true);
+    let leaves = |root: &Node| {
+        let mut out = vec![];
+        root.leaves(&mut out);
+        out
+    };
+    let ids: Vec<PaneId> = a.tabs.iter().flat_map(|t| leaves(&t.root)).collect();
+    assert!(ids.len() >= 3);
+    let nav = |a: &mut App, back: bool| {
+        a.handle(Event::Navigate(back));
+        a.after_events();
+    };
+    for &id in &ids[..3] {
+        a.go_session(id);
+        a.after_events();
+    }
+    nav(&mut a, true);
+    assert_eq!(a.focused(), Some(ids[1]));
+    nav(&mut a, true);
+    assert_eq!(a.focused(), Some(ids[0]));
+    nav(&mut a, false);
+    assert_eq!(a.focused(), Some(ids[1]));
+
+    // the new-session screen is a stop too; leaving it by starting something keeps it in history
+    a.open_launcher(None, Place::Tab);
+    a.after_events();
+    a.overlay = Overlay::None;
+    a.go_session(ids[2]);
+    a.after_events();
+    nav(&mut a, true);
+    assert!(matches!(a.overlay, Overlay::Launcher(_)), "back to the new-session screen");
+    nav(&mut a, true);
+    assert!(!a.overlay.is_open());
+    assert_eq!(a.focused(), Some(ids[1]));
+    nav(&mut a, false);
+    nav(&mut a, false);
+    assert_eq!(a.focused(), Some(ids[2]));
+
+    // a zoomed split stays zoomed on the session you step to
+    if let Some(split) = a.tabs.iter().position(|t| !matches!(t.root, Node::Leaf(_))) {
+        let (first, second) = (leaves(&a.tabs[split].root)[0], leaves(&a.tabs[split].root)[1]);
+        a.go_session(first);
+        a.after_events();
+        a.go_session(second);
+        a.tabs[a.cur].zoom = true;
+        a.after_events();
+        nav(&mut a, true);
+        assert_eq!(a.focused(), Some(first));
+        assert!(a.tabs[a.cur].zoom, "full screen stays full screen");
+    }
+
+    // full-screen tiles stay full screen; plain tiles stay tiled and step through tiled sessions only
+    a.run_act(Act::TileAll);
+    let tiled = a.stack.clone();
+    a.go_session(tiled[0]);
+    a.after_events();
+    a.go_session(tiled[1]);
+    a.after_events();
+    a.stack_zoom = true;
+    nav(&mut a, true);
+    assert_eq!(a.focused(), Some(tiled[0]));
+    assert!(a.stacked() && a.stack_zoom);
+    a.stack_zoom = false;
+    nav(&mut a, false);
+    assert_eq!(a.focused(), Some(tiled[1]));
+    assert!(a.stacked() && !a.stack_zoom);
+
+    // a preview open on top closes first
+    a.overlay = Overlay::Help(crate::help::Help::default());
+    nav(&mut a, true);
+    assert!(!a.overlay.is_open());
+    assert_eq!(a.focused(), Some(tiled[1]));
 }

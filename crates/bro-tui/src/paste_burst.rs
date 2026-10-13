@@ -18,14 +18,40 @@ pub trait Source {
     fn read(&mut self) -> Option<Event>;
 }
 
-pub struct Console;
+pub struct Console {
+    /// The mouse's back (`true`) / forward buttons, which crossterm can't report.
+    pub on_nav: Box<dyn FnMut(bool) + Send>,
+    #[cfg(windows)]
+    pub nav: crate::console_nav::Nav,
+}
+
+impl Console {
+    pub fn new(on_nav: Box<dyn FnMut(bool) + Send>) -> Console {
+        Console {
+            on_nav,
+            #[cfg(windows)]
+            nav: Default::default(),
+        }
+    }
+
+    fn wait(&mut self, wait: Option<Duration>) -> bool {
+        #[cfg(windows)]
+        return self.nav.wait(wait, &mut self.on_nav);
+        #[cfg(not(windows))]
+        match wait {
+            Some(w) => crossterm::event::poll(w).unwrap_or(false),
+            None => true,
+        }
+    }
+}
 
 impl Source for Console {
     fn poll(&mut self, wait: Duration) -> bool {
-        crossterm::event::poll(wait).unwrap_or(false)
+        self.wait(Some(wait))
     }
 
     fn read(&mut self) -> Option<Event> {
+        while !self.wait(None) {}
         crossterm::event::read().ok()
     }
 }

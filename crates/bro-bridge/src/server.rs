@@ -68,8 +68,12 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/acp/{*rest}", any(rest::unavailable))
         .route(
             "/api/sessions",
-            get(rest_sessions::list).post(rest_sessions::create),
+            get(rest_sessions::list)
+                .post(rest_sessions::create)
+                .delete(rest_sessions::cleanup),
         )
+        .route("/api/sessions/cleanup", post(rest_sessions::cleanup))
+        .route("/api/usage", get(rest::usage))
         .route(
             "/api/sessions/{id}",
             patch(rest_sessions::rename).delete(rest_sessions::kill),

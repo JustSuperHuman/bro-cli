@@ -256,32 +256,40 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
-pub const PROJECT_COLORS: usize = 8;
-
-/// A stable preferred slot; the workspace resolves collisions among its projects.
-pub fn project_color_slot(key: &str) -> usize {
-    // FNV-1a, explicitly fixed instead of a platform-dependent/randomized hasher.
-    let hash = key.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
-    (hash % PROJECT_COLORS as u64) as usize
-}
-
-/// Light themes use darker counterparts; monochrome/terminal themes retain their palette.
-pub fn project_color(slot: usize, t: &Theme) -> Color {
+/// A project's color, from its folder name alone (case-insensitive): the same project gets the same color in
+/// every session, workspace and bro window, whatever else is open. Painted themes pick from their palette;
+/// others from the whole hue circle, so different projects rarely share one. Never red, which reads as an error.
+pub fn project_color(key: &str, t: &Theme) -> Color {
     if t.name == "mono" || t.name == "terminal" {
         return t.accent;
     }
-    // painted themes pick from their own palette (never red, which reads as an error): blue, magenta, cyan,
-    // yellow, green, bright blue, bright magenta, bright cyan
+    let name = key.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(key).to_lowercase();
+    // FNV-1a, explicitly fixed instead of a platform-dependent/randomized hasher.
+    let hash = name.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    // blue, magenta, cyan, yellow, green, bright blue, bright magenta, bright cyan
     if let Some(a) = t.ansi {
-        return a[[4, 5, 6, 3, 2, 12, 13, 14][slot % 8]];
+        return a[[4, 5, 6, 3, 2, 12, 13, 14][(hash % 8) as usize]];
     }
-    let colors = if t.is_light() {
-        [0x2864ad, 0x8761b4, 0x237d78, 0xa66028, 0xa84d76, 0x587c2c, 0x4e62ad, 0x96701f]
-    } else {
-        [0x7eb8f6, 0xc3a1ef, 0x69c8c2, 0xe9ad79, 0xe896b8, 0xa6c879, 0xa0adf7, 0xe4c579]
+    let hue = 20.0 + (hash % 3200) as f32 / 10.0;
+    let (saturation, lightness) = if t.is_light() { (0.55, 0.38) } else { (0.7, 0.72) };
+    hsl(hue, saturation, lightness)
+}
+
+fn hsl(hue: f32, s: f32, l: f32) -> Color {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h = hue / 60.0;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
     };
-    let rgb = colors[slot % colors.len()];
-    Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+    let m = l - c / 2.0;
+    let v = |n: f32| ((n + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color::Rgb(v(r), v(g), v(b))
 }
 
 pub fn project_tint(color: Color, t: &Theme) -> Color {

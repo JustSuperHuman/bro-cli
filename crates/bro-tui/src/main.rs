@@ -11,6 +11,8 @@ mod app;
 mod cli;
 mod continue_picker;
 mod clip;
+#[cfg(windows)]
+mod console_nav;
 mod editor;
 mod file_view;
 mod folder;
@@ -25,6 +27,7 @@ mod layout;
 mod palette;
 mod pane;
 mod paste_burst;
+mod priority;
 mod projects;
 mod open_cmd;
 mod proxy_cmd;
@@ -134,9 +137,12 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
         }
     };
 
-    let input_tx = tx.clone();
+    let (input_tx, nav_tx) = (tx.clone(), tx.clone());
+    let console = paste_burst::Console::new(Box::new(move |back| {
+        let _ = nav_tx.send(pane::Event::Navigate(back));
+    }));
     std::thread::Builder::new().name("bro-input".into())
-        .spawn(move || paste_burst::pump(paste_burst::Console, |ev| input_tx.send(pane::Event::Input(ev)).is_ok()))?;
+        .spawn(move || paste_burst::pump(console, |ev| input_tx.send(pane::Event::Input(ev)).is_ok()))?;
 
     let _instance = if demo { None } else { instance::serve(tx.clone()) };
     let mut app = app::App::new(svc, tx, app::Opts { demo, fixed_demo: false, load_recents: !demo });

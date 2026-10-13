@@ -149,6 +149,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/models", get(list_models));
     Router::new()
         .route("/health", get(health))
+        .route("/usage", get(usage))
+        .route("/v1/usage", get(usage))
         .route("/", get(health))
         .nest("/r/{route}", api)
         .fallback(not_found)
@@ -167,6 +169,31 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
         .map(|r| json!({"id": r.id, "label": r.label, "upstream": r.upstream.kind_str()}))
         .collect();
     axum::Json(json!({"ok": true, "via": "bro proxy", "routes": routes})).into_response()
+}
+
+/// Subscription meters for every login (bro_core's usage cache; no upstream request
+/// is made) plus, per Claude pool route, each account's local counters and cooldown.
+async fn usage(State(state): State<Arc<AppState>>) -> Response {
+    let report = tokio::task::spawn_blocking(move || {
+        let pools: Vec<Value> = state
+            .routes()
+            .iter()
+            .filter_map(|r| match &r.upstream {
+                crate::Upstream::ClaudePool { config_dirs } => Some(json!({
+                    "route": r.id,
+                    "label": r.label,
+                    "accounts": state.pool().status(config_dirs),
+                })),
+                _ => None,
+            })
+            .collect();
+        let mut report = bro_core::usage::cache::report();
+        report["pools"] = json!(pools);
+        report
+    })
+    .await
+    .unwrap_or_else(|_| json!({ "error": "usage report failed" }));
+    axum::Json(report).into_response()
 }
 
 async fn not_found(uri: Uri) -> Response {

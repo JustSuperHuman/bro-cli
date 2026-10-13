@@ -24,7 +24,7 @@ impl App {
     }
 
     pub(super) fn project_color(&self, key: &str) -> ratatui::style::Color {
-        crate::theme::project_color(*self.project_colors.get(key).unwrap_or(&crate::theme::project_color_slot(key)), &self.theme)
+        crate::theme::project_color(key, &self.theme)
     }
 
     /// The tiled sessions by project: (key, name, panes), in tile order, each project where it first appears.
@@ -40,24 +40,7 @@ impl App {
         groups
     }
 
-    fn sync_project_colors(&mut self) {
-        let mut live = self.live_infos();
-        live.sort_by_key(|p| p.seq);
-        let keys = self.open_infos().into_iter().map(|p| p.key).chain(live.into_iter().map(|p| p.project_key));
-        for key in keys {
-            if self.project_colors.contains_key(&key) {
-                continue;
-            }
-            let preferred = crate::theme::project_color_slot(&key);
-            let slot = (0..crate::theme::PROJECT_COLORS).map(|n| (preferred + n) % crate::theme::PROJECT_COLORS)
-                .find(|slot| !self.project_colors.values().any(|used| used == slot)).unwrap_or(preferred);
-            // Keep assignments when sessions close, so existing projects never change color mid-use.
-            self.project_colors.insert(key, slot);
-        }
-    }
-
     pub(crate) fn draw(&mut self, f: &mut Frame) {
-        self.sync_project_colors();
         let area = f.area();
         let t = self.theme.clone();
         if !matches!(t.bg, ratatui::style::Color::Reset) {
@@ -132,6 +115,10 @@ impl App {
         let mut rects = vec![];
         // Tiled sessions from two or more projects: one colored frame per project around its sessions.
         let mut groups: Vec<(Rect, String, String, usize)> = vec![];
+        // every project region (framed or not) and, per entry of `groups`, its index here: the priority grow
+        // resizes the regions with the panes
+        let mut regions: Vec<(Rect, bool)> = vec![];
+        let mut group_tags: Vec<usize> = vec![];
         let (focus, zoomed) = if self.stacked() {
             let focus = self.focused().unwrap_or(0);
             let by_project = if self.stack_zoom { vec![] } else { self.tile_groups() };
@@ -146,8 +133,10 @@ impl App {
                     let inside = if framed { Rect { x: region.x + 1, y: region.y + 1, width: region.width - 2, height: region.height - 2 } } else { region };
                     out.extend(crate::layout::stack_rects(inside, &ids));
                     if framed {
+                        group_tags.push(regions.len());
                         groups.push((region, key, name, ids.len()));
                     }
+                    regions.push((region, framed));
                 }
                 out
             } else {
@@ -163,6 +152,19 @@ impl App {
             }
             (tab.focus, tab.zoom)
         };
+        // A ctrl+clicked session grows to a working size inside this arrangement; its neighbours give way.
+        let mut folded = vec![];
+        let grown = self.priority.filter(|_| !zoomed).and_then(|id| crate::priority::prioritize(body, &rects, &regions, id, crate::priority::want(body)));
+        self.grown = grown.is_some();
+        if let Some(g) = grown {
+            for (tag, r) in g.frames {
+                if let Some(i) = group_tags.iter().position(|t| *t == tag) {
+                    groups[i].0 = r;
+                }
+            }
+            rects = g.panes;
+            folded = g.folded;
+        }
         self.outer = rects.clone();
         if self.tile_all && rects.is_empty() && !self.minimized.is_empty() {
             let message = "All sessions minimized · show minimized in the sidebar";
@@ -185,7 +187,13 @@ impl App {
             if !focused {
                 title = Line::from(title.spans.into_iter().map(|s| Span::styled(s.content, s.style.remove_modifier(Modifier::BOLD).fg(t.muted))).collect::<Vec<_>>());
             }
-            let sub = zoomed.then(|| format!("zoomed · {}", self.keymap.primary(crate::keymap::Act::Zoom)));
+            let sub = if zoomed {
+                Some(format!("zoomed · {}", self.keymap.primary(crate::keymap::Act::Zoom)))
+            } else {
+                (self.grown && self.priority == Some(id)).then(|| format!("grown · {} restores", self.keymap.primary(crate::keymap::Act::Shrink)))
+            };
+            let folded = folded.contains(&id);
+            let label: String = title.spans.iter().map(|s| s.content.as_ref()).collect();
             let project = p.as_term_ref().map(|p| &p.meta.project);
             let color = project.map(|p| self.project_color(&p.key)).unwrap_or(t.accent);
             let inner = if let Some(project) = project {
@@ -201,7 +209,10 @@ impl App {
             } else {
                 ui::frame_ex(f, r, title, status, sub.as_deref(), focused, &t)
             };
-            self.inner.push((id, inner));
+            // a folded pane takes no clicks inside: one focuses it, which unfolds it
+            if !folded {
+                self.inner.push((id, inner));
+            }
             if r.width > 24 {
                 let b = Rect { x: r.right() - 4, y: r.bottom().saturating_sub(1), width: 3, height: 1 };
                 if b.x > r.x + 2 && !zoomed {
@@ -210,6 +221,17 @@ impl App {
                     ui::line(f, b, vec![Span::styled("×", style)]);
                     self.pane_close.push((b, id));
                 }
+            }
+            // Folded out of the way of the grown session: just its title (down the strip when narrow); the program
+            // keeps its size until it unfolds.
+            if folded {
+                if inner.width > 0 && inner.width < crate::priority::USEFUL[0] && inner.height > 1 {
+                    for (i, c) in label.split(" — ").next().unwrap_or_default().trim().chars().filter(|c| !c.is_whitespace()).take(inner.height as usize).enumerate() {
+                        let cell = Rect { x: inner.x + (inner.width - 1) / 2, y: inner.y + i as u16, width: 1, height: 1 };
+                        ui::line(f, cell, vec![Span::styled(c.to_string(), fg(color))]);
+                    }
+                }
+                continue;
             }
             let mut actions = vec![];
             if let Some(p) = self.panes.get_mut(&id) {

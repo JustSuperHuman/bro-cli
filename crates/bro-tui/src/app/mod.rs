@@ -9,6 +9,7 @@
 mod commands;
 mod draw;
 mod files;
+mod history;
 mod input;
 pub(crate) mod insights;
 mod mouse;
@@ -117,7 +118,6 @@ pub struct App {
     /// launch order per pane (sidebar grouping)
     seqs: HashMap<PaneId, u64>,
     pub(crate) theme: Theme,
-    project_colors: HashMap<String, usize>,
     pub(crate) keymap: Keymap,
     pub(crate) svc: Services,
     tx: Sender<Event>,
@@ -205,6 +205,12 @@ pub struct App {
     /// The grid shows only this project's sessions (click a project in the sidebar).
     pub(crate) tile_project: Option<String>,
     stack_zoom: bool,
+    /// The session ctrl+click grew to a working size (until ctrl+clicked again or focus moves on).
+    pub(crate) priority: Option<PaneId>,
+    /// The priority grow changed the layout in the last draw (the split dividers aren't where the tree says).
+    grown: bool,
+    /// back/forward through the sessions you looked at (mouse back/forward buttons)
+    history: history::History,
     term_focused: bool,
     opts: Opts,
     _theme_watcher: Option<notify::RecommendedWatcher>,
@@ -223,7 +229,6 @@ impl App {
             next_id: 1,
             seqs: HashMap::new(),
             theme,
-            project_colors: HashMap::new(),
             keymap,
             svc,
             tx: tx.clone(),
@@ -284,6 +289,9 @@ impl App {
             show_minimized: false,
             tile_project: None,
             stack_zoom: false,
+            priority: None,
+            grown: false,
+            history: Default::default(),
             term_focused: true,
             opts,
             _theme_watcher: None,
@@ -707,7 +715,12 @@ impl App {
 
     /// Housekeeping after each batch of events.
     pub(crate) fn after_events(&mut self) {
+        // the grown session snaps back once you work somewhere else
+        if self.priority.is_some() && self.priority != self.focused() {
+            self.priority = None;
+        }
         self.follow_focus();
+        self.record_view();
         let focused = self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone());
         self.svc.set_focused_session(focused.as_deref());
         self.reap();
@@ -795,6 +808,7 @@ impl App {
                 self.drag = None;
             }
             Event::Input(_) => {}
+            Event::Navigate(back) => self.navigate(back),
             Event::Wake(wake) => {
                 wake.acknowledge();
                 self.with_pane(wake.id, |p, cx| p.poll(cx));
