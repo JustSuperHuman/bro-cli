@@ -17,6 +17,25 @@ One terminal workspace for all your coding agents — Claude Code, Codex, Pi and
 
 ## Install
 
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/JustSuperHuman/bro-cli/main/install.ps1 | iex
+```
+
+**macOS / Linux**:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/JustSuperHuman/bro-cli/main/install.sh | sh
+```
+
+The installer downloads the latest release for your platform, verifies its SHA-256 checksum and
+installs bro to `%LOCALAPPDATA%\Programs\bro` (added to your user `PATH`) or `~/.local/bin`.
+Set `BRO_VERSION` (e.g. `v2.0.11`) to pin a release or `BRO_INSTALL_DIR` to change the location.
+Rerun it to update.
+
+Or install by hand:
+
 1. Download the archive for your system from the [latest release](https://github.com/JustSuperHuman/bro-cli/releases/latest).
 2. Unpack it and put `bro` somewhere on your `PATH`.
 3. Run it:
