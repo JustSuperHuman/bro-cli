@@ -281,6 +281,16 @@ impl SettingsView {
                 cx.act(Action::Open(Box::new(super::quick_install::install_term(cx.svc, cwd, &["justimagine", "--force"])), Place::Tab));
                 self.imagine_update = Some((Instant::now(), found.commit.clone()));
             }
+            // running and up to date: open it, signed in (its address needs the token bro reads off disk)
+            Some(found) if found.url.is_some() => {
+                let tx = cx.tx.clone();
+                std::thread::spawn(move || {
+                    let result = bro_core::justimagine::open_url().ok_or_else(|| "JustImagine stopped answering".to_string()).and_then(|u| crate::panes::links::open(&u));
+                    if let Err(e) = result {
+                        let _ = tx.send(crate::pane::Event::Toast(Kind::Error, format!("couldn't open JustImagine: {e}")));
+                    }
+                });
+            }
             Some(_) => cx.svc.check_justimagine(false),
         }
     }
@@ -512,6 +522,7 @@ impl Pane for SettingsView {
             (Some(f), Some(n)) => (format!("+{}", commits(n)), fg(t.shine).add_modifier(Modifier::BOLD), format!("{} is behind GitHub · enter pulls them and restarts the service", f.describe())),
             (Some(f), None) if f.dir.is_none() => (f.describe(), fg(t.inline), "runs from a copy bro doesn't manage, so bro leaves its updates to you".into()),
             (Some(f), None) if ji.error.is_some() => (f.describe(), fg(t.inline), format!("couldn't compare with GitHub: {} · enter tries again", ji.error.as_deref().unwrap_or_default())),
+            (Some(f), None) if f.url.is_some() => (f.describe(), fg(t.inline), "up to date with GitHub · enter opens it in your browser, signed in".into()),
             (Some(f), None) => (f.describe(), fg(t.inline), "up to date with GitHub · enter checks again".into()),
         };
         lines.push((Some(i), vec![name(i, "JustImagine"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));

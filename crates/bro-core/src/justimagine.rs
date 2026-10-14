@@ -138,11 +138,45 @@ fn running(port: u16) -> Option<String> {
     (resp.ok() && resp.body.get("service").and_then(|s| s.as_str()) == Some("justimagine")).then_some(url)
 }
 
+/// The port its service listens on: the one it recorded, else [`DEFAULT_PORT`].
+pub fn port() -> u16 {
+    service_record(&app_home()).and_then(|r| r.port).unwrap_or(DEFAULT_PORT)
+}
+
+/// Its API and sign-in token: beside its config (`JUSTIMAGINE_CONFIG_PATH`), else in its home.
+fn token_file() -> PathBuf {
+    match std::env::var_os("JUSTIMAGINE_CONFIG_PATH").filter(|v| !v.is_empty()) {
+        Some(config) => Path::new(&config).parent().map_or_else(app_home, Path::to_path_buf).join("auth.token"),
+        None => app_home().join("auth.token"),
+    }
+}
+
+/// `token` for a query string.
+fn encode(token: &str) -> String {
+    token.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// The gallery's address, signed in: JustImagine trades `?token=` for a cookie and drops it from
+/// the address bar. Without a token file, the plain address.
+pub fn signed_in_url(port: u16, token: Option<&str>) -> String {
+    let base = format!("http://127.0.0.1:{port}");
+    match token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => format!("{base}/?token={}", encode(t)),
+        None => base,
+    }
+}
+
+/// The running gallery's signed-in address, or None when nothing answers. Blocking.
+pub fn open_url() -> Option<String> {
+    let port = port();
+    running(port)?;
+    Some(signed_in_url(port, std::fs::read_to_string(token_file()).ok().as_deref()))
+}
+
 /// bro's checkout, or a service answering on its recorded port. Blocking (asks the local
 /// service): call off the UI thread.
 pub fn installed() -> Option<Installed> {
-    let port = service_record(&app_home()).and_then(|r| r.port).unwrap_or(DEFAULT_PORT);
-    let url = running(port);
+    let url = running(port());
     let dir = Some(install_dir()).filter(|d| is_checkout(d));
     if dir.is_none() && url.is_none() {
         return None;
@@ -189,7 +223,8 @@ fn step(program: &Path, args: &[&std::ffi::OsStr]) -> Step {
 pub fn plan(dir: &Path, root: &Path, git: &Path, npm: &Path, node: &Path) -> Vec<Step> {
     let os = |s: &str| std::ffi::OsString::from(s);
     let (dir, root) = (dir.as_os_str().to_owned(), root.as_os_str().to_owned());
-    let mut steps = vec![if Path::new(&dir).join(".git").exists() {
+    let update = Path::new(&dir).join(".git").exists();
+    let mut steps = vec![if update {
         step(git, &[&os("-C"), &dir, &os("pull"), &os("--ff-only")])
     } else {
         step(git, &[&os("clone"), &os("--depth"), &os("1"), &os(CLONE_URL), &dir])
@@ -201,7 +236,12 @@ pub fn plan(dir: &Path, root: &Path, git: &Path, npm: &Path, node: &Path) -> Vec
     let mut stop = step(node, &[&entry, &os("service"), &os("stop")]);
     stop.ok_codes = vec![1];
     steps.push(stop);
-    steps.push(step(node, &[&entry, &os("service"), &os("install"), &os("--root"), &root, &os("--no-open")]));
+    // a first install opens the gallery, signed in (JustImagine adds its token); an update doesn't
+    let mut install = vec![entry.clone(), os("service"), os("install"), os("--root"), root];
+    if update {
+        install.push(os("--no-open"));
+    }
+    steps.push(step(node, &install.iter().map(|a| a.as_os_str()).collect::<Vec<_>>()));
     steps
 }
 
@@ -322,10 +362,20 @@ mod tests {
         assert!(steps[0].display.starts_with("git clone --depth 1 https://github.com/JustGains/JustImagine.git"), "{}", steps[0].display);
         assert_eq!(steps[1].args[..3], ["install".to_string(), "--prefix".into(), app.display().to_string()]);
         assert!(steps[2].args.ends_with(&["service".into(), "stop".into()]) && steps[2].ok_codes == [1]);
-        assert_eq!(steps[3].args[1..], ["service".to_string(), "install".into(), "--root".into(), root.display().to_string(), "--no-open".into()]);
+        // a first install opens the gallery signed in
+        assert_eq!(steps[3].args[1..], ["service".to_string(), "install".into(), "--root".into(), root.display().to_string()]);
         std::fs::create_dir_all(app.join(".git")).unwrap();
         let steps = plan(&app, &root, &git, &npm, &node);
         assert_eq!(steps[0].args, ["-C".to_string(), app.display().to_string(), "pull".into(), "--ff-only".into()]);
+        assert_eq!(steps[3].args.last().map(String::as_str), Some("--no-open"), "an update doesn't open a browser");
+    }
+
+    #[test]
+    fn the_gallery_url_carries_its_token() {
+        assert_eq!(signed_in_url(8793, Some("ab12\n")), "http://127.0.0.1:8793/?token=ab12");
+        assert_eq!(signed_in_url(8791, Some("a+b/c=")), "http://127.0.0.1:8791/?token=a%2Bb%2Fc%3D");
+        assert_eq!(signed_in_url(8793, Some("  ")), "http://127.0.0.1:8793");
+        assert_eq!(signed_in_url(8793, None), "http://127.0.0.1:8793");
     }
 
     /// Clones and installs dependencies for real, without touching the service.

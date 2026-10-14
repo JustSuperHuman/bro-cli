@@ -112,6 +112,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(cli::Command::Imagine) => match install_cmd::open_imagine() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro imagine: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(cli::Command::InstallHelp) => {
             print!("{}", install_cmd::HELP);
             ExitCode::SUCCESS

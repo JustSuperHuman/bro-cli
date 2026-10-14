@@ -23,6 +23,8 @@ pub enum Command {
     /// `bro env encrypt | decrypt | list` — env files (`--env` itself is taken off in `main`).
     Env(crate::env_cmd::EnvCmd),
     EnvHelp,
+    /// `bro imagine` — open the running JustImagine gallery, signed in.
+    Imagine,
 }
 
 /// Usage text (`{version}` is substituted).
@@ -54,6 +56,7 @@ usage
   bro --export-env [file] [--plain]
                    your own environment variables as an encrypted env file (bro.env by
                    default, asks for a passphrase), to load anywhere with --env
+  bro imagine      open your JustImagine gallery in the browser, signed in
   bro --version    print the version
   bro --help       this help
 
@@ -83,6 +86,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
     if args.first().map(String::as_str) == Some("env") {
         return crate::env_cmd::parse(&args[1..]).map(|a| a.map_or(Command::EnvHelp, Command::Env));
+    }
+    if args.first().map(String::as_str) == Some("imagine") {
+        return match args.get(1).map(String::as_str) {
+            None => Ok(Command::Imagine),
+            Some(other) => Err(format!("bro imagine: unknown argument '{other}'")),
+        };
     }
     if args.first().map(String::as_str) == Some("install") {
         return crate::install_cmd::parse(&args[1..]).map(|a| a.map_or(Command::InstallHelp, Command::Install));
@@ -128,6 +137,7 @@ mod tests {
         assert!(p(&["update", "now"]).is_err());
         assert!(matches!(p(&["env", "list", "k.env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::List { .. }))));
         assert_eq!(p(&["env"]), Ok(Command::EnvHelp));
+        assert_eq!(p(&["imagine"]), Ok(Command::Imagine));
         assert_eq!(p(&["--export-env", "me.env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::Export { out: "me.env".into(), plain: false, all: false, force: false })));
         assert!(matches!(p(&["--export-env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::Export { ref out, plain: false, .. })) if out == "bro.env"));
     }

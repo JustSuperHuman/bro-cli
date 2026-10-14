@@ -158,7 +158,7 @@ fn install_one(t: Tool) -> Result<(), String> {
     match t {
         Tool::JustTools => install_justtools(),
         Tool::JustWatch => install_justwatch(),
-        Tool::JustImagine => bro_core::justimagine::install(|line| println!("{line}")),
+        Tool::JustImagine => bro_core::justimagine::install(|line| println!("{line}")).map(|()| println!("  open it any time, signed in: bro imagine")),
         Tool::Agent(h) => agent_install::install(h, |line| println!("{line}")).map(|_| ()),
         _ => quick_install::install(t, |line| println!("{line}")),
     }
@@ -169,6 +169,21 @@ fn wait_for_enter() {
         print!("\nPress Enter to close. ");
         std::io::stdout().flush().ok();
         let _ = std::io::stdin().lock().read_line(&mut String::new());
+    }
+}
+
+/// `bro imagine`: the running JustImagine gallery in the browser, signed in.
+pub fn open_imagine() -> Result<(), String> {
+    use bro_core::justimagine;
+    match justimagine::open_url() {
+        Some(url) => {
+            println!("opening JustImagine at http://127.0.0.1:{} (signed in)", justimagine::port());
+            crate::panes::links::open(&url)
+        }
+        None if justimagine::installed().is_some_and(|f| f.dir.is_some()) => {
+            Err(format!("nothing answers on port {}: `bro install justimagine --force` reinstalls and starts its service", justimagine::port()))
+        }
+        None => Err("JustImagine isn't running here: `bro install justimagine` installs it as a service".into()),
     }
 }
 
