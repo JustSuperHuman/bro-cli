@@ -1,6 +1,6 @@
 //! bro's own updates: the newest release on GitHub (when bro opens and every
 //! [`self_update::CHECK_EVERY`], unless switched off), and installing it over the running bro.
-//! Everything slow runs on a background thread and publishes into [`UpdateState`].
+//! The same looks ask whether JustImagine's checkout is behind GitHub. Everything slow runs on a background thread and publishes into [`UpdateState`].
 
 use super::{Services, guard_res};
 use crate::alerts::Kind;
@@ -98,6 +98,7 @@ impl Services {
                 loop {
                     if svc.settings().updates.check {
                         svc.check_bro_update(true);
+                        svc.check_justimagine(true);
                     }
                     std::thread::sleep(self_update::CHECK_EVERY);
                 }

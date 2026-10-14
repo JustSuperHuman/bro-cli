@@ -2523,6 +2523,8 @@ fn settings_view_switches_presets_and_overrides_switches() {
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert!(!a.svc.settings().justwatch.skill);
     }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustImagine: the demo has none
+    { let s = draw(&mut a); assert!(s.contains("JustImagine") && s.contains("not installed"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // bro version: the demo never looks
     { let s = draw(&mut a); assert!(s.contains("updates") && s.contains(bro_core::self_update::CURRENT), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // check for updates: on unless you turn it off
@@ -2542,7 +2544,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     let screen = draw(&mut a);
     assert!(screen.contains("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"), "{screen}");
     key(&mut a, KeyCode::Home, KeyModifiers::NONE);
-    for _ in 0..15 + usize::from(bro_core::justwatch::supported()) {
+    for _ in 0..16 + usize::from(bro_core::justwatch::supported()) {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // back to error reports
     }
     key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
@@ -2580,6 +2582,28 @@ fn settings_show_a_justtools_update_its_progress_and_how_it_ended() {
     });
     let s = draw(&mut a);
     assert!(s.contains("✓ updated 2.8.0 → 2.9.0") && s.contains("the newest release · enter checks again"), "{s}");
+}
+
+#[test]
+fn settings_show_justimagine_behind_github_and_where_it_runs() {
+    use bro_core::justimagine::{Behind, Installed};
+    let mut a = app(false);
+    a.run_act(Act::Settings);
+    let _ = draw(&mut a);
+    let sha = "0a50ae7c5f0e7c2b1d1e9f8a7b6c5d4e3f2a1b0c";
+    a.svc.update(|st| {
+        st.justimagine.installed = Some(Installed { dir: Some(std::env::temp_dir()), version: Some("0.1.0".into()), commit: Some(sha.into()), url: Some("http://127.0.0.1:8793".into()) });
+        st.justimagine.behind = Some(Behind { commits: 3, latest: Some("b".repeat(40)) });
+    });
+    let s = draw(&mut a);
+    assert!(s.contains("+3 new commits") && s.contains("0.1.0 · 0a50ae7 is behind GitHub"), "{s}");
+    assert!(s.contains("open at http://127.0.0.1:8793"), "{s}");
+    a.svc.update(|st| {
+        st.justimagine.behind = Some(Behind { commits: 0, latest: None });
+        st.justimagine.installed.as_mut().unwrap().url = None;
+    });
+    let s = draw(&mut a);
+    assert!(s.contains("up to date with GitHub") && s.contains("service isn't answering"), "{s}");
 }
 
 #[test]
@@ -2779,4 +2803,58 @@ fn quick_install_ticks_the_missing_recommended_tools_and_toggles_them() {
     assert_eq!(s.contains("[x] JustWatch"), bro_core::justwatch::supported(), "JustWatch is listed on Windows only: {s}");
     key(&mut a, KeyCode::Char('i'), KeyModifiers::NONE); // the demo installs nothing
     assert_eq!(a.focused(), Some(id), "no install tab in the demo");
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "spawns local processes in ConPTY; no accounts or network"]
+fn closing_a_session_ends_the_background_processes_it_started() {
+    use crate::panes::term::{Spawn, Term};
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    let alive = |pid: u32| unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        ok && code == STILL_ACTIVE as u32
+    };
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    let survivor = a.focused().unwrap();
+    let mut meta = a.panes[&survivor].as_term_ref().unwrap().meta.clone();
+    meta.sid = uuid::Uuid::new_v4().to_string();
+    meta.cwd = dir.path().to_path_buf();
+    meta.harness = None;
+    meta.route_id = None;
+    meta.cleanup.clear();
+    // like an agent starting a dev server or MCP server with its own hidden console
+    let marker = dir.path().join("server.pid");
+    let ps = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let script = format!(
+        "$p = Start-Process '{}' -ArgumentList '-NoProfile','-Command','Start-Sleep 120' -WindowStyle Hidden -PassThru; Set-Content -Path '{}' -Value $p.Id; Start-Sleep 120",
+        ps.display(),
+        marker.display()
+    );
+    let spawn = Spawn { program: ps.to_string_lossy().into_owned(), args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into(), script], ..Spawn::default() };
+    let id = a.new_tab(Box::new(Term::new(meta, spawn, a.svc.clone())));
+    a.start_now(id);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let server: u32 = loop {
+        if let Some(pid) = std::fs::read_to_string(&marker).ok().and_then(|s| s.trim().parse().ok()) {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "the background process never started");
+        a.handle(Event::Tick);
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(alive(server));
+    a.close(id);
+    std::thread::sleep(Duration::from_millis(500));
+    let left = alive(server);
+    a.shutdown();
+    assert!(!left, "the session's background process outlived the session");
 }

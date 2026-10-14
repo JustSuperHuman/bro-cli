@@ -19,9 +19,14 @@ rand.workspace = true
 chrono.workspace = true
 ureq.workspace = true
 memchr.workspace = true
+argon2.workspace = true
+chacha20poly1305.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

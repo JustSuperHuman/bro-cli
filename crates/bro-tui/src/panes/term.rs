@@ -302,6 +302,10 @@ impl Term {
         self.size = (rows, cols);
         self.base = (rows, cols);
         let pid = child.process_id();
+        // so closing the window (not just quitting) still ends this session's processes
+        if let Some(p) = pid.filter(|_| !self.svc.is_demo()) {
+            bro_core::proc_tree::track(p);
+        }
         self.live = Some(Live { master: pair.master, child });
         self.svc.bridge_register(self.bridge_meta(s, pid));
         self.launch = Some(s.clone());
@@ -555,12 +559,16 @@ impl Term {
         self.size
     }
 
-    /// Kill the program (bridge kill, close).
+    /// Kill the program and what it started (bridge kill, close, quit): console programs in its
+    /// process tree end with it; GUI apps it opened stay (see `bro_core::proc_tree`).
     pub fn kill(&mut self) {
         if self.exit_code().is_some() {
             return;
         }
         if let Some(l) = &mut self.live {
+            if let Some(pid) = l.child.process_id() {
+                bro_core::proc_tree::kill_tree(pid);
+            }
             let _ = l.child.kill();
         }
     }
@@ -569,6 +577,11 @@ impl Term {
     pub fn exit_code(&mut self) -> Option<i32> {
         if self.exit_status.is_none() {
             self.exit_status = self.live.as_mut().and_then(|l| l.child.try_wait().ok().flatten()).map(|s| s.exit_code() as i32);
+            if self.exit_status.is_some()
+                && let Some(pid) = self.live.as_ref().and_then(|l| l.child.process_id())
+            {
+                bro_core::proc_tree::untrack(pid);
+            }
         }
         self.exit_status
     }

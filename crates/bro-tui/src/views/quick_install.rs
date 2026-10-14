@@ -1,8 +1,9 @@
-//! Quick Install view: a checklist of the tools a coding machine wants — JustTools first, JustWatch on Windows, then Git,
+//! Quick Install view: a checklist of the tools a coding machine wants — JustTools first, JustWatch on Windows, JustImagine, then Git,
 //! Node.js, Bun, Python, the .NET SDKs, the agent CLIs and a few utilities — with what's already
 //! installed. JustTools installs in the background like in settings; the rest run in a new tab
 //! (`bro install --wait …`) so each installer's progress and its password / UAC prompts are visible.
-//! Once a JustWatch installed from here shows up, its skill is switched on for new sessions.
+//! Once a JustWatch installed from here shows up, its skill is switched on for new sessions; once JustImagine does,
+//! bro looks at it again so settings show its version.
 
 use super::settings::{spinner, step_label};
 use crate::alerts::Kind;
@@ -33,7 +34,8 @@ const WATCH_FOR: Duration = Duration::from_secs(15 * 60);
 /// A tab running `bro install --wait <ids>`: the installers' output and prompts, kept open at the end.
 pub fn install_term(svc: &Services, cwd: PathBuf, ids: &[&str]) -> Term {
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "bro".into());
-    let label = if ids.len() == 1 { format!("install {}", ids[0]) } else { "quick install".into() };
+    let names: Vec<&str> = ids.iter().copied().filter(|i| !i.starts_with('-')).collect();
+    let label = if names.len() == 1 { format!("install {}", names[0]) } else { "quick install".into() };
     let meta = Meta {
         sid: uuid::Uuid::new_v4().to_string(),
         harness: None,
@@ -151,7 +153,7 @@ impl QuickInstallView {
 
     fn toggle(&mut self, t: Tool, cx: &mut Cx) {
         if self.installed(t, cx) {
-            let how = if t == Tool::JustTools { "settings update it" } else { "`bro install --force` reinstalls it" };
+            let how = if matches!(t, Tool::JustTools | Tool::JustImagine) { "settings update it" } else { "`bro install --force` reinstalls it" };
             cx.toast(Kind::Info, format!("{} is already installed · {how}", t.name()));
             return;
         }
@@ -221,6 +223,10 @@ impl Pane for QuickInstallView {
                 if !cx.svc.settings().justwatch.skill {
                     cx.svc.set_justwatch_skill_on(true);
                 }
+            }
+            if self.started.contains(&Tool::JustImagine) && self.installed(Tool::JustImagine, cx) {
+                self.started.remove(&Tool::JustImagine);
+                cx.svc.check_justimagine(true);
             }
         }
         if self.watching.is_some_and(|w| w.elapsed() > WATCH_FOR) {

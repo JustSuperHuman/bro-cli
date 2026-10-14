@@ -14,6 +14,7 @@ mod clip;
 #[cfg(windows)]
 mod console_nav;
 mod editor;
+mod env_cmd;
 mod file_view;
 mod folder;
 mod fonts;
@@ -52,6 +53,24 @@ fn main() -> ExitCode {
         args.remove(i);
         fonts::APP_WINDOW.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    // `--env <file|url> [--save]`: into bro's environment before any thread starts, so everything inherits it
+    let env = match env_cmd::take_flags(&mut args) {
+        Ok(env) => env,
+        Err(e) => {
+            eprintln!("bro: {e}\n\nrun `bro env --help` for usage");
+            return ExitCode::from(2);
+        }
+    };
+    if !env.sources.is_empty() {
+        if let Err(e) = env_cmd::run_flags(&env) {
+            eprintln!("bro: {e}");
+            return ExitCode::FAILURE;
+        }
+        // `bro --env x --save` on its own only saves
+        if env.save && args.is_empty() {
+            return ExitCode::SUCCESS;
+        }
+    }
     match cli::parse(&args) {
         Ok(cli::Command::Help) => {
             print!("{}", cli::HELP.replace("{version}", env!("CARGO_PKG_VERSION")));
@@ -82,6 +101,17 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(cli::Command::EnvHelp) => {
+            print!("{}", env_cmd::HELP);
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Command::Env(cmd)) => match env_cmd::run(cmd) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro env: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(cli::Command::InstallHelp) => {
             print!("{}", install_cmd::HELP);
             ExitCode::SUCCESS
@@ -100,7 +130,8 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Ok(cli::Command::Tui { demo, new, dir }) => match run_tui(demo, new, dir) {
+        // a running bro has its own environment: with --env, open a new one that has these variables
+        Ok(cli::Command::Tui { demo, new, dir }) => match run_tui(demo, new || !env.sources.is_empty(), dir) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("bro: {e:#}");
@@ -129,6 +160,7 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
         return Ok(());
     }
     services::guard::install_panic_hook();
+    end_sessions_when_the_window_closes();
     util::probe_local_offset();
     // demo mode never reads or writes your real settings
     let (settings, problem) = if demo { (services::fallback_settings(), None) } else { services::load_settings() };
@@ -206,3 +238,24 @@ fn enable_vt_output() {
         unsafe { std::env::set_var("TERM", "xterm-256color") };
     }
 }
+
+/// Closing the console window (or signing out) ends bro without its own quit running: end every
+/// session's processes first, the way quitting does. Windows gives the handler a few seconds.
+#[cfg(windows)]
+fn end_sessions_when_the_window_closes() {
+    use windows_sys::Win32::System::Console::{CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, SetConsoleCtrlHandler};
+    unsafe extern "system" fn handler(event: u32) -> i32 {
+        if matches!(event, CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT) {
+            bro_core::proc_tree::kill_all_tracked();
+        }
+        // not handled: Windows goes on to end bro
+        0
+    }
+    unsafe {
+        SetConsoleCtrlHandler(Some(handler), 1);
+    }
+}
+
+/// On Unix the closing terminal hangs up bro and, through their ptys, each session's process group.
+#[cfg(not(windows))]
+fn end_sessions_when_the_window_closes() {}

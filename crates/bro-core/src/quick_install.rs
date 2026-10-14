@@ -1,4 +1,4 @@
-//! Quick Install: the tools a coding machine wants (JustTools first, JustWatch on Windows, then Git, Node.js, Bun, Python,
+//! Quick Install: the tools a coding machine wants (JustTools first, JustWatch on Windows, JustImagine, then Git, Node.js, Bun, Python,
 //! the .NET SDKs, the agent CLIs and a few utilities), which of them are already here, and how to
 //! install the rest on this OS.
 //!
@@ -19,6 +19,8 @@ pub enum Tool {
     JustTools,
     /// Windows only
     JustWatch,
+    /// runs as a service; needs Git and Node.js
+    JustImagine,
     Git,
     GitHubCli,
     Node,
@@ -56,10 +58,11 @@ impl Group {
 }
 
 impl Tool {
-    /// Every tool, in install order: what others need (Node.js, Bun) comes before them.
-    pub const ALL: [Tool; 17] = [
+    /// Every tool, in list order, which is install order except for [Tool::install_rank].
+    pub const ALL: [Tool; 18] = [
         Tool::JustTools,
         Tool::JustWatch,
+        Tool::JustImagine,
         Tool::Git,
         Tool::GitHubCli,
         Tool::Node,
@@ -82,6 +85,7 @@ impl Tool {
         match self {
             Tool::JustTools => "justtools",
             Tool::JustWatch => "justwatch",
+            Tool::JustImagine => "justimagine",
             Tool::Git => "git",
             Tool::GitHubCli => "gh",
             Tool::Node => "node",
@@ -103,6 +107,7 @@ impl Tool {
         let alias = match n.as_str() {
             "just" | "just-tools" => Some(Tool::JustTools),
             "just-watch" | "watch" => Some(Tool::JustWatch),
+            "just-imagine" | "imagine" => Some(Tool::JustImagine),
             "github-cli" | "github" => Some(Tool::GitHubCli),
             "nodejs" | "node.js" | "npm" => Some(Tool::Node),
             "python3" | "py" => Some(Tool::Python),
@@ -132,6 +137,7 @@ impl Tool {
         match self {
             Tool::JustTools => "JustTools",
             Tool::JustWatch => "JustWatch",
+            Tool::JustImagine => "JustImagine",
             Tool::Git => "Git",
             Tool::GitHubCli => "GitHub CLI",
             Tool::Node => "Node.js LTS",
@@ -154,6 +160,7 @@ impl Tool {
         match self {
             Tool::JustTools => "image, video, PDF, QR and port commands, JustCommit and JustReady in one binary",
             Tool::JustWatch => "tray app that keeps your dev servers running; agents restart them and read their logs",
+            Tool::JustImagine => "your own image, video, song and voice studio, always on in the background; agents generate through its API",
             Tool::Git => "version control; agents expect it",
             Tool::GitHubCli => "issues, pull requests and releases from the terminal",
             Tool::Node => "JavaScript runtime and npm; Codex and Pi install with it",
@@ -174,7 +181,7 @@ impl Tool {
 
     pub fn group(self) -> Group {
         match self {
-            Tool::JustTools | Tool::JustWatch => Group::Main,
+            Tool::JustTools | Tool::JustWatch | Tool::JustImagine => Group::Main,
             Tool::Git | Tool::GitHubCli => Group::Essentials,
             Tool::Node | Tool::Bun | Tool::Python | Tool::Uv | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => Group::Runtimes,
             Tool::Agent(_) => Group::Agents,
@@ -190,6 +197,12 @@ impl Tool {
     /// Every tool this OS can install, in install order.
     pub fn here() -> Vec<Tool> {
         Tool::ALL.into_iter().filter(|t| t.supported()).collect()
+    }
+
+    /// Where it goes in install order: its place in [`Tool::ALL`], except JustImagine, which comes
+    /// after Git and Node.js because it installs with them.
+    pub fn install_rank(self) -> usize {
+        if self == Tool::JustImagine { Tool::ALL.len() } else { Tool::ALL.iter().position(|t| *t == self).unwrap_or(Tool::ALL.len()) }
     }
 
     /// Ticked by default when it's missing.
@@ -224,7 +237,7 @@ impl Tool {
             },
             Tool::Ripgrep => &["rg"],
             Tool::Ffmpeg => &["ffmpeg"],
-            Tool::JustTools | Tool::JustWatch | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => &[],
+            Tool::JustTools | Tool::JustWatch | Tool::JustImagine | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => &[],
         }
     }
 }
@@ -239,7 +252,7 @@ const ENV_KEYS: [&str; 2] = [r"HKLM\SYSTEM\CurrentControlSet\Control\Session Man
 
 /// `%NAME%` replaced by its value (a `REG_EXPAND_SZ` PATH).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn expand_vars(s: &str) -> String {
+pub(crate) fn expand_vars(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(start) = rest.find('%') {
@@ -395,6 +408,9 @@ pub fn detect() -> Status {
     if let Some(found) = crate::justwatch::installed() {
         status.insert(Tool::JustWatch, found.version.unwrap_or_else(|| "installed".into()));
     }
+    if let Some(found) = crate::justimagine::installed() {
+        status.insert(Tool::JustImagine, found.describe());
+    }
     let sdks = dotnet_sdks(&dirs);
     for tool in Tool::ALL {
         if let Some(want) = tool.dotnet_major() {
@@ -536,10 +552,10 @@ fn dotnet_script(major: u32) -> Step {
     step
 }
 
-/// The commands that install `tool` on `os`. JustTools and the agents have their own installers
-/// and get an empty plan.
+/// The commands that install `tool` on `os`. JustTools, JustImagine and the agents have their own
+/// installers and get an empty plan.
 pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
-    if matches!(tool, Tool::JustTools | Tool::Agent(_)) {
+    if matches!(tool, Tool::JustTools | Tool::JustImagine | Tool::Agent(_)) {
         return Ok(vec![]);
     }
     if tool == Tool::JustWatch {
@@ -644,6 +660,7 @@ pub fn how(tool: Tool, os: &Os) -> String {
         Tool::JustTools => "JustTools' own installer; the download is checked against its SHA-256".into(),
         Tool::JustWatch if !matches!(os, Os::Windows { .. }) => "JustWatch is a Windows app".into(),
         Tool::JustWatch => format!("{} · then its skill for new sessions", crate::justwatch::installer_command()),
+        Tool::JustImagine => crate::justimagine::how(),
         Tool::Agent(h) => match crate::agent_install::plan(h) {
             Ok(steps) => steps.iter().map(|s| s.display.as_str()).collect::<Vec<_>>().join(" && "),
             Err(e) => e,
@@ -655,7 +672,7 @@ pub fn how(tool: Tool, os: &Os) -> String {
     }
 }
 
-fn run(step: &Step) -> Result<(), String> {
+pub(crate) fn run(step: &Step) -> Result<(), String> {
     let status = Command::new(&step.program).args(&step.args).status().map_err(|e| format!("couldn't run {}: {e}", step.program))?;
     if status.success() || status.code().is_some_and(|c| step.ok_codes.contains(&c)) {
         Ok(())
@@ -722,6 +739,9 @@ mod tests {
         assert_eq!(Tool::ALL[0], Tool::JustTools, "JustTools comes first");
         let pos = |t| Tool::ALL.iter().position(|x| *x == t).unwrap();
         assert!(pos(Tool::Node) < pos(Tool::Agent(Harness::Codex)) && pos(Tool::Bun) < pos(Tool::Agent(Harness::Omp)));
+        assert_eq!(Tool::from_id("imagine"), Some(Tool::JustImagine));
+        assert!(Tool::JustImagine.install_rank() > Tool::Node.install_rank() && Tool::JustImagine.install_rank() > Tool::Git.install_rank());
+        assert_eq!(Tool::Node.install_rank(), pos(Tool::Node));
     }
 
     #[test]
@@ -735,6 +755,7 @@ mod tests {
         assert!(plan(Tool::Bun, &os).unwrap()[0].display.contains("bun.sh/install.ps1"));
         assert!(plan(Tool::Git, &Os::Windows { winget: false }).unwrap_err().contains("App Installer"));
         assert!(plan(Tool::JustTools, &os).unwrap().is_empty() && plan(Tool::Agent(Harness::Pi), &os).unwrap().is_empty());
+        assert!(plan(Tool::JustImagine, &os).unwrap().is_empty() && how(Tool::JustImagine, &os).contains("service install"));
         assert!(plan(Tool::JustWatch, &os).unwrap()[0].display.contains("JustWatch/main/install.ps1"));
         assert!(plan(Tool::JustWatch, &Os::Linux { pkg: Some(Pkg::Apt), root: false }).is_err());
         assert_eq!(Tool::here().contains(&Tool::JustWatch), cfg!(windows));

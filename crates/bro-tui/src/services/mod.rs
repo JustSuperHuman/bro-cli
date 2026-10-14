@@ -6,6 +6,7 @@
 
 pub mod demo;
 pub mod guard;
+pub mod justimagine;
 pub mod justtools;
 pub mod justwatch;
 pub mod updates;
@@ -108,6 +109,7 @@ pub struct State {
     pub proxy: ProxyState,
     pub bridge: BridgeState,
     pub justtools: justtools::JustToolsState,
+    pub justimagine: justimagine::JustImagineState,
     pub updates: updates::UpdateState,
     /// Things that didn't work at startup, shown once as toasts and in the views.
     pub issues: Vec<String>,
@@ -248,6 +250,7 @@ impl Services {
             bridge: BridgeState { status: Avail::Loading, qr: None, enabled: settings.bridge.enabled },
             settings,
             justtools: Default::default(),
+            justimagine: Default::default(),
             updates: Default::default(),
             config: None,
             profiles: Avail::Loading,

@@ -1,4 +1,4 @@
-//! `bro install [tools…] [--force] [--wait]` — Quick Install from the command line: JustTools, JustWatch, Git,
+//! `bro install [tools…] [--force] [--wait]` — Quick Install from the command line: JustTools, JustWatch, JustImagine, Git,
 //! Node.js, Bun, Python, the .NET SDKs, the agent CLIs bro launches and a few utilities. With no
 //! tools named it lists them and asks which to install (Enter: the recommended ones that are missing).
 
@@ -18,7 +18,7 @@ pub struct InstallArgs {
     pub wait: bool,
 }
 
-pub const HELP: &str = "bro install — Quick Install: JustTools, Git, Node.js, Bun, .NET, the coding agents and more
+pub const HELP: &str = "bro install — Quick Install: JustTools, JustImagine, Git, Node.js, Bun, .NET, the coding agents and more
 
 usage
   bro install                     list everything and pick what to install
@@ -31,6 +31,8 @@ usage
 tools
   justtools  JustTools: media, PDF, QR, port commands, JustCommit, JustReady
   justwatch  JustWatch: keeps your dev servers running, plus its agent skill (Windows)
+  justimagine  JustImagine: image, video, song and voice studio as a background service
+             (needs git and node; --force pulls the newest commits and restarts it)
   git        Git                        gh        GitHub CLI
   node       Node.js LTS                bun       Bun
   python     Python 3                   uv        uv (Python packages)
@@ -59,7 +61,7 @@ pub fn parse(args: &[String]) -> Result<Option<InstallArgs>, String> {
         }
     }
     // install order: what others need first
-    out.tools.sort_by_key(|t| Tool::ALL.iter().position(|x| x == t));
+    out.tools.sort_by_key(|t| t.install_rank());
     out.tools.dedup();
     Ok(Some(out))
 }
@@ -156,6 +158,7 @@ fn install_one(t: Tool) -> Result<(), String> {
     match t {
         Tool::JustTools => install_justtools(),
         Tool::JustWatch => install_justwatch(),
+        Tool::JustImagine => bro_core::justimagine::install(|line| println!("{line}")),
         Tool::Agent(h) => agent_install::install(h, |line| println!("{line}")).map(|_| ()),
         _ => quick_install::install(t, |line| println!("{line}")),
     }
@@ -267,8 +270,12 @@ mod tests {
         assert_eq!(p(&[]), Ok(Some(InstallArgs { tools: vec![], force: false, wait: false })));
         // install order, not the order given, and no repeats
         assert_eq!(p(&["codex", "Node", "claude", "codex"]).unwrap().unwrap().tools, vec![Tool::Node, Tool::Agent(Harness::Claude), Tool::Agent(Harness::Codex)]);
-        assert_eq!(p(&["all", "-f", "--wait"]), Ok(Some(InstallArgs { tools: Tool::here(), force: true, wait: true })));
+        let mut all = Tool::here();
+        all.sort_by_key(|t| t.install_rank());
+        assert_eq!(p(&["all", "-f", "--wait"]), Ok(Some(InstallArgs { tools: all, force: true, wait: true })));
         assert_eq!(p(&["justwatch"]).unwrap().unwrap().tools, vec![Tool::JustWatch]);
+        // JustImagine installs with Git and Node.js, so it goes after them
+        assert_eq!(p(&["justimagine", "node", "git"]).unwrap().unwrap().tools, vec![Tool::Git, Tool::Node, Tool::JustImagine]);
         assert_eq!(p(&["agents"]).unwrap().unwrap().tools, Harness::ALL.map(Tool::Agent).to_vec());
         assert_eq!(p(&["recommended"]).unwrap().unwrap().tools[0], Tool::JustTools);
         assert_eq!(p(&["dotnet-9", "net11"]).unwrap().unwrap().tools, vec![Tool::Dotnet9, Tool::Dotnet11]);

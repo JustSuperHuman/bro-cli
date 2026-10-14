@@ -8,7 +8,7 @@ exclude = ["vendor/vt100"]
 vt100 = { path = "vendor/vt100" }
 
 [workspace.package]
-version = "2.0.14"
+version = "2.0.15"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -38,6 +38,9 @@ ureq = { version = "3", features = ["json"] }
 vt100 = "0.16"
 regex = "1"
 memchr = "2"
+# encrypted env files (`bro env encrypt`)
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
 url = "2"
 
 # Request compression in bro-proxy (MPL-2.0). Pinned exactly: its byte output is the prompt-cache
@@ -74,6 +77,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = "1"
 
 tempfile = "3"
+
+# Argon2 in a debug build takes seconds per password; optimise it there too
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

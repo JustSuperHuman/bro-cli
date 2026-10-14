@@ -1,11 +1,12 @@
 //! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), caveman
-//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install and the JustWatch skill), bro's own updates and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
+//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install, the JustWatch skill and JustImagine), bro's own updates and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
 //! part applies to sessions launched from now on.
 
 use crate::keymap::Act;
 use crate::alerts::Kind;
-use crate::pane::{Action, Cx, Pane};
+use crate::pane::{Action, Cx, Pane, Place};
+use crate::services::justimagine::commits;
 use crate::services::justtools::JobKind;
 use crate::ui::{self, fg, muted};
 use bro_core::caveman::Level;
@@ -148,7 +149,14 @@ enum ToolOpt {
     AutoUpdate,
     /// the JustWatch skill (Windows only: JustWatch is a Windows app)
     WatchSkill,
+    /// JustImagine: its version, and an update when GitHub has newer commits
+    Imagine,
 }
+
+/// How often to look at JustImagine while an update started here runs in its tab.
+const IMAGINE_RECHECK: Duration = Duration::from_secs(3);
+/// Stop looking after this long.
+const IMAGINE_WATCH_FOR: Duration = Duration::from_secs(10 * 60);
 
 /// bro's own updates' rows.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -193,7 +201,7 @@ fn rows() -> Vec<Row> {
         .map(Row::Bro)
         .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
-        .chain([Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check), Row::Preset])
+        .chain([Row::Tool(ToolOpt::Imagine), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check), Row::Preset])
         .chain((0..KNOBS.len()).map(Row::Knob))
         .collect()
 }
@@ -213,6 +221,10 @@ pub struct SettingsView {
     tools_busy: bool,
     /// bro is updating itself or looking for a release: keep the spinner moving
     update_busy: bool,
+    /// a JustImagine update started here: (when, the commit it started from), until the checkout moves
+    imagine_update: Option<(Instant, Option<String>)>,
+    /// when the last look at JustImagine during that update was asked for
+    imagine_looked: Option<Instant>,
 }
 
 impl SettingsView {
@@ -226,7 +238,7 @@ impl SettingsView {
 
     /// Enter on a JustTools row: open Quick Install (JustTools isn't installed), update or check for a release;
     /// switch its skill or auto-update.
-    fn tool(&self, o: ToolOpt, cx: &mut Cx) {
+    fn tool(&mut self, o: ToolOpt, cx: &mut Cx) {
         let jt = cx.svc.state().justtools.clone();
         let mut s = cx.svc.settings();
         match o {
@@ -235,6 +247,7 @@ impl SettingsView {
                 cx.svc.save_settings(s);
             }
             ToolOpt::QuickInstall => cx.act(Action::Run(Act::QuickInstall)),
+            ToolOpt::Imagine => self.imagine(cx),
             ToolOpt::WatchSkill => {
                 cx.svc.set_justwatch_skill_on(!s.justwatch.skill);
                 if s.justwatch.skill {
@@ -256,8 +269,24 @@ impl SettingsView {
         }
     }
 
+    /// Enter on JustImagine: open Quick Install (it isn't installed), update it in a tab, or look again.
+    fn imagine(&mut self, cx: &mut Cx) {
+        let ji = cx.svc.state().justimagine.clone();
+        match &ji.installed {
+            _ if ji.checking || self.imagine_update.is_some() => {}
+            _ if cx.svc.is_demo() => cx.toast(Kind::Info, "the demo doesn't install anything"),
+            None => cx.act(Action::Run(Act::QuickInstall)),
+            Some(found) if ji.update().is_some() => {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                cx.act(Action::Open(Box::new(super::quick_install::install_term(cx.svc, cwd, &["justimagine", "--force"])), Place::Tab));
+                self.imagine_update = Some((Instant::now(), found.commit.clone()));
+            }
+            Some(_) => cx.svc.check_justimagine(false),
+        }
+    }
+
     /// Step the selected row's value by `dir` (+1 / -1).
-    fn step(&self, dir: isize, cx: &mut Cx) {
+    fn step(&mut self, dir: isize, cx: &mut Cx) {
         let mut s = cx.svc.settings();
         let env = &mut s.claude_env;
         match self.row() {
@@ -344,6 +373,17 @@ impl Pane for SettingsView {
         if !self.tools_checked {
             self.tools_checked = true;
             cx.svc.check_justtools();
+            cx.svc.check_justimagine(true);
+        }
+        // an update running in a tab: look again until the checkout moves
+        if let Some((started, from)) = self.imagine_update.clone() {
+            let moved = cx.svc.state().justimagine.installed.as_ref().is_some_and(|f| f.commit != from);
+            if moved || started.elapsed() > IMAGINE_WATCH_FOR {
+                self.imagine_update = None;
+            } else if self.imagine_looked.is_none_or(|l| l.elapsed() >= IMAGINE_RECHECK) {
+                self.imagine_looked = Some(Instant::now());
+                cx.svc.refresh_justimagine();
+            }
         }
         let env = cx.svc.settings().claude_env;
         let reset = matches!(self.row(), Row::Preset | Row::Knob(_));
@@ -437,7 +477,7 @@ impl Pane for SettingsView {
         lines.push((Some(i), vec![
             name(i, "Quick install"),
             Span::styled(ui::pad("open ›", 16), fg(t.inline)),
-            Span::styled(" tick what to install: JustTools, JustWatch, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…", muted(t)),
+            Span::styled(" tick what to install: JustTools, JustWatch, JustImagine, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…", muted(t)),
         ]));
         let i = idx(Row::Tool(ToolOpt::Skill));
         let (v, style) = match &jt.job {
@@ -461,6 +501,24 @@ impl Pane for SettingsView {
                 Span::styled(ui::pad(if on { "on" } else { "off" }, 16), if on { fg(t.inline) } else { muted(t) }),
                 Span::styled(" lets new Claude and Codex sessions check, restart and tail your dev servers through JustWatch", muted(t)),
             ]));
+        }
+
+        let ji = cx.svc.state().justimagine.clone();
+        let i = idx(Row::Tool(ToolOpt::Imagine));
+        let (v, style, help): (String, Style, String) = match (&ji.installed, ji.update()) {
+            _ if self.imagine_update.is_some() => ("updating in a tab".into(), fg(t.shine).add_modifier(Modifier::BOLD), "pulling from GitHub, then npm install and a service restart".into()),
+            _ if ji.checking || !ji.checked => ("checking…".into(), muted(t), String::new()),
+            (None, _) => ("not installed".into(), muted(t), "enter opens Quick Install · image, video, song and voice studio that runs in the background".into()),
+            (Some(f), Some(n)) => (format!("+{}", commits(n)), fg(t.shine).add_modifier(Modifier::BOLD), format!("{} is behind GitHub · enter pulls them and restarts the service", f.describe())),
+            (Some(f), None) if f.dir.is_none() => (f.describe(), fg(t.inline), "runs from a copy bro doesn't manage, so bro leaves its updates to you".into()),
+            (Some(f), None) if ji.error.is_some() => (f.describe(), fg(t.inline), format!("couldn't compare with GitHub: {} · enter tries again", ji.error.as_deref().unwrap_or_default())),
+            (Some(f), None) => (f.describe(), fg(t.inline), "up to date with GitHub · enter checks again".into()),
+        };
+        lines.push((Some(i), vec![name(i, "JustImagine"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
+        match ji.installed.as_ref() {
+            Some(f) if f.url.is_some() => lines.push(note(format!("open at {} · starts at login through {}", f.url.as_deref().unwrap_or_default(), bro_core::justimagine::mechanism()), muted(t))),
+            Some(_) => lines.push(note("its service isn't answering · `bro install justimagine --force` reinstalls and starts it".into(), fg(t.danger))),
+            None => {}
         }
 
         lines.push((None, vec![]));
@@ -568,7 +626,10 @@ impl Pane for SettingsView {
         }
     }
     fn tick_every(&self) -> Option<Duration> {
-        (self.tools_busy || self.update_busy).then_some(Duration::from_millis(100))
+        if self.tools_busy || self.update_busy {
+            return Some(Duration::from_millis(100));
+        }
+        self.imagine_update.as_ref().map(|_| IMAGINE_RECHECK)
     }
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         let last = rows().len() - 1;
@@ -623,9 +684,10 @@ mod tests {
         assert_eq!(r[bro_opts().len() + 2], Row::Tool(ToolOpt::Install));
         assert_eq!(r[bro_opts().len() + 3], Row::Tool(ToolOpt::QuickInstall));
         let watch = usize::from(bro_core::justwatch::supported());
-        assert_eq!(r[bro_opts().len() + 6 + watch], Row::Update(UpdOpt::Version));
-        assert_eq!(r[bro_opts().len() + 8 + watch], Row::Preset);
-        assert_eq!(r.len(), bro_opts().len() + 9 + watch + KNOBS.len());
+        assert_eq!(r[bro_opts().len() + 6 + watch], Row::Tool(ToolOpt::Imagine));
+        assert_eq!(r[bro_opts().len() + 7 + watch], Row::Update(UpdOpt::Version));
+        assert_eq!(r[bro_opts().len() + 9 + watch], Row::Preset);
+        assert_eq!(r.len(), bro_opts().len() + 10 + watch + KNOBS.len());
     }
 
     #[test]

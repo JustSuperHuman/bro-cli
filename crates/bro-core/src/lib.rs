@@ -30,8 +30,11 @@ pub mod caveman;
 pub mod agent_install;
 pub mod quick_install;
 pub mod justwatch;
+pub mod justimagine;
+pub mod envfile;
 pub mod managed_skill;
 pub mod self_update;
+pub mod proc_tree;
 
 use serde::{Deserialize, Serialize};
 

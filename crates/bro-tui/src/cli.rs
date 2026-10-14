@@ -20,6 +20,9 @@ pub enum Command {
     InstallHelp,
     /// `bro update [--check]` — install the newest bro release over this one (or only look).
     Update { check_only: bool },
+    /// `bro env encrypt | decrypt | list` — env files (`--env` itself is taken off in `main`).
+    Env(crate::env_cmd::EnvCmd),
+    EnvHelp,
 }
 
 /// Usage text (`{version}` is substituted).
@@ -42,6 +45,15 @@ usage
   bro install [tools… | recommended | agents | all] [--force]
                    Quick Install: JustTools, JustWatch, Git, Node.js, Bun, Python, .NET 9/10/11,
                    Claude Code, Codex, Pi, omp… (no names: pick from a list)
+  bro --env <file|url> [--save] [command]
+                   load API keys and settings from an env file (encrypted ones ask for a
+                   password) for bro and everything it starts; --save keeps them for every
+                   new program and service
+  bro env encrypt | decrypt | list <file>
+                   make an encrypted env file, read one back, or list what it sets
+  bro --export-env [file] [--plain]
+                   your own environment variables as an encrypted env file (bro.env by
+                   default, asks for a passphrase), to load anywhere with --env
   bro --version    print the version
   bro --help       this help
 
@@ -63,6 +75,14 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             Some("--check" | "-c") if args.len() == 2 => Ok(Command::Update { check_only: true }),
             Some(other) => Err(format!("bro update: unknown argument '{other}' (bro update [--check])")),
         };
+    }
+    // `bro --export-env [file] [--all] [--plain]` is `bro env export …`
+    if args.first().map(String::as_str) == Some("--export-env") {
+        let rest: Vec<String> = std::iter::once("export".to_string()).chain(args[1..].iter().cloned()).collect();
+        return crate::env_cmd::parse(&rest).map(|a| a.map_or(Command::EnvHelp, Command::Env));
+    }
+    if args.first().map(String::as_str) == Some("env") {
+        return crate::env_cmd::parse(&args[1..]).map(|a| a.map_or(Command::EnvHelp, Command::Env));
     }
     if args.first().map(String::as_str) == Some("install") {
         return crate::install_cmd::parse(&args[1..]).map(|a| a.map_or(Command::InstallHelp, Command::Install));
@@ -106,5 +126,9 @@ mod tests {
         assert_eq!(p(&["update"]), Ok(Command::Update { check_only: false }));
         assert_eq!(p(&["update", "--check"]), Ok(Command::Update { check_only: true }));
         assert!(p(&["update", "now"]).is_err());
+        assert!(matches!(p(&["env", "list", "k.env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::List { .. }))));
+        assert_eq!(p(&["env"]), Ok(Command::EnvHelp));
+        assert_eq!(p(&["--export-env", "me.env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::Export { out: "me.env".into(), plain: false, all: false, force: false })));
+        assert!(matches!(p(&["--export-env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::Export { ref out, plain: false, .. })) if out == "bro.env"));
     }
 }
