@@ -52,10 +52,15 @@ fn subdirs(dir: PathBuf) -> impl Iterator<Item = PathBuf> {
     std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir())
 }
 
+/// Every Claude and Codex home bro launches: `~/.claude`, `~/.codex`, each pooled Claude account
+/// and each Codex profile.
+pub fn homes() -> Vec<PathBuf> {
+    [paths::claude_local_dir(), paths::codex_local_dir()].into_iter().chain(subdirs(paths::claude_accounts_dir())).chain(subdirs(paths::codex_profiles_dir())).collect()
+}
+
 /// Takes skill `name` back out of every Claude and Codex home bro launches.
 pub fn remove_everywhere(name: &str) {
-    let homes = [paths::claude_local_dir(), paths::codex_local_dir()].into_iter().chain(subdirs(paths::claude_accounts_dir())).chain(subdirs(paths::codex_profiles_dir()));
-    for home in homes {
+    for home in homes() {
         remove(&home, name);
     }
 }

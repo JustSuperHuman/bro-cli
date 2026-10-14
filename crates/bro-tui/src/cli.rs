@@ -56,7 +56,8 @@ usage
   bro --export-env [file] [--plain]
                    your own environment variables as an encrypted env file (bro.env by
                    default, asks for a passphrase), to load anywhere with --env
-  bro imagine      open your JustImagine gallery in the browser, signed in
+  bro imagine      open your JustImagine gallery in the browser, signed in, and refresh the
+                   generate-images, -video and -voice skills for your agents
   bro --version    print the version
   bro --help       this help
 

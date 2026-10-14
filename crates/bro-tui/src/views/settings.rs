@@ -285,6 +285,8 @@ impl SettingsView {
             Some(found) if found.url.is_some() => {
                 let tx = cx.tx.clone();
                 std::thread::spawn(move || {
+                    // the agent skills come along each time, as with `bro imagine`
+                    let _ = bro_core::justimagine::install_skills();
                     let result = bro_core::justimagine::open_url().ok_or_else(|| "JustImagine stopped answering".to_string()).and_then(|u| crate::panes::links::open(&u));
                     if let Err(e) = result {
                         let _ = tx.send(crate::pane::Event::Toast(Kind::Error, format!("couldn't open JustImagine: {e}")));

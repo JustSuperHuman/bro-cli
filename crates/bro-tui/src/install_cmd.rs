@@ -158,7 +158,10 @@ fn install_one(t: Tool) -> Result<(), String> {
     match t {
         Tool::JustTools => install_justtools(),
         Tool::JustWatch => install_justwatch(),
-        Tool::JustImagine => bro_core::justimagine::install(|line| println!("{line}")).map(|()| println!("  open it any time, signed in: bro imagine")),
+        Tool::JustImagine => bro_core::justimagine::install(|line| println!("{line}")).map(|()| {
+            print_imagine_skills();
+            println!("  open it any time, signed in: bro imagine");
+        }),
         Tool::Agent(h) => agent_install::install(h, |line| println!("{line}")).map(|_| ()),
         _ => quick_install::install(t, |line| println!("{line}")),
     }
@@ -172,9 +175,18 @@ fn wait_for_enter() {
     }
 }
 
-/// `bro imagine`: the running JustImagine gallery in the browser, signed in.
+/// The generate-images, generate-video and generate-voice skills, into every agent home.
+fn print_imagine_skills() {
+    println!("  agent skills (generate-images, generate-video, generate-voice):");
+    for line in bro_core::justimagine::install_skills() {
+        println!("    {line}");
+    }
+}
+
+/// `bro imagine`: the agent skills refreshed, then the running JustImagine gallery in the browser, signed in.
 pub fn open_imagine() -> Result<(), String> {
     use bro_core::justimagine;
+    print_imagine_skills();
     match justimagine::open_url() {
         Some(url) => {
             println!("opening JustImagine at http://127.0.0.1:{} (signed in)", justimagine::port());

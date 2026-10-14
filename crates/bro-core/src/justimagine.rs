@@ -284,6 +284,109 @@ pub fn install(mut say: impl FnMut(&str)) -> Result<(), String> {
     Ok(())
 }
 
+// ---- agent skills ----
+
+/// The helper every skill carries a copy of (`scripts/ji.mjs`).
+const HELPER: &str = include_str!("../skills/justimagine/ji.mjs");
+
+/// The agent skills that drive JustImagine, bundled with bro so they match the bro that installs them.
+pub const SKILLS: [(&str, &str); 3] = [
+    ("generate-images", include_str!("../skills/justimagine/generate-images/SKILL.md")),
+    ("generate-video", include_str!("../skills/justimagine/generate-video/SKILL.md")),
+    ("generate-voice", include_str!("../skills/justimagine/generate-voice/SKILL.md")),
+];
+
+/// Marks a skill directory bro wrote (the same marker as [`crate::managed_skill`]).
+const MARKER: &str = ".bro-managed";
+
+/// What [`write_skills`] did in one home.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SkillsWritten {
+    pub written: Vec<String>,
+    /// skills of the same name bro didn't write, moved here first
+    pub backed_up: Vec<PathBuf>,
+    /// links to a skill elsewhere, left alone
+    pub linked: Vec<String>,
+}
+
+/// Writes [`SKILLS`] under `<home>/skills`, refreshing copies bro wrote (unchanged files aren't
+/// touched). A skill of the same name bro didn't write is moved into `backups` first; a link is
+/// left as it is.
+pub fn write_skills(home: &Path, backups: &Path) -> std::io::Result<SkillsWritten> {
+    let mut done = SkillsWritten::default();
+    for (name, body) in SKILLS {
+        let dir = home.join("skills").join(name);
+        let meta = std::fs::symlink_metadata(&dir);
+        if meta.as_ref().is_ok_and(|m| m.file_type().is_symlink()) {
+            done.linked.push(name.to_string());
+            continue;
+        }
+        if meta.is_ok() && !dir.join(MARKER).is_file() {
+            // "claude", "pi-agent": the home's last two folders, so `~/.pi/agent` and `~/.omp/agent` differ
+            let parts: Vec<String> = home.components().rev().take(2).map(|c| c.as_os_str().to_string_lossy().trim_start_matches('.').to_string()).collect();
+            let label = if parts.first().is_some_and(|p| p == "agent") { parts.iter().rev().cloned().collect::<Vec<_>>().join("-") } else { parts.first().cloned().unwrap_or_else(|| "home".into()) };
+            let mut to = backups.join(format!("{label}-{name}"));
+            for n in 2.. {
+                if !to.exists() {
+                    break;
+                }
+                to = backups.join(format!("{label}-{name}-{n}"));
+            }
+            std::fs::create_dir_all(backups)?;
+            std::fs::rename(&dir, &to)?;
+            done.backed_up.push(to);
+        }
+        crate::browser::write_if_changed(&dir.join("SKILL.md"), body)?;
+        crate::browser::write_if_changed(&dir.join("scripts").join("ji.mjs"), HELPER)?;
+        crate::browser::write_if_changed(&dir.join(MARKER), "written by bro with JustImagine (`bro imagine`, `bro install justimagine`); bro replaces it on each\n")?;
+        done.written.push(name.to_string());
+    }
+    Ok(done)
+}
+
+/// Where agents look for skills: every Claude and Codex home bro launches, plus `~/.agents`,
+/// `~/.pi/agent` and `~/.omp/agent` when they already keep skills. Only homes that exist.
+pub fn skill_homes() -> Vec<PathBuf> {
+    let mut homes = crate::managed_skill::homes();
+    for dir in [home_dir().join(".agents"), crate::paths::pi_agent_dir(), crate::paths::omp_agent_dir()] {
+        if dir.join("skills").is_dir() {
+            homes.push(dir);
+        }
+    }
+    // `~/.claude/skills` and `~/.codex/skills` are often links to one folder: write it once
+    let mut seen: Vec<PathBuf> = vec![];
+    homes.retain(|h| {
+        let skills = std::fs::canonicalize(h.join("skills")).unwrap_or_else(|_| h.join("skills"));
+        h.is_dir() && !seen.iter().any(|s| crate::util::same_path(s, &skills)) && {
+            seen.push(skills);
+            true
+        }
+    });
+    homes
+}
+
+/// Installs the skills in every [`skill_homes`] home; one line per home for the terminal.
+/// Copies bro didn't write go to `~/.bro/skill-backups/<time>/`.
+pub fn install_skills() -> Vec<String> {
+    let backups = crate::paths::bro_dir().join("skill-backups").join(chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
+    skill_homes()
+        .into_iter()
+        .map(|home| match write_skills(&home, &backups) {
+            Ok(done) => {
+                let mut line = format!("{}: {}", home.join("skills").display(), done.written.join(", "));
+                if !done.backed_up.is_empty() {
+                    line.push_str(&format!(" (your earlier copies moved to {})", backups.display()));
+                }
+                if !done.linked.is_empty() {
+                    line.push_str(&format!(" (left your links: {})", done.linked.join(", ")));
+                }
+                line
+            }
+            Err(e) => format!("{}: couldn't write the skills: {e}", home.join("skills").display()),
+        })
+        .collect()
+}
+
 /// Restart bro's JustImagine service so it reads the environment again (it takes keys from it
 /// only when it starts). Runs in the current terminal. Err when bro's copy isn't installed.
 pub fn restart_service() -> Result<(), String> {
@@ -368,6 +471,28 @@ mod tests {
         let steps = plan(&app, &root, &git, &npm, &node);
         assert_eq!(steps[0].args, ["-C".to_string(), app.display().to_string(), "pull".into(), "--ff-only".into()]);
         assert_eq!(steps[3].args.last().map(String::as_str), Some("--no-open"), "an update doesn't open a browser");
+    }
+
+    #[test]
+    fn skills_are_written_refreshed_and_yours_backed_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, backups) = (dir.path().join(".claude"), dir.path().join("backups"));
+        let mine = home.join("skills").join("generate-images");
+        crate::util::atomic_write(&mine.join("SKILL.md"), b"my own").unwrap();
+        let done = write_skills(&home, &backups).unwrap();
+        assert_eq!(done.written, ["generate-images", "generate-video", "generate-voice"]);
+        assert_eq!(done.backed_up, [backups.join("claude-generate-images")]);
+        assert_eq!(std::fs::read_to_string(backups.join("claude-generate-images").join("SKILL.md")).unwrap(), "my own");
+        for (name, body) in SKILLS {
+            let d = home.join("skills").join(name);
+            assert_eq!(std::fs::read_to_string(d.join("SKILL.md")).unwrap(), body);
+            assert!(d.join("scripts").join("ji.mjs").is_file() && d.join(MARKER).is_file());
+            assert!(body.starts_with("---\nname: ") || body.starts_with("---\r\nname: "), "{name} has frontmatter");
+        }
+        // again: bro's own copies are refreshed in place, nothing more is backed up
+        let again = write_skills(&home, &backups).unwrap();
+        assert!(again.backed_up.is_empty() && again.written.len() == 3);
+        assert!(HELPER.contains("auth.token") && HELPER.contains("voice-design"));
     }
 
     #[test]
