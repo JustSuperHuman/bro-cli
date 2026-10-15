@@ -30,7 +30,7 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(4);
 
 /// Session-scoped variables a parent Claude Code leaves in bro's environment;
 /// inherited, they would make the child think it is nested in that session.
-const INHERITED_SESSION_VARS: [&str; 11] = [
+pub(crate) const INHERITED_SESSION_VARS: [&str; 11] = [
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SESSION_ID",

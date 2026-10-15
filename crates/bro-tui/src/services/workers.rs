@@ -445,6 +445,8 @@ pub(super) fn spawn_bridge(svc: &Services) {
                 _ => {}
             }))
         });
+        let w_svc = svc.clone();
+        let _ = guard("bridge::on_watchdog_update", || b.on_watchdog_update(Box::new(move |u| w_svc.on_watchdog_update(u))));
         let qr = guard("bridge::pairing_qr", || b.pairing_qr()).ok().flatten();
         svc.set_bridge(Some(b.clone()));
         svc.update(|st| st.bridge.qr = qr);

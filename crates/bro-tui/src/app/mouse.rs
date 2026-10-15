@@ -70,6 +70,10 @@ impl App {
                     l.scroll(pos, down);
                     return;
                 }
+                Overlay::Watchdog(_) if left => {
+                    self.watchdog_click(pos);
+                    return;
+                }
                 Overlay::Resume(p) if left => {
                     if let Some(i) = p.hits.iter().position(|r| r.contains(pos)) {
                         if i == p.sel {

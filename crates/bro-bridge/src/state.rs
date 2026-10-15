@@ -64,6 +64,8 @@ pub(crate) struct AppState {
     pub data_root: Arc<PathBuf>,
     pub config: Arc<BridgeConfig>,
     pub orchestrator: Arc<Orchestrator>,
+    /// Every session's watchdog (see [`crate::watchdog`]).
+    pub watchdogs: Arc<crate::watchdog::Watchdogs>,
     /// The bridge runtime, once it runs (timers need it; tests without a
     /// runtime fall back to immediate behaviour).
     pub runtime: Arc<OnceLock<tokio::runtime::Handle>>,
@@ -106,6 +108,7 @@ impl AppState {
             data_root: Arc::new(data_root),
             config: Arc::new(config),
             orchestrator,
+            watchdogs: Arc::new(crate::watchdog::Watchdogs::default()),
             runtime: Arc::new(OnceLock::new()),
             clients: Arc::new(AtomicUsize::new(0)),
             viewers: Arc::new(Mutex::new(HashMap::new())),

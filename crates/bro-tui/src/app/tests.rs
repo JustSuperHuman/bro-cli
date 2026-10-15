@@ -2474,7 +2474,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     let id = a.focused().expect("settings pane");
     assert_eq!(a.panes[&id].view(), Some("settings"));
     let screen = draw(&mut a);
-    assert!(screen.contains("Auto-resume") && screen.contains("Standard") && screen.contains("Usage telemetry"), "{screen}");
+    assert!(screen.contains("Auto-resume") && screen.contains("Caveman mode"), "{screen}");
     // bro's own options come first: auto-approve (off by default) and recaps toggle in place
     assert!(screen.contains("Auto-approve prompts"), "{screen}");
     let recaps = a.svc.settings().insights.generate_recaps;
@@ -2531,6 +2531,23 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert!(a.svc.settings().updates.check);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().updates.check);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // watchdog prompt: opens the editor
+    { let s = draw(&mut a); assert!(s.contains("Watchdog prompt") && s.contains("bro's default"), "{s}"); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::WatchdogPrompt(_)));
+    { let s = draw(&mut a); assert!(s.contains("watchdog prompt") && s.contains("You are bro's watchdog"), "{s}"); }
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!a.overlay.is_open());
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // wake after
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().watchdog.idle_secs, 120);
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().watchdog.idle_secs, 60);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // reviewer
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // reviewer model
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().watchdog.model, "fable");
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // wake-up budget
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
     assert_eq!(a.svc.settings().claude_env.preset, "quiet");
@@ -2544,7 +2561,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     let screen = draw(&mut a);
     assert!(screen.contains("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"), "{screen}");
     key(&mut a, KeyCode::Home, KeyModifiers::NONE);
-    for _ in 0..16 + usize::from(bro_core::justwatch::supported()) {
+    for _ in 0..21 + usize::from(bro_core::justwatch::supported()) {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // back to error reports
     }
     key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
@@ -2857,4 +2874,50 @@ fn closing_a_session_ends_the_background_processes_it_started() {
     let left = alive(server);
     a.shutdown();
     assert!(!left, "the session's background process outlived the session");
+}
+
+#[test]
+fn prefix_w_starts_a_watchdog_with_milestones_and_shows_its_status() {
+    use super::overlays::Overlay;
+    let mut a = app(true);
+    a.side_focus = false;
+    let id = a.focused().expect("a demo session");
+    let sid = a.panes[&id].as_term_ref().unwrap().meta.sid.clone();
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::CONTROL);
+    assert!(draw(&mut a).contains("w watchdog"), "the armed prefix offers it");
+    key(&mut a, KeyCode::Char('w'), KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::Watchdog(_)));
+    let s = shot(&mut a, "watchdog-setup");
+    assert!(s.contains("MILESTONES") && s.contains("Start watchdog") && s.contains("Second opinions"), "{s}");
+    for c in "Offline sync: queued writes retry with backoff, tests cover it".chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    a.paste("- Settings redesign in the new theme system\n- Docs for both");
+    shot(&mut a, "watchdog-milestones");
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    assert!(!a.overlay.is_open());
+    let dog = a.svc.watchdog(&sid).expect("started");
+    assert_eq!(dog.plan.milestones.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["Offline sync: queued writes retry with backoff, tests cover it", "Settings redesign in the new theme system", "Docs for both"]);
+    assert!(draw(&mut a).contains("watchdog 0/3"), "the header says it's on");
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::CONTROL);
+    key(&mut a, KeyCode::Char('w'), KeyModifiers::NONE);
+    let s = shot(&mut a, "watchdog-status");
+    assert!(s.contains("watching") && s.contains("Offline sync") && s.contains("Wake now") && s.contains("None yet"), "{s}");
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE);
+    assert!(draw(&mut a).contains("press s again"));
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE);
+    assert!(a.svc.watchdog(&sid).is_none());
+    assert!(!a.overlay.is_open());
+}
+
+#[test]
+fn closing_a_watched_session_ends_its_watchdog() {
+    let mut a = app(true);
+    let id = a.focused().expect("a demo session");
+    let sid = a.panes[&id].as_term_ref().unwrap().meta.sid.clone();
+    a.svc.watchdog_start(&sid, bro_bridge::WatchdogPlan::default()).unwrap();
+    assert!(a.svc.watchdog(&sid).is_some());
+    a.close(id);
+    assert!(a.svc.watchdog(&sid).is_none());
 }

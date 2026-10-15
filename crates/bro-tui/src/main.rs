@@ -39,10 +39,12 @@ mod services;
 mod sidebar;
 mod skin;
 mod testkit;
+mod textarea;
 mod theme;
 mod ui;
 mod util;
 mod views;
+mod watchdog;
 
 use std::process::ExitCode;
 

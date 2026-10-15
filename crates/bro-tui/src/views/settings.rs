@@ -1,4 +1,5 @@
-//! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), caveman
+//! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), watchdog
+//! defaults and the reviewer's prompt, caveman
 //! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install, the JustWatch skill and JustImagine), bro's own updates and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
 //! part applies to sessions launched from now on.
@@ -184,13 +185,28 @@ pub(crate) fn spinner(started: Instant) -> &'static str {
     FRAMES[(started.elapsed().as_millis() / 100) as usize % FRAMES.len()]
 }
 
-/// A selectable row: bro's options, caveman mode, JustTools, then the Claude preset, then each [`KNOBS`] switch.
+/// The watchdog section's rows: defaults for new watchdogs and the reviewer's instructions.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum WatchOpt {
+    /// opens the prompt editor
+    Prompt,
+    Wake,
+    Reviewer,
+    Model,
+    Budget,
+}
+
+const WATCH_OPTS: [WatchOpt; 5] = [WatchOpt::Prompt, WatchOpt::Wake, WatchOpt::Reviewer, WatchOpt::Model, WatchOpt::Budget];
+
+/// A selectable row: bro's options, caveman mode, JustTools, updates, watchdogs, then the Claude preset, then
+/// each [`KNOBS`] switch.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
     Bro(BroOpt),
     Cave(CaveOpt),
     Tool(ToolOpt),
     Update(UpdOpt),
+    Watch(WatchOpt),
     Preset,
     Knob(usize),
 }
@@ -201,7 +217,9 @@ fn rows() -> Vec<Row> {
         .map(Row::Bro)
         .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
-        .chain([Row::Tool(ToolOpt::Imagine), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check), Row::Preset])
+        .chain([Row::Tool(ToolOpt::Imagine), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
+        .chain(WATCH_OPTS.map(Row::Watch))
+        .chain([Row::Preset])
         .chain((0..KNOBS.len()).map(Row::Knob))
         .collect()
 }
@@ -331,6 +349,19 @@ impl SettingsView {
                 }
             }
             Row::Cave(CaveOpt::Subagents) => s.caveman.subagents = !s.caveman.subagents,
+            Row::Watch(WatchOpt::Prompt) => return cx.act(Action::Run(Act::WatchdogPrompt)),
+            Row::Watch(WatchOpt::Wake) => s.watchdog.idle_secs = crate::watchdog::step_choice(&crate::watchdog::IDLE_CHOICES, s.watchdog.idle_secs, dir),
+            Row::Watch(WatchOpt::Budget) => s.watchdog.max_wakes = crate::watchdog::step_choice(&crate::watchdog::BUDGET_CHOICES, s.watchdog.max_wakes, dir),
+            Row::Watch(WatchOpt::Model) => {
+                let all = crate::watchdog::MODEL_CHOICES;
+                let i = all.iter().position(|m| *m == s.watchdog.model).map_or(0, |i| i as isize + dir);
+                s.watchdog.model = all[i.rem_euclid(all.len() as isize) as usize].to_string();
+            }
+            Row::Watch(WatchOpt::Reviewer) => {
+                let all = reviewer_choices(cx);
+                let i = all.iter().position(|r| *r == s.watchdog.reviewer).unwrap_or(0) as isize;
+                s.watchdog.reviewer = all[(i + dir).rem_euclid(all.len() as isize) as usize].clone();
+            }
             Row::Preset => {
                 let i = PRESETS.iter().position(|p| p.id == claude_env::preset(&env.preset).id).unwrap_or(0);
                 env.use_preset(PRESETS[(i as isize + dir).rem_euclid(PRESETS.len() as isize) as usize].id);
@@ -348,6 +379,16 @@ impl SettingsView {
         let mut s = cx.svc.settings();
         match self.row() {
             Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Update(_) => return,
+            Row::Watch(o) => {
+                let d = bro_core::config::WatchdogSettings::default();
+                match o {
+                    WatchOpt::Prompt => s.watchdog.prompt = None,
+                    WatchOpt::Wake => s.watchdog.idle_secs = d.idle_secs,
+                    WatchOpt::Reviewer => s.watchdog.reviewer = d.reviewer,
+                    WatchOpt::Model => s.watchdog.model = d.model,
+                    WatchOpt::Budget => s.watchdog.max_wakes = d.max_wakes,
+                }
+            }
             Row::Preset => s.claude_env.overrides.clear(),
             Row::Knob(k) => {
                 s.claude_env.overrides.remove(KNOBS[k].id);
@@ -355,6 +396,19 @@ impl SettingsView {
         }
         cx.svc.save_settings(s);
     }
+}
+
+/// "auto", then every signed-in Claude and Codex login.
+fn reviewer_choices(cx: &Cx) -> Vec<String> {
+    let mut all = vec!["auto".to_string()];
+    if let Some(ps) = cx.svc.state().profiles.ready() {
+        all.extend(ps.iter().filter(|p| p.authenticated && (p.is_claude() || p.is_codex())).map(|p| p.id.clone()));
+    }
+    let current = cx.svc.settings().watchdog.reviewer;
+    if !all.contains(&current) {
+        all.push(current);
+    }
+    all
 }
 
 /// "K=V  K=V" for the next direct launch.
@@ -402,6 +456,9 @@ impl Pane for SettingsView {
         let mut hints = vec![("j/k", "move"), ("enter/→", "change"), ("←", "back")];
         if reset {
             hints.push(("r", "reset to preset"));
+        }
+        if matches!(self.row(), Row::Watch(_)) {
+            hints.push(("r", "bro's default"));
         }
         let area = ui::hint_line(f, area, &hints, t);
         let all = rows();
@@ -573,6 +630,32 @@ impl Pane for SettingsView {
         ]));
 
         lines.push((None, vec![]));
+        lines.push((None, heading("watchdog · a fresh reviewer hands an idle session its next task (prefix w on a session)", t)));
+        let w = cx.svc.settings().watchdog;
+        for o in WATCH_OPTS {
+            let i = idx(Row::Watch(o));
+            let (v, style, help): (String, Style, String) = match o {
+                WatchOpt::Prompt => match &w.prompt {
+                    Some(_) => ("customized".into(), fg(t.shine).add_modifier(Modifier::BOLD), "your instructions for every reviewer · enter edits · r goes back to bro's".into()),
+                    None => ("bro's default".into(), fg(t.inline), "what every reviewer is told before its brief · enter opens the editor".into()),
+                },
+                WatchOpt::Wake => (format!("{} idle", crate::watchdog::human(w.idle_secs)), fg(t.inline), "how long a session sits quiet after it stops before its watchdog wakes".into()),
+                WatchOpt::Reviewer if w.reviewer == "auto" => ("auto".into(), fg(t.inline), "the login with the most usage left, Claude first, Codex when Claude is out".into()),
+                WatchOpt::Reviewer => (w.reviewer.clone(), fg(t.shine).add_modifier(Modifier::BOLD), "always this login, whatever its usage".into()),
+                WatchOpt::Model => (w.model.clone(), fg(t.inline), "the Claude model reviewers run on · a Codex reviewer uses its login's own".into()),
+                WatchOpt::Budget => (format!("{} wake-ups", w.max_wakes), fg(t.inline), "per watchdog, then it stands down and tells you".into()),
+            };
+            let label = match o {
+                WatchOpt::Prompt => "Watchdog prompt",
+                WatchOpt::Wake => "Wake after",
+                WatchOpt::Reviewer => "Reviewer",
+                WatchOpt::Model => "Reviewer model",
+                WatchOpt::Budget => "Wake-up budget",
+            };
+            lines.push((Some(i), vec![name(i, label), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
+        }
+
+        lines.push((None, vec![]));
         lines.push((None, heading("Claude Code · applies to sessions launched from now on", t)));
         let p = claude_env::preset(&env.preset);
         let i = idx(Row::Preset);
@@ -699,8 +782,9 @@ mod tests {
         let watch = usize::from(bro_core::justwatch::supported());
         assert_eq!(r[bro_opts().len() + 6 + watch], Row::Tool(ToolOpt::Imagine));
         assert_eq!(r[bro_opts().len() + 7 + watch], Row::Update(UpdOpt::Version));
-        assert_eq!(r[bro_opts().len() + 9 + watch], Row::Preset);
-        assert_eq!(r.len(), bro_opts().len() + 10 + watch + KNOBS.len());
+        assert_eq!(r[bro_opts().len() + 9 + watch], Row::Watch(WatchOpt::Prompt));
+        assert_eq!(r[bro_opts().len() + 9 + watch + WATCH_OPTS.len()], Row::Preset);
+        assert_eq!(r.len(), bro_opts().len() + 10 + watch + WATCH_OPTS.len() + KNOBS.len());
     }
 
     #[test]

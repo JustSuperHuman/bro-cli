@@ -866,6 +866,17 @@ impl Pane for Term {
         if let Some(note) = self.resume_note() {
             right.push(Span::styled(format!(" {note} "), Style::default().fg(t.inline)));
         }
+        if let Some(d) = self.svc.watchdog(&self.meta.sid) {
+            const SPIN: [&str; 4] = ["◐", "◓", "◑", "◒"];
+            let (done, total) = d.plan.progress();
+            let (text, c) = match (&d.running, &d.finished, d.paused) {
+                (Some(_), _, _) => (format!("{} watchdog reviewing", SPIN[(time * 6.0) as usize % 4]), t.accent),
+                (None, Some(_), _) => ("✓ watchdog done".to_string(), t.good),
+                (None, None, true) => ("‖ watchdog paused".to_string(), t.muted),
+                (None, None, false) => (format!("{} watchdog {done}/{total}", crate::ui::icon("watchdog")), t.shine),
+            };
+            right.push(Span::styled(format!(" {text} "), Style::default().fg(c)));
+        }
         if let Some((g, word, c)) = status_look(self.activity(), false, t, time) {
             right.push(Span::styled(format!(" {g} {word} "), Style::default().fg(c).add_modifier(Modifier::BOLD)));
         }

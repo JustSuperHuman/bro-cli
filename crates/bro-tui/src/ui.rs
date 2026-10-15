@@ -44,6 +44,7 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("key", "\u{F0306}", "⌘"),
     ("settings", "\u{F0493}", "⚙"),
     ("caveman", "⛏", "⛏"),
+    ("watchdog", "\u{F0A43}", "◉"),
     ("history", "\u{F02DA}", "↺"),
     ("branch", "\u{E725}", "⎇"),
 ];

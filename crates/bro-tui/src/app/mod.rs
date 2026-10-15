@@ -16,6 +16,7 @@ mod mouse;
 mod overlays;
 mod sessions;
 mod side_view;
+mod watchdogs;
 mod welcome;
 
 use crate::alerts::{Kind, Toasts};
@@ -211,6 +212,8 @@ pub struct App {
     grown: bool,
     /// back/forward through the sessions you looked at (mouse back/forward buttons)
     history: history::History,
+    /// per watched session: when its watchdog should wake
+    pub(crate) watch: HashMap<PaneId, crate::watchdog::Trigger>,
     term_focused: bool,
     opts: Opts,
     _theme_watcher: Option<notify::RecommendedWatcher>,
@@ -292,6 +295,7 @@ impl App {
             priority: None,
             grown: false,
             history: Default::default(),
+            watch: HashMap::new(),
             term_focused: true,
             opts,
             _theme_watcher: None,
@@ -543,6 +547,8 @@ impl App {
         }
         if let Some(mut p) = self.panes.remove(&id) {
             if let Some(t) = p.as_term() {
+                // its watchdog (and a review in progress) ends with it
+                self.svc.watchdog_stop(&t.meta.sid);
                 t.kill();
                 t.on_exit();
                 // route ids are stable per (upstream, model): keep the route while another session uses it
@@ -725,6 +731,7 @@ impl App {
         self.svc.set_focused_session(focused.as_deref());
         self.reap();
         self.track_agents();
+        self.tick_watchdogs();
         self.update_insights();
         self.toasts.expire();
     }
@@ -760,7 +767,9 @@ impl App {
     /// Sleep until the soonest thing that needs a redraw without an event.
     fn next_deadline(&self) -> Duration {
         let mut d = Duration::from_secs(30);
-        let spinning = self.panes.values().any(|p| p.activity() == Some(Activity::Working));
+        let spinning = self.panes.values().any(|p| p.activity() == Some(Activity::Working))
+            || matches!(self.overlay, Overlay::Watchdog(_))
+            || self.svc.state().watchdogs.values().any(|d| d.running.is_some());
         // the rainbow only plays on the welcome logo
         if (self.theme.animated && self.tabs.is_empty()) || spinning {
             d = d.min(Duration::from_millis(125));
@@ -892,6 +901,7 @@ impl App {
                 self.side_focus = false;
             }
             Event::FolderCreated(request, result) => self.project_folder_created(request, result),
+            Event::Watchdog(u) => self.watchdog_event(u),
             Event::ThemeFilesChanged => {
                 if theme::is_custom(&self.theme.name) {
                     let name = self.theme.name.clone();
@@ -909,6 +919,8 @@ impl App {
         self.sel = None;
         match &mut self.overlay {
             Overlay::Launcher(l) => return l.paste(s),
+            Overlay::Watchdog(v) => return v.paste(s),
+            Overlay::WatchdogPrompt(e) => return e.paste(s),
             Overlay::Palette(p) => {
                 p.query.extend(s.chars().filter(|c| !c.is_control()));
                 p.sel = 0;

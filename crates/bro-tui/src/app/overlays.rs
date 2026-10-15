@@ -25,6 +25,10 @@ pub enum Overlay {
     File(Box<crate::file_view::FileView>),
     /// What the focused agent sent you and the files it touched.
     AgentFiles(Box<crate::agent_files::AgentFilesView>),
+    /// The focused session's watchdog: setup form or status page (prefix w).
+    Watchdog(Box<crate::watchdog::view::WatchdogView>),
+    /// The watchdog reviewer's instructions (settings).
+    WatchdogPrompt(Box<crate::watchdog::prompt_editor::PromptEditor>),
 }
 
 impl Overlay {
@@ -105,6 +109,11 @@ impl App {
             Overlay::Confirm(c) => self.confirm_hits = draw_confirm(f, area, c, self.hover, &t),
             Overlay::File(v) => crate::file_view::draw(f, area, v, self.hover, &t),
             Overlay::AgentFiles(v) => crate::agent_files::draw(f, area, v, &t),
+            Overlay::Watchdog(v) => {
+                let dog = self.svc.watchdog(&v.sid);
+                crate::watchdog::view::draw(f, area, v, dog.as_ref(), &t);
+            }
+            Overlay::WatchdogPrompt(e) => e.draw(f, area, &t),
         }
     }
 

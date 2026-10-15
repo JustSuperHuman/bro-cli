@@ -48,6 +48,8 @@ pub enum Event {
     OpenProject(std::path::PathBuf),
     /// The folder picker finished creating a directory on a background thread.
     FolderCreated(uuid::Uuid, Result<std::path::PathBuf, String>),
+    /// A watchdog woke, stepped, reported or stood down (the snapshot cache is already updated).
+    Watchdog(bro_bridge::WatchdogUpdate),
 }
 
 /// Where a new pane goes.

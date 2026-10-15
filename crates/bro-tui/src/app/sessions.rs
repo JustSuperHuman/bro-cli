@@ -177,7 +177,8 @@ impl App {
                 let cwd = req.cwd.clone().filter(|c| c.is_dir()).or_else(|| self.current_project()).or_else(dirs::home_dir).unwrap_or_default();
                 match create_target(req.profile_id.as_deref()) {
                     Some((harness, profile_id)) => {
-                        let spec = LaunchSpec { harness, profile_id, provider_id: None, model: None, cwd, resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: req.args.clone() };
+                        // a watchdog's second opinion asks for a model ("opus")
+                        let spec = LaunchSpec { harness, profile_id, provider_id: None, model: req.model.clone(), cwd, resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: req.args.clone() };
                         let mut lr = LaunchRequest::new(spec, Place::Tab);
                         lr.reply = Some(reply);
                         lr.name = req.title.clone();

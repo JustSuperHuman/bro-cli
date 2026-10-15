@@ -138,6 +138,8 @@ impl App {
             }
             Act::OpenedFile => self.show_last_opened(),
             Act::AgentFiles => self.show_agent_files(),
+            Act::Watchdog => self.open_watchdog(),
+            Act::WatchdogPrompt => self.open_watchdog_prompt(),
             Act::SwitchLogin => {
                 if let Some(id) = self.focused() {
                     self.open_switch(id);

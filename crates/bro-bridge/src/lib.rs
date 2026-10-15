@@ -25,6 +25,7 @@
 //! | `project_store` / `projects` | project ids, names, order |
 //! | `net` | access URLs and the pairing QR code |
 //! | `orchestrator` | Hugh, the built-in agent over every session: a headless Claude Code process using the tools at `/mcp` |
+//! | `watchdog` | per-session watchdogs: milestones, a log, and a fresh reviewer agent per wake-up on the same tools |
 //!
 //! # Data root
 //!
@@ -61,6 +62,7 @@ mod session;
 mod slash_commands;
 mod state;
 mod vt_stream;
+pub mod watchdog;
 mod ws;
 
 #[cfg(test)]
@@ -70,6 +72,7 @@ pub use auth::is_authorized;
 pub use insights::{AgentFiles, Attention, AttentionState, Recap, RecapSource, SentFile, SessionInsights, TouchKind, TouchedFile};
 pub use model::TerminalProfile;
 pub use orchestrator::{MessageContext, OrchestratorLaunch, OrchestratorUpdate};
+pub use watchdog::{Milestone, MilestoneStatus, ReviewerKind, ReviewerLaunch, RunRecord, Running, WatchdogPlan, WatchdogSnapshot, WatchdogUpdate, WatchdogWake, WatchedSession};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -162,6 +165,9 @@ pub struct CreateRequest {
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub project_id: Option<String>,
+    /// Model for an agent session ("opus"); None = the login's default.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Commands the bridge asks bro to execute on its PTYs.
@@ -501,6 +507,44 @@ impl Bridge {
         self.state().orchestrator.on_update(Arc::from(f));
     }
 
+    /// Start a watchdog on session `id` (replacing one it had). bro wakes it with [`Bridge::watchdog_wake`].
+    pub fn watchdog_start(&self, id: &str, plan: WatchdogPlan) -> WatchdogSnapshot {
+        self.state().watchdogs.start(id, plan)
+    }
+
+    /// New milestones / options for a running watchdog; its log stays. False when the session has none.
+    pub fn watchdog_set_plan(&self, id: &str, plan: WatchdogPlan) -> bool {
+        self.state().watchdogs.set_plan(id, plan)
+    }
+
+    /// Stop and forget the watchdog (a running review ends).
+    pub fn watchdog_stop(&self, id: &str) -> bool {
+        self.state().watchdogs.stop(id)
+    }
+
+    pub fn watchdog_pause(&self, id: &str, paused: bool) -> bool {
+        self.state().watchdogs.set_paused(id, paused)
+    }
+
+    pub fn watchdog(&self, id: &str) -> Option<WatchdogSnapshot> {
+        self.state().watchdogs.get(id)
+    }
+
+    pub fn watchdogs(&self) -> Vec<WatchdogSnapshot> {
+        self.state().watchdogs.all()
+    }
+
+    /// Wake session `id`'s watchdog: a fresh reviewer starts at once on the bridge runtime. Errs when there is
+    /// no watchdog, it is already reviewing, paused, finished or out of wake-ups.
+    pub fn watchdog_wake(&self, id: &str, wake: WatchdogWake) -> Result<(), String> {
+        watchdog::run::spawn(self.state(), id, wake)
+    }
+
+    /// Watchdog changes and progress for bro's UI. Runs on a bridge thread; don't block.
+    pub fn on_watchdog_update(&self, f: Box<dyn Fn(WatchdogUpdate) + Send + Sync>) {
+        self.state().watchdogs.on_update(Arc::from(f));
+    }
+
     /// Push a notification to connected clients (and history).
     pub fn notify(&self, n: Notification) {
         let state = self.state();
@@ -603,6 +647,9 @@ impl Bridge {
     pub fn shutdown(&self) {
         let state = self.state();
         state.orchestrator.shutdown();
+        for dog in state.watchdogs.all() {
+            state.watchdogs.stop(&dog.session_id);
+        }
         state.shutdown.send_replace(true);
         let Some(thread) = self.inner.thread.lock().take() else {
             return;

@@ -65,6 +65,7 @@ pub(crate) fn create_request(state: &AppState, body: &Value) -> CreateRequest {
         args,
         cwd: string_field(body, "cwd").map(PathBuf::from),
         project_id: string_field(body, "projectId"),
+        model: string_field(body, "model"),
     }
 }
 

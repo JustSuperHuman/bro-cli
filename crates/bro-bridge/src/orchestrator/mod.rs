@@ -8,11 +8,11 @@
 
 mod cast;
 mod chats;
-mod claude;
+pub(crate) mod claude;
 mod context;
 mod folders;
 pub(crate) mod mcp;
-mod tools;
+pub(crate) mod tools;
 mod turn;
 
 pub use claude::OrchestratorLaunch;

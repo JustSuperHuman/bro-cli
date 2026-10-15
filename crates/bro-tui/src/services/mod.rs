@@ -111,6 +111,8 @@ pub struct State {
     pub justtools: justtools::JustToolsState,
     pub justimagine: justimagine::JustImagineState,
     pub updates: updates::UpdateState,
+    /// Every session's watchdog as the bridge last reported it, by session id.
+    pub watchdogs: HashMap<String, bro_bridge::WatchdogSnapshot>,
     /// Things that didn't work at startup, shown once as toasts and in the views.
     pub issues: Vec<String>,
 }
@@ -206,6 +208,7 @@ pub fn fallback_settings() -> Settings {
         justtools: Default::default(),
         justwatch: Default::default(),
         updates: Default::default(),
+        watchdog: Default::default(),
         keys: BTreeMap::new(),
     }
 }
@@ -260,6 +263,7 @@ impl Services {
             usage: BTreeMap::new(),
             usage_at: None,
             picks: (None, None),
+            watchdogs: HashMap::new(),
             issues: vec![],
         }
     }
@@ -565,6 +569,97 @@ impl Services {
         if let Some(old) = std::mem::replace(&mut *self.inner.voice.lock(), voice) {
             old.stop();
         }
+    }
+
+    // ------------------------------------------------------------------ watchdogs
+
+    /// The session's watchdog, as last reported (cheap: the cache, no bridge call).
+    pub fn watchdog(&self, sid: &str) -> Option<bro_bridge::WatchdogSnapshot> {
+        self.state().watchdogs.get(sid).cloned()
+    }
+
+    fn cache_watchdog(&self, sid: &str, snapshot: Option<bro_bridge::WatchdogSnapshot>) {
+        self.update(|st| match snapshot {
+            Some(s) => {
+                st.watchdogs.insert(sid.to_string(), s);
+            }
+            None => {
+                st.watchdogs.remove(sid);
+            }
+        });
+    }
+
+    /// Start a watchdog on session `sid`. Err when the bridge (which runs the reviewers) is off.
+    pub fn watchdog_start(&self, sid: &str, plan: bro_bridge::WatchdogPlan) -> Result<(), String> {
+        if self.is_demo() {
+            // the demo shows the pages without running reviewers
+            let snapshot = bro_bridge::WatchdogSnapshot { session_id: sid.to_string(), plan, started_at: chrono::Utc::now().to_rfc3339(), ..Default::default() };
+            self.cache_watchdog(sid, Some(snapshot));
+            return Ok(());
+        }
+        if !self.bridge_running() {
+            return Err("watchdogs need the bridge (it serves the reviewer's tools): turn it on in the bridge view (alt+g)".into());
+        }
+        let mut snapshot = None;
+        self.with_bridge("bridge::watchdog_start", |b| snapshot = Some(b.watchdog_start(sid, plan)));
+        self.cache_watchdog(sid, snapshot);
+        Ok(())
+    }
+
+    pub fn watchdog_set_plan(&self, sid: &str, plan: bro_bridge::WatchdogPlan) {
+        if self.is_demo() {
+            self.update(|st| {
+                if let Some(d) = st.watchdogs.get_mut(sid) {
+                    d.plan = plan;
+                }
+            });
+            return;
+        }
+        self.with_bridge("bridge::watchdog_set_plan", |b| {
+            b.watchdog_set_plan(sid, plan);
+        });
+    }
+
+    pub fn watchdog_stop(&self, sid: &str) {
+        if self.state().watchdogs.contains_key(sid) {
+            self.with_bridge("bridge::watchdog_stop", |b| {
+                b.watchdog_stop(sid);
+            });
+            self.cache_watchdog(sid, None);
+        }
+    }
+
+    pub fn watchdog_pause(&self, sid: &str, paused: bool) {
+        if self.is_demo() {
+            self.update(|st| {
+                if let Some(d) = st.watchdogs.get_mut(sid) {
+                    d.paused = paused;
+                }
+            });
+            return;
+        }
+        self.with_bridge("bridge::watchdog_pause", |b| {
+            b.watchdog_pause(sid, paused);
+        });
+    }
+
+    /// Wake the watchdog now: a reviewer starts on the bridge runtime.
+    pub fn watchdog_wake(&self, sid: &str, wake: bro_bridge::WatchdogWake) -> Result<(), String> {
+        if self.is_demo() {
+            return Err("the demo doesn't run reviewers".into());
+        }
+        let mut out = Err("the bridge isn't running".to_string());
+        self.with_bridge("bridge::watchdog_wake", |b| out = b.watchdog_wake(sid, wake));
+        out
+    }
+
+    /// Bridge updates: keep the cache current and hand the event to the UI.
+    pub(crate) fn on_watchdog_update(&self, u: bro_bridge::WatchdogUpdate) {
+        if let bro_bridge::WatchdogUpdate::Changed { session_id, snapshot } = &u {
+            self.cache_watchdog(session_id, snapshot.as_deref().cloned());
+            return;
+        }
+        self.send(Event::Watchdog(u));
     }
 
     /// Tell the bridge what remote clients can launch: a shell, every logged-in profile, pi and omp.

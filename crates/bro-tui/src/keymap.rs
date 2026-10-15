@@ -71,6 +71,10 @@ pub enum Act {
     OpenedFile,
     /// What the focused agent sent you and the files it touched.
     AgentFiles,
+    /// Start or look at the focused session's watchdog (milestones, a reviewer that hands it its next task).
+    Watchdog,
+    /// Edit the instructions every watchdog reviewer starts with.
+    WatchdogPrompt,
     Quit,
 }
 
@@ -101,11 +105,11 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, SwitchLogin, OpenedFile, AgentFiles, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, SwitchLogin, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, QuickInstall, RefreshUsage]);
+        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, RefreshUsage]);
         v.extend([Palette, Help, Themes, ToggleIcons, ToggleAutoResume, ToggleCaveman, Quit]);
         v
     }
@@ -164,6 +168,8 @@ impl Act {
             CloseProject => "close_project".into(),
             OpenedFile => "opened_file".into(),
             AgentFiles => "agent_files".into(),
+            Watchdog => "watchdog".into(),
+            WatchdogPrompt => "watchdog_prompt".into(),
             Quit => "quit".into(),
         }
     }
@@ -227,6 +233,8 @@ impl Act {
             CloseProject => "close the current project (and its sessions)".into(),
             OpenedFile => "show the file an agent last opened (bro open)".into(),
             AgentFiles => "agent files: what it sent you and the files it touched".into(),
+            Watchdog => "watchdog: keep this session working through your milestones while you're away".into(),
+            WatchdogPrompt => "watchdog prompt: edit what every reviewer is told".into(),
             Quit => "quit bro".into(),
         }
     }
@@ -234,10 +242,10 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | CloseProject | OpenedFile | AgentFiles => Group::Sessions,
+            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | CloseProject | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | QuickInstall | RefreshUsage => Group::Views,
+            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | RefreshUsage => Group::Views,
             Palette | Help | Themes | ToggleIcons | ToggleAutoResume | ToggleCaveman | Quit => Group::App,
         }
     }
@@ -326,6 +334,7 @@ impl Act {
             CloseProject => vec!["X"],
             OpenedFile => vec!["f"],
             AgentFiles => vec!["F"],
+            Watchdog => vec!["w"],
             Profiles => vec!["o"],
             Proxy => vec!["y"],
             Bridge => vec!["g"],
@@ -336,7 +345,7 @@ impl Act {
             RefreshUsage => vec!["r"],
             Quit => vec!["q"],
             QuickInstall => vec!["I"],
-            Split | ToggleTrim | ToggleAutoResume | ToggleCaveman => vec![],
+            Split | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt => vec![],
         }
     }
 }
@@ -578,7 +587,7 @@ impl Keymap {
 
     /// A short "key action · key action" line of the prefix table, for the armed-prefix hint.
     pub fn prefix_hint(&self) -> String {
-        let want = [Act::SplitRight, Act::SplitDown, Act::Close, Act::Zoom, Act::NewSession, Act::FocusSidebar, Act::Palette, Act::Help];
+        let want = [Act::Watchdog, Act::SplitRight, Act::SplitDown, Act::Close, Act::Zoom, Act::NewSession, Act::FocusSidebar, Act::Palette, Act::Help];
         want.iter()
             .filter_map(|a| self.prefixed.iter().find(|(_, x)| x == a).map(|(c, _)| format!("{} {}", c.display(), short_label(*a))))
             .collect::<Vec<_>>()
@@ -596,6 +605,7 @@ fn short_label(a: Act) -> &'static str {
         Act::FocusSidebar => "sidebar",
         Act::Palette => "palette",
         Act::Help => "help",
+        Act::Watchdog => "watchdog",
         _ => "",
     }
 }

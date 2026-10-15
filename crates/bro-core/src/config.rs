@@ -168,6 +168,8 @@ pub struct Settings {
     pub justwatch: crate::justwatch::JustWatchSettings,
     /// Looking for new bro releases.
     pub updates: crate::self_update::UpdateSettings,
+    /// Watchdogs: a fresh reviewer agent that hands an idle session its next task.
+    pub watchdog: WatchdogSettings,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
     pub keys: BTreeMap<String, String>,
 }
@@ -221,6 +223,29 @@ pub struct AutoResumeSettings {
 impl Default for AutoResumeSettings {
     fn default() -> Self {
         Self { enabled: true, prompt: "continue".into(), max_attempts: 6, after_limit_reset: true }
+    }
+}
+
+/// Defaults for new watchdogs (each one can change them when it starts) and the reviewer's standing
+/// instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WatchdogSettings {
+    /// The reviewer's system prompt; None = bro's own (`bro_bridge::watchdog::DEFAULT_PROMPT`).
+    pub prompt: Option<String>,
+    /// Seconds a session sits idle after its agent stops before the watchdog wakes.
+    pub idle_secs: u64,
+    /// Wake-ups a watchdog gets before it stands down.
+    pub max_wakes: u32,
+    /// Claude model the reviewer runs on (alias or full id). A Codex reviewer uses its login's default.
+    pub model: String,
+    /// "auto" (the login with the most usage left, Claude first) or a login id ("claude:work").
+    pub reviewer: String,
+}
+
+impl Default for WatchdogSettings {
+    fn default() -> Self {
+        Self { prompt: None, idle_secs: 60, max_wakes: 25, model: "opus".into(), reviewer: "auto".into() }
     }
 }
 
@@ -306,6 +331,7 @@ impl Default for Settings {
             justtools: Default::default(),
             justwatch: Default::default(),
             updates: Default::default(),
+            watchdog: Default::default(),
             keys: BTreeMap::new(),
         }
     }

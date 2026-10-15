@@ -95,7 +95,9 @@ pub fn definitions() -> Vec<Value> {
                 "task": { "type": "string", "description": "First message to send the agent (optional)." },
                 "agent": { "type": "string", "description": "claude (default), codex, pi, or shell. A login-specific id like claude:work also works." },
                 "name": { "type": "string", "description": "Session name; default is the next free squad name." },
-                "focus": { "type": "boolean", "description": "Bring it to the front in bro (default false; true when the user wants to see it)." }
+                "focus": { "type": "boolean", "description": "Bring it to the front in bro (default false; true when the user wants to see it)." },
+                "model": { "type": "string", "description": "Model for the agent (e.g. \"opus\", \"sonnet\", or a Codex model id); default is the login's own." },
+                "forWatchdog": { "type": "string", "description": "A watchdog reviewer opening a helper (a second opinion, a refinement pass): the watched session's id. The helper is listed in later wake-ups." }
             }),
             &["project"],
         ),
@@ -184,6 +186,36 @@ pub fn definitions() -> Vec<Value> {
             "List the project groupings (name + directory) tabs are organized under, and recently used directories.",
             json!({}),
             &[],
+        ),
+        tool(
+            "clear_context",
+            "Start the agent in a tab on a fresh conversation (Claude Code /clear, Codex /new) so its next task begins clean. The agent forgets everything said so far: follow up with a self-contained task. Refused while the agent is mid-turn.",
+            json!({ "sessionId": { "type": "string" } }),
+            &["sessionId"],
+        ),
+        tool(
+            "watchdog_update",
+            "For a watchdog reviewer: record progress on the watched session's milestones. Set a milestone's status (pending, active, done) and a short note on the evidence, add milestones the work turned up, or stand the watchdog down once every milestone is done and verified.",
+            json!({
+                "sessionId": { "type": "string", "description": "The watched session." },
+                "milestones": {
+                    "type": "array",
+                    "description": "Changes to existing milestones.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "number": { "type": "integer", "description": "1-based, as numbered in the brief." },
+                            "status": { "type": "string", "enum": ["pending", "active", "done"] },
+                            "note": { "type": "string", "description": "What you saw: \"tests pass, empty state still missing\"." }
+                        },
+                        "required": ["number"]
+                    }
+                },
+                "add": { "type": "array", "items": { "type": "string" }, "description": "New milestones, appended." },
+                "standDown": { "type": "boolean", "description": "Stop watching: nothing is left to do." },
+                "reason": { "type": "string", "description": "Why it stands down, in a few words." }
+            }),
+            &["sessionId"],
         ),
         tool(
             "notify_user",
@@ -369,6 +401,11 @@ pub fn summarize(app: &AppState, name: &str, args: &Value) -> String {
             string_arg(args, "title").unwrap_or_default()
         ),
         "list_projects" => "Listed projects".into(),
+        "clear_context" => format!("Cleared {}'s context", target()),
+        "watchdog_update" => match args.get("standDown").and_then(Value::as_bool) {
+            Some(true) => "Stood the watchdog down".into(),
+            _ => "Updated the milestones".into(),
+        },
         "notify_user" => format!(
             "Notified you: {}",
             string_arg(args, "title").unwrap_or_default()
@@ -716,6 +753,12 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             "recent": app.recent_projects()
         }))
         .unwrap_or_default()),
+        "clear_context" => clear_context(app, args).await,
+        "watchdog_update" => {
+            let id = resolve_session(app, args)?;
+            let outcome = app.watchdogs.apply(&id, args)?;
+            Ok(serde_json::to_string_pretty(&outcome).unwrap_or_default())
+        }
         "notify_user" => {
             let title = string_arg(args, "title").ok_or("title is required.")?;
             app.notify(
@@ -872,6 +915,28 @@ async fn type_text(app: &AppState, id: &str, text: &str, submit: bool) -> Result
     Ok(())
 }
 
+/// `/clear` (Claude Code) or `/new` (Codex, Pi, omp), then wait for the fresh prompt.
+async fn clear_context(app: &AppState, args: &Value) -> Result<String, String> {
+    let id = resolve_session(app, args)?;
+    let view = app.session_view(&id).ok_or("The session is no longer available.")?;
+    let agent = view.summary.agent.clone().ok_or("That tab isn't running an agent.")?;
+    match view.summary.agent_activity.as_deref() {
+        Some("working") => return Err("The agent is mid-turn; wait for it to stop before clearing.".into()),
+        Some("awaiting") => return Err("The agent is waiting on a question; answer or cancel it first.".into()),
+        _ => {}
+    }
+    let command = if agent.eq_ignore_ascii_case("claude") { "/clear" } else { "/new" };
+    // type the command, let the slash menu settle on it, then Enter
+    write_paced(app, &id, command).await?;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    app.dispatch(&id, COMMAND_INPUT, &key_sequence("enter").unwrap_or_default(), 0, 0)?;
+    let screen = wait_for_output(app, &id, Duration::from_secs(10), 12).await;
+    Ok(format!(
+        "Sent {command} to \"{}\". It starts from an empty conversation now: the next message must carry the whole task.\n{screen}",
+        session_label(app, &id)
+    ))
+}
+
 async fn find_folders(app: &AppState, query: &str) -> Vec<folders::FolderMatch> {
     let app = app.clone();
     let query = query.to_string();
@@ -945,12 +1010,19 @@ async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
         cast::next_name(titles.iter().map(String::as_str))
     });
     let title = cast::title(&name, Some(&best.name));
+    let watched = match string_arg(args, "forWatchdog") {
+        Some(_) => Some(resolve_session(app, &json!({ "sessionId": args["forWatchdog"] }))?),
+        None => None,
+    };
     let session = launch_terminal(
         app,
-        json!({ "title": title, "cwd": best.path, "profileId": agent }),
+        json!({ "title": title, "cwd": best.path, "profileId": agent, "model": string_arg(args, "model") }),
     )
     .await?;
     let id = session.id.clone();
+    if let Some(watched) = &watched {
+        app.watchdogs.add_helper(watched, &id);
+    }
     if args.get("focus").and_then(Value::as_bool).unwrap_or(false) {
         app.send_command(BridgeCommand::Focus { id: id.clone() });
     }
