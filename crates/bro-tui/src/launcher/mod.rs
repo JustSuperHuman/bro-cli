@@ -127,6 +127,8 @@ pub enum Outcome {
     CreateProject(PathBuf, uuid::Uuid),
     Launch(LaunchSpec, Place),
     Resume(usize),
+    /// Resume several earlier sessions, one after another.
+    ResumeMany(Vec<usize>),
     Archive(String, bool),
     UndoArchive,
     /// Install this agent (it isn't on PATH).
@@ -244,6 +246,7 @@ impl Launcher {
             continue_picker::Outcome::None => Outcome::None,
             continue_picker::Outcome::Close => Outcome::Close,
             continue_picker::Outcome::Resume(idx) => Outcome::Resume(idx),
+            continue_picker::Outcome::ResumeMany(idx) => Outcome::ResumeMany(idx),
             continue_picker::Outcome::Archive(id, on) => Outcome::Archive(id, on),
             continue_picker::Outcome::Undo => Outcome::UndoArchive,
         }
@@ -615,7 +618,8 @@ impl Launcher {
     }
 
     /// A mouse click. Clicking the selected row again acts like Enter; clicking outside closes.
-    pub fn click(&mut self, pos: ratatui::layout::Position) -> Outcome {
+    /// Shift / ctrl on an earlier session picks several.
+    pub fn click(&mut self, pos: ratatui::layout::Position, mods: KeyModifiers) -> Outcome {
         if let Some(p) = &mut self.project_picker {
             let clicked_row = p.hits.iter().any(|(r, _)| r.contains(pos));
             let mut outcome = p.click(pos);
@@ -633,7 +637,7 @@ impl Launcher {
             Hit::Project => self.open_project_picker(),
             Hit::Tab(tab) => self.tab = tab,
             Hit::ContinueScope(all) => self.continue_picker.set_all(all),
-            Hit::ContinueRow(_) => return Self::continue_outcome(self.continue_picker.click(pos)),
+            Hit::ContinueRow(_) => return Self::continue_outcome(self.continue_picker.click(pos, mods)),
             Hit::Harness(h) => {
                 while self.harness != h {
                     self.set_harness(1);

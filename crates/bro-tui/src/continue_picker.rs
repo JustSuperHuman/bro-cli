@@ -1,6 +1,7 @@
 //! "Continue a session": earlier sessions, searchable, for the current project (tab: every project). Enter
 //! resumes (asking which login when you have several); Delete archives; ctrl+a shows archived ones too.
-//! Earlier sessions live here instead of cluttering the sidebar.
+//! Earlier sessions live here instead of cluttering the sidebar. Shift+arrows / shift+click pick a range,
+//! ctrl+space / ctrl+click pick one more; Enter then resumes every picked session.
 
 use crate::fuzzy;
 use crate::theme::Theme;
@@ -35,6 +36,8 @@ pub enum Outcome {
     Close,
     /// resume this past-session index
     Resume(usize),
+    /// resume these past-session indexes, in list order
+    ResumeMany(Vec<usize>),
     /// archive (true) / restore (false) this session id
     Archive(String, bool),
     /// undo the last archive
@@ -54,6 +57,10 @@ pub struct ContinuePicker {
     pub hits: Vec<(Rect, usize)>,
     /// clickable project and all-session filters
     pub scope_hits: Vec<(Rect, bool)>,
+    /// picked session ids (multi-select), kept while you search
+    pub picked: Vec<String>,
+    /// where a shift range starts (a view position) and what was picked before it
+    anchor: Option<(usize, Vec<String>)>,
     view: Vec<usize>,
 }
 
@@ -61,7 +68,7 @@ impl ContinuePicker {
     /// `entries` newest first.
     pub fn new(entries: Vec<Entry>, project: Option<(String, String)>) -> ContinuePicker {
         let all = project.is_none();
-        let mut p = ContinuePicker { filter: String::new(), sel: 0, all, show_archived: false, project, entries, hits: vec![], scope_hits: vec![], view: vec![] };
+        let mut p = ContinuePicker { filter: String::new(), sel: 0, all, show_archived: false, project, entries, hits: vec![], scope_hits: vec![], picked: vec![], anchor: None, view: vec![] };
         p.refresh();
         p
     }
@@ -70,6 +77,7 @@ impl ContinuePicker {
     pub fn set_entries(&mut self, entries: Vec<Entry>) {
         let sel = self.sel;
         self.entries = entries;
+        self.picked.retain(|id| self.entries.iter().any(|e| &e.id == id));
         self.refresh();
         self.sel = sel.min(self.view.len().saturating_sub(1));
     }
@@ -106,6 +114,7 @@ impl ContinuePicker {
             hits.into_iter().map(|k| pool[k]).collect()
         };
         self.sel = 0;
+        self.anchor = None;
     }
 
     pub fn view(&self) -> Vec<&Entry> {
@@ -116,30 +125,103 @@ impl ContinuePicker {
         self.view.get(self.sel).map(|&i| &self.entries[i])
     }
 
+    pub fn is_picked(&self, id: &str) -> bool {
+        self.picked.iter().any(|p| p == id)
+    }
+
+    /// Pick or unpick the row at view position `k`; the next shift range starts there.
+    fn toggle(&mut self, k: usize) {
+        let Some(id) = self.view.get(k).map(|&i| self.entries[i].id.clone()) else { return };
+        match self.picked.iter().position(|p| *p == id) {
+            Some(at) => {
+                self.picked.remove(at);
+            }
+            None => self.picked.push(id),
+        }
+        self.sel = k;
+        self.anchor = None;
+    }
+
+    /// Move to view position `to`, picking every row between the range's start and there.
+    fn extend(&mut self, to: usize) {
+        if self.view.is_empty() {
+            return;
+        }
+        let to = to.min(self.view.len() - 1);
+        let (from, base) = self.anchor.clone().unwrap_or_else(|| (self.sel, self.picked.clone()));
+        let mut picked = base.clone();
+        for k in from.min(to)..=from.max(to) {
+            let id = &self.entries[self.view[k]].id;
+            if !picked.contains(id) {
+                picked.push(id.clone());
+            }
+        }
+        self.picked = picked;
+        self.sel = to;
+        self.anchor = Some((from, base));
+    }
+
+    /// Enter: every picked session (list order), else the one under the cursor.
+    fn resume_outcome(&self) -> Outcome {
+        if self.picked.is_empty() {
+            return self.current().map(|e| Outcome::Resume(e.idx)).unwrap_or(Outcome::None);
+        }
+        let mut idx: Vec<usize> = self.entries.iter().filter(|e| self.is_picked(&e.id)).map(|e| e.idx).collect();
+        if idx.len() == 1 {
+            return Outcome::Resume(idx.remove(0));
+        }
+        Outcome::ResumeMany(idx)
+    }
+
     pub fn paste(&mut self, s: &str) {
         self.filter.push_str(s.trim());
         self.refresh();
     }
 
-    pub fn click(&mut self, pos: Position) -> Outcome {
+    /// A click; ctrl picks one more row, shift picks the range up to it.
+    pub fn click(&mut self, pos: Position, mods: KeyModifiers) -> Outcome {
         let Some(&(_, k)) = self.hits.iter().find(|(r, _)| r.contains(pos)) else { return Outcome::None };
+        if mods.contains(KeyModifiers::CONTROL) {
+            if self.picked.is_empty() && k != self.sel {
+                self.toggle(self.sel);
+            }
+            self.toggle(k);
+            return Outcome::None;
+        }
+        if mods.contains(KeyModifiers::SHIFT) {
+            self.extend(k);
+            return Outcome::None;
+        }
         if k == self.sel {
-            return self.current().map(|e| Outcome::Resume(e.idx)).unwrap_or(Outcome::None);
+            return self.resume_outcome();
         }
         self.sel = k;
+        self.anchor = None;
         Outcome::None
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let n = self.view.len();
         match k.code {
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
                 self.refresh();
             }
+            KeyCode::Esc if !self.picked.is_empty() => {
+                self.picked.clear();
+                self.anchor = None;
+            }
             KeyCode::Esc => return Outcome::Close,
-            KeyCode::Enter => return self.current().map(|e| Outcome::Resume(e.idx)).unwrap_or(Outcome::None),
+            KeyCode::Enter => return self.resume_outcome(),
+            // some terminals report ctrl+space as ctrl+@ or NUL
+            KeyCode::Char(' ' | '@') if ctrl => self.toggle(self.sel),
+            KeyCode::Null => self.toggle(self.sel),
+            KeyCode::Down if shift => self.extend(self.sel + 1),
+            KeyCode::Up if shift => self.extend(self.sel.saturating_sub(1)),
+            KeyCode::PageDown if shift => self.extend(self.sel + 10),
+            KeyCode::PageUp if shift => self.extend(self.sel.saturating_sub(10)),
             KeyCode::Tab | KeyCode::BackTab if self.project.is_some() => {
                 self.all = !self.all;
                 self.refresh();
@@ -173,6 +255,10 @@ impl ContinuePicker {
                 self.refresh();
             }
             _ => {}
+        }
+        // a plain move ends the shift range; the next one starts from the cursor
+        if !(shift && matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown)) {
+            self.anchor = None;
         }
         Outcome::None
     }
@@ -213,8 +299,11 @@ pub fn draw_in(f: &mut Frame, inner: Rect, p: &mut ContinuePicker, t: &Theme) {
         let y = inner.y + 2 + (k - start) as u16;
         let r = Rect { y, height: 1, ..inner };
         let on = k == p.sel;
+        let picked = p.is_picked(&e.id);
         if on {
             f.buffer_mut().set_style(r, Style::default().bg(crate::theme::mix(t.user, ratatui::style::Color::Rgb(20, 20, 24), 0.35)));
+        } else if picked {
+            f.buffer_mut().set_style(r, Style::default().bg(crate::theme::mix(t.accent, ratatui::style::Color::Rgb(20, 20, 24), 0.82)));
         }
         let brand = ui::harness_color(Some(e.harness), t);
         let id_tail = e.id.rsplit('-').next().unwrap_or(&e.id);
@@ -230,12 +319,13 @@ pub fn draw_in(f: &mut Frame, inner: Rect, p: &mut ContinuePicker, t: &Theme) {
         }
         right.push(Span::styled(format!("{:>4} ", crate::util::short_dur(e.age_secs)), muted(t)));
         let right_w: usize = right.iter().map(|s| ui::width(&s.content)).sum();
-        let mut title_style = if on { ui::bold_accent(t) } else { Style::default() };
+        let mut title_style = if on || picked { ui::bold_accent(t) } else { Style::default() };
         if e.archived {
             title_style = title_style.add_modifier(Modifier::CROSSED_OUT).fg(t.muted);
         }
         let left = vec![
-            Span::styled(if on { "▌ " } else { "  " }, ui::accent(t)),
+            Span::styled(if on { "▌" } else { " " }, ui::accent(t)),
+            Span::styled(if picked { "✓" } else { " " }, ui::bold_accent(t)),
             Span::styled(format!("{} ", ui::harness_glyph(Some(e.harness))), fg(brand)),
             Span::styled(ui::fit(&e.title, now_w.saturating_sub(right_w + 6)), title_style),
         ];
@@ -247,7 +337,13 @@ pub fn draw_in(f: &mut Frame, inner: Rect, p: &mut ContinuePicker, t: &Theme) {
         ui::line(f, Rect { y: inner.y + 2, height: 1, ..inner }, vec![Span::styled(msg, muted(t))]);
     }
     let archived = if p.show_archived { "hide archived" } else { "show archived" };
-    ui::hint_line(f, inner, &[("⏎", "resume"), ("↑↓", "move"), ("del", "archive"), ("^z", "undo"), ("^a", archived), ("esc", "close")], t);
+    if p.picked.is_empty() {
+        ui::hint_line(f, inner, &[("⏎", "resume"), ("↑↓", "move"), ("⇧↑↓ ^space", "pick several"), ("del", "archive"), ("^z", "undo"), ("^a", archived), ("esc", "close")], t);
+    } else {
+        let n = p.picked.len();
+        let resume = if n == 1 { "resume 1 session".to_string() } else { format!("resume all {n}, one at a time") };
+        ui::hint_line(f, inner, &[("⏎", &resume), ("⇧↑↓", "range"), ("^space ^click", "pick / unpick"), ("esc", "clear picks")], t);
+    }
 }
 
 #[cfg(test)]
@@ -281,5 +377,49 @@ mod tests {
         let p = ContinuePicker::new(entries, Some(("zzz".into(), "zzz".into())));
         assert!(!p.all);
         assert!(p.view().is_empty());
+    }
+
+    #[test]
+    fn shift_ranges_and_ctrl_space_pick_several() {
+        let entries: Vec<Entry> = (0..5).map(|i| e(i, "a", &format!("task {i}"), false)).collect();
+        let mut p = ContinuePicker::new(entries, None);
+        let shift = |p: &mut ContinuePicker, code| p.key(KeyEvent::new(code, KeyModifiers::SHIFT));
+        shift(&mut p, KeyCode::Down);
+        shift(&mut p, KeyCode::Down);
+        assert_eq!(p.picked, ["id0", "id1", "id2"]);
+        // back up inside the range shrinks it
+        shift(&mut p, KeyCode::Up);
+        assert_eq!(p.picked, ["id0", "id1"]);
+        // a plain move, then ctrl+space adds one more; the picks survive a search
+        key(&mut p, KeyCode::Down);
+        key(&mut p, KeyCode::Down);
+        p.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        assert_eq!(p.picked, ["id0", "id1", "id3"]);
+        key(&mut p, KeyCode::Char('4'));
+        assert_eq!(p.picked.len(), 3);
+        assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::ResumeMany(ref v) if v == &[0, 1, 3]));
+        // esc clears the search, then the picks, then closes
+        key(&mut p, KeyCode::Esc);
+        key(&mut p, KeyCode::Esc);
+        assert!(p.picked.is_empty());
+        assert!(matches!(key(&mut p, KeyCode::Esc), Outcome::Close));
+    }
+
+    #[test]
+    fn ctrl_and_shift_clicks_pick() {
+        let entries: Vec<Entry> = (0..4).map(|i| e(i, "a", &format!("task {i}"), false)).collect();
+        let mut p = ContinuePicker::new(entries, None);
+        p.hits = (0..4).map(|k| (Rect { x: 0, y: k as u16, width: 20, height: 1 }, k)).collect();
+        let at = |k: u16| Position { x: 1, y: k };
+        // ctrl+click picks the cursor row too, so two rows end up picked
+        assert!(matches!(p.click(at(2), KeyModifiers::CONTROL), Outcome::None));
+        assert_eq!(p.picked, ["id0", "id2"]);
+        p.click(at(2), KeyModifiers::CONTROL);
+        assert_eq!(p.picked, ["id0"]);
+        // shift+click picks from the last clicked row
+        p.click(at(3), KeyModifiers::SHIFT);
+        assert_eq!(p.picked, ["id0", "id2", "id3"]);
+        // a plain click on the cursor row resumes every pick
+        assert!(matches!(p.click(at(3), KeyModifiers::NONE), Outcome::ResumeMany(ref v) if v == &[0, 2, 3]));
     }
 }

@@ -1200,12 +1200,12 @@ fn launched_sessions_open_panes_and_report_errors() {
         browser: bro_core::browser::BrowserMode::Off,
         extra_args: vec![],
     };
-    let bad = crate::services::Launched { spec: spec.clone(), place: Place::Tab, reply: None, name: None, remember: false, result: Err("no key".into()), route_id: None, note: None };
+    let bad = crate::services::Launched { spec: spec.clone(), place: Place::Tab, reply: None, name: None, remember: false, result: Err("no key".into()), route_id: None, note: None, into: None };
     a.launched(bad);
     assert!(a.tabs.is_empty());
     assert!(a.toasts.latest().unwrap().text.contains("no key"));
     let cmd = bro_core::launch::CommandSpec { program: "definitely-not-a-program-xyz".into(), label: "codex · local · gpt-5.2".into(), cwd: std::env::temp_dir(), ..Default::default() };
-    let ok = crate::services::Launched { spec, place: Place::Tab, reply: None, name: None, remember: true, result: Ok(cmd), route_id: None, note: None };
+    let ok = crate::services::Launched { spec, place: Place::Tab, reply: None, name: None, remember: true, result: Ok(cmd), route_id: None, note: None, into: None };
     a.launched(ok);
     assert_eq!(a.tabs.len(), 1);
     assert_eq!(a.recents.len(), 1);
@@ -1292,6 +1292,51 @@ fn all_sessions_resumes_in_the_selected_sessions_project() {
     assert_eq!(launch.spec.resume.as_ref().unwrap().session_id, entry.id);
     assert_eq!(launch.spec.cwd, expected_dir);
     assert_eq!(a.svc.project_for(&launch.spec.cwd).key, entry.project_key);
+}
+
+#[test]
+fn picking_several_sessions_opens_loaders_and_starts_them_one_at_a_time() {
+    let (mut a, rx) = usage_launch_app();
+    a.open_continue();
+    let Overlay::Launcher(l) = &mut a.overlay else { panic!("session dialog") };
+    l.continue_picker.set_all(true);
+    let picked: Vec<String> = l.continue_picker.view().iter().take(3).map(|e| e.id.clone()).collect();
+    assert_eq!(picked.len(), 3, "the demo has earlier sessions");
+    let before = a.panes.len();
+    key(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
+    key(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::None), "no login picker for several");
+    assert_eq!(a.panes.len(), before + 3, "a placeholder per session, right away");
+    let ids = a.stack.clone();
+    assert_eq!(ids.len(), 3, "shown side by side");
+    let queued = |a: &App, id: PaneId| a.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.queued);
+    assert!(ids.iter().all(|id| queued(&a, *id).is_some()));
+    assert!(queued(&a, ids[0]).unwrap().starting);
+    assert_eq!(queued(&a, ids[2]).unwrap().ahead, 2);
+    let s = draw(&mut a);
+    assert!(s.contains("Resuming") && s.contains("in line"), "{s}");
+
+    // only the first one launches; it takes over its placeholder's pane
+    let mut first = usage_launch_result(&rx);
+    assert_eq!(first.into, Some(ids[0]));
+    assert_eq!(first.spec.resume.as_ref().unwrap().session_id, picked[0]);
+    if let Ok(cmd) = &mut first.result {
+        cmd.program = "definitely-not-a-program-xyz".into();
+    }
+    a.launched(*first);
+    assert!(queued(&a, ids[0]).is_none());
+    assert_eq!(a.panes.len(), before + 3);
+    assert!(a.resume_queue.starting.is_none() && a.resume_queue.next_at.is_some(), "waits before the next");
+    a.pump_resumes();
+    assert_eq!(a.resume_queue.waiting.len(), 2, "still in its gap");
+
+    // a placeholder you close drops out of the line
+    a.close(ids[2]);
+    a.resume_queue.next_at = Some(Instant::now());
+    a.pump_resumes();
+    assert!(a.resume_queue.waiting.is_empty());
+    assert_eq!(usage_launch_result(&rx).into, Some(ids[1]));
 }
 
 #[test]

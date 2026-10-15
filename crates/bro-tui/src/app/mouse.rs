@@ -40,7 +40,7 @@ impl App {
                     return;
                 }
                 Overlay::Launcher(l) if left => {
-                    match l.click(pos) {
+                    match l.click(pos, m.modifiers) {
                         crate::launcher::Outcome::None => self.remember_launcher_permission(),
                         crate::launcher::Outcome::Close => self.overlay = Overlay::None,
                         crate::launcher::Outcome::Profiles => {
@@ -56,6 +56,10 @@ impl App {
                         crate::launcher::Outcome::Resume(idx) => {
                             self.overlay = Overlay::None;
                             self.open_resume(idx);
+                        }
+                        crate::launcher::Outcome::ResumeMany(idx) => {
+                            self.overlay = Overlay::None;
+                            self.resume_many(&idx);
                         }
                         crate::launcher::Outcome::Archive(id, on) => self.continue_archive(id, on),
                         crate::launcher::Outcome::UndoArchive => self.undo_archive(),

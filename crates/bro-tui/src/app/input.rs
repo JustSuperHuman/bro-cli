@@ -137,6 +137,10 @@ impl App {
                     self.overlay = Overlay::None;
                     self.open_resume(idx);
                 }
+                Outcome::ResumeMany(idx) => {
+                    self.overlay = Overlay::None;
+                    self.resume_many(&idx);
+                }
                 Outcome::Archive(id, on) => self.continue_archive(id, on),
                 Outcome::UndoArchive => self.undo_archive(),
                 Outcome::Install(h) => {

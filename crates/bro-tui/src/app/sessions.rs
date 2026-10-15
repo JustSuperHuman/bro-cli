@@ -14,8 +14,25 @@ use bro_core::Harness;
 use bro_core::browser::BrowserMode;
 use bro_core::launch::{LaunchSpec, Permission, Resume};
 use bro_core::sessions::SessionInfo;
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Quiet time after one queued resume starts before the next one launches.
+const RESUME_GAP: Duration = Duration::from_millis(1500);
+/// A queued launch that never reports back stops holding up the rest after this long.
+const RESUME_STUCK: Duration = Duration::from_secs(20);
+
+/// Earlier sessions resumed together: each waits in a placeholder pane and they launch one at a time,
+/// so a dozen agents don't all start (and hit the disk and network) at once.
+#[derive(Default)]
+pub(crate) struct ResumeQueue {
+    pub(super) waiting: VecDeque<(PaneId, LaunchRequest)>,
+    /// the launch building now, and since when
+    pub(super) starting: Option<(PaneId, Instant)>,
+    /// the next one launches no earlier than this
+    pub(super) next_at: Option<Instant>,
+}
 
 /// What a remote create's `profile_id` asks for: an agent (harness + bro profile) or None for a shell.
 /// Accepts bro profile ids ("claude:work"), bare harness names ("claude", "pi") and "shell".
@@ -34,13 +51,21 @@ pub(crate) fn create_target(profile_id: Option<&str>) -> Option<(Harness, Option
 impl App {
     /// A launch finished building: open its pane (or report why not).
     pub(super) fn launched(&mut self, l: Launched) {
-        let Launched { spec, place, reply, name, remember, result, route_id, note } = l;
+        let Launched { spec, place, reply, name, remember, result, route_id, note, into } = l;
+        // a queued resume: its placeholder (unless you closed it meanwhile) becomes the session
+        let placeholder = into.filter(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.queued.is_some()));
+        if let Some(id) = into {
+            self.resume_started(id);
+        }
         let cmd = match result {
             Ok(c) => c,
             Err(e) => {
                 self.raise(Kind::Error, format!("couldn't launch {}: {e}", spec.harness.label()));
                 if let Some(r) = reply {
                     let _ = r.send(Err(anyhow::anyhow!(e)));
+                }
+                if let Some(id) = placeholder {
+                    self.close(id);
                 }
                 return;
             }
@@ -75,6 +100,26 @@ impl App {
         };
         let sid = meta.sid.clone();
         let term = Term::new(meta, Spawn { program: cmd.program, args: cmd.args, env: cmd.env, env_remove: cmd.env_remove }, self.svc.clone());
+        if into.is_some() {
+            match placeholder {
+                Some(id) => {
+                    // same pane id: it keeps its tab, grid slot and sidebar place
+                    self.panes.insert(id, Box::new(term));
+                    self.agent_state.remove(&id);
+                    self.last_tick.remove(&id);
+                    self.start_now(id);
+                }
+                None => {
+                    // closed while it was building: end it the way closing a session does (route, staged files)
+                    let id = self.add(Box::new(term));
+                    self.close(id);
+                }
+            }
+            if let Some(n) = note {
+                self.toast(Kind::Info, n);
+            }
+            return;
+        }
         let background = reply.is_some();
         let here = self.cur;
         let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all);
@@ -432,12 +477,95 @@ impl App {
     /// Resume a past session in its own profile.
     pub(crate) fn resume(&mut self, idx: usize) {
         let Some(s) = self.past_session(idx) else { return };
-        let cwd = s.cwd.clone().or_else(|| s.project.as_ref().map(|p| p.root.clone())).or_else(dirs::home_dir).unwrap_or_default();
-        let spec = LaunchSpec { harness: s.harness, profile_id: s.profile_id.clone(), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: false }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![] };
-        let mut req = LaunchRequest::new(spec, Place::Tab);
-        req.name = Some(crate::ui::fit(&s.title, 28));
-        self.svc.launch(req);
+        self.svc.launch(resume_request(&s));
         self.toast(Kind::Info, format!("resuming “{}”…", crate::ui::fit(&s.title, 40)));
+    }
+
+    /// Resume several earlier sessions, each in its own login: their panes open now with a loader and
+    /// the sessions start one at a time. Two or more show side by side.
+    pub(crate) fn resume_many(&mut self, idx: &[usize]) {
+        let sessions: Vec<SessionInfo> = idx.iter().filter_map(|&i| self.past_session(i)).collect();
+        if sessions.is_empty() {
+            return;
+        }
+        let mut ahead = self.resume_queue.waiting.len() + usize::from(self.resume_queue.starting.is_some());
+        let mut ids = vec![];
+        for s in &sessions {
+            let mut req = resume_request(s);
+            let spec = &req.spec;
+            let meta = Meta {
+                sid: uuid::Uuid::new_v4().to_string(),
+                harness: Some(spec.harness),
+                profile: spec.profile_id.clone(),
+                store: transcript_store(spec),
+                model: None,
+                label: crate::services::launch::label_for(spec),
+                name: req.name.clone(),
+                renamed: false,
+                project: self.svc.project_for(&spec.cwd),
+                cwd: spec.cwd.clone(),
+                started: Instant::now(),
+                route_id: None,
+                cleanup: vec![],
+                caveman: None,
+            };
+            let id = self.open(Box::new(Term::queued(meta, ahead, self.svc.clone())), Place::Tab);
+            ahead += 1;
+            req.into = Some(id);
+            self.resume_queue.waiting.push_back((id, req));
+            ids.push(id);
+        }
+        if ids.len() >= 2 && !self.tile_all {
+            self.stack = ids.clone();
+            self.stack_focus = ids.first().copied();
+            self.stack_zoom = false;
+        } else {
+            self.focus_pane(ids[0]);
+        }
+        self.side_focus = false;
+        let n = sessions.len();
+        self.toast(Kind::Info, if n == 1 { format!("resuming “{}”…", crate::ui::fit(&sessions[0].title, 40)) } else { format!("resuming {n} sessions, one at a time") });
+        self.pump_resumes();
+    }
+
+    /// A queued resume reported back (started or failed): the next one may go after a short gap.
+    fn resume_started(&mut self, id: PaneId) {
+        if self.resume_queue.starting.is_some_and(|(s, _)| s == id) {
+            self.resume_queue.starting = None;
+            self.resume_queue.next_at = Some(Instant::now() + RESUME_GAP);
+        }
+        self.pump_resumes();
+    }
+
+    /// Launch the next queued resume when its turn comes, and keep each placeholder's place in line current.
+    pub(super) fn pump_resumes(&mut self) {
+        let q = &mut self.resume_queue;
+        if q.waiting.is_empty() && q.starting.is_none() {
+            return;
+        }
+        let panes = &self.panes;
+        q.waiting.retain(|(id, _)| panes.contains_key(id));
+        if q.starting.is_some_and(|(_, at)| at.elapsed() >= RESUME_STUCK) {
+            q.starting = None;
+        }
+        let due = q.starting.is_none() && q.next_at.is_none_or(|t| Instant::now() >= t);
+        if due && let Some((id, req)) = q.waiting.pop_front() {
+            q.starting = Some((id, Instant::now()));
+            q.next_at = None;
+            self.svc.launch(req);
+        }
+        let q = &self.resume_queue;
+        let mut line: Vec<(PaneId, usize, bool)> = q.starting.iter().map(|(id, _)| (*id, 0, true)).collect();
+        let offset = line.len();
+        line.extend(q.waiting.iter().enumerate().map(|(k, (id, _))| (*id, k + offset, false)));
+        for (id, ahead, starting) in line {
+            if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term())
+                && let Some(queued) = &mut t.queued
+            {
+                queued.ahead = ahead;
+                queued.starting = starting;
+            }
+        }
     }
 
     /// The logins a session of `harness` can continue in: the current one first, then the rest by what's left.
@@ -657,6 +785,15 @@ impl App {
             t.focus = t.root.leaf_ids()[0];
         }
     }
+}
+
+/// Resume `s` in its own login, named after it.
+fn resume_request(s: &SessionInfo) -> LaunchRequest {
+    let cwd = s.cwd.clone().or_else(|| s.project.as_ref().map(|p| p.root.clone())).or_else(dirs::home_dir).unwrap_or_default();
+    let spec = LaunchSpec { harness: s.harness, profile_id: s.profile_id.clone(), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: false }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![] };
+    let mut req = LaunchRequest::new(spec, Place::Tab);
+    req.name = Some(crate::ui::fit(&s.title, 28));
+    req
 }
 
 /// Where a launch keeps its transcript: its own login when it's the harness's kind, else the machine's own.

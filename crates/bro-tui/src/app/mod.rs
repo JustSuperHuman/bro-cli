@@ -176,6 +176,8 @@ pub struct App {
     side_thumb: Rect,
     // agents
     agent_state: HashMap<PaneId, Activity>,
+    /// resumes picked together, launching one at a time
+    resume_queue: sessions::ResumeQueue,
     pub(crate) done: HashSet<PaneId>,
     /// per agent pane: attention state, what the bridge was told, recap attempts
     tracks: HashMap<PaneId, insights::Track>,
@@ -275,6 +277,7 @@ impl App {
             side_drawn_scroll: 0,
             side_thumb: Rect::default(),
             agent_state: HashMap::new(),
+            resume_queue: Default::default(),
             done: HashSet::new(),
             tracks: HashMap::new(),
             notes: HashMap::new(),
@@ -823,6 +826,7 @@ impl App {
                 self.with_pane(wake.id, |p, cx| p.poll(cx));
             }
             Event::Tick => {
+                self.pump_resumes();
                 let ids: Vec<PaneId> = self.panes.keys().copied().collect();
                 for id in ids {
                     let due = match self.panes.get(&id).and_then(|p| p.tick_every()) {

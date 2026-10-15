@@ -5,6 +5,7 @@
 //! cases (a profile's own backend, model, permission, resume) so bro stays usable.
 
 use super::{Services, State, guard, guard_res};
+use crate::layout::PaneId;
 use crate::pane::{Event, Place};
 use bro_core::Harness;
 use bro_core::launch::{CommandSpec, LaunchCtx, LaunchSpec, Permission, RouteRequest, UpstreamTarget};
@@ -29,6 +30,8 @@ pub struct LaunchRequest {
     /// Moving a running session to another login: find its transcript first, then resume it in
     /// `spec.profile_id` (staged as a fork when that's a different login).
     pub find_live: Option<FindLive>,
+    /// A queued resume's placeholder pane: the session takes its place.
+    pub into: Option<PaneId>,
 }
 
 /// Which transcript a running session is writing.
@@ -42,7 +45,7 @@ pub struct FindLive {
 
 impl LaunchRequest {
     pub fn new(spec: LaunchSpec, place: Place) -> LaunchRequest {
-        LaunchRequest { spec, place, stage: None, reply: None, name: None, remember: false, find_live: None }
+        LaunchRequest { spec, place, stage: None, reply: None, name: None, remember: false, find_live: None, into: None }
     }
 }
 
@@ -58,11 +61,13 @@ pub struct Launched {
     pub route_id: Option<String>,
     /// Something worth telling the user (e.g. the built-in launcher was used).
     pub note: Option<String>,
+    /// The placeholder pane this session replaces (see [`LaunchRequest::into`]).
+    pub into: Option<PaneId>,
 }
 
 /// Build (and route) on this thread, then post `Event::Launched`.
 pub(super) fn run(svc: &Services, req: LaunchRequest) {
-    let LaunchRequest { mut spec, place, mut stage, reply, name, remember, find_live } = req;
+    let LaunchRequest { mut spec, place, mut stage, reply, name, remember, find_live, into } = req;
     let mut note = None;
     let mut route_id = None;
     let result = (|| -> Result<CommandSpec, String> {
@@ -124,7 +129,7 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
         }
         Ok(cmd)
     })();
-    svc.send(Event::Launched(Box::new(Launched { spec, place, reply, name, remember, result, route_id, note })));
+    svc.send(Event::Launched(Box::new(Launched { spec, place, reply, name, remember, result, route_id, note, into })));
 }
 
 /// "claude · work · opus" for a spec (used before a CommandSpec exists).

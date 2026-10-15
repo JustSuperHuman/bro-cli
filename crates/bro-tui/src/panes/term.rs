@@ -184,6 +184,18 @@ pub struct Term {
     enter_at: Option<Instant>,
     /// When auto-approve last answered a prompt (one answer per prompt while the screen catches up).
     approved_at: Option<Instant>,
+    /// A resume waiting its turn: shows a loader until the real session takes this pane.
+    pub queued: Option<Queued>,
+}
+
+/// Where a queued resume stands (the app keeps it current).
+#[derive(Clone, Copy, Debug)]
+pub struct Queued {
+    pub since: Instant,
+    /// sessions that start before this one
+    pub ahead: usize,
+    /// its launch is building now
+    pub starting: bool,
 }
 
 impl Term {
@@ -239,6 +251,46 @@ impl Term {
             typed: 0,
             enter_at: None,
             approved_at: None,
+            queued: None,
+        }
+    }
+
+    /// A placeholder for a resume that starts later; the app swaps the real session in.
+    pub fn queued(meta: Meta, ahead: usize, svc: Services) -> Term {
+        let mut t = Term::new(meta, Spawn::default(), svc);
+        t.spawn = None;
+        t.queued = Some(Queued { since: Instant::now(), ahead, starting: false });
+        t
+    }
+
+    fn render_queued(&self, q: Queued, f: &mut Frame, area: Rect, t: &Theme) {
+        let title = self.meta.name.clone().unwrap_or_else(|| self.meta.label.clone());
+        let width = area.width.saturating_sub(8) as usize;
+        let state = if q.starting {
+            "starting now".to_string()
+        } else if q.ahead == 0 {
+            "up next".to_string()
+        } else {
+            format!("in line · {} ahead", q.ahead)
+        };
+        let who = [Some(self.meta.label.clone()), Some(self.meta.project.name.clone())].into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        let lines = [
+            vec![
+                Span::styled(format!("  {}  ", crate::views::settings::spinner(q.since)), Style::default().fg(t.accent)),
+                Span::styled("Resuming ", Style::default().fg(t.muted)),
+                Span::styled(crate::ui::fit(&title, width.saturating_sub(9)), Style::default().add_modifier(Modifier::BOLD)),
+            ],
+            vec![Span::raw("     "), Span::styled(crate::ui::fit(&format!("{who} · {state}"), width), Style::default().fg(t.muted))],
+            vec![],
+            vec![Span::raw("     "), Span::styled(crate::ui::fit("Sessions open one at a time so they don't fight over your machine.", width), Style::default().fg(t.frame))],
+        ];
+        let top = area.y + area.height.saturating_sub(lines.len() as u16) / 3;
+        for (i, l) in lines.into_iter().enumerate() {
+            let y = top + i as u16;
+            if y >= area.bottom() {
+                break;
+            }
+            crate::ui::line(f, Rect { y, height: 1, ..area }, l);
         }
     }
 
@@ -889,6 +941,9 @@ impl Pane for Term {
         !self.exited.load(Ordering::SeqCst)
     }
     fn activity(&self) -> Option<Activity> {
+        if self.queued.is_some() {
+            return Some(Activity::Working);
+        }
         let screen = self.demo_activity.or(self.status);
         // A question tool waiting for its answer means the agent needs you, whatever the screen
         // markers say (Claude's question menu shows "esc to cancel", which reads as working).
@@ -915,6 +970,9 @@ impl Pane for Term {
         (self.agent || self.live.is_some()).then_some(Duration::from_millis(400))
     }
     fn poll(&mut self, cx: &mut Cx) {
+        if self.queued.is_some() {
+            return;
+        }
         if self.exit_code().is_some() {
             self.exited.store(true, Ordering::SeqCst);
             return;
@@ -943,6 +1001,11 @@ impl Pane for Term {
     fn render(&mut self, f: &mut Frame, area: Rect, cx: &mut Cx) {
         if area.width == 0 || area.height == 0 {
             self.links.clear();
+            return;
+        }
+        if let Some(q) = self.queued {
+            self.links.clear();
+            self.render_queued(q, f, area, cx.theme);
             return;
         }
         self.ensure_started(area.height, area.width, cx.waker());
