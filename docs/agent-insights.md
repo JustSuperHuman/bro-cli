@@ -97,6 +97,28 @@ blocks the TUI thread. It produces `AgentFacts`:
 * **TUI sidebar**. Live rows get a muted second line when there is something to say:
   `⏸ <reason>` when the pane needs you, otherwise `↳ <recap>`, truncated to the row
   width. Rows with nothing to say stay one line.
+* **Card back** (`bro-tui` `card.rs`). Alt+double-click a session, or press alt+i (prefix d),
+  and its card turns over (a 280 ms squash). Alt+I (prefix D) turns every session on screen
+  over 45 ms apart, or all face up when they already are. The back is drawn from memory every frame, so it's ready at once
+  and stays current:
+  * the title: your name for it, else Claude's `custom-title` / `ai-title`, else the header's
+  * the login, folder, `gitBranch` and how long the pane has been open
+  * the state, with the pending call while working or the waiting reason
+  * the latest prompt (`prompt`) and the plan (`TodoWrite` todos, Codex `update_plan`)
+  * the recap, or the last reply in full (`reply`), and the files it changed
+  * its links (`urls`: http(s) addresses in your prompts, its replies and its command output,
+    plus any on the pane's screen, such as a dev server started in a shell). Local ones are
+    checked off the UI thread (`devprobe`: a 150 ms connect every 2 s while shown), and
+    running dev servers are listed first. Clicking a link opens it; clicking a file opens
+    the preview.
+  * The **summary screensaver** (`summary_screensaver_secs`, Settings → Summary screensaver,
+    off by default) turns every session on screen over after that long with no input. The
+    next key, click, scroll, mouse move or return to the window turns them back. A key or
+    click that wakes it does nothing else, and cards you turned over yourself stay over.
+  Typing into the pane, or alt+double-clicking again, turns it face up. The program keeps
+  running and sized underneath and gets no mouse while the card is turned over. This is
+  the same zero-cost approach as tmux session pickers that show Claude's own title with
+  a last-prompt fallback.
 * **Notifications**. The "needs input" body becomes the reason, falling back to the old
   text. The "finished" body becomes `asked`, else the recap, else the old text.
 

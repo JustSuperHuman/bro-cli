@@ -89,6 +89,10 @@ impl App {
             self.welcome_key(k);
             return;
         };
+        // typing into a card that's turned over turns it face up: you see where the keys land
+        if self.flips.get(&id).is_some_and(|f| f.back) {
+            self.flip_pane(id);
+        }
         let used = self.with_pane(id, |p, cx| p.key(k, cx)).unwrap_or(false);
         let terminal = self.panes.get(&id).is_some_and(|p| p.is_terminal());
         if !used && !terminal {

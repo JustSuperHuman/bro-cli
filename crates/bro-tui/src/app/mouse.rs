@@ -260,11 +260,29 @@ impl App {
                 return;
             }
         }
+        // a link or file on a turned-over card: open it (a dev server in the browser, a file in the preview)
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind
+            && !m.modifiers.contains(KeyModifiers::ALT)
+            && let Some((_, id, uri)) = self.card_links.iter().find(|(r, ..)| r.contains(pos)).cloned()
+        {
+            self.sel = None;
+            self.last_pane_click = None;
+            if uri.starts_with("file:") {
+                self.open_file_link(id, &uri);
+            } else {
+                let _ = self.tx.send(crate::pane::Event::OpenLink(uri));
+            }
+            return;
+        }
         // the pane under the cursor
         let Some(&(id, _)) = self.outer.iter().find(|(_, r)| r.contains(pos)) else { return };
         let inner = self.inner.iter().find(|(i, _)| *i == id).map(|x| x.1).unwrap_or_default();
-        let wants = self.panes.get(&id).is_some_and(|p| p.wants_mouse());
+        // a card turned over shows bro's own text: the program under it gets no mouse
+        let flipped = self.flips.contains_key(&id);
+        let alt = m.modifiers.contains(KeyModifiers::ALT);
+        let wants = !flipped && self.panes.get(&id).is_some_and(|p| p.wants_mouse());
         let link = if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+            && !flipped
             && inner.contains(pos) && !m.modifiers.contains(KeyModifiers::SHIFT)
             && (!wants || m.modifiers.contains(KeyModifiers::CONTROL)) {
                 self.panes.get(&id).and_then(|p| p.link_at(pos.y - inner.y, pos.x - inner.x))
@@ -283,6 +301,8 @@ impl App {
         // phone's prompt buttons do).
         if let MouseEventKind::Down(MouseButton::Left) = m.kind
             && link.is_none()
+            && !flipped
+            && !alt
             && inner.contains(pos)
             && (!wants || m.modifiers.contains(KeyModifiers::SHIFT))
             && let Some(key) = self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.prompt_option_at(pos.y - inner.y))
@@ -302,10 +322,11 @@ impl App {
         }
         // Double-click a pane: full screen, and again back to the tiles or splits. On the frame always; inside
         // the terminal unless the program there uses the mouse (shift takes it back, as for selecting).
+        // Alt+double-click turns the card over instead (anywhere on it; alt clicks are always bro's).
         if let MouseEventKind::Down(MouseButton::Left) = m.kind
             && link.is_none()
         {
-            let ours = !inner.contains(pos) || !wants || m.modifiers.contains(KeyModifiers::SHIFT);
+            let ours = alt || !inner.contains(pos) || !wants || m.modifiers.contains(KeyModifiers::SHIFT);
             let double = ours
                 && self.last_pane_click.is_some_and(|(at, pane, first)| {
                     pane == id && at.elapsed() < Duration::from_millis(400) && first.x.abs_diff(pos.x) <= 1 && first.y.abs_diff(pos.y) <= 1
@@ -313,7 +334,11 @@ impl App {
             self.last_pane_click = (ours && !double).then(|| (Instant::now(), id, pos));
             if double {
                 self.sel = None;
-                self.zoom_pane(id);
+                if alt {
+                    self.flip_pane(id);
+                } else {
+                    self.zoom_pane(id);
+                }
                 return;
             }
         }
@@ -333,9 +358,65 @@ impl App {
             self.link_press = Some((id, pos, uri));
             return;
         }
-        if inner.contains(pos) && !(m.modifiers.contains(KeyModifiers::SHIFT) && wants) {
+        if inner.contains(pos) && !flipped && !alt && !(m.modifiers.contains(KeyModifiers::SHIFT) && wants) {
             self.with_pane(id, |p, cx| p.mouse(m, inner, cx));
         }
+    }
+
+    /// Focus `id` and turn its card over: the back says what it's working on; again turns it face up.
+    pub(crate) fn flip_pane(&mut self, id: crate::pane::PaneId) {
+        if !self.panes.get(&id).is_some_and(|p| p.as_term_ref().is_some()) {
+            return;
+        }
+        self.side_focus = false;
+        if self.stacked() {
+            self.stack_focus = Some(id);
+        } else if let Some(t) = self.tabs.get_mut(self.cur) {
+            t.focus = id;
+        }
+        self.turn_card(id, Duration::ZERO);
+    }
+
+    /// Turn every session on screen over; when they all already are, turn them all face up. They go one after
+    /// another, left to right and top to bottom, a beat apart.
+    pub(crate) fn flip_all(&mut self) {
+        let back = self.cards_on_screen().iter().any(|id| !self.flips.get(id).is_some_and(|f| f.back));
+        self.turn_all(back);
+    }
+
+    /// The sessions on screen, left to right and top to bottom.
+    fn cards_on_screen(&self) -> Vec<crate::pane::PaneId> {
+        let mut ids: Vec<(crate::pane::PaneId, ratatui::layout::Rect)> = self
+            .outer
+            .iter()
+            .filter(|(id, _)| self.panes.get(id).is_some_and(|p| p.as_term_ref().is_some()))
+            .copied()
+            .collect();
+        ids.sort_by_key(|(_, r)| (r.y, r.x));
+        ids.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Turn every session on screen to its back (`back`) or face up, one after another; returns the ones that
+    /// turned.
+    pub(super) fn turn_all(&mut self, back: bool) -> Vec<crate::pane::PaneId> {
+        let mut delay = Duration::ZERO;
+        let mut turned = vec![];
+        for id in self.cards_on_screen() {
+            if self.flips.get(&id).is_some_and(|f| f.back) != back {
+                self.turn_card(id, delay);
+                delay += crate::card::CASCADE;
+                turned.push(id);
+            }
+        }
+        turned
+    }
+
+    /// Start `id`'s card turning over, `delay` from now.
+    pub(super) fn turn_card(&mut self, id: crate::pane::PaneId, delay: Duration) {
+        let now = Instant::now();
+        let mut flip = crate::card::Flip::toggled(self.flips.get(&id).copied(), now);
+        flip.at += delay;
+        self.flips.insert(id, flip);
     }
 
     /// Grow `id` to a working size (focusing it), or snap it back if it already is the one grown. Only one

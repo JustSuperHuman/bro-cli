@@ -80,6 +80,7 @@ impl App {
         for (r, bd, skip) in self.backdrops(area) {
             crate::skin::backdrop(f.buffer_mut(), r, &t, time, bd, &skip);
         }
+        self.draw_alt_hints(f);
         self.draw_toasts(f, area);
         self.draw_overlay(f, area);
         crate::skin::effects(f.buffer_mut(), area, &t);
@@ -180,6 +181,9 @@ impl App {
             ui::group_frame(f, *region, name, *count, color, holds_focus, &t);
         }
         let grouped = !groups.is_empty();
+        let now = std::time::Instant::now();
+        self.card_links.clear();
+        self.flips.retain(|id, flip| self.panes.contains_key(id) && (flip.back || flip.turning(now)));
         for (id, r) in rects {
             let Some(p) = self.panes.get(&id) else { continue };
             let focused = id == focus && !self.side_focus && !self.overlay.is_open();
@@ -187,7 +191,9 @@ impl App {
             if !focused {
                 title = Line::from(title.spans.into_iter().map(|s| Span::styled(s.content, s.style.remove_modifier(Modifier::BOLD).fg(t.muted))).collect::<Vec<_>>());
             }
-            let sub = if zoomed {
+            let sub = if self.flips.get(&id).is_some_and(|f| f.back) {
+                Some("back · alt+double-click".to_string())
+            } else if zoomed {
                 Some(format!("zoomed · {}", self.keymap.primary(crate::keymap::Act::Zoom)))
             } else {
                 (self.grown && self.priority == Some(id)).then(|| format!("grown · {} restores", self.keymap.primary(crate::keymap::Act::Shrink)))
@@ -236,10 +242,13 @@ impl App {
             let mut actions = vec![];
             if let Some(p) = self.panes.get_mut(&id) {
                 let mut cx = Cx { id, theme: &t, svc: &self.svc, tx: &self.tx, actions: &mut actions, focused };
+                let started = std::time::Instant::now();
                 p.render(f, inner, &mut cx);
+                self.perf.pane_rendered(id, started.elapsed());
             }
             // a prompt option under the mouse lights up: it can be clicked
             if inner.contains(self.hover)
+                && !self.flips.contains_key(&id)
                 && let Some(term) = self.panes.get(&id).and_then(|p| p.as_term_ref())
                 && !self.panes.get(&id).is_some_and(|p| p.wants_mouse())
                 && term.prompt_option_at(self.hover.y - inner.y).is_some()
@@ -247,11 +256,67 @@ impl App {
                 let row = Rect { x: inner.x, y: self.hover.y, width: inner.width, height: 1 };
                 f.buffer_mut().set_style(row, ratatui::style::Style::default().bg(crate::theme::project_tint(color, &t)).add_modifier(Modifier::BOLD));
             }
+            // Turned over: the back covers the program (which keeps running and sized underneath).
+            if let Some(flip) = self.flips.get(&id).copied() {
+                let (back, cover) = flip.face(now);
+                if back {
+                    let links = self.draw_card_back(f, id, inner, color, time);
+                    // a link or file under the mouse lights up: it opens on click
+                    if let Some((r, _)) = links.iter().find(|(r, _)| r.contains(self.hover)) {
+                        f.buffer_mut().set_style(*r, Style::default().bg(crate::theme::mix(color, t.bg, 0.6)));
+                    }
+                    self.card_links.extend(links.into_iter().map(|(r, uri)| (r, id, uri)));
+                }
+                crate::card::squash(f.buffer_mut(), inner, cover, color, &t);
+            }
             if !actions.is_empty() {
                 self.apply(id, actions);
                 let _ = self.tx.send(crate::pane::Event::Tick);
             }
         }
+    }
+
+    /// The back of session `id`'s card, from what its transcript worker and the attention tracker already hold;
+    /// returns the rows that open something when clicked.
+    fn draw_card_back(&self, f: &mut Frame, id: crate::pane::PaneId, area: Rect, color: ratatui::style::Color, time: f64) -> Vec<(Rect, String)> {
+        let Some(term) = self.panes.get(&id).and_then(|p| p.as_term_ref()) else { return vec![] };
+        let snap = term.insights();
+        let facts = snap.as_ref().and_then(|s| s.facts.as_deref());
+        let view = self.pane_view(id).filter(|_| term.meta.harness.is_some());
+        // your name for it, else the one the agent gave the session, else what the header shows
+        let title = if term.meta.renamed { None } else { facts.and_then(|f| f.custom_title.clone().or_else(|| f.ai_title.clone())) };
+        let card = crate::card::Card {
+            title: title.unwrap_or_else(|| term.display_name()),
+            who: term.meta.label.clone(),
+            cwd: &term.meta.cwd,
+            open_for: term.meta.started.elapsed(),
+            state: view.as_ref().map(|v| v.state),
+            reason: view.as_ref().and_then(|v| v.reason.clone()),
+            facts,
+            recap: view.and_then(|v| v.recap),
+            now_ms: chrono::Utc::now().timestamp_millis(),
+            time,
+            links: self.card_links_for(term, facts),
+        };
+        crate::card::render(f, area, &card, color, &self.theme)
+    }
+
+    /// The addresses for a card: what the session mentioned, then what's on its screen (a dev server started in
+    /// a shell), each with whether it answers when it's on this machine.
+    fn card_links_for(&self, term: &crate::panes::term::Term, facts: Option<&bro_core::sessions::live::AgentFacts>) -> Vec<crate::card::Link> {
+        let mut urls: Vec<String> = term.screen_urls();
+        for u in facts.map(|f| f.urls.as_slice()).unwrap_or_default() {
+            if !urls.contains(&u.url) {
+                urls.push(u.url.clone());
+            }
+        }
+        urls.into_iter()
+            .map(|url| {
+                let local = bro_core::sessions::live::SeenUrl { url: url.clone(), at_ms: None }.is_local();
+                let up = if local { self.probe.up(&url) } else { None };
+                crate::card::Link { url, local, up }
+            })
+            .collect()
     }
 
     /// Highlight the mouse selection and, after a release, copy it from the rendered cells.

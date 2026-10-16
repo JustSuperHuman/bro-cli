@@ -202,6 +202,7 @@ pub fn fallback_settings() -> Settings {
         insights: bro_core::config::InsightsSettings::default(),
         auto_resume: bro_core::config::AutoResumeSettings::default(),
         auto_approve: false,
+        summary_screensaver_secs: 0,
         permission: Default::default(),
         claude_env: Default::default(),
         caveman: Default::default(),

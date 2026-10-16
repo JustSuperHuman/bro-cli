@@ -22,6 +22,10 @@ pub enum Act {
     /// Snap a grown session back to its place in the layout.
     Shrink,
     TileAll,
+    /// Turn the focused session's card over: what it's working on; again: face up.
+    Flip,
+    /// Turn every session on screen over, or all face up again.
+    FlipAll,
     FocusLeft,
     FocusRight,
     FocusUp,
@@ -108,7 +112,7 @@ impl Act {
         let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, SwitchLogin, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
-        v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
+        v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
         v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, RefreshUsage]);
         v.extend([Palette, Help, Themes, ToggleIcons, ToggleAutoResume, ToggleCaveman, Quit]);
         v
@@ -129,6 +133,8 @@ impl Act {
             Grow => "grow".into(),
             Shrink => "shrink".into(),
             TileAll => "tile_all".into(),
+            Flip => "flip".into(),
+            FlipAll => "flip_all".into(),
             FocusLeft => "focus_left".into(),
             FocusRight => "focus_right".into(),
             FocusUp => "focus_up".into(),
@@ -194,6 +200,8 @@ impl Act {
             Grow => "grow the focused session to a working size (neighbours give way) / snap back".into(),
             Shrink => "snap a grown session back".into(),
             TileAll => "tile all sessions / return to the focused session".into(),
+            Flip => "turn the focused session over: its task, plan, latest word and files / face up".into(),
+            FlipAll => "turn every session on screen over / all face up".into(),
             FocusLeft => "focus the pane to the left".into(),
             FocusRight => "focus the pane to the right".into(),
             FocusUp => "focus the pane above".into(),
@@ -244,7 +252,7 @@ impl Act {
         match self {
             NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | CloseProject | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
-            Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
+            Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | RefreshUsage => Group::Views,
             Palette | Help | Themes | ToggleIcons | ToggleAutoResume | ToggleCaveman | Quit => Group::App,
         }
@@ -262,6 +270,8 @@ impl Act {
             Grow => vec!["ctrl+up", "alt+="],
             Shrink => vec!["ctrl+down", "alt+-"],
             TileAll => vec!["alt+shift+t"],
+            Flip => vec!["alt+i"],
+            FlipAll => vec!["alt+I"],
             FocusLeft => vec!["alt+left"],
             FocusRight => vec!["alt+right"],
             FocusUp => vec!["alt+up"],
@@ -306,6 +316,8 @@ impl Act {
             Grow => vec!["="],
             Shrink => vec!["_"],
             TileAll => vec!["T"],
+            Flip => vec!["d"],
+            FlipAll => vec!["D"],
             FocusLeft => vec!["h", "left"],
             FocusRight => vec!["l", "right"],
             FocusUp => vec!["k", "up"],

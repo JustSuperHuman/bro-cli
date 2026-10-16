@@ -22,6 +22,12 @@ pub const REASON_MAX: usize = 80;
 pub const LAST_ASSISTANT_MAX: usize = 160;
 /// Lists in [`AgentFacts`] keep at most this many entries.
 pub const LIST_MAX: usize = 500;
+/// `prompt` and `reply` are cut to this many characters.
+pub const TEXT_MAX: usize = 1200;
+/// The plan keeps at most this many steps.
+pub const PLAN_MAX: usize = 50;
+/// `urls` keeps at most this many.
+pub const URL_MAX: usize = 20;
 /// How much of the final assistant text the "asked" rule looks at.
 const ASKED_WINDOW: usize = 700;
 
@@ -489,6 +495,98 @@ pub struct Pending {
     pub at_ms: Option<i64>,
 }
 
+/// A web address the session mentioned: a dev server's `http://localhost:5173/`, a pull request, a deploy.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SeenUrl {
+    pub url: String,
+    pub at_ms: Option<i64>,
+}
+
+impl SeenUrl {
+    /// On this machine (localhost, 127.x, `*.localhost`): a dev server, worth checking whether it's up.
+    pub fn is_local(&self) -> bool {
+        url::Url::parse(&self.url).ok().is_some_and(|u| is_local_host(u.host_str().unwrap_or_default()))
+    }
+}
+
+fn is_local_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    host == "localhost" || host.ends_with(".localhost") || host.starts_with("127.") || host == "::1" || host == "0.0.0.0"
+}
+
+/// The http(s) addresses in `text`, in order: trailing punctuation off, a dev server's `0.0.0.0` read as
+/// `localhost` (what you'd open), each once.
+pub fn find_urls(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let lower = text.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find("http").map(|i| i + from) {
+        from = i + 4;
+        let rest = &text[i..];
+        if !(lower[i..].starts_with("http://") || lower[i..].starts_with("https://")) {
+            continue;
+        }
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '|' | '^' | '{' | '}' | '\\' | '[' | ']'))
+            .unwrap_or(rest.len());
+        let mut cand = &rest[..end];
+        // closing punctuation and a bracket the address didn't open
+        loop {
+            let trimmed = cand.trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '\u{2026}']);
+            let trimmed = if trimmed.ends_with(')') && trimmed.matches('(').count() < trimmed.matches(')').count() { &trimmed[..trimmed.len() - 1] } else { trimmed };
+            if trimmed.len() == cand.len() {
+                break;
+            }
+            cand = trimmed;
+        }
+        from = i + cand.len().max(4);
+        let Ok(mut u) = url::Url::parse(cand) else { continue };
+        let Some(host) = u.host_str().map(str::to_string) else { continue };
+        if host == "0.0.0.0" || host == "[::]" {
+            let _ = u.set_host(Some("localhost"));
+        }
+        let s: String = u.into();
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Where a step of the agent's plan stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StepStatus {
+    Pending,
+    Active,
+    Done,
+}
+
+/// One step of the agent's own task list (Claude `TodoWrite`, Codex `update_plan`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PlanStep {
+    pub text: String,
+    pub status: StepStatus,
+}
+
+/// Steps from a `TodoWrite` (`todos[].content`) or `update_plan` (`plan[].step`) call's input.
+fn plan_steps(items: &Value, text_key: &str) -> Option<Vec<PlanStep>> {
+    let steps = items
+        .as_array()?
+        .iter()
+        .filter_map(|t| {
+            let text = t.get(text_key).and_then(Value::as_str)?.split_whitespace().collect::<Vec<_>>().join(" ");
+            let status = match t.get("status").and_then(Value::as_str) {
+                Some("in_progress") => StepStatus::Active,
+                Some("completed") => StepStatus::Done,
+                _ => StepStatus::Pending,
+            };
+            (!text.is_empty()).then_some(PlanStep { text, status })
+        })
+        .take(PLAN_MAX)
+        .collect();
+    Some(steps)
+}
+
 /// The turn ended on an API error (Claude's synthetic `isApiErrorMessage` entry, Codex's `error` event) and
 /// nothing has happened since.
 #[derive(Debug, Clone, PartialEq)]
@@ -533,6 +631,19 @@ pub struct AgentFacts {
     pub away_summary: Option<Stamped>,
     /// First sentence/line of the last assistant text
     pub last_assistant: Option<Stamped>,
+    /// The last assistant text in full, up to [`TEXT_MAX`] characters
+    pub reply: Option<Stamped>,
+    /// The latest prompt you sent (cleaned; a slash command as `/name args`), up to [`TEXT_MAX`]
+    pub prompt: Option<Stamped>,
+    /// Claude: the session's name, yours (`custom-title`, from `/rename`) else its own (`ai-title`)
+    pub custom_title: Option<String>,
+    pub ai_title: Option<String>,
+    /// Claude: the git branch the last record was written on
+    pub branch: Option<String>,
+    /// The agent's task list as it last wrote it (empty when it never made one)
+    pub plan: Vec<PlanStep>,
+    /// Web addresses from your prompts, its replies and its command output: newest first, each once
+    pub urls: Vec<SeenUrl>,
     /// Newest record timestamp
     pub last_activity_ms: Option<i64>,
     /// The turn stopped on an API error, still unanswered
@@ -560,6 +671,13 @@ impl AgentFacts {
             asked: None,
             away_summary: None,
             last_assistant: None,
+            reply: None,
+            prompt: None,
+            custom_title: None,
+            ai_title: None,
+            branch: None,
+            plan: vec![],
+            urls: vec![],
             last_activity_ms: None,
             api_error: None,
             turn_open: None,
@@ -649,6 +767,10 @@ impl AgentFacts {
             .as_ref()
             .map(|a| (&a.text, a.at_ms))
             .hash(&mut h);
+        self.reply.as_ref().map(|a| (&a.text, a.at_ms)).hash(&mut h);
+        self.prompt.as_ref().map(|a| (&a.text, a.at_ms)).hash(&mut h);
+        (&self.custom_title, &self.ai_title, &self.branch, &self.plan).hash(&mut h);
+        (self.urls.len(), self.urls.first()).hash(&mut h);
         (self.last_activity_ms, &self.session_id, &self.cwd).hash(&mut h);
         self.api_error.as_ref().map(|e| &e.id).hash(&mut h);
         h.finish()
@@ -712,6 +834,24 @@ impl AgentFacts {
         self.refresh_pending();
     }
 
+    /// Remember the addresses in `text` (written at `at_ms`) ahead of older ones, keeping their order.
+    fn saw_urls(&mut self, text: &str, at_ms: Option<i64>) {
+        for url in find_urls(text).into_iter().rev() {
+            self.urls.retain(|u| u.url != url);
+            self.urls.insert(0, SeenUrl { url, at_ms });
+        }
+        self.urls.truncate(URL_MAX);
+    }
+
+    fn prompt_text(&mut self, text: Option<String>, at_ms: Option<i64>) {
+        if let Some(text) = text {
+            self.prompt = Some(Stamped {
+                text: truncate(&text, TEXT_MAX),
+                at_ms,
+            });
+        }
+    }
+
     fn assistant_text(&mut self, text: &str, at_ms: Option<i64>) {
         let text = text.trim();
         if text.is_empty() {
@@ -721,6 +861,11 @@ impl AgentFacts {
             text: first_sentence(text, LAST_ASSISTANT_MAX),
             at_ms,
         });
+        self.reply = Some(Stamped {
+            text: truncate(text, TEXT_MAX),
+            at_ms,
+        });
+        self.saw_urls(text, at_ms);
         self.asked = asked_line(text);
     }
 
@@ -740,12 +885,36 @@ impl AgentFacts {
         {
             self.cwd = Some(PathBuf::from(cwd));
         }
+        if let Some(b) = v
+            .get("gitBranch")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && *s != "HEAD")
+        {
+            self.branch = Some(b.to_string());
+        }
         let at = v
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_iso_ms);
         let cwd = v.get("cwd").and_then(Value::as_str);
+        let named = |key: &str| {
+            v.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
         match v.get("type").and_then(Value::as_str) {
+            Some("ai-title") => {
+                if let Some(t) = named("aiTitle") {
+                    self.ai_title = Some(t);
+                }
+            }
+            Some("custom-title") => {
+                if let Some(t) = named("customTitle") {
+                    self.custom_title = Some(t);
+                }
+            }
             Some("system") if v.get("subtype").and_then(Value::as_str) == Some("away_summary") => {
                 if let Some(text) = v
                     .get("content")
@@ -808,11 +977,17 @@ impl AgentFacts {
                             };
                             // The text before a tool call was not the end of the turn.
                             self.asked = None;
+                            let input = b.get("input").cloned().unwrap_or(Value::Null);
+                            if name == "TodoWrite"
+                                && let Some(steps) = input.get("todos").and_then(|t| plan_steps(t, "content"))
+                            {
+                                self.plan = steps;
+                            }
                             self.open.retain(|c| c.id != id);
                             self.open.push(OpenCall {
                                 id: id.to_string(),
                                 name: name.to_string(),
-                                input: b.get("input").cloned().unwrap_or(Value::Null),
+                                input,
                                 at_ms: at,
                                 message_id: message_id.clone(),
                             });
@@ -841,6 +1016,11 @@ impl AgentFacts {
                     // A real prompt (string or text blocks) starts a new turn.
                     if content.is_some() {
                         self.user_prompt();
+                        let prompt = super::describe::claude_prompt(content);
+                        if let Some(p) = &prompt {
+                            self.saw_urls(p, at);
+                        }
+                        self.prompt_text(prompt, at);
                     }
                     return;
                 }
@@ -853,6 +1033,18 @@ impl AgentFacts {
                         continue;
                     };
                     let call = self.open.remove(pos);
+                    // what a command printed: a dev server's address, a deploy, a pull request
+                    if matches!(call.name.as_str(), "Bash" | "BashOutput") {
+                        let printed = tool_result
+                            .and_then(|t| t.get("stdout"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| match r.get("content") {
+                                Some(Value::String(s)) => s.clone(),
+                                other => claude_text(Some(&serde_json::json!({ "content": other }))),
+                            });
+                        self.saw_urls(&printed, at.or(call.at_ms));
+                    }
                     let failed = r.get("is_error").and_then(Value::as_bool) == Some(true)
                         || tool_result
                             .and_then(Value::as_str)
@@ -1026,6 +1218,11 @@ impl AgentFacts {
                             .collect();
                         self.patches.insert(id.to_string(), changes);
                     }
+                    if name == "update_plan"
+                        && let Some(steps) = input.get("plan").and_then(|p| plan_steps(p, "step"))
+                    {
+                        self.plan = steps;
+                    }
                     self.asked = None;
                     self.open.retain(|c| c.id != id);
                     self.open.push(OpenCall {
@@ -1041,6 +1238,16 @@ impl AgentFacts {
                     let Some(id) = payload.get("call_id").and_then(Value::as_str) else {
                         return;
                     };
+                    // command output (not a patch's or a web search's): addresses it printed
+                    let call = self.open.iter().find(|c| c.id == id).map(|c| c.name.clone());
+                    if call.as_deref().is_some_and(|n| n != "apply_patch" && !n.contains("search") && !n.contains("fetch")) {
+                        let printed = match payload.get("output") {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(o) => o.get("output").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| o.to_string()),
+                            None => String::new(),
+                        };
+                        self.saw_urls(&printed, at);
+                    }
                     self.open.retain(|c| c.id != id);
                     if let Some(changes) = self.patches.remove(id) {
                         let output = payload
@@ -1058,7 +1265,12 @@ impl AgentFacts {
                 _ => {}
             },
             Some("event_msg") => match kind {
-                Some("user_message") => self.user_prompt(),
+                Some("user_message") => {
+                    self.user_prompt();
+                    let text = payload.get("message").and_then(Value::as_str).unwrap_or_default();
+                    self.saw_urls(text, at);
+                    self.prompt_text(super::describe::codex_prompt(text), at);
+                }
                 Some("error") => {
                     self.set_turn_open(false);
                     let text = payload
@@ -1734,6 +1946,64 @@ mod tests {
                 .to_string(),
         );
         assert_eq!(f.pending.as_ref().unwrap().reason, "MCP: create_pr");
+    }
+
+    #[test]
+    fn urls_come_from_prompts_replies_and_command_output() {
+        assert_eq!(
+            find_urls("Local:   http://localhost:5173/\n  Network: http://0.0.0.0:3000, docs (see https://example.com/a_(b)). Done: https://github.com/o/r/pull/12."),
+            vec!["http://localhost:5173/", "http://localhost:3000/", "https://example.com/a_(b)", "https://github.com/o/r/pull/12"]
+        );
+        assert_eq!(find_urls("`https://x.dev/p` and \"http://127.0.0.1:8080/api\""), vec!["https://x.dev/p", "http://127.0.0.1:8080/api"]);
+        assert!(find_urls("http:// nothing, httpx://no").is_empty());
+        let f = claude_facts(&[
+            json!({"type": "user", "timestamp": "2026-10-16T10:00:00Z", "message": {"content": "the staging site https://staging.app.dev is down"}}),
+            assistant("m1", "2026-10-16T10:00:01Z", json!([{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "npm run dev"}}])),
+            json!({"type": "user", "timestamp": "2026-10-16T10:00:09Z", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "content": "ready"}]},
+                "toolUseResult": {"stdout": "  VITE v6  ready\n  Local:   http://localhost:5173/\n", "stderr": ""}}),
+            assistant("m2", "2026-10-16T10:00:02Z", json!([{"type": "tool_use", "id": "w1", "name": "WebFetch", "input": {"url": "https://docs.rs"}}])),
+            json!({"type": "user", "timestamp": "2026-10-16T10:00:10Z", "message": {"content": [{"type": "tool_result", "tool_use_id": "w1", "content": "see https://docs.rs/other"}]}}),
+        ]);
+        let urls: Vec<_> = f.urls.iter().map(|u| (u.url.as_str(), u.is_local())).collect();
+        assert_eq!(urls, vec![("http://localhost:5173/", true), ("https://staging.app.dev/", false)], "a web fetch's pages aren't the session's");
+    }
+
+    #[test]
+    fn card_facts_titles_prompts_plans_and_replies() {
+        let f = claude_facts(&[
+            json!({"type": "user", "timestamp": "2026-10-15T10:00:00Z", "gitBranch": "main", "message": {"content": "add a  dark\nmode toggle"}}),
+            json!({"type": "ai-title", "aiTitle": "Dark mode toggle", "sessionId": "s"}),
+            assistant("m1", "2026-10-15T10:00:05Z", json!([{"type": "tool_use", "id": "t1", "name": "TodoWrite", "input": {"todos": [
+                {"content": "Add the setting", "status": "completed", "activeForm": "Adding the setting"},
+                {"content": "Wire the toggle", "status": "in_progress", "activeForm": "Wiring the toggle"},
+                {"content": "Test it", "status": "pending", "activeForm": "Testing it"}]}}])),
+            assistant("m2", "2026-10-15T10:01:00Z", json!([{"type": "text", "text": "Toggle works.\n\nNext I'll add tests."}])),
+            json!({"type": "user", "timestamp": "2026-10-15T10:02:00Z", "message": {"content": "<command-name>/review</command-name>\n<command-args>src</command-args>"}}),
+            json!({"type": "user", "timestamp": "2026-10-15T10:02:01Z", "message": {"content": "[Request interrupted by user]"}}),
+        ]);
+        assert_eq!(f.ai_title.as_deref(), Some("Dark mode toggle"));
+        assert_eq!(f.custom_title, None);
+        assert_eq!(f.branch.as_deref(), Some("main"));
+        assert_eq!(f.prompt.as_ref().map(|p| p.text.as_str()), Some("/review src"), "a slash command counts, an interruption doesn't");
+        assert_eq!(f.reply.as_ref().map(|p| p.text.as_str()), Some("Toggle works. Next I'll add tests."));
+        assert_eq!(
+            f.plan.iter().map(|s| (s.text.as_str(), s.status)).collect::<Vec<_>>(),
+            vec![("Add the setting", StepStatus::Done), ("Wire the toggle", StepStatus::Active), ("Test it", StepStatus::Pending)]
+        );
+        let mut g = f.clone();
+        let rev = g.revision;
+        g.ingest_line(&json!({"type": "custom-title", "customTitle": "Toggle work"}).to_string());
+        assert_eq!(g.custom_title.as_deref(), Some("Toggle work"));
+        assert!(g.revision > rev, "a new title is a change");
+
+        let c = codex_facts(&[
+            json!({"type": "event_msg", "timestamp": "2026-10-15T10:00:00Z", "payload": {"type": "user_message", "message": "fix the flaky test"}}),
+            json!({"type": "response_item", "timestamp": "2026-10-15T10:00:01Z", "payload": {"type": "function_call", "call_id": "c1", "name": "update_plan",
+                "arguments": "{\"plan\":[{\"step\":\"Find the race\",\"status\":\"in_progress\"},{\"step\":\"Fix it\",\"status\":\"pending\"}]}"}}),
+        ]);
+        assert_eq!(c.prompt.as_ref().map(|p| p.text.as_str()), Some("fix the flaky test"));
+        assert_eq!(c.plan.len(), 2);
+        assert_eq!(c.plan[0].status, StepStatus::Active);
     }
 
     #[test]

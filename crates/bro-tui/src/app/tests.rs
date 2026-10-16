@@ -542,6 +542,189 @@ fn ctrl_up_grows_the_focused_session_and_moving_on_snaps_it_back() {
 }
 
 #[test]
+fn alt_double_click_turns_a_card_over_and_back() {
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    let focus = a.focused().unwrap();
+    let (other, _) = a.outer.iter().find(|(id, _)| *id != focus).copied().unwrap();
+    let inner = a.inner.iter().find(|(id, _)| *id == other).unwrap().1;
+    let click = |a: &mut App, mods| {
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: inner.x + 3, row: inner.y + 1, modifiers: mods });
+        a.mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), column: inner.x + 3, row: inner.y + 1, modifiers: mods });
+    };
+    click(&mut a, KeyModifiers::ALT);
+    assert!(a.flips.is_empty(), "one alt+click does nothing");
+    click(&mut a, KeyModifiers::ALT);
+    assert!(a.flips.get(&other).is_some_and(|f| f.back), "alt+double-click turns it over");
+    assert_eq!(a.focused(), Some(other));
+    assert!(!a.stack_zoom, "and doesn't zoom");
+    // landed: the back is drawn in place of the program
+    a.flips.get_mut(&other).unwrap().at -= crate::card::TURN;
+    let buf = draw_buf(&mut a, W, H);
+    let row =|y: u16| (inner.x..inner.right()).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+    assert!((inner.y..inner.bottom()).any(|y| row(y).contains("now  ")), "the back shows: {:?}", (inner.y..inner.bottom()).map(row).collect::<Vec<_>>());
+    // typing turns it face up
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(a.flips.get(&other).is_some_and(|f| !f.back));
+    a.flips.get_mut(&other).unwrap().at -= crate::card::TURN;
+    draw(&mut a);
+    assert!(a.flips.is_empty(), "face up again, nothing left to track");
+}
+
+#[test]
+fn holding_alt_shows_key_hints_where_they_apply() {
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    let focus = a.focused().unwrap();
+    let screen = |a: &mut App| draw(a);
+    let before = screen(&mut a);
+    // a quick press: nothing yet
+    a.handle(crate::pane::Event::Alt(true));
+    assert!(!a.alt_hints());
+    assert!(a.alt_wake().is_some_and(|d| d <= crate::app::alt_hints::HOLD + std::time::Duration::from_millis(5)), "the loop wakes when they're due");
+    // held: every card says what alt+double-click does, the focused one lists its keys, sessions show their jump key
+    a.alt_down = Some(std::time::Instant::now() - crate::app::alt_hints::HOLD);
+    assert!(a.alt_hints());
+    let buf = draw_buf(&mut a, W, H);
+    let row = |y: u16, r: ratatui::layout::Rect| (r.x..r.right()).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+    for (id, r) in a.outer.clone() {
+        let edge = row(r.bottom() - 1, r);
+        if r.width >= 30 {
+            assert!(edge.contains("dbl-click  flip"), "{edge}");
+        }
+        if id == focus && r.width >= 50 {
+            assert!(edge.contains(" i  flip ") && edge.contains(" I  flip all "), "{edge}");
+        }
+    }
+    let (_, wide) = a.outer.iter().find(|(id, r)| *id != focus && r.width >= 45).copied().unwrap();
+    assert!(row(wide.bottom() - 1, wide).contains("  go "), "other cards show their jump key");
+    let sidebar: String = (a.side_area.y..a.side_area.bottom()).map(|y| row(y, a.side_area)).collect::<Vec<_>>().join("\n");
+    assert!(sidebar.contains("Continue  r "), "continue shows its key beside it:\n{sidebar}");
+    let (nx, ny) = (a.side_area.y..a.side_area.bottom())
+        .find_map(|y| row(y, a.side_area).find("+ New").map(|i| (a.side_area.x + row(y, a.side_area)[..i].chars().count() as u16 + 2, y)))
+        .expect("the new-session button");
+    assert_eq!(buf[(nx, ny)].symbol(), "N");
+    assert!(buf[(nx, ny)].modifier.contains(ratatui::style::Modifier::REVERSED), "alt+n lights the N of New");
+    // a key, or letting go, puts them away
+    a.handle(crate::pane::Event::Input(crossterm::event::Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))));
+    assert!(!a.alt_hints());
+    a.alt_down = Some(std::time::Instant::now() - crate::app::alt_hints::HOLD);
+    a.handle(crate::pane::Event::Alt(false));
+    assert!(!a.alt_hints());
+    assert_eq!(screen(&mut a), before);
+    // a mouse move with alt held counts as holding it (terminals that don't report a bare alt)
+    a.mouse(MouseEvent { kind: MouseEventKind::Moved, column: 50, row: 5, modifiers: KeyModifiers::NONE });
+    a.handle(crate::pane::Event::Input(crossterm::event::Event::Mouse(MouseEvent { kind: MouseEventKind::Moved, column: 50, row: 5, modifiers: KeyModifiers::ALT })));
+    assert!(a.alt_down.is_some());
+    a.handle(crate::pane::Event::Input(crossterm::event::Event::Mouse(MouseEvent { kind: MouseEventKind::Moved, column: 51, row: 5, modifiers: KeyModifiers::NONE })));
+    assert!(a.alt_down.is_none());
+}
+
+#[test]
+fn the_summary_screensaver_turns_everything_over_and_a_touch_turns_it_back() {
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    let on_screen: Vec<_> = a.outer.iter().map(|(id, _)| *id).collect();
+    let input = |a: &mut App, ev: crossterm::event::Event| a.handle(crate::pane::Event::Input(ev));
+    let land = |a: &mut App| {
+        for f in a.flips.values_mut() {
+            f.at -= crate::card::TURN * 8;
+        }
+        draw(a);
+    };
+    // off by default: nothing happens however long you're away
+    a.last_input -= std::time::Duration::from_secs(3600);
+    a.after_events();
+    assert!(a.flips.is_empty() && a.screensaver_wake().is_none());
+    // on: one you turned yourself stays turned through it
+    let mut s = a.svc.settings();
+    s.summary_screensaver_secs = 60;
+    a.svc.save_settings(s);
+    a.flip_pane(on_screen[0]);
+    land(&mut a);
+    a.last_input = std::time::Instant::now();
+    a.after_events();
+    assert_eq!(a.flips.len(), 1, "not yet");
+    assert!(a.screensaver_wake().is_some_and(|d| d > std::time::Duration::from_secs(50)), "the loop wakes when it's due");
+    a.last_input -= std::time::Duration::from_secs(61);
+    a.after_events();
+    assert!(on_screen.iter().all(|id| a.flips.get(id).is_some_and(|f| f.back)), "away long enough: all turned over");
+    assert_eq!(a.saver.len(), on_screen.len() - 1);
+    land(&mut a);
+    // the key that wakes it does only that
+    let focus = a.focused().unwrap();
+    let typed = a.panes.get(&focus).and_then(|p| p.as_term_ref()).map(|t| t.parser_for_test().lock().screen().contents());
+    input(&mut a, crossterm::event::Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)));
+    assert!(a.saver.is_empty());
+    assert_eq!(a.panes.get(&focus).and_then(|p| p.as_term_ref()).map(|t| t.parser_for_test().lock().screen().contents()), typed, "the wake key isn't typed");
+    land(&mut a);
+    assert_eq!(a.flips.keys().copied().collect::<Vec<_>>(), vec![on_screen[0]], "back as they were: yours still over");
+    // a mouse move counts as a touch too, and restarts the wait
+    a.last_input -= std::time::Duration::from_secs(61);
+    a.after_events();
+    assert!(!a.saver.is_empty());
+    input(&mut a, crossterm::event::Event::Mouse(MouseEvent { kind: MouseEventKind::Moved, column: 60, row: 10, modifiers: KeyModifiers::NONE }));
+    assert!(a.saver.is_empty() && a.last_input.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn links_and_files_on_a_turned_card_open_on_click() {
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    let id = a.focused().unwrap();
+    a.flip_pane(id);
+    a.flips.get_mut(&id).unwrap().at -= crate::card::TURN;
+    draw(&mut a);
+    // the demo's shells have no links: give the card one as the draw would have
+    let inner = a.inner.iter().find(|(p, _)| *p == id).unwrap().1;
+    let row = ratatui::layout::Rect { y: inner.y + 3, height: 1, ..inner };
+    a.card_links = vec![(row, id, "http://localhost:5173/".into())];
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: row.x + 4, row: row.y, modifiers: KeyModifiers::NONE });
+    assert!(a.flips.get(&id).is_some_and(|f| f.back), "a click on a link opens it and leaves the card over");
+}
+
+#[test]
+fn keys_turn_the_focused_card_or_all_of_them() {
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    let focus = a.focused().unwrap();
+    let land = |a: &mut App| {
+        for f in a.flips.values_mut() {
+            f.at -= crate::card::TURN * 4;
+        }
+        draw(a);
+    };
+    // alt+i: the focused one, and again face up
+    key(&mut a, KeyCode::Char('i'), KeyModifiers::ALT);
+    assert_eq!(a.flips.keys().copied().collect::<Vec<_>>(), vec![focus]);
+    land(&mut a);
+    key(&mut a, KeyCode::Char('i'), KeyModifiers::ALT);
+    land(&mut a);
+    assert!(a.flips.is_empty());
+    // alt+I: every session on screen, one after another; with one already over, the rest join it
+    a.flip_pane(focus);
+    key(&mut a, KeyCode::Char('I'), KeyModifiers::ALT);
+    let on_screen: Vec<_> = a.outer.iter().map(|(id, _)| *id).collect();
+    assert_eq!(on_screen.len(), 5);
+    assert!(on_screen.iter().all(|id| a.flips.get(id).is_some_and(|f| f.back)), "all turned over");
+    let mut starts: Vec<_> = on_screen.iter().filter(|id| **id != focus).map(|id| a.flips[id].at).collect();
+    starts.sort();
+    starts.dedup();
+    assert_eq!(starts.len(), 4, "a beat apart");
+    land(&mut a);
+    // again: all face up
+    key(&mut a, KeyCode::Char('I'), KeyModifiers::ALT);
+    assert!(a.flips.values().all(|f| !f.back));
+    land(&mut a);
+    assert!(a.flips.is_empty());
+}
+
+#[test]
 fn double_clicking_a_pane_goes_full_screen_and_back() {
     let mut a = app(true);
     a.run_act(Act::TileAll);
@@ -2523,7 +2706,18 @@ fn settings_view_switches_presets_and_overrides_switches() {
     // bro's own options come first: auto-approve (off by default) and recaps toggle in place
     assert!(screen.contains("Auto-approve prompts"), "{screen}");
     let recaps = a.svc.settings().insights.generate_recaps;
-    for _ in 0..4 {
+    // the summary screensaver: off, then steps through its waits
+    assert!(screen.contains("Summary screensaver"), "{screen}");
+    for _ in 0..2 {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    }
+    assert_eq!(a.svc.settings().summary_screensaver_secs, 0);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().summary_screensaver_secs, 60);
+    assert!(draw(&mut a).contains("after 1 min"));
+    key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().summary_screensaver_secs, 0);
+    for _ in 0..3 {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     }
     assert!(!a.svc.settings().auto_approve);
@@ -2606,7 +2800,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     let screen = draw(&mut a);
     assert!(screen.contains("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"), "{screen}");
     key(&mut a, KeyCode::Home, KeyModifiers::NONE);
-    for _ in 0..21 + usize::from(bro_core::justwatch::supported()) {
+    for _ in 0..22 + usize::from(bro_core::justwatch::supported()) {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // back to error reports
     }
     key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);

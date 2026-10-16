@@ -48,6 +48,12 @@ impl App {
             }
             Act::Shrink => self.priority = None,
             Act::TileAll => self.toggle_tiles(),
+            Act::Flip => {
+                if let Some(id) = self.focused() {
+                    self.flip_pane(id);
+                }
+            }
+            Act::FlipAll => self.flip_all(),
             Act::FocusLeft => self.move_focus(-1, 0),
             Act::FocusRight => self.move_focus(1, 0),
             Act::FocusUp => self.move_focus(0, -1),

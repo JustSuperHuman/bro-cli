@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "bro-bridge"
-version = "2.0.19"
+version = "2.0.20"
 dependencies = [
  "anyhow",
  "axum",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "bro-core"
-version = "2.0.19"
+version = "2.0.20"
 dependencies = [
  "anyhow",
  "argon2",
@@ -412,12 +412,13 @@ dependencies = [
  "tempfile",
  "toml",
  "ureq",
+ "url",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "bro-proxy"
-version = "2.0.19"
+version = "2.0.20"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -444,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "bro-tui"
-version = "2.0.19"
+version = "2.0.20"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -481,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "bro-voice"
-version = "2.0.19"
+version = "2.0.20"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

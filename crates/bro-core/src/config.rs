@@ -156,6 +156,9 @@ pub struct Settings {
     /// Answer Yes for you when Claude stops on a "Do you want to proceed?" permission prompt (the safety
     /// checks bypass mode still asks, e.g. "Dangerous rm operation on statically-unresolvable target"). Off by default.
     pub auto_approve: bool,
+    /// Summary screensaver: after this many seconds with no keys or mouse, every session on screen turns over
+    /// to its summary (the card back), and they turn back at the next touch. 0 = off.
+    pub summary_screensaver_secs: u64,
     /// Permission mode new sessions start on: the one last picked in the launcher.
     pub permission: crate::launch::Permission,
     /// Privacy / update / behaviour env for Claude launches (preset + overrides).
@@ -325,6 +328,7 @@ impl Default for Settings {
             insights: InsightsSettings::default(),
             auto_resume: AutoResumeSettings::default(),
             auto_approve: false,
+            summary_screensaver_secs: 0,
             permission: Default::default(),
             claude_env: Default::default(),
             caveman: Default::default(),

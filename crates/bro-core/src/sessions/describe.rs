@@ -133,6 +133,33 @@ fn truncated_snippet(line: &str, marker: &str) -> Option<String> {
     serde_json::from_str::<String>(&format!("\"{captured}\"")).ok()
 }
 
+/// A real prompt in a Claude user record's `message.content`, cleaned: the slash command for a
+/// command wrapper, None for other injected text (hook output, reminders, interruptions) and
+/// image-only prompts.
+pub fn claude_prompt(content: Option<&Value>) -> Option<String> {
+    let raw = text_of(content, &["text"]);
+    let body = clean(&raw);
+    if body.is_empty() || body.starts_with("[Request interrupted") {
+        return None;
+    }
+    if is_noise(&body, &CLAUDE_NOISE) {
+        return Some(command_title(&raw)).filter(|c| !c.is_empty());
+    }
+    Some(body)
+}
+
+/// The same for the text of a Codex user message.
+pub fn codex_prompt(raw: &str) -> Option<String> {
+    let body = clean(&strip_images(raw));
+    if body.is_empty() {
+        return None;
+    }
+    if is_noise(&body, &CODEX_NOISE) {
+        return Some(command_title(raw)).filter(|c| !c.is_empty());
+    }
+    Some(body)
+}
+
 /// v1 `describeTranscript`: a Claude Code transcript head → title/cwd/branch.
 pub fn describe_transcript(text: &str) -> Described {
     let (mut title, mut command, mut cwd, mut branch) = (String::new(), String::new(), String::new(), String::new());

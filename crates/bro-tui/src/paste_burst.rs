@@ -18,17 +18,25 @@ pub trait Source {
     fn read(&mut self) -> Option<Event>;
 }
 
+/// Console input bro reads itself because crossterm can't report it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Raw {
+    /// The mouse's back (`true`) / forward button, or a keyboard's browser keys.
+    Nav(bool),
+    /// Alt went down (`true`) or up on its own (Windows; no other terminal reports a bare modifier).
+    Alt(bool),
+}
+
 pub struct Console {
-    /// The mouse's back (`true`) / forward buttons, which crossterm can't report.
-    pub on_nav: Box<dyn FnMut(bool) + Send>,
+    pub on_raw: Box<dyn FnMut(Raw) + Send>,
     #[cfg(windows)]
     pub nav: crate::console_nav::Nav,
 }
 
 impl Console {
-    pub fn new(on_nav: Box<dyn FnMut(bool) + Send>) -> Console {
+    pub fn new(on_raw: Box<dyn FnMut(Raw) + Send>) -> Console {
         Console {
-            on_nav,
+            on_raw,
             #[cfg(windows)]
             nav: Default::default(),
         }
@@ -36,7 +44,7 @@ impl Console {
 
     fn wait(&mut self, wait: Option<Duration>) -> bool {
         #[cfg(windows)]
-        return self.nav.wait(wait, &mut self.on_nav);
+        return self.nav.wait(wait, &mut self.on_raw);
         #[cfg(not(windows))]
         match wait {
             Some(w) => crossterm::event::poll(w).unwrap_or(false),

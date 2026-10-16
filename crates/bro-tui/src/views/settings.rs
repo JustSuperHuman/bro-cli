@@ -30,6 +30,7 @@ enum BroOpt {
     Theme,
     Font,
     Rain,
+    Screensaver,
     Icons,
     AutoResume,
     AutoApprove,
@@ -37,7 +38,7 @@ enum BroOpt {
     Compression,
 }
 
-const BRO_OPTS: [BroOpt; 8] = [BroOpt::Theme, BroOpt::Font, BroOpt::Rain, BroOpt::Icons, BroOpt::AutoResume, BroOpt::AutoApprove, BroOpt::Recaps, BroOpt::Compression];
+const BRO_OPTS: [BroOpt; 9] = [BroOpt::Theme, BroOpt::Font, BroOpt::Rain, BroOpt::Screensaver, BroOpt::Icons, BroOpt::AutoResume, BroOpt::AutoApprove, BroOpt::Recaps, BroOpt::Compression];
 
 /// bro's options this window can use: the font only where the terminal can switch it.
 fn bro_opts() -> Vec<BroOpt> {
@@ -46,12 +47,16 @@ fn bro_opts() -> Vec<BroOpt> {
 
 const RAIN: [RainMode; 3] = [RainMode::Off, RainMode::Everywhere, RainMode::Working];
 
+/// The summary screensaver's waits, in seconds (0 = off).
+const SCREENSAVER: [u64; 7] = [0, 60, 120, 300, 600, 900, 1800];
+
 impl BroOpt {
     fn label(self) -> &'static str {
         match self {
             BroOpt::Theme => "Theme",
             BroOpt::Font => "Font",
             BroOpt::Rain => "Digital rain",
+            BroOpt::Screensaver => "Summary screensaver",
             BroOpt::Icons => "Nerd Font icons",
             BroOpt::AutoResume => "Auto-resume",
             BroOpt::AutoApprove => "Auto-approve prompts",
@@ -64,6 +69,7 @@ impl BroOpt {
             BroOpt::Theme => "enter opens the picker with a live preview",
             BroOpt::Font => "this window only, switches as you go: ←/→ to try them",
             BroOpt::Rain => "over any theme: everywhere, or only in sessions whose agent is mid-turn",
+            BroOpt::Screensaver => "step away and every session turns over to what it's working on; any touch turns them back",
             BroOpt::Icons => "turn off if icons show as boxes",
             BroOpt::AutoResume => "types `continue` when an agent stops on an API error or a limit resets",
             BroOpt::AutoApprove => "answers Yes to Claude's \"Do you want to proceed?\" (bypass mode's rm / path safety checks)",
@@ -84,6 +90,11 @@ impl BroOpt {
                 RainMode::Working => "working sessions",
             }
             .to_string(),
+            BroOpt::Screensaver => match s.summary_screensaver_secs {
+                0 => "off".to_string(),
+                n if n < 60 => format!("after {n} s"),
+                n => format!("after {} min", n / 60),
+            },
             BroOpt::Icons => on(ui::NERD.load(Ordering::Relaxed)),
             BroOpt::AutoResume => on(s.auto_resume.enabled),
             BroOpt::AutoApprove => on(s.auto_approve),
@@ -108,6 +119,12 @@ impl BroOpt {
                 let mut s = cx.svc.settings();
                 let i = RAIN.iter().position(|r| *r == s.rain).unwrap_or(0) as isize;
                 s.rain = RAIN[(i + dir).rem_euclid(RAIN.len() as isize) as usize];
+                cx.svc.save_settings(s);
+            }
+            BroOpt::Screensaver => {
+                let mut s = cx.svc.settings();
+                let i = SCREENSAVER.iter().position(|n| *n >= s.summary_screensaver_secs).unwrap_or(0) as isize;
+                s.summary_screensaver_secs = SCREENSAVER[(i + dir).rem_euclid(SCREENSAVER.len() as isize) as usize];
                 cx.svc.save_settings(s);
             }
             BroOpt::Theme => cx.act(Action::Run(Act::Themes)),

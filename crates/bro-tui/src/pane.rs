@@ -18,6 +18,8 @@ pub enum Event {
     Input(crossterm::event::Event),
     /// The mouse's back (`true`) or forward button, or a keyboard's browser keys.
     Navigate(bool),
+    /// Alt pressed (`true`) or released on its own: key hints show while it's held.
+    Alt(bool),
     /// A pane's background work produced something: redraw and call `Pane::poll`.
     Wake(WakeSignal),
     /// The deadline passed (animations, agent re-scans).

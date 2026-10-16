@@ -6,6 +6,7 @@
 //! Split by concern: `input` (keys), `commands` (what actions do), `mouse`, `draw` (+ `side_view`,
 //! `welcome`), `sessions` (launch results, bridge commands, agent tracking), `overlays`.
 
+mod alt_hints;
 mod commands;
 mod draw;
 mod files;
@@ -14,6 +15,7 @@ mod input;
 pub(crate) mod insights;
 mod mouse;
 mod overlays;
+mod screensaver;
 mod sessions;
 mod side_view;
 mod watchdogs;
@@ -210,6 +212,18 @@ pub struct App {
     stack_zoom: bool,
     /// The session ctrl+click grew to a working size (until ctrl+clicked again or focus moves on).
     pub(crate) priority: Option<PaneId>,
+    /// Sessions turned over (alt+double-click) or turning: the back says what each is working on
+    pub(crate) flips: HashMap<PaneId, crate::card::Flip>,
+    /// When alt went down on its own: key hints show once it's been held a moment
+    pub(crate) alt_down: Option<Instant>,
+    /// Whether the dev servers sessions mention are listening (checked off the UI thread)
+    pub(crate) probe: crate::devprobe::Probe,
+    /// The links and files on turned-over cards as last drawn: click one to open it
+    card_links: Vec<(Rect, PaneId, String)>,
+    /// Your last key, click, scroll or mouse move (the summary screensaver counts from it)
+    pub(crate) last_input: Instant,
+    /// The cards the summary screensaver turned over: the next touch turns them back
+    pub(crate) saver: Vec<PaneId>,
     /// The priority grow changed the layout in the last draw (the split dividers aren't where the tree says).
     grown: bool,
     /// back/forward through the sessions you looked at (mouse back/forward buttons)
@@ -219,6 +233,8 @@ pub struct App {
     term_focused: bool,
     opts: Opts,
     _theme_watcher: Option<notify::RecommendedWatcher>,
+    /// the loop pass being timed (slow ones go to `~/.bro/v2-perf.log`)
+    perf: crate::perf::Pass,
 }
 
 impl App {
@@ -302,6 +318,13 @@ impl App {
             term_focused: true,
             opts,
             _theme_watcher: None,
+            perf: Default::default(),
+            flips: HashMap::new(),
+            alt_down: None,
+            probe: if cfg!(test) { Default::default() } else { crate::devprobe::Probe::start(tx.clone()) },
+            card_links: vec![],
+            last_input: Instant::now(),
+            saver: vec![],
         };
         app.seed_projects();
         let t2 = tx.clone();
@@ -691,28 +714,37 @@ impl App {
             crate::fonts::apply(Some(&font), &self.tx);
         }
         loop {
+            let started = Instant::now();
+            let mut render = Duration::ZERO;
             term.draw(|f| {
+                let t = Instant::now();
                 self.draw(f);
                 crate::icons::place(f.buffer_mut());
+                render = t.elapsed();
             })?;
             crate::icons::flush(term)?;
             crate::fonts::flush(term.backend_mut())?;
+            self.perf.drawn(render, started.elapsed());
+            self.perf.finish();
             let timeout = self.next_deadline();
             let ev = match rx.recv_timeout(timeout) {
                 Ok(e) => e,
                 Err(RecvTimeoutError::Timeout) => Event::Tick,
                 Err(RecvTimeoutError::Disconnected) => break,
             };
-            self.handle(ev);
+            self.perf.begin();
+            self.handle_timed(ev);
             // coalesce a burst (a terminal spewing output) into one redraw
             let burst = Instant::now();
             while let Ok(e) = rx.try_recv() {
-                self.handle(e);
+                self.handle_timed(e);
                 if burst.elapsed() > Duration::from_millis(12) {
                     break;
                 }
             }
+            let t = Instant::now();
             self.after_events();
+            self.perf.housekeeping(t.elapsed());
             if self.quit {
                 break;
             }
@@ -724,6 +756,7 @@ impl App {
 
     /// Housekeeping after each batch of events.
     pub(crate) fn after_events(&mut self) {
+        self.screensaver_step();
         // the grown session snaps back once you work somewhere else
         if self.priority.is_some() && self.priority != self.focused() {
             self.priority = None;
@@ -793,6 +826,17 @@ impl App {
         if let Some(t) = side_view::bar_wake(self.side_nav_at) {
             d = d.min(t);
         }
+        // a card turning over draws every frame until it lands
+        let now = Instant::now();
+        if self.flips.values().any(|f| f.turning(now)) {
+            d = d.min(Duration::from_millis(16));
+        }
+        if let Some(t) = self.alt_wake() {
+            d = d.min(t);
+        }
+        if let Some(t) = self.screensaver_wake() {
+            d = d.min(t);
+        }
         // terminals tick even when hidden, so agents in other tabs still turn "done"
         let ids: Vec<PaneId> = self.panes.iter().filter(|(id, p)| p.is_terminal() || self.visible().contains(id)).map(|(id, _)| *id).collect();
         for id in ids {
@@ -804,15 +848,50 @@ impl App {
         d.max(Duration::from_millis(4))
     }
 
+    /// [`Self::handle`], timed for the slow-pass log.
+    fn handle_timed(&mut self, ev: Event) {
+        let mut perf = std::mem::take(&mut self.perf);
+        perf.event(ev, |ev| self.handle(ev));
+        self.perf = perf;
+    }
+
     pub(crate) fn handle(&mut self, ev: Event) {
         use crossterm::event::{Event as CEvent, KeyEventKind};
         match ev {
-            Event::Input(CEvent::Key(k)) if k.kind != KeyEventKind::Release => self.key(k),
-            Event::Input(CEvent::Mouse(m)) => self.mouse(m),
-            Event::Input(CEvent::Paste(s)) => self.paste(&s),
-            Event::Input(CEvent::FocusGained) => self.term_focused = true,
+            // a key (even an alt chord) puts the hints away; the mouse says whether alt is held
+            // (a key or click that wakes the summary screensaver does only that)
+            Event::Input(CEvent::Key(k)) if k.kind != KeyEventKind::Release => {
+                self.alt_held(false);
+                if !self.touched() {
+                    self.key(k)
+                }
+            }
+            Event::Input(CEvent::Mouse(m)) => {
+                self.alt_held(m.modifiers.contains(crossterm::event::KeyModifiers::ALT));
+                let woke = self.touched();
+                if !woke || matches!(m.kind, crossterm::event::MouseEventKind::Moved) {
+                    self.mouse(m)
+                }
+            }
+            Event::Input(CEvent::Paste(s)) => {
+                self.alt_held(false);
+                self.touched();
+                self.paste(&s)
+            }
+            Event::Alt(down) => {
+                self.alt_held(down);
+                if down {
+                    self.touched();
+                }
+            }
+            Event::Input(CEvent::FocusGained) => {
+                self.term_focused = true;
+                self.touched();
+            }
             Event::Input(CEvent::FocusLost) => {
                 self.term_focused = false;
+                // alt+tab away: the release goes to the other window
+                self.alt_held(false);
                 if self.side_drag {
                     self.side_drag = false;
                     self.save_sidebar_width();

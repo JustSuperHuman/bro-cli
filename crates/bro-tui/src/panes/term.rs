@@ -681,6 +681,22 @@ impl Term {
         clean_title(&self.program_title()?)
     }
 
+    /// The web addresses on screen, lowest row first (the newest output), each once: a dev server's
+    /// "Local: http://localhost:5173/" in a shell.
+    pub fn screen_urls(&self) -> Vec<String> {
+        let mut seen: Vec<(u16, u16, &str)> = self.links.iter().filter(|(_, u)| u.starts_with("http")).map(|((r, c), u)| (*r, *c, u.as_ref())).collect();
+        seen.sort_by_key(|(r, c, _)| (std::cmp::Reverse(*r), *c));
+        let mut out: Vec<String> = vec![];
+        for (_, _, u) in seen {
+            for u in bro_core::sessions::live::find_urls(u) {
+                if !out.contains(&u) {
+                    out.push(u);
+                }
+            }
+        }
+        out
+    }
+
     /// The program's own window title (OSC 0/2), e.g. Claude Code's task summary.
     pub fn program_title(&self) -> Option<String> {
         self.program_state.lock().title.clone()

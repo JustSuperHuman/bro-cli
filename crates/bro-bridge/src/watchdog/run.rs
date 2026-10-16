@@ -60,6 +60,8 @@ pub(crate) fn claude_args(prompt_file: &str, mcp_file: &str, model: Option<&str>
 pub(crate) fn codex_args(cwd: &Path, mcp_url: &str, model: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec!["exec".into(), "--json".into(), "--skip-git-repo-check".into(), "-s".into(), "read-only".into(), "-C".into(), cwd.to_string_lossy().into_owned()];
     args.extend(["-c".into(), format!("mcp_servers.bro.url={}", serde_json::to_string(mcp_url).unwrap_or_default())]);
+    // exec can't ask anyone: without this, Codex's approval review rejects every bro tool call
+    args.extend(["-c".into(), "mcp_servers.bro.default_tools_approval_mode=\"approve\"".into()]);
     if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
         args.extend(["-m".into(), model.to_string()]);
     }
@@ -179,6 +181,12 @@ async fn review(app: &AppState, session_id: &str, generation: u64, snapshot: &Wa
     if let Some(error) = parsed.error {
         return Err(error);
     }
+    // every bro tool call refused (an approval policy, a dead endpoint): the reviewer never reached the
+    // session, so this wake-up failed whatever its report says, and bro retries instead of going quiet
+    if parsed.bro_calls > 0 && parsed.bro_failed == parsed.bro_calls {
+        let report = parsed.text.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(|t| format!(": {}", prompt::clip(t, 300))).unwrap_or_default();
+        return Err(format!("{} couldn't use bro's tools (all {} calls were refused){report}", wake.reviewer.label, parsed.bro_calls));
+    }
     match parsed.text.filter(|t| !t.trim().is_empty()) {
         Some(text) => Ok(text.trim().to_string()),
         None if status.is_some_and(|s| s.success()) => Ok("The reviewer finished without a report.".into()),
@@ -197,6 +205,11 @@ pub(crate) struct Parsed {
     /// The last thing it wrote: its report.
     pub text: Option<String>,
     pub error: Option<String>,
+    /// bro tool calls finished, and how many of them came back refused or failed
+    pub bro_calls: usize,
+    pub bro_failed: usize,
+    /// Claude's ids for its bro tool calls, to match their results
+    bro_ids: Vec<String>,
 }
 
 impl Parsed {
@@ -214,9 +227,25 @@ impl Parsed {
                         }
                         Some("tool_use") => {
                             let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                            if name.starts_with("mcp__bro__")
+                                && let Some(id) = block.get("id").and_then(Value::as_str)
+                            {
+                                self.bro_ids.push(id.to_string());
+                            }
                             steps.push(describe(app, name, block.get("input").unwrap_or(&Value::Null)));
                         }
                         _ => {}
+                    }
+                }
+            }
+            Some("user") => {
+                for block in event.pointer("/message/content").and_then(Value::as_array).into_iter().flatten() {
+                    let id = block.get("tool_use_id").and_then(Value::as_str).unwrap_or_default();
+                    if block.get("type").and_then(Value::as_str) == Some("tool_result") && self.bro_ids.iter().any(|b| b == id) {
+                        self.bro_calls += 1;
+                        if block.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+                            self.bro_failed += 1;
+                        }
                     }
                 }
             }
@@ -250,6 +279,15 @@ impl Parsed {
             }
             (Some("item.started"), "command_execution") => {
                 vec![format!("Ran {}", prompt::clip(item.get("command").and_then(Value::as_str).unwrap_or("a command"), 60))]
+            }
+            (Some("item.completed"), "mcp_tool_call") => {
+                if item.get("server").and_then(Value::as_str).is_none_or(|s| s == "bro") {
+                    self.bro_calls += 1;
+                    if item.get("status").and_then(Value::as_str) == Some("failed") || item.get("error").is_some_and(|e| !e.is_null()) {
+                        self.bro_failed += 1;
+                    }
+                }
+                vec![]
             }
             (Some("item.completed"), "agent_message") => {
                 if let Some(text) = item.get("text").and_then(Value::as_str).filter(|t| !t.trim().is_empty()) {
@@ -302,7 +340,19 @@ mod tests {
     #[test]
     #[ignore = "runs the real claude CLI (network, uses the login)"]
     fn a_real_reviewer_hands_an_idle_session_its_next_task() {
-        use crate::watchdog::{Milestone, ReviewerLaunch, WatchdogPlan, WatchdogUpdate, WatchedSession};
+        real_reviewer(ReviewerLaunch { kind: ReviewerKind::Claude, program: "claude".into(), env: vec![], env_remove: vec![], model: Some("sonnet".into()), label: "claude · local · sonnet".into() });
+    }
+
+    #[test]
+    #[ignore = "runs the real codex CLI (network, uses the login)"]
+    fn a_real_codex_reviewer_hands_an_idle_session_its_next_task() {
+        real_reviewer(ReviewerLaunch { kind: ReviewerKind::Codex, program: "codex".into(), env: vec![], env_remove: vec![], model: None, label: "codex · local".into() });
+    }
+
+    use crate::watchdog::ReviewerLaunch;
+
+    fn real_reviewer(reviewer: ReviewerLaunch) {
+        use crate::watchdog::{Milestone, WatchdogPlan, WatchdogUpdate, WatchedSession};
         use crate::{BridgeCommand, SessionMeta};
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("app");
@@ -333,7 +383,7 @@ mod tests {
         bridge
             .watchdog_wake("mal", crate::watchdog::WatchdogWake {
                 reason: "it finished a turn and sat idle 1 min".into(),
-                reviewer: ReviewerLaunch { kind: ReviewerKind::Claude, program: "claude".into(), env: vec![], env_remove: vec![], model: Some("sonnet".into()), label: "claude · local · sonnet".into() },
+                reviewer,
                 prompt: crate::watchdog::DEFAULT_PROMPT.into(),
                 session: WatchedSession { title: "Mal · app".into(), agent: "claude · local".into(), cwd: project },
             })
@@ -362,6 +412,7 @@ mod tests {
         let codex = codex_args(Path::new("J:/app"), "http://127.0.0.1:10001/mcp", None);
         assert_eq!(codex.first().map(String::as_str), Some("exec"));
         assert!(codex.contains(&"mcp_servers.bro.url=\"http://127.0.0.1:10001/mcp\"".to_string()));
+        assert!(codex.contains(&"mcp_servers.bro.default_tools_approval_mode=\"approve\"".to_string()), "exec can't answer approval prompts");
         assert_eq!(codex.last().map(String::as_str), Some("-"));
     }
 
@@ -387,5 +438,29 @@ mod tests {
         assert_eq!(c.text.as_deref(), Some("Done."));
         c.codex(&app, &json!({ "type": "turn.failed", "error": { "message": "usage limit" } }));
         assert_eq!(c.error.as_deref(), Some("usage limit"));
+    }
+
+    #[test]
+    fn refused_bro_calls_are_counted() {
+        let root = tempfile::tempdir().unwrap();
+        let app = app(root.path());
+        let mut c = Parsed::default();
+        let refused = json!({ "type": "item.completed", "item": { "type": "mcp_tool_call", "server": "bro", "tool": "read_chat", "error": { "message": "MCP tool call requires approval, but approval policy is never" }, "status": "failed" } });
+        c.codex(&app, &refused);
+        c.codex(&app, &json!({ "type": "item.completed", "item": { "type": "mcp_tool_call", "server": "other", "tool": "x", "error": { "message": "no" }, "status": "failed" } }));
+        assert_eq!((c.bro_calls, c.bro_failed), (1, 1), "only bro's own tools count");
+        c.codex(&app, &json!({ "type": "item.completed", "item": { "type": "mcp_tool_call", "server": "bro", "tool": "list_sessions", "error": null, "status": "completed" } }));
+        assert_eq!((c.bro_calls, c.bro_failed), (2, 1));
+
+        let mut p = Parsed::default();
+        p.claude(&app, &json!({ "type": "assistant", "message": { "content": [
+            { "type": "tool_use", "id": "t1", "name": "mcp__bro__read_chat", "input": {} },
+            { "type": "tool_use", "id": "t2", "name": "Read", "input": { "file_path": "a.rs" } }
+        ] } }));
+        p.claude(&app, &json!({ "type": "user", "message": { "content": [
+            { "type": "tool_result", "tool_use_id": "t1", "is_error": true, "content": "denied" },
+            { "type": "tool_result", "tool_use_id": "t2", "is_error": true, "content": "denied" }
+        ] } }));
+        assert_eq!((p.bro_calls, p.bro_failed), (1, 1));
     }
 }

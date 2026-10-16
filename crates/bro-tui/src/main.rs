@@ -8,6 +8,8 @@ mod agent_files;
 mod alerts;
 mod archive;
 mod app;
+mod card;
+mod devprobe;
 mod cli;
 mod continue_picker;
 mod clip;
@@ -28,6 +30,7 @@ mod layout;
 mod palette;
 mod pane;
 mod paste_burst;
+mod perf;
 mod priority;
 mod projects;
 mod install_cmd;
@@ -198,11 +201,17 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
     };
 
     let (input_tx, nav_tx) = (tx.clone(), tx.clone());
-    let console = paste_burst::Console::new(Box::new(move |back| {
-        let _ = nav_tx.send(pane::Event::Navigate(back));
+    let console = paste_burst::Console::new(Box::new(move |raw| {
+        let _ = nav_tx.send(match raw {
+            paste_burst::Raw::Nav(back) => pane::Event::Navigate(back),
+            paste_burst::Raw::Alt(down) => pane::Event::Alt(down),
+        });
     }));
     std::thread::Builder::new().name("bro-input".into())
-        .spawn(move || paste_burst::pump(console, |ev| input_tx.send(pane::Event::Input(ev)).is_ok()))?;
+        .spawn(move || paste_burst::pump(console, |ev| {
+            perf::input_read();
+            input_tx.send(pane::Event::Input(ev)).is_ok()
+        }))?;
 
     let _instance = if demo { None } else { instance::serve(tx.clone()) };
     let mut app = app::App::new(svc, tx, app::Opts { demo, fixed_demo: false, load_recents: !demo });
