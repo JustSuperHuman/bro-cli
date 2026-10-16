@@ -13,7 +13,8 @@ One terminal workspace for all your coding agents — Claude Code, Codex, Pi and
 - **Mixes models** — a built-in proxy lets Claude Code run on OpenAI-format models, and Codex / Pi / omp run on Claude.
 - **Reaches your phone** — a built-in bridge lets the Just Terminal mobile and web clients connect.
 - **Sets how Claude Code runs** — pick a preset (Quiet, Private, Lockdown, Incognito, Presenter, Marathon) in Settings (the ⚙ in the sidebar, `alt+,` or prefix `A`), next to theme, icons, auto-resume, recaps and compression, to control telemetry, updates, retries and more for every launch. See [docs/claude-env.md](docs/claude-env.md).
-- **Watchdogs** — keep a session working while you're away. Press `ctrl+space w` on a session and list its milestones. Each time the agent stops and sits idle, bro starts a fresh reviewer on whichever login has the most usage left. The reviewer reads the chat and the code, checks the work against the milestones and sends the agent its next task. It can clear the agent's context before a new milestone, or open a second-opinion session (an Opus pass over UI work Codex did, for example). Edit what every reviewer is told under Settings → watchdog. See [docs/watchdog.md](docs/watchdog.md).
+- **The orchestrator** — one session that runs the others. Start it from New session (the gold ★ orchestrator tab, or `alt+O`) on Claude Code, Codex, Pi or omp. It opens sessions, hands them tasks, waits on them and reports back. Push-to-talk, the phone and web orchestrator panels, watchdog reviews and the reminders it schedules for itself (once, every so often or daily, for this session or across restarts) all go to it. It sits in gold at the top of the sidebar, runs in `~/orchestrator`, and comes back with the same settings when you reopen bro. `bro ctl <tool>` gives any shell the same tools.
+- **Watchdogs** — keep a session working while you're away. Press `ctrl+space w` on a session and list its milestones. Each time the agent stops and sits idle, bro hands the review to the orchestrator, starting one if none is running. It reads the chat and the code, checks the work against the milestones and sends the agent its next task. It can clear the agent's context before a new milestone, or open a second-opinion session (an Opus pass over UI work Codex did, for example). Edit what every reviewer is told under Settings → watchdog. See [docs/watchdog.md](docs/watchdog.md).
 - **Caveman mode** — terse replies that keep every technical fact ([Caveman](https://github.com/JuliusBrussee/caveman) rules: caveman, ultracave or megacave) for new Claude, Codex and Pi sessions. Turn it on in Settings or the palette ("caveman"); ⛏ in the sidebar and on each session's header shows it. Nothing to install. See [docs/caveman.md](docs/caveman.md).
 
 ## Install
@@ -23,6 +24,12 @@ One terminal workspace for all your coding agents — Claude Code, Codex, Pi and
 ```powershell
 irm https://raw.githubusercontent.com/JustSuperHuman/bro-cli/main/install.ps1 | iex
 ```
+
+Or download `bro-<version>-x86_64-pc-windows-msvc-setup.exe` from the
+[latest release](https://github.com/JustSuperHuman/bro-cli/releases/latest) and run it. It installs bro for
+your user only (no admin prompt) in the same folder, adds **bro** to the Start menu (it opens bro in its own
+window), can put bro on your `PATH` and a shortcut on your desktop, and is listed in Settings → Apps for
+uninstalling. Run a newer one to update, even while bro is open.
 
 **macOS / Linux**:
 

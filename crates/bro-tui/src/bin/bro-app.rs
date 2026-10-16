@@ -8,10 +8,19 @@
 //! turns on its font choice (the fork switches fonts with OSC 50).
 //!
 //! A windows-subsystem program, so launching it never flashes a console of its own.
+//!
+//! Every way in is tried in turn until one works: a terminal alias can outlive the app it pointed to (a dev
+//! build removed, a package re-registered), and a launcher that starts but exits with an error within a few
+//! seconds didn't open anything, so bro-app moves on to the next one rather than leaving you with nothing.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
+
+/// A terminal launcher that fails says so quickly (a stale alias, an unknown flag); one still running after this
+/// long is the terminal itself, hosting bro.
+const LAUNCH_CHECK: Duration = Duration::from_secs(4);
 
 /// bro's icon, written next to bro's data so terminals can point at a real file.
 const ICON: &[u8] = include_bytes!("../../assets/bro.ico");
@@ -22,24 +31,23 @@ fn main() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| dirs::home_dir().unwrap_or_default());
     let icon = icon_file();
     let relaunch = std::env::current_exe().ok().map(|launcher| relaunch_command(&launcher, &cwd, &args));
-    let terminal = std::env::var_os("BRO_TERMINAL").map(PathBuf::from).filter(|p| present(p)).or_else(fork_terminal);
-
-    let started = match &terminal {
-        Some(wt) if supports_app_mode(wt) => {
-            let mut cmd = Command::new(wt);
-            cmd.args(app_mode_args(&bro, &cwd, icon.as_deref(), relaunch.as_deref(), &args));
-            // the side-by-side build keeps its own phone-bridge data (like the fork's launch:next script)
-            if wt.file_name().is_some_and(|n| n.eq_ignore_ascii_case("wtdn.exe"))
-                && std::env::var_os("TERMINAL_WEB_DATA_ROOT").is_none()
-                && let Some(local) = dirs::data_local_dir()
-            {
-                cmd.env("TERMINAL_WEB_DATA_ROOT", local.join("TerminalWebNext"));
-            }
-            spawn(&mut cmd)
+    // BRO_TERMINAL first, then the fork's builds in order: each in app mode until one opens
+    let chosen = std::env::var_os("BRO_TERMINAL").map(PathBuf::from).filter(|p| present(p));
+    let app_mode = chosen.into_iter().chain(fork_terminals()).any(|wt| {
+        let mut cmd = Command::new(&wt);
+        cmd.args(app_mode_args(&bro, &cwd, icon.as_deref(), relaunch.as_deref(), &args));
+        // the side-by-side build keeps its own phone-bridge data (like the fork's launch:next script)
+        if wt.file_name().is_some_and(|n| n.eq_ignore_ascii_case("wtdn.exe"))
+            && std::env::var_os("TERMINAL_WEB_DATA_ROOT").is_none()
+            && let Some(local) = dirs::data_local_dir()
+        {
+            cmd.env("TERMINAL_WEB_DATA_ROOT", local.join("TerminalWebNext"));
         }
-        _ => false,
-    } || which("wt.exe").is_some_and(|wt| spawn(Command::new(wt).args(plain_wt_args(&bro, &cwd, &args))))
-        || spawn(Command::new("conhost.exe").arg(&bro).args(&args).current_dir(&cwd));
+        launch(&mut cmd)
+    });
+    let started = app_mode
+        || which("wt.exe").is_some_and(|wt| launch(Command::new(wt).args(plain_wt_args(&bro, &cwd, &args))))
+        || launch(Command::new("conhost.exe").arg(&bro).args(&args).current_dir(&cwd));
     if !started {
         std::process::exit(1);
     }
@@ -73,24 +81,20 @@ fn newest_bro(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> 
     }).reduce(|best, candidate| if candidate.1 > best.1 { candidate } else { best }).map(|(path, _)| path)
 }
 
-/// The fork: the side-by-side build (`wtdn.exe`, where new fork features land first), else the everyday
-/// `wtd.exe` alias, else the per-user `wt.exe` shim that forwards to it.
-fn fork_terminal() -> Option<PathBuf> {
-    let local = dirs::data_local_dir()?;
+/// The fork's builds that are installed, in order: the side-by-side build (`wtdn.exe`, where new fork features
+/// land first), the everyday `wtd.exe` alias, and the per-user `wt.exe` shim that forwards to it.
+fn fork_terminals() -> Vec<PathBuf> {
+    let Some(local) = dirs::data_local_dir() else { return vec![] };
     let apps = local.join("Microsoft").join("WindowsApps");
     [apps.join("wtdn.exe"), apps.join("wtd.exe"), local.join("Programs").join("WindowsTerminalDevShim").join("wt.exe")]
         .into_iter()
-        .find(|p| present(p))
+        .filter(|p| present(p))
+        .collect()
 }
 
 /// Exists — including app execution aliases (wtd.exe, wtdn.exe), which are reparse points `is_file` rejects.
 fn present(p: &Path) -> bool {
     p.symlink_metadata().is_ok()
-}
-
-/// Only the fork understands `--app`; assume the shim is the fork, anything else (BRO_TERMINAL) is trusted.
-fn supports_app_mode(_wt: &Path) -> bool {
-    true
 }
 
 fn app_mode_args(bro: &Path, cwd: &Path, icon: Option<&Path>, relaunch: Option<&str>, args: &[String]) -> Vec<String> {
@@ -161,10 +165,28 @@ fn icon_file() -> Option<PathBuf> {
     Some(path)
 }
 
-fn spawn(cmd: &mut Command) -> bool {
+/// Start it and see that it took: it fails to start, or exits with an error within [`LAUNCH_CHECK`], and the next
+/// way in gets its turn. (Terminal launchers hand the window to the running terminal and exit 0; a terminal or
+/// console that keeps running is hosting bro.)
+fn launch(cmd: &mut Command) -> bool {
     // an app window shouldn't inherit a shell's colour opt-out (NO_COLOR makes crossterm, PowerShell and most
     // CLIs drop every colour) — bro is started from here, not from that shell
-    cmd.env_remove("NO_COLOR").spawn().is_ok()
+    let Ok(mut child) = cmd.env_remove("NO_COLOR").spawn() else { return false };
+    launched(|| child.try_wait().ok().map(|s| s.map(|s| s.success())), LAUNCH_CHECK)
+}
+
+/// Poll `status` (None: still running; Some(ok): it exited) until it exits or `within` passes.
+fn launched(mut status: impl FnMut() -> Option<Option<bool>>, within: Duration) -> bool {
+    let until = Instant::now() + within;
+    loop {
+        match status() {
+            Some(Some(ok)) => return ok,
+            // can't tell: assume it runs
+            None => return true,
+            Some(None) if Instant::now() >= until => return true,
+            Some(None) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 fn exe(name: &str) -> String {
@@ -262,6 +284,26 @@ mod tests {
         let installed = executable(dir.path(), "installed.exe", 200);
         let equal = executable(dir.path(), "equal.exe", 300);
         assert_eq!(newest_bro([sibling.clone(), installed, equal]), Some(sibling));
+    }
+
+    #[test]
+    fn a_launcher_that_fails_hands_over_to_the_next() {
+        let fast = Duration::from_millis(200);
+        assert!(launched(|| Some(Some(true)), fast), "exited 0: the terminal took the window");
+        assert!(!launched(|| Some(Some(false)), fast), "exited with an error: try the next one");
+        assert!(launched(|| Some(None), fast), "still running: it hosts bro");
+        let mut calls = 0;
+        assert!(!launched(|| { calls += 1; if calls < 3 { Some(None) } else { Some(Some(false)) } }, Duration::from_secs(2)), "fails a moment later");
+    }
+
+    #[test]
+    fn a_real_failing_launcher_is_caught() {
+        // a program that starts and exits with an error, like a stale terminal alias's forwarder
+        let mut cmd = if cfg!(windows) { let mut c = Command::new("cmd"); c.args(["/c", "exit 1"]); c } else { let mut c = Command::new("sh"); c.args(["-c", "exit 1"]); c };
+        assert!(!launch(&mut cmd));
+        let mut ok = if cfg!(windows) { let mut c = Command::new("cmd"); c.args(["/c", "exit 0"]); c } else { Command::new("true") };
+        assert!(launch(&mut ok));
+        assert!(!launch(&mut Command::new("definitely-not-a-terminal-xyz")));
     }
 
     #[test]

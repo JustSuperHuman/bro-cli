@@ -55,6 +55,23 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/bro.exe", "target/${{ matrix.target }}/release/bro-app.exe", README.md, LICENSE "dist/$name"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
 
+      - name: Installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Inno Setup builds bro-<tag>-<target>-setup.exe from the packaged folder (packaging/windows/bro.iss)
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress | Out-Null
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          $tag = "${{ github.ref_name }}"
+          # a manual run builds from a branch: the version comes from Cargo.toml
+          $version = if ($tag -match '^v\d') { $tag.Substring(1) } else { (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value }
+          $name = "bro-$tag-${{ matrix.target }}"
+          & $iscc /Q "/DAppVersion=$version" "/DBinDir=$PWD\dist\$name" "/DOutputName=$name-setup" "/O$PWD\dist" packaging/windows/bro.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -69,6 +86,7 @@ jobs:
           path: |
             dist/*.zip
             dist/*.tar.gz
+            dist/*-setup.exe
           if-no-files-found: error
 
   release:

@@ -17,9 +17,9 @@ Focus a Claude or Codex session and press `ctrl+space w` (or pick "watchdog" in 
 
 bro wakes the watchdog when the agent finishes a turn and stays idle for the wait you set, or when it has waited on a question for a while. It wakes once per stop: a review that sent nothing doesn't fire again until the session does something. A failed review is retried after 2, 5 and 15 minutes.
 
-Every wake-up starts a new headless reviewer. bro picks the login: the one named under Settings → watchdog → Reviewer, else the Claude login with the most usage left, else the roomiest Codex login. Claude reviewers run `claude -p` on the reviewer model from settings (Opus by default). Codex reviewers run `codex exec` in a read-only sandbox. Both reach the session through bro's own MCP server (the bridge's `/mcp`), so the bridge has to be on.
+Every wake-up goes to the orchestrator, bro's one session that runs the others. With none running, bro starts one: the way it last ran, else the last one you launched, else on the Claude or Codex login with the most usage left. bro writes the review brief to `~/.bro/orchestrator/watchdog/` and types a one-line `[watchdog · <session>]` message pointing at it into the orchestrator. The orchestrator reaches the session through bro's own tools (the bridge's `/mcp`), so the bridge has to be on; bro turns it on when it starts the orchestrator.
 
-The reviewer gets bro's standing instructions and a brief: the session, the milestones with their status and notes, any helper sessions and the last few wake-ups. It can read the chat, the screen and the project (Read, Grep, Glob and read-only git), mark milestones with `watchdog_update`, clear the agent's context with `clear_context`, answer a prompt the plan settles, open a helper with `open_session` (`model` and `forWatchdog`), and finally send one task with `send_input`. Its last message is the report you see in the toast and the log.
+The orchestrator gets the watchdog prompt and a brief: the session, the milestones with their status and notes, any helper sessions and the last few wake-ups. It can read the chat, the screen and the project (Read, Grep, Glob and read-only git), mark milestones with `watchdog_update`, clear the agent's context with `clear_context`, answer a prompt the plan settles, open a helper with `open_session` (`model` and `forWatchdog`), and finally send one task with `send_input`. The last line of its reply is the report you see in the toast and the log, with "the orchestrator" as the reviewer.
 
 ## Watching it
 
@@ -27,4 +27,4 @@ The session header shows `watchdog 2/5` (milestones done), a spinner while a rev
 
 ## The prompt
 
-Settings → watchdog → Watchdog prompt opens an editor for the instructions every reviewer starts with (`ctrl+s` saves, `ctrl+r` loads bro's default). It's stored as `[watchdog] prompt` in `~/.bro/v2.toml`. The same section sets the defaults for new watchdogs (wake after, budget), the reviewer login and the reviewer model.
+Settings → watchdog → Watchdog prompt opens an editor for the instructions every reviewer starts with (`ctrl+s` saves, `ctrl+r` loads bro's default). It's stored as `[watchdog] prompt` in `~/.bro/v2.toml`. The same section sets the defaults for new watchdogs (wake after, budget). The reviewer login and model settings only applied to the headless reviewers bro used before the orchestrator took the reviews over.
