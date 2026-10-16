@@ -1382,6 +1382,7 @@ fn launched_sessions_open_panes_and_report_errors() {
         permission: bro_core::launch::Permission::Default,
         browser: bro_core::browser::BrowserMode::Off,
         extra_args: vec![],
+        orchestrator: false,
     };
     let bad = crate::services::Launched { spec: spec.clone(), place: Place::Tab, reply: None, name: None, remember: false, result: Err("no key".into()), route_id: None, note: None, into: None };
     a.launched(bad);
@@ -1625,7 +1626,7 @@ fn session_dialog_switches_to_an_open_project_without_resetting_the_agent() {
     a.pick_project(first.clone());
     a.open_launcher(Some(first.clone()), Place::Tab);
     let rendered = draw(&mut a);
-    assert!(rendered.contains("╭ PROJECT") && rendered.contains("Change project  Alt+P") && rendered.contains("first"), "the session dialog shows the selected project in a path box\n{rendered}");
+    assert!(rendered.contains("change alt+p") && rendered.contains("first"), "the session dialog shows the selected project as a chip\n{rendered}");
     let Overlay::Launcher(l) = &a.overlay else { panic!("session dialog") };
     let row = l.hits.iter().find_map(|(r, hit)| (*hit == crate::launcher::Hit::Project).then_some(*r)).unwrap();
     let tabs = l.hits.iter().find_map(|(r, hit)| matches!(hit, crate::launcher::Hit::Harness(_)).then_some(*r)).unwrap();
@@ -1650,7 +1651,7 @@ fn session_dialog_switches_to_an_open_project_without_resetting_the_agent() {
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.continue_picker.all && !l.continue_picker.view().is_empty()));
     let compact = crate::testkit::dump(&draw_buf(&mut a, 66, 16));
-    assert!(compact.contains("second") && compact.contains("Change"), "the project path stays visible in a short window\n{compact}");
+    assert!(compact.contains("second") && compact.contains("change"), "the project path stays visible in a short window\n{compact}");
     a.select_launcher_project(first);
     assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.continue_picker.all), "all sessions stays global when the path bar changes");
 }
@@ -2728,10 +2729,9 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert_eq!(a.svc.settings().insights.generate_recaps, !recaps);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // compression
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // caveman mode
-    assert!(!draw(&mut a).contains("⛏ caveman"), "no badge while off");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // off → caveman
     assert_eq!(a.svc.settings().caveman.active(), Some(bro_core::caveman::Level::Caveman));
-    { let s = draw(&mut a); assert!(s.contains("⛏ caveman"), "the sidebar shows it: {s}"); }
+    { let s = draw(&mut a); let top = s.lines().next().unwrap_or_default(); assert!(!top.contains("caveman"), "no badge beside the settings gear: {top}"); }
     key(&mut a, KeyCode::Left, KeyModifiers::NONE); // back to off
     assert_eq!(a.svc.settings().caveman.active(), None);
     assert!(a.svc.settings().caveman.used);
@@ -3159,4 +3159,413 @@ fn closing_a_watched_session_ends_its_watchdog() {
     assert!(a.svc.watchdog(&sid).is_some());
     a.close(id);
     assert!(a.svc.watchdog(&sid).is_none());
+}
+
+fn orchestrator_spec(h: bro_core::Harness) -> bro_core::launch::LaunchSpec {
+    bro_core::launch::LaunchSpec {
+        harness: h,
+        profile_id: None,
+        provider_id: None,
+        model: None,
+        cwd: std::env::temp_dir(),
+        resume: None,
+        permission: bro_core::launch::Permission::Skip,
+        browser: bro_core::browser::BrowserMode::Off,
+        extra_args: vec![],
+        orchestrator: true,
+    }
+}
+
+/// An orchestrator launch finished building (its program doesn't exist: the pane shows why).
+fn land_orchestrator(a: &mut App) {
+    let cmd = bro_core::launch::CommandSpec { program: "definitely-not-a-program-xyz".into(), label: "orchestrator · claude · local".into(), cwd: std::env::temp_dir(), ..Default::default() };
+    a.launched(crate::services::Launched { spec: orchestrator_spec(bro_core::Harness::Claude), place: Place::SplitRight, reply: None, name: None, remember: true, result: Ok(cmd), route_id: None, note: None, into: None });
+}
+
+#[test]
+fn the_orchestrator_is_one_gold_session_pinned_atop_the_sidebar() {
+    let mut a = app(true);
+    let before = a.panes.len();
+    let project_before = a.current_project();
+    land_orchestrator(&mut a);
+    let boss = a.orchestrator_pane().expect("an orchestrator");
+    assert_eq!(a.panes.len(), before + 1);
+    let t = a.panes[&boss].as_term_ref().unwrap();
+    assert!(t.meta.orchestrator);
+    assert_eq!(t.meta.project.key, crate::panes::term::ORCHESTRATOR_KEY);
+    assert!(a.recents[0].orchestrator, "remembered as an orchestrator combo");
+    assert_eq!(a.tabs.iter().filter(|t| t.root.contains(boss)).count(), 1);
+    assert!(!a.tabs.iter().any(|t| t.root.contains(boss) && t.root.leaf_ids().len() > 1), "its own session, never a split");
+
+    // pinned: first row, first in the numbering, outside every project
+    let rows = a.rows();
+    assert!(matches!(&rows[0], crate::sidebar::Row::Live { info, n: Some(1) } if info.pane == boss && info.orchestrator), "{rows:?}");
+    assert!(matches!(&rows[1], crate::sidebar::Row::Project { .. }));
+    assert_eq!(crate::sidebar::live_order(&a.live_infos(), &a.past_infos(), &a.open_infos())[0], boss);
+    // focusing it doesn't make it the project new sessions start in
+    a.focus_pane(boss);
+    a.follow_focus();
+    assert_eq!(a.current_project(), project_before);
+
+    let s = shot(&mut a, "orchestrator");
+    let side: String = s.lines().take(6).collect::<Vec<_>>().join("\n");
+    assert!(side.contains("★ orchestrator"), "pinned on top\n{s}");
+    assert!(s.contains('╔') && s.contains('╝'), "the gold window has a double frame\n{s}");
+
+    // only ever one: launching again goes to it, a second build that lands is ended
+    a.focus_pane(*a.live_infos().iter().map(|l| l.pane).filter(|p| *p != boss).collect::<Vec<_>>().first().unwrap());
+    a.launch_spec(orchestrator_spec(bro_core::Harness::Codex), Place::Tab);
+    assert_eq!(a.focused(), Some(boss));
+    assert!(a.toasts.latest().unwrap().text.contains("already running"));
+    land_orchestrator(&mut a);
+    assert_eq!(a.panes.values().filter(|p| p.as_term_ref().is_some_and(|t| t.meta.orchestrator)).count(), 1);
+    assert_eq!(a.panes.len(), before + 1);
+
+    // alt+O goes to it too
+    a.overlay = Overlay::None;
+    a.run_act(Act::Orchestrator);
+    assert_eq!(a.focused(), Some(boss));
+    assert!(!a.overlay.is_open());
+}
+
+#[test]
+fn the_orchestrator_tiles_minimizes_and_survives_closing_a_project() {
+    let mut a = app(true);
+    land_orchestrator(&mut a);
+    let boss = a.orchestrator_pane().unwrap();
+    a.toggle_tiles();
+    assert!(a.tile_all);
+    assert_eq!(a.stack.first(), Some(&boss), "first in the grid, like in the sidebar");
+    let s = shot(&mut a, "orchestrator-tiled");
+    assert!(s.contains("★ orchestrator"), "{s}");
+    // a full-height column on the right; every other session tiles to its left
+    let body = a.body;
+    let col = a.outer.iter().find(|(id, _)| *id == boss).map(|(_, r)| *r).unwrap();
+    assert_eq!((col.right(), col.y, col.height), (body.right(), body.y, body.height), "{col:?} in {body:?}");
+    assert!(col.width >= body.width / 4 && col.width <= body.width / 2, "{col:?}");
+    for (id, r) in a.outer.iter().filter(|(id, _)| *id != boss) {
+        assert!(r.right() <= col.x, "pane {id} {r:?} overlaps the column {col:?}");
+    }
+    assert!(a.outer.len() > 2);
+    // minimized and restored like any other session
+    a.minimize_pane(boss);
+    assert!(!a.stack.contains(&boss));
+    assert!(a.rows().iter().any(|r| matches!(r, crate::sidebar::Row::Live { info, .. } if info.pane == boss)), "still pinned in the sidebar");
+    a.focus_pane(boss);
+    assert!(a.stack.contains(&boss) && a.focused() == Some(boss));
+
+    // closing a project closes its sessions, never the orchestrator
+    let root = a.open_projects.roots.first().cloned().unwrap();
+    a.close_project_now(root);
+    assert_eq!(a.orchestrator_pane(), Some(boss));
+}
+
+#[test]
+fn the_orchestrator_tab_in_the_launcher() {
+    let mut a = app(true);
+    a.run_act(Act::Orchestrator);
+    let Overlay::Launcher(l) = &a.overlay else { panic!("the launcher on the orchestrator tab") };
+    assert!(l.orchestrator);
+    let spec = l.spec().expect("something to start");
+    assert!(spec.orchestrator);
+    let s = shot(&mut a, "launcher-orchestrator");
+    assert!(s.contains("★ orchestrator") && s.contains("runs on") && s.contains("Start it on"), "{s}");
+    assert!(s.contains("runs in") && s.contains("orchestrator "), "the folder chip names ~/orchestrator\n{s}");
+    // enter starts it as its own session
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.overlay.is_open());
+    assert!(a.orchestrator_pending.is_some());
+    // a second start while the first builds waits for it
+    a.launch_spec(orchestrator_spec(bro_core::Harness::Claude), Place::Tab);
+    assert!(a.toasts.latest().unwrap().text.contains("already starting"));
+}
+
+#[test]
+fn the_orchestrator_stays_on_top_while_the_sidebar_scrolls() {
+    let mut a = app(true);
+    land_orchestrator(&mut a);
+    let boss = a.orchestrator_pane().unwrap();
+    let small = |a: &mut App| {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(W, 22)).expect("backend");
+        term.draw(|f| a.draw(f)).expect("draw");
+        testkit::dump(term.backend().buffer())
+    };
+    // browse to the last row: the list scrolls, the orchestrator doesn't
+    a.side_focus = true;
+    a.side_sel = a.rows().len() - 1;
+    let s = small(&mut a);
+    assert!(a.side_scroll > 1, "the list overflows 22 rows and scrolls");
+    let top: Vec<&str> = s.lines().skip(1).take(2).collect();
+    assert!(top[0].contains("★ orchestrator"), "sticky on the first line\n{s}");
+    assert!(top[1].contains('╌'), "a hairline under it\n{s}");
+    assert!(s.contains("dotfiles"), "the selection scrolled into view\n{s}");
+    // its row still clicks through to it after scrolling
+    let row = s.lines().skip(1).next().unwrap();
+    let x = row.find("orchestrator").unwrap() as u16;
+    a.side_focus = false;
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x.min(20), row: 1, modifiers: KeyModifiers::NONE });
+    assert_eq!(a.focused(), Some(boss));
+    // the wheel can't scroll it away either
+    for _ in 0..30 {
+        a.mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column: 5, row: 10, modifiers: KeyModifiers::NONE });
+    }
+    let s = small(&mut a);
+    assert!(s.lines().nth(1).unwrap().contains("★ orchestrator"), "{s}");
+}
+
+/// One test owns `~/.bro/v2-orchestrator.json` (in the test BRO_DIR): tests run in parallel.
+#[test]
+fn a_running_orchestrator_comes_back_when_bro_reopens() {
+    use crate::orchestrator_state as state;
+    testkit::isolate();
+    state::clear();
+    let bro = || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::mem::forget(rx);
+        App::new(Services::offline(fallback_settings(), tx.clone()), tx, Opts { demo: false, fixed_demo: true, load_recents: true })
+    };
+    let spec = bro_core::launch::LaunchSpec {
+        profile_id: Some("codex:team".into()),
+        model: Some("gpt-5.2".into()),
+        permission: bro_core::launch::Permission::Auto,
+        browser: bro_core::browser::BrowserMode::Edge,
+        ..orchestrator_spec(bro_core::Harness::Codex)
+    };
+    let land = |a: &mut App, spec: &bro_core::launch::LaunchSpec, result: Result<bro_core::launch::CommandSpec, String>| {
+        a.launched(crate::services::Launched { spec: spec.clone(), place: Place::Tab, reply: None, name: None, remember: false, result, route_id: None, note: None, into: None });
+    };
+    let cmd = || Ok(bro_core::launch::CommandSpec { program: "definitely-not-a-program-xyz".into(), label: "orchestrator · codex · team · gpt-5.2".into(), cwd: std::env::temp_dir(), ..Default::default() });
+
+    // nothing saved: a fresh bro starts without one
+    let mut a = bro();
+    a.restore_orchestrator();
+    assert!(a.orchestrator_pending.is_none());
+
+    // it runs: saved with its params; quitting bro keeps them
+    land(&mut a, &spec, cmd());
+    let saved = state::load().expect("saved while it runs");
+    assert_eq!((saved.harness, saved.profile_id.as_deref(), saved.model.as_deref(), saved.permission, saved.browser), (spec.harness, Some("codex:team"), Some("gpt-5.2"), spec.permission, spec.browser));
+    a.shutdown();
+    assert!(state::load().is_some(), "quitting bro isn't closing the orchestrator");
+
+    // the next bro (a reopen, or another instance) starts it the same way
+    let mut b = bro();
+    b.restore_orchestrator();
+    assert!(b.orchestrator_pending.is_some(), "relaunching");
+    assert!(b.toasts.latest().unwrap().text.contains("orchestrator · codex · team · gpt-5.2"), "{:?}", b.toasts.latest());
+
+    // a plain session never counts
+    let plain = bro_core::launch::LaunchSpec { orchestrator: false, ..spec.clone() };
+    state::save(&plain);
+    assert!(state::load().is_none());
+
+    // you close it: forgotten
+    land(&mut b, &spec, cmd());
+    assert!(state::load().is_some());
+    let id = b.orchestrator_pane().unwrap();
+    b.close(id);
+    assert!(state::load().is_none(), "closed by you: the next bro starts without it");
+
+    // it can't start any more (login gone…): forgotten too, so bro doesn't fail on every start
+    state::save(&spec);
+    land(&mut b, &spec, Err("unknown profile \"codex:team\"".into()));
+    assert!(state::load().is_none());
+}
+
+/// Every signed-in login's usage, as (5h used %, week used %).
+fn set_usage(a: &mut App, used: &[(&str, f32, f32)]) {
+    a.svc.update(|st| {
+        for (id, h5, wk) in used {
+            let e = st.usage.entry(id.to_string()).or_default();
+            let mut u = e.usage.clone().unwrap_or_default();
+            let now = crate::util::now_secs();
+            u.five_hour = Some(bro_core::usage::Window { used_pct: *h5, resets_at: Some(now + 3_600), window_mins: Some(300) });
+            u.weekly = Some(bro_core::usage::Window { used_pct: *wk, resets_at: Some(now + 3 * 86_400), window_mins: Some(10_080) });
+            e.usage = Some(u);
+            e.error = None;
+        }
+    });
+}
+
+fn signed_in(a: &App) -> Vec<String> {
+    a.svc.state().profiles.ready().unwrap().iter().filter(|p| p.authenticated && (p.is_claude() || p.is_codex())).map(|p| p.id.clone()).collect()
+}
+
+#[test]
+fn the_launcher_reads_the_tighter_window_like_the_sidebar() {
+    let mut a = app(true);
+    let claude = signed_in(&a).into_iter().find(|p| p.starts_with("claude:")).unwrap();
+    // a fresh 5h window, but nothing left this week: out, not 100%
+    set_usage(&mut a, &[(&claude, 0.0, 100.0)]);
+    let d = overlays::launcher_data(&a);
+    assert_eq!(d.usage.get(&claude).copied(), Some(100.0), "used % of the binding window");
+    a.open_launcher(None, Place::Tab);
+    if let Overlay::Launcher(l) = &mut a.overlay {
+        l.list_filter = claude.split(':').nth(1).unwrap().into();
+    }
+    let s = draw(&mut a);
+    assert!(s.contains("0% left") && !s.contains("100% left"), "{s}");
+}
+
+#[test]
+fn holding_alt_shows_when_usage_resets() {
+    let mut a = app(true);
+    let s = draw(&mut a);
+    assert!(!s.contains("Resets @"));
+    a.alt_down = Some(Instant::now() - Duration::from_secs(1));
+    let s = shot(&mut a, "usage-resets");
+    let foot: String = s.lines().skip_while(|l| !l.contains("usage left")).take(4).collect::<Vec<_>>().join("\n");
+    assert!(foot.contains("resets") && foot.matches("Resets @ ").count() >= 2, "{foot}");
+    a.alt_down = None;
+    assert!(!draw(&mut a).contains("Resets @"));
+}
+
+#[test]
+fn reset_times_read_short() {
+    let now = crate::util::now_secs();
+    let soon = crate::util::reset_time(now + 60);
+    assert!(soon.ends_with("am") || soon.ends_with("pm") || soon.contains(' '), "{soon}");
+    let days = crate::util::reset_time(now + 3 * 86_400);
+    assert!(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].iter().any(|d| days.starts_with(d)), "{days}");
+    let later = crate::util::reset_time(now + 30 * 86_400);
+    assert!(!later.contains(':'), "a date, no time: {later}");
+}
+
+#[test]
+fn voice_starts_an_orchestrator_on_the_roomiest_login_and_goes_to_it() {
+    use crate::services::VoiceMsg;
+    let mut a = app(true);
+    let logins = signed_in(&a);
+    let roomy = logins.iter().find(|p| p.starts_with("codex:")).unwrap().clone();
+    let fresh_but_out = logins.iter().find(|p| p.starts_with("claude:")).unwrap().clone();
+    let mut used: Vec<(&str, f32, f32)> = logins.iter().map(|p| (p.as_str(), 90.0, 90.0)).collect();
+    for u in used.iter_mut() {
+        if u.0 == roomy {
+            *u = (u.0, 20.0, 30.0);
+        }
+        if u.0 == fresh_but_out {
+            *u = (u.0, 0.0, 100.0);
+        }
+    }
+    set_usage(&mut a, &used);
+    assert_eq!(a.roomiest_login().as_deref(), Some(roomy.as_str()), "most left in the tighter window");
+    let spec = a.voice_orchestrator_spec().unwrap();
+    assert!(spec.orchestrator && spec.harness == bro_core::Harness::Codex && spec.profile_id.as_deref() == Some(roomy.as_str()));
+
+    // the last one you launched wins over the roomiest
+    a.recents.insert(0, crate::recents::Recent { harness: bro_core::Harness::Claude, profile_id: Some(fresh_but_out.clone()), provider_id: None, model: Some("opus".into()), cwd: std::env::temp_dir(), permission: bro_core::launch::Permission::Auto, browser: bro_core::browser::BrowserMode::Off, at: 1, orchestrator: true });
+    let spec = a.voice_orchestrator_spec().unwrap();
+    assert_eq!((spec.harness, spec.profile_id.as_deref(), spec.model.as_deref()), (bro_core::Harness::Claude, Some(fresh_but_out.as_str()), Some("opus")));
+
+    // nothing running: speaking starts one and waits for it, keeping you where you were
+    let looking = a.focused().unwrap();
+    let looking_sid = a.panes[&looking].as_term_ref().unwrap().meta.sid.clone();
+    a.voice_message(VoiceMsg { text: "  what is   Toast doing ".into(), focused: Some(looking_sid.clone()), tag: Some("d1".into()) });
+    assert!(a.orchestrator_pending.is_some());
+    assert!(a.toasts.latest().unwrap().text.contains("launching orchestrator"));
+    assert_eq!(a.voice.queue.len(), 1);
+    land_orchestrator(&mut a);
+    let boss = a.orchestrator_pane().unwrap();
+    a.pump_voice();
+    assert_eq!(a.focused(), Some(looking), "the orchestrator opens in the background");
+    assert_eq!(a.voice.queue.len(), 1, "not at its prompt yet");
+    // at its prompt: typed in, marked as spoken, with the session you were looking at, then Enter
+    {
+        let t = a.panes.get_mut(&boss).unwrap().as_term().unwrap();
+        t.meta.started -= Duration::from_secs(5);
+        t.demo_activity = Some(Activity::Idle);
+    }
+    a.pump_voice();
+    assert!(a.voice.queue.is_empty());
+    let sent = String::from_utf8_lossy(&a.panes[&boss].as_term_ref().unwrap().sent).to_string();
+    assert!(sent.starts_with("[voice · looking at \"") && sent.contains(&format!("(sessionId {looking_sid})] what is Toast doing")), "{sent:?}");
+    assert_eq!(a.voice.awaiting.len(), 1, "the live voice waits for the answer");
+
+    // its answer goes back to be spoken
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("t.jsonl");
+    let reply = serde_json::json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","message":{"id":"m1","content":[{"type":"text","text":"Toast is running the tests."}]}});
+    std::fs::write(&transcript, format!("{reply}\n")).unwrap();
+    a.voice.awaiting[0].since -= Duration::from_secs(5);
+    a.panes.get_mut(&boss).unwrap().as_term().unwrap().set_insights(crate::panes::insights::Insights::from_transcript(bro_core::Harness::Claude, &transcript, None));
+    a.pump_voice();
+    assert!(a.voice.awaiting.is_empty(), "answered");
+
+    // running: straight in, no launch
+    a.focus_pane(boss);
+    a.voice_message(VoiceMsg { text: "close Pinky".into(), focused: Some(a.panes[&boss].as_term_ref().unwrap().meta.sid.clone()), tag: None });
+    let sent = String::from_utf8_lossy(&a.panes[&boss].as_term_ref().unwrap().sent).to_string();
+    assert!(sent.ends_with("[voice] close Pinky"), "looking at the orchestrator itself: just the words · {sent:?}");
+}
+
+#[test]
+fn voice_says_so_when_the_orchestrator_cant_start() {
+    use crate::services::VoiceMsg;
+    let mut a = app(true);
+    a.voice_message(VoiceMsg { text: "status".into(), focused: None, tag: None });
+    let spec = orchestrator_spec(bro_core::Harness::Claude);
+    a.launched(crate::services::Launched { spec, place: Place::Tab, reply: None, name: None, remember: false, result: Err("no login".into()), route_id: None, note: None, into: None });
+    a.voice.queue[0].1 -= Duration::from_secs(2);
+    a.pump_voice();
+    assert!(a.voice.queue.is_empty());
+    assert!(a.toasts.items.iter().any(|t| t.text.contains("orchestrator: The orchestrator couldn't start")));
+}
+
+/// A running orchestrator at its prompt (fixed activity), for the inbox tests.
+fn ready_orchestrator(a: &mut App, harness: bro_core::Harness) -> PaneId {
+    land_orchestrator(a);
+    let boss = a.orchestrator_pane().unwrap();
+    let t = a.panes.get_mut(&boss).unwrap().as_term().unwrap();
+    t.meta.harness = Some(harness);
+    t.meta.started -= Duration::from_secs(10);
+    t.demo_activity = Some(Activity::Idle);
+    boss
+}
+
+fn typed(a: &App, id: PaneId) -> String {
+    String::from_utf8_lossy(&a.panes[&id].as_term_ref().unwrap().sent).to_string()
+}
+
+#[test]
+fn panels_schedules_and_stop_reach_the_orchestrator_session() {
+    use bro_bridge::OrchestratorCommand as C;
+    let mut a = app(true);
+    let boss = ready_orchestrator(&mut a, bro_core::Harness::Claude);
+    a.orchestrator_command(C::Message { id: "item1".into(), text: " is anything stuck? ".into(), voice: false, focused: None, tag: None });
+    assert!(typed(&a, boss).ends_with("[panel] is anything stuck?"), "{:?}", typed(&a, boss));
+    assert!(matches!(&a.voice.awaiting[..], [w] if w.reply == super::voice::Reply::Panel("item1".into())), "the panel waits for the answer");
+    a.orchestrator_command(C::Scheduled { id: "ab12cd34".into(), name: "toast check".into(), prompt: "check Toast's tests".into(), persist: true });
+    assert!(typed(&a, boss).ends_with("[schedule \"toast check\" · persistent trigger ab12cd34] check Toast's tests"), "{:?}", typed(&a, boss));
+    a.orchestrator_command(C::Cancel);
+    assert!(typed(&a, boss).ends_with('\x1b'), "stop is esc");
+    // the orchestrator closes: whoever waits hears so, and its session schedule goes
+    a.close(boss);
+    assert!(a.voice.awaiting.is_empty());
+}
+
+#[test]
+fn the_orchestrator_clears_its_own_context_once_its_turn_ends() {
+    use bro_bridge::OrchestratorCommand as C;
+    for (harness, command) in [(bro_core::Harness::Claude, "/clear"), (bro_core::Harness::Codex, "/new")] {
+        let mut a = app(true);
+        let boss = ready_orchestrator(&mut a, harness);
+        // asked mid-turn (the tool call itself): nothing yet
+        a.panes.get_mut(&boss).unwrap().as_term().unwrap().demo_activity = Some(Activity::Working);
+        a.orchestrator_command(C::ClearContext { handoff: Some("Toast runs the tests\nin justgains".into()) });
+        a.orchestrator_command(C::Message { id: "later".into(), text: "status".into(), voice: false, focused: None, tag: None });
+        assert_eq!(typed(&a, boss), "", "waits for the turn to end, and so does what came after");
+        // the turn ended a moment ago: the command goes in, the handoff and the rest wait for it to settle
+        a.panes.get_mut(&boss).unwrap().as_term().unwrap().demo_activity = Some(Activity::Idle);
+        a.pump_voice();
+        assert_eq!(typed(&a, boss), "", "idle, but only just");
+        a.voice.idle_since = Some(Instant::now() - Duration::from_secs(2));
+        a.pump_voice();
+        assert_eq!(typed(&a, boss), command, "{harness:?}");
+        assert!(a.toasts.latest().unwrap().text.contains("fresh conversation"));
+        a.voice.hold_until = Some(Instant::now() - Duration::from_millis(1));
+        a.pump_voice();
+        let after = typed(&a, boss);
+        assert!(after.contains("[fresh start · your handoff notes] Toast runs the tests in justgains"), "{after:?}");
+        assert!(after.ends_with("[panel] status"), "then what came after, in order: {after:?}");
+    }
 }

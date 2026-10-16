@@ -1,7 +1,10 @@
 //! The launcher: choose a project, an agent, and where it runs.
 //!
 //! 1. **Project** — the path bar shows the current location and opens the project picker.
-//! 2. **Harness** — tabs across the top (←/→): claude, codex, pi, omp.
+//! 2. **Harness** — tabs across the top (←/→): claude, codex, pi, omp, and ★ orchestrator. The orchestrator
+//!    is bro's one session that drives all the others; on its tab a second row picks the harness it runs on
+//!    (shift+←/→), and the list starts on the smartest login for it (your last orchestrator combo unless that
+//!    login is nearly out, else the ready login with the most left).
 //! 3. **Run on** — one list: recent combos for this harness, then its own logins (no model to pick — the CLI
 //!    uses its default and `/model` works inside), then other logins it can use through bro-proxy, then API
 //!    providers (OpenRouter's live catalogue, DeepSeek, …).
@@ -82,7 +85,7 @@ pub enum Item {
 pub struct Data {
     pub profiles: Vec<Profile>,
     pub providers: Vec<Provider>,
-    /// profile id → 5h used % (weekly when that's the only reported window)
+    /// profile id → % used of its tighter window (the 5h one capped by the week), as the sidebar reads it
     pub usage: BTreeMap<String, f32>,
     /// Window label and refresh state shown alongside a login's last reading.
     pub usage_status: BTreeMap<String, String>,
@@ -93,6 +96,8 @@ pub struct Data {
     pub models: BTreeMap<String, Vec<ModelRow>>,
     /// provider ids with a key configured (or that need none)
     pub keyed: Vec<String>,
+    /// The orchestrator already running, by its label: launching it again goes to that one.
+    pub orchestrator_running: Option<String>,
 }
 
 /// Something clickable in the launcher (recorded while drawing).
@@ -104,6 +109,10 @@ pub enum Hit {
     ContinueScope(bool),
     ContinueRow(usize),
     Harness(Harness),
+    /// the ★ orchestrator tab
+    Orchestrator,
+    /// the harness the orchestrator runs on
+    Brain(Harness),
     /// index into the selectable run-on rows
     Row(usize),
     /// index into the filtered models
@@ -137,11 +146,16 @@ pub enum Outcome {
 
 /// Recent combos shown per harness.
 const RECENTS_SHOWN: usize = 4;
+/// A login with less than this % left isn't the orchestrator's first pick.
+const NEARLY_OUT: f64 = 10.0;
 
 /// The launcher state.
 pub struct Launcher {
     pub data: Data,
+    /// The agent; on the orchestrator tab, the harness the orchestrator runs on.
     pub harness: Harness,
+    /// The ★ orchestrator tab is open.
+    pub orchestrator: bool,
     pub focus: Focus,
     pub list_filter: String,
     pub model_filter: String,
@@ -204,6 +218,7 @@ impl Launcher {
         Launcher {
             data,
             harness,
+            orchestrator: false,
             focus: Focus::List,
             list_filter: String::new(),
             model_filter: String::new(),
@@ -286,6 +301,7 @@ impl Launcher {
 
     /// Open on `h` instead of the most recent harness.
     pub fn with_harness(mut self, h: Harness) -> Launcher {
+        self.orchestrator = false;
         self.harness = h;
         self.list_filter.clear();
         self.list_sel = 0;
@@ -313,6 +329,88 @@ impl Launcher {
             Item::Account(a) if !a.ready || self.needs_model() => None,
             _ => self.spec(),
         }
+    }
+
+    /// Open on the ★ orchestrator tab.
+    pub fn with_orchestrator(mut self) -> Launcher {
+        self.enter_orchestrator();
+        self
+    }
+
+    /// Switch to the orchestrator tab on its smartest harness and login.
+    fn enter_orchestrator(&mut self) {
+        self.orchestrator = true;
+        self.harness = self.brain_default();
+        self.list_filter.clear();
+        self.focus = Focus::List;
+        self.list_sel = self.smart_sel();
+        self.reset_models();
+    }
+
+    /// The orchestrator's harness to start on: the one it last ran on, else Claude Code (its tools are native
+    /// there), else Codex, else whatever is installed.
+    pub fn brain_default(&self) -> Harness {
+        let last = self.data.recents.iter().find(|r| r.orchestrator).map(|r| r.harness).filter(|h| self.installed(*h));
+        last.or_else(|| [Harness::Claude, Harness::Codex, Harness::Pi, Harness::Omp].into_iter().find(|h| self.installed(*h))).unwrap_or(Harness::Claude)
+    }
+
+    /// Pick the harness the orchestrator runs on, landing on its smartest login.
+    fn set_brain(&mut self, h: Harness) {
+        self.harness = h;
+        self.list_filter.clear();
+        if self.focus == Focus::Models {
+            self.focus = Focus::List;
+        }
+        self.list_sel = self.smart_sel();
+        self.reset_models();
+    }
+
+    /// % left on the login a profile id names.
+    fn left_of(&self, profile: Option<&str>) -> Option<f64> {
+        profile.and_then(|p| self.data.usage.get(p)).map(|u| (100.0 - *u as f64).clamp(0.0, 100.0))
+    }
+
+    /// Where the cursor starts on the orchestrator tab: your last orchestrator combo on this harness unless its
+    /// login is nearly out, else the ready login of this harness's own family with the most left, else the first
+    /// ready row. It runs for hours and every turn reads the whole workspace, so headroom matters most.
+    pub fn smart_sel(&self) -> usize {
+        let items = self.items();
+        let sel = Self::selectable(&items);
+        let fine = |left: Option<f64>| left.is_none_or(|l| l >= NEARLY_OUT);
+        for (k, &i) in sel.iter().enumerate() {
+            if let Item::Recent(r) = &items[i] {
+                let r = &self.data.recents[*r];
+                if fine(self.left_of(r.profile_id.as_deref().or(r.provider_id.as_deref()))) {
+                    return k;
+                }
+            }
+        }
+        let own = |a: &Account| match &a.kind {
+            AccountKind::Profile(p) => match self.harness {
+                Harness::Claude => p.starts_with("claude:"),
+                Harness::Codex => p.starts_with("codex:"),
+                _ => false,
+            },
+            AccountKind::Native | AccountKind::Pool => true,
+            AccountKind::Provider(_) => false,
+        };
+        let mut best: Option<(usize, f64)> = None;
+        for (k, &i) in sel.iter().enumerate() {
+            if let Item::Account(a) = &items[i]
+                && a.ready
+                && own(a)
+            {
+                // an unread meter counts as half full: a known roomy login beats it, a nearly empty one doesn't
+                let score = a.left.unwrap_or(50.0);
+                if best.is_none_or(|(_, s)| score > s) {
+                    best = Some((k, score));
+                }
+            }
+        }
+        if let Some((k, _)) = best {
+            return k;
+        }
+        sel.iter().position(|&i| matches!(&items[i], Item::Account(a) if a.ready)).unwrap_or(0)
     }
 
     pub fn installed(&self, h: Harness) -> bool {
@@ -421,7 +519,7 @@ impl Launcher {
     fn recents_for(&self, h: Harness) -> Vec<usize> {
         let mut out: Vec<usize> = vec![];
         for (i, r) in self.data.recents.iter().enumerate() {
-            if r.harness != h {
+            if r.harness != h || r.orchestrator != self.orchestrator {
                 continue;
             }
             let dup = out.iter().any(|&j| {
@@ -506,6 +604,7 @@ impl Launcher {
             permission: self.permission,
             browser: self.browser,
             extra_args: vec![],
+            orchestrator: self.orchestrator,
         };
         match self.current()? {
             Item::Header(_) => None,
@@ -527,10 +626,18 @@ impl Launcher {
 
     // ------------------------------------------------------------------ keys
 
+    /// ←/→ across the tabs: the agents, then ★ orchestrator.
     fn set_harness(&mut self, d: i32) {
         let all = Harness::ALL;
-        let i = all.iter().position(|h| *h == self.harness).unwrap_or(0) as i32;
-        self.harness = all[(i + d).rem_euclid(all.len() as i32) as usize];
+        let n = all.len() as i32 + 1;
+        let i = if self.orchestrator { all.len() as i32 } else { all.iter().position(|h| *h == self.harness).unwrap_or(0) as i32 };
+        let next = (i + d).rem_euclid(n) as usize;
+        if next == all.len() {
+            self.enter_orchestrator();
+            return;
+        }
+        self.orchestrator = false;
+        self.harness = all[next];
         self.list_filter.clear();
         self.list_sel = 0;
         self.reset_models();
@@ -612,6 +719,8 @@ impl Launcher {
 
     fn launch(&self) -> Outcome {
         match self.spec() {
+            // the orchestrator always gets its own session
+            Some(s) if s.orchestrator => Outcome::Launch(s, Place::Tab),
             Some(s) => Outcome::Launch(s, self.place),
             None => Outcome::None,
         }
@@ -639,8 +748,20 @@ impl Launcher {
             Hit::ContinueScope(all) => self.continue_picker.set_all(all),
             Hit::ContinueRow(_) => return Self::continue_outcome(self.continue_picker.click(pos, mods)),
             Hit::Harness(h) => {
-                while self.harness != h {
-                    self.set_harness(1);
+                if self.orchestrator || self.harness != h {
+                    self.orchestrator = false;
+                    self.harness = h;
+                    self.set_harness(0);
+                }
+            }
+            Hit::Orchestrator => {
+                if !self.orchestrator {
+                    self.enter_orchestrator();
+                }
+            }
+            Hit::Brain(h) => {
+                if self.harness != h {
+                    self.set_brain(h);
                 }
             }
             Hit::Row(i) => {
@@ -743,6 +864,12 @@ impl Launcher {
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = if self.focus == Focus::List && self.needs_model() { Focus::Models } else { Focus::List };
             }
+            KeyCode::Right | KeyCode::Left if self.orchestrator && k.modifiers.contains(KeyModifiers::SHIFT) => {
+                let all = Harness::ALL;
+                let i = all.iter().position(|h| *h == self.harness).unwrap_or(0) as i32;
+                let d = if k.code == KeyCode::Right { 1 } else { -1 };
+                self.set_brain(all[(i + d).rem_euclid(all.len() as i32) as usize]);
+            }
             KeyCode::Right => self.set_harness(1),
             KeyCode::Left => self.set_harness(-1),
             KeyCode::Down => self.move_sel(1),
@@ -766,7 +893,7 @@ impl Launcher {
                     BrowserMode::Chrome => BrowserMode::Off,
                 }
             }
-            KeyCode::Char('s') if ctrl => self.place = if self.place == Place::Tab { Place::Split } else { Place::Tab },
+            KeyCode::Char('s') if ctrl && !self.orchestrator => self.place = if self.place == Place::Tab { Place::Split } else { Place::Tab },
             KeyCode::Char('u') if ctrl => {
                 self.filter_mut().clear();
                 self.filter_changed();

@@ -6,6 +6,7 @@
 //! `cargo test -p bro-tui e2e -- --ignored --nocapture --test-threads=1`
 
 use super::*;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::services::{Avail, Services, load_settings};
 use futures_util::{SinkExt, StreamExt};
 use ratatui::{Terminal, backend::TestBackend};
@@ -325,5 +326,255 @@ fn e2e_bridge_client_and_resizing() {
     } else {
         println!("claude not installed or no claude profile: skipped the Claude part (which = {:?})", crate::util::which("claude"));
     }
+    h.app.shutdown();
+}
+
+/// The orchestrator for real: the bridge starts off, alt+O opens the launcher on the orchestrator tab, Enter
+/// turns the bridge on and starts Claude Code in a PTY with the orchestrator's prompt and bro's tools. Told what
+/// to do in its own pane, it types a command into another session ("Toast", a shell) through those tools.
+/// `cargo test -p bro-tui e2e_orchestrator -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn e2e_orchestrator_drives_another_session() {
+    if bro_core::launch::which("claude").is_none() {
+        println!("claude isn't installed: skipped");
+        return;
+    }
+    crate::testkit::isolate();
+    let dir = crate::util::bro_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("v2.toml"), "[bridge]\nenabled = false\nport = 0\nbind = \"127.0.0.1\"\n[proxy]\nport = 0\n").unwrap();
+    let (settings, _) = load_settings();
+    assert!(!settings.bridge.enabled);
+    let (tx, rx) = channel();
+    let svc = Services::start(settings, tx.clone());
+    crate::orchestrator_state::clear();
+    // a real bro: it remembers the orchestrator for next time
+    let app = App::new(svc.clone(), tx, Opts { load_recents: true, ..Opts::default() });
+    let mut h = Harness { app, rx, term: Terminal::new(TestBackend::new(160, 46)).unwrap(), client: None };
+
+    // a worker: a shell named Toast
+    let worker = h.app.open_shell(Some(std::env::temp_dir()), Place::Tab);
+    if let Some(t) = h.app.panes.get_mut(&worker).and_then(|p| p.as_term()) {
+        t.meta.name = Some("Toast".into());
+        t.meta.renamed = true;
+    }
+    h.pump(1500);
+    let worker_sid = h.app.panes.get(&worker).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()).unwrap();
+
+    // alt+O: the launcher on the orchestrator tab, on Claude Code; Enter starts it
+    h.app.key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::ALT | KeyModifiers::SHIFT));
+    let Overlay::Launcher(l) = &h.app.overlay else { panic!("alt+O should open the launcher") };
+    assert!(l.orchestrator);
+    if let Overlay::Launcher(l) = &mut h.app.overlay
+        && l.harness != bro_core::Harness::Claude
+    {
+        l.harness = bro_core::Harness::Claude;
+        l.list_sel = l.smart_sel();
+    }
+    h.app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(h.until(40, |h| h.app.orchestrator_pane().is_some()), "the orchestrator never opened: {:?}", h.app.toasts.latest().map(|t| t.text.clone()));
+    assert!(svc.state().bridge.enabled, "starting the orchestrator turned the bridge on");
+    let boss = h.app.orchestrator_pane().unwrap();
+    assert!(matches!(&h.app.rows()[0], crate::sidebar::Row::Live { info, .. } if info.pane == boss));
+    let bridge = svc.bridge_local_url().expect("bridge url");
+    println!("bridge {bridge}, orchestrator up");
+
+    // let Claude Code reach its prompt, then tell it what to do
+    h.pump(12_000);
+    let shell = crate::util::default_shell(None).0;
+    let (cmd, want) = marker_cmd(&shell, "ORCHE2E");
+    let ask = format!("Use your bro tools: in the session named Toast, run this exact command with send_input (submit it): {}", cmd.trim_end());
+    h.app.focus_pane(boss);
+    if let Some(t) = h.app.panes.get_mut(&boss).and_then(|p| p.as_term()) {
+        t.send(ask.as_bytes());
+    }
+    h.pump(800);
+    if let Some(t) = h.app.panes.get_mut(&boss).and_then(|p| p.as_term()) {
+        t.send(b"\r");
+    }
+    let read = crate::ctl_cmd::CtlArgs { tool: Some("read_session".into()), arguments: json!({ "sessionId": worker_sid, "lines": 60 }) };
+    let ok = h.until(180, |_| crate::ctl_cmd::run(&read, Some(&bridge)).is_ok_and(|s| s.contains(&want)));
+    let orch_screen = crate::ctl_cmd::run(&crate::ctl_cmd::CtlArgs { tool: Some("read_session".into()), arguments: json!({ "sessionId": h.app.panes.get(&boss).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()).unwrap(), "lines": 40 }) }, Some(&bridge));
+    assert!(ok, "Toast never ran it. Orchestrator screen:\n{}", orch_screen.unwrap_or_default());
+    println!("Toast ran the orchestrator's command");
+    let launched_as = h.app.panes.get(&boss).and_then(|p| p.as_term_ref()).map(|t| (t.meta.harness, t.meta.profile.clone())).unwrap();
+    h.app.shutdown();
+    assert!(crate::orchestrator_state::load().is_some(), "quitting bro keeps the orchestrator for next time");
+
+    // reopen: a new bro brings it back with the same params, before anything else is open
+    let (settings, _) = load_settings();
+    let (tx, rx) = channel();
+    let svc = Services::start(settings, tx.clone());
+    let app = App::new(svc.clone(), tx, Opts { load_recents: true, ..Opts::default() });
+    let mut h = Harness { app, rx, term: Terminal::new(TestBackend::new(160, 46)).unwrap(), client: None };
+    h.app.restore_orchestrator();
+    assert!(h.until(40, |h| h.app.orchestrator_pane().is_some()), "the orchestrator didn't come back: {:?}", h.app.toasts.latest().map(|t| t.text.clone()));
+    let boss = h.app.orchestrator_pane().unwrap();
+    let again = h.app.panes.get(&boss).and_then(|p| p.as_term_ref()).map(|t| (t.meta.harness, t.meta.profile.clone())).unwrap();
+    assert_eq!(again, launched_as);
+    h.pump(4000);
+    assert!(h.app.panes.contains_key(&boss), "it keeps running");
+    println!("the orchestrator came back after a reopen");
+    // you close it: the next bro starts without it
+    h.app.close(boss);
+    assert!(crate::orchestrator_state::load().is_none());
+    h.app.shutdown();
+}
+
+/// Push-to-talk for real, with no orchestrator running: the words start one on the login with the most room,
+/// wait for it to reach its prompt, and go in marked as spoken with the session you were looking at. Said while
+/// looking at "Toast" (a shell), a command is passed straight on to Toast.
+/// `cargo test -p bro-tui e2e_voice -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn e2e_voice_starts_the_orchestrator_and_reaches_the_session_you_look_at() {
+    crate::testkit::isolate();
+    let dir = crate::util::bro_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("v2.toml"), "[bridge]\nport = 0\nbind = \"127.0.0.1\"\n[proxy]\nport = 0\n").unwrap();
+    let (settings, _) = load_settings();
+    let (tx, rx) = channel();
+    let svc = Services::start(settings, tx.clone());
+    let app = App::new(svc.clone(), tx, Opts::default());
+    let mut h = Harness { app, rx, term: Terminal::new(TestBackend::new(160, 46)).unwrap(), client: None };
+    assert!(h.until(30, |h| h.app.svc.state().profiles.ready().is_some() && h.app.svc.bridge_local_url().is_some()), "profiles / bridge never loaded");
+    h.pump(3000); // usage readings
+    let pick = h.app.roomiest_login();
+    println!("roomiest login: {pick:?}");
+
+    let worker = h.app.open_shell(Some(std::env::temp_dir()), Place::Tab);
+    if let Some(t) = h.app.panes.get_mut(&worker).and_then(|p| p.as_term()) {
+        t.meta.name = Some("Toast".into());
+        t.meta.renamed = true;
+    }
+    h.pump(1500);
+    let worker_sid = h.app.panes.get(&worker).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()).unwrap();
+    let shell = crate::util::default_shell(None).0;
+    let (cmd, want) = marker_cmd(&shell, "VOICEE2E");
+
+    svc.orchestrator_send_voice(format!("run {}", cmd.trim_end()), Some(worker_sid.clone()), None);
+    assert!(h.until(40, |h| h.app.orchestrator_pane().is_some()), "no orchestrator: {:?}", h.app.toasts.latest().map(|t| t.text.clone()));
+    let boss = h.app.orchestrator_pane().unwrap();
+    let t = h.app.panes.get(&boss).and_then(|p| p.as_term_ref()).unwrap();
+    println!("orchestrator on {:?} {:?}", t.meta.harness, t.meta.profile);
+    assert_eq!(t.meta.profile, pick, "started on the roomiest login");
+    assert_eq!(h.app.focused(), Some(worker), "you stay where you were");
+
+    let bridge = svc.bridge_local_url().unwrap();
+    let read = crate::ctl_cmd::CtlArgs { tool: Some("read_session".into()), arguments: json!({ "sessionId": worker_sid, "lines": 60 }) };
+    let ok = h.until(240, |_| crate::ctl_cmd::run(&read, Some(&bridge)).is_ok_and(|s| s.contains(&want)));
+    let boss_sid = h.app.panes.get(&boss).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()).unwrap();
+    let screen = crate::ctl_cmd::run(&crate::ctl_cmd::CtlArgs { tool: Some("read_session".into()), arguments: json!({ "sessionId": boss_sid, "lines": 40 }) }, Some(&bridge)).unwrap_or_default();
+    assert!(ok, "Toast never ran it. Orchestrator screen:\n{screen}");
+    println!("the spoken command reached Toast through the orchestrator");
+    h.app.shutdown();
+}
+
+/// Everything Hugh and the watchdog did, done by a real orchestrator session (Claude Code in a PTY):
+/// a phone/web panel message is answered in the panel's transcript; a trigger scheduled through bro's tools is
+/// fired by bro's own timer and acted on; the orchestrator's context is cleared after its turn, keeping only its
+/// handoff notes; and a watchdog wake-up is reviewed by the orchestrator and logged as the watchdog's run.
+/// `cargo test -p bro-tui e2e_inbox -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn e2e_inbox_panels_schedule_fresh_start_and_watchdog_go_through_the_orchestrator() {
+    if bro_core::launch::which("claude").is_none() {
+        println!("claude isn't installed: skipped");
+        return;
+    }
+    crate::testkit::isolate();
+    let dir = crate::util::bro_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("v2.toml"), "[bridge]\nport = 0\nbind = \"127.0.0.1\"\n[proxy]\nport = 0\n").unwrap();
+    let (settings, _) = load_settings();
+    let (tx, rx) = channel();
+    let svc = Services::start(settings, tx.clone());
+    let app = App::new(svc.clone(), tx, Opts::default());
+    let mut h = Harness { app, rx, term: Terminal::new(TestBackend::new(160, 46)).unwrap(), client: None };
+    assert!(h.until(30, |h| h.app.svc.state().profiles.ready().is_some() && h.app.svc.bridge_local_url().is_some()), "profiles / bridge never loaded");
+    let bridge = svc.bridge_local_url().unwrap();
+    let worker = h.app.open_shell(Some(std::env::temp_dir()), Place::Tab);
+    if let Some(t) = h.app.panes.get_mut(&worker).and_then(|p| p.as_term()) {
+        t.meta.name = Some("Toast".into());
+        t.meta.renamed = true;
+    }
+    h.pump(1500);
+    let worker_sid = h.app.panes.get(&worker).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()).unwrap();
+    // a Claude orchestrator
+    let spec = bro_core::launch::LaunchSpec {
+        harness: bro_core::Harness::Claude,
+        profile_id: None,
+        provider_id: None,
+        model: None,
+        cwd: std::env::temp_dir(),
+        resume: None,
+        permission: bro_core::launch::Permission::Skip,
+        browser: bro_core::browser::BrowserMode::Off,
+        extra_args: vec![],
+        orchestrator: true,
+    };
+    h.app.launch_spec(spec, Place::Tab);
+    assert!(h.until(40, |h| h.app.orchestrator_pane().is_some()), "no orchestrator");
+    h.pump(10_000);
+    let http = |method: &str, path: &str, body: Option<serde_json::Value>| -> serde_json::Value {
+        let url = format!("{bridge}{path}");
+        let r = match (method, body) {
+            ("GET", _) => bro_core::http::get_json(&url, &[], Duration::from_secs(10)).map(|r| r.body),
+            (_, Some(b)) => bro_core::http::post_json(&url, &b, Duration::from_secs(10)).map(|r| r.body),
+            _ => unreachable!(),
+        };
+        r.unwrap_or_default()
+    };
+    let panel_answer = |h: &mut Harness, ask: &str| -> String {
+        http("POST", "/api/orchestrator/messages", Some(json!({ "text": ask })));
+        let mut answer = String::new();
+        h.until(150, |_| {
+            let status = http("GET", "/api/orchestrator", None);
+            let items = status["transcript"].as_array().or(status["items"].as_array()).cloned().unwrap_or_default();
+            let last = items.iter().rev().find(|i| i["role"] == "assistant" || i["role"] == "error").cloned().unwrap_or_default();
+            if last["status"] == "done" || last["status"] == "error" {
+                answer = last["text"].as_str().unwrap_or_default().to_string();
+                return true;
+            }
+            false
+        });
+        answer
+    };
+
+    // 1. a panel message, answered in the panel
+    let a1 = panel_answer(&mut h, "Remember this secret code for later: MANGO. Reply with exactly: PANEL-OK");
+    println!("panel → {a1}");
+    assert!(a1.contains("PANEL-OK"), "panel answer: {a1:?}");
+
+    // 2. a trigger, scheduled through bro's tools and fired by bro's own timer
+    let shell = crate::util::default_shell(None).0;
+    let (cmd, want) = marker_cmd(&shell, "SCHEDE2E");
+    let add = crate::ctl_cmd::CtlArgs { tool: Some("schedule_add".into()), arguments: json!({ "name": "e2e", "in": "3s", "prompt": format!("In the session named Toast, run this exact command with send_input: {}", cmd.trim_end()) }) };
+    println!("{}", crate::ctl_cmd::run(&add, Some(&bridge)).unwrap());
+    let read = crate::ctl_cmd::CtlArgs { tool: Some("read_session".into()), arguments: json!({ "sessionId": worker_sid, "lines": 60 }) };
+    assert!(h.until(150, |_| crate::ctl_cmd::run(&read, Some(&bridge)).is_ok_and(|s| s.contains(&want))), "the scheduled prompt never ran in Toast");
+    println!("scheduled trigger fired and ran in Toast");
+    h.pump(8000);
+
+    // 3. a fresh start: the secret is gone, the handoff stays
+    let clear = crate::ctl_cmd::CtlArgs { tool: Some("clear_own_context".into()), arguments: json!({ "handoff": "The handoff word is PINEAPPLE." }) };
+    crate::ctl_cmd::run(&clear, Some(&bridge)).unwrap();
+    assert!(h.until(30, |h| h.app.toasts.items.iter().any(|t| t.text.contains("fresh conversation"))), "never cleared");
+    h.pump(12_000);
+    let a3 = panel_answer(&mut h, "Answer in one line: what is the secret code I gave you earlier (say UNKNOWN if you don't know), and what is the handoff word?");
+    println!("after the fresh start → {a3}");
+    assert!(a3.contains("PINEAPPLE"), "handoff kept: {a3:?}");
+    assert!(!a3.contains("MANGO"), "context cleared: {a3:?}");
+
+    // 4. a watchdog wake-up, reviewed by the orchestrator
+    svc.watchdog_start(&worker_sid, bro_bridge::WatchdogPlan { milestones: vec![bro_bridge::Milestone::new("Toast has printed the SCHEDE2E marker")], ..Default::default() }).unwrap();
+    h.pump(500);
+    h.app.wake_watchdog(worker, "the user asked for a review now".into(), true);
+    let done = h.until(300, |h| h.app.svc.watchdog(&worker_sid).is_some_and(|w| w.running.is_none() && !w.runs.is_empty()));
+    let w = svc.watchdog(&worker_sid).unwrap();
+    println!("watchdog runs: {:?}", w.runs.iter().map(|r| (r.reviewer.clone(), r.ok, r.summary.clone())).collect::<Vec<_>>());
+    assert!(done, "the review never finished");
+    assert!(w.runs[0].ok && w.runs[0].reviewer == "the orchestrator", "{:?}", w.runs[0]);
     h.app.shutdown();
 }

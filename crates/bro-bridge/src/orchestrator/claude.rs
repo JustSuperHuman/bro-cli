@@ -839,6 +839,7 @@ mod tests {
                         cols: 100,
                         rows: 30,
                         agent: None,
+                        kind: None,
                     });
                     let _ = reply.send(Ok(id));
                 }
@@ -943,6 +944,7 @@ mod tests {
             cols: 100,
             rows: 30,
             agent: Some("claude".into()),
+            kind: None,
         });
         bridge.output("mal", "> \r\n".as_bytes());
         let (tx, mut rx) = mpsc::unbounded_channel();

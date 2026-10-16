@@ -135,6 +135,7 @@ impl App {
                 self.set_caveman((!s.on).then_some(s.level));
             }
             Act::Continue => self.open_continue(),
+            Act::Orchestrator => self.open_orchestrator(),
             Act::CloseProject => {
                 if let Some(root) = self.current_project() {
                     let key = self.svc.project_for(&root).key;
@@ -267,6 +268,19 @@ impl App {
         launcher.with_continue(self.continue_entries(), Some((project.key, project.name)))
     }
 
+    /// Go to the orchestrator, or open the launcher on its tab to start one.
+    pub(crate) fn open_orchestrator(&mut self) {
+        if let Some(id) = self.orchestrator_pane() {
+            self.overlay = Overlay::None;
+            self.focus_pane(id);
+            self.side_focus = false;
+            return;
+        }
+        self.svc.refresh_usage();
+        let l = self.session_launcher(self.preferred_dir(), Place::Tab).with_orchestrator();
+        self.overlay = Overlay::Launcher(Box::new(l));
+    }
+
     /// Keep the permission mode picked in the launcher for the next new session.
     pub(crate) fn remember_launcher_permission(&mut self) {
         let Overlay::Launcher(l) = &self.overlay else { return };
@@ -323,6 +337,20 @@ impl App {
 
     /// Launch from the launcher.
     pub(crate) fn launch_spec(&mut self, spec: bro_core::launch::LaunchSpec, place: Place) {
+        if spec.orchestrator {
+            // one per bro: go to the running one, or wait for the one starting
+            if let Some(id) = self.orchestrator_pane() {
+                self.focus_pane(id);
+                self.side_focus = false;
+                self.toast(Kind::Info, "the orchestrator is already running · here it is");
+                return;
+            }
+            if self.orchestrator_pending.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(90)) {
+                self.toast(Kind::Info, "the orchestrator is already starting…");
+                return;
+            }
+            self.orchestrator_pending = Some(std::time::Instant::now());
+        }
         let mut req = LaunchRequest::new(spec, place);
         req.remember = true;
         self.toast(Kind::Info, format!("launching {}…", crate::services::launch::label_for(&req.spec)));
@@ -389,7 +417,7 @@ impl App {
             Cmd::Caveman(level) => self.set_caveman(level),
             Cmd::Recent(i) => {
                 if let Some(r) = self.recents.get(i).cloned() {
-                    let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: self.svc.state().settings.permission, browser: r.browser, extra_args: vec![] };
+                    let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: self.svc.state().settings.permission, browser: r.browser, extra_args: vec![], orchestrator: false };
                     self.launch_spec(spec, Place::Tab);
                 }
             }

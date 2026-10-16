@@ -142,6 +142,9 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         }
     }
     args.extend(spec.extra_args.iter().cloned());
+    if spec.orchestrator {
+        orchestrator_args(&mut args, &config_dir, ctx)?;
+    }
     cmd.caveman = apply_caveman(&mut cmd, &mut args, spec, ctx);
     let strict_mcp = spec.extra_args.iter().any(|a| a == "--strict-mcp-config");
     if let Some(p) = account.filter(|_| !strict_mcp)
@@ -162,6 +165,32 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
 }
 
 const PROMPT_FILE: &str = "--append-system-prompt-file";
+
+/// The orchestrator's instructions (merged with any others by [`apply_caveman`]), its skill, and the
+/// bridge's tools as the `bro` MCP server, allowed without asking.
+fn orchestrator_args(args: &mut Vec<String>, config_dir: &Path, ctx: &LaunchCtx) -> anyhow::Result<()> {
+    use crate::orchestrator as orch;
+    let bridge = super::orchestrator_bridge(ctx).unwrap_or_default();
+    let prompt = orch::write_prompt(Harness::Claude)?;
+    // best effort, like bro's other skills
+    let _ = orch::write_skill(config_dir);
+    let end = options_end(args);
+    args.splice(end..end, [PROMPT_FILE.to_string(), prompt.to_string_lossy().into_owned()]);
+    let mcp = orch::write_mcp_config(bridge)?;
+    // both options are variadic: last, or first when a `--` ends the options
+    let tools = [
+        "--allowedTools".to_string(),
+        format!("mcp__{}", orch::MCP_SERVER),
+        "--mcp-config".to_string(),
+        mcp.to_string_lossy().into_owned(),
+    ];
+    if args.iter().any(|a| a == "--") {
+        args.splice(0..0, tools);
+    } else {
+        args.extend(tools);
+    }
+    Ok(())
+}
 
 /// The options part of `args`: everything before a `--`.
 fn options_end(args: &[String]) -> usize {

@@ -339,15 +339,31 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         args.extend([flag.to_string(), target]);
     }
     // Both read the file when given a path; omp's help documents the `=` form.
+    let mut prompts: Vec<std::path::PathBuf> = vec![];
+    if spec.orchestrator {
+        prompts.push(crate::orchestrator::write_prompt(spec.harness)?);
+    }
     if let Some(level) = ctx.caveman.active()
         && let Ok(rules) = crate::caveman::rules_file(level)
     {
-        let rules = rules.to_string_lossy().into_owned();
-        match spec.harness {
-            Harness::Pi => args.extend(["--append-system-prompt".into(), rules]),
-            _ => args.push(format!("--append-system-prompt={rules}")),
-        }
+        prompts.push(rules);
         cmd.caveman = Some(level);
+    }
+    // omp may keep only one: several become one combined file
+    let prompt = match prompts.len() {
+        0 => None,
+        1 => prompts.pop(),
+        _ => {
+            let parts: Vec<String> = prompts.iter().filter_map(|p| std::fs::read_to_string(p).ok()).collect();
+            Some(crate::caveman::combined_prompt_file(&parts)?)
+        }
+    };
+    if let Some(file) = prompt {
+        let file = file.to_string_lossy().into_owned();
+        match spec.harness {
+            Harness::Pi => args.extend(["--append-system-prompt".into(), file]),
+            _ => args.push(format!("--append-system-prompt={file}")),
+        }
     }
     args.extend(spec.extra_args.iter().cloned());
     let program = spec.harness.label();

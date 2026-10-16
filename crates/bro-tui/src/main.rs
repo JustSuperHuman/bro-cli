@@ -35,8 +35,10 @@ mod priority;
 mod projects;
 mod install_cmd;
 mod open_cmd;
+mod ctl_cmd;
 mod proxy_cmd;
 mod panes;
+mod orchestrator_state;
 mod recents;
 mod services;
 mod sidebar;
@@ -92,6 +94,23 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(cli::Command::CtlHelp) => {
+            print!("{}", ctl_cmd::HELP);
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Command::Ctl(args)) => {
+            let ctx = open_cmd::Context::from_env();
+            match ctl_cmd::run(&args, ctx.bridge.as_deref()) {
+                Ok(out) => {
+                    println!("{}", out.trim_end());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("bro ctl: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Ok(cli::Command::OpenHelp) => {
             print!("{}", open_cmd::HELP);
             ExitCode::SUCCESS
@@ -217,6 +236,8 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
     let mut app = app::App::new(svc, tx, app::Opts { demo, fixed_demo: false, load_recents: !demo });
     if !demo {
         app.start_in(dir);
+        // an orchestrator that was running when bro last stopped comes back the way it was launched
+        app.restore_orchestrator();
     }
     if let Some(p) = problem.filter(|p| !services::guard::is_unimplemented(p)) {
         app.toast(alerts::Kind::Error, format!("settings: {p} — using defaults"));

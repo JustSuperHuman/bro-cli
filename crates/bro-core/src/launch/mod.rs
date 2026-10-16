@@ -59,6 +59,10 @@ pub struct LaunchSpec {
     pub permission: Permission,
     pub browser: crate::browser::BrowserMode,
     pub extra_args: Vec<String>,
+    /// Launch as bro's orchestrator: its instructions, skill and the bridge's tools (see
+    /// [`crate::orchestrator`]). Needs [`LaunchCtx::bridge_url`].
+    #[serde(default)]
+    pub orchestrator: bool,
 }
 
 /// Where the running bro-proxy lives, so cross-format launches can be routed through it.
@@ -79,6 +83,9 @@ pub struct LaunchCtx {
     pub justtools_skill: bool,
     /// Claude / Codex launches get the JustWatch skill (`Settings::justwatch`).
     pub justwatch_skill: bool,
+    /// Loopback URL of the running bridge (`http://127.0.0.1:<port>`): an orchestrator launch
+    /// points its tools here.
+    pub bridge_url: Option<String>,
 }
 
 impl LaunchCtx {
@@ -248,6 +255,18 @@ fn label(harness: Harness, who: &str, model: Option<&str>) -> String {
 /// Build the command for one launch. Performs no spawning; may stage session files for
 /// a cross-profile resume (listed in `cleanup`) and upsert Pi/omp provider configs.
 pub fn build(spec: &LaunchSpec, ctx: &LaunchCtx) -> anyhow::Result<CommandSpec> {
+    if spec.orchestrator && orchestrator_bridge(ctx).is_none() {
+        bail!("the orchestrator drives bro through its bridge, which isn't running (turn it on in the bridge view)");
+    }
+    // the orchestrator always runs in its own folder in your profile
+    let moved;
+    let spec = if spec.orchestrator {
+        let dir = crate::orchestrator::ensure_workspace().with_context(|| format!("creating {}", crate::orchestrator::workspace().display()))?;
+        moved = LaunchSpec { cwd: dir, ..spec.clone() };
+        &moved
+    } else {
+        spec
+    };
     let r = resolve(spec)?;
     let mut out = match r.harness {
         Harness::Claude => claude::build(spec, ctx, &r),
@@ -256,8 +275,17 @@ pub fn build(spec: &LaunchSpec, ctx: &LaunchCtx) -> anyhow::Result<CommandSpec> 
     };
     if let Ok(cmd) = &mut out {
         cmd.cwd = spec.cwd.clone();
+        if spec.orchestrator {
+            cmd.set_env(crate::orchestrator::ENV_FLAG, "1");
+            cmd.label = format!("orchestrator · {}", cmd.label);
+        }
     }
     out.with_context(|| format!("building {} launch", spec.harness.label()))
+}
+
+/// The bridge an orchestrator launch talks to.
+fn orchestrator_bridge(ctx: &LaunchCtx) -> Option<&str> {
+    ctx.bridge_url.as_deref().map(str::trim).filter(|u| !u.is_empty())
 }
 
 /// Cross-profile resume for Claude/Codex: when the session lives in another login,

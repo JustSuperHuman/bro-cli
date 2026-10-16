@@ -38,6 +38,17 @@ pub(crate) fn spawn(app: &AppState, session_id: &str, wake: WatchdogWake) -> Res
     Ok(())
 }
 
+/// A wake-up for bro's orchestrator session instead of a headless reviewer: claims it like [`spawn`] (the
+/// watchdog shows it running) and returns its generation and the whole brief, instructions first.
+pub(crate) fn brief_for_orchestrator(app: &AppState, session_id: &str, wake: WatchdogWake) -> Result<(u64, String), String> {
+    // stopping the watchdog ends the wake-up on bro's side; nothing to kill here
+    let (kill, _) = oneshot::channel();
+    let (generation, snapshot) = app.watchdogs.begin(session_id, &wake.reason, &wake.reviewer.label, kill)?;
+    let helpers: Vec<(String, String)> = snapshot.helpers.iter().map(|h| (h.clone(), helper_state(app, h))).collect();
+    let brief = prompt::brief(session_id, &snapshot, &wake, &helpers);
+    Ok((generation, format!("{}\n\n---\n\n{brief}", wake.prompt)))
+}
+
 /// `claude -p` arguments: stream-json out, bro's MCP tools plus read-only project access, nothing else.
 pub(crate) fn claude_args(prompt_file: &str, mcp_file: &str, model: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose", "--system-prompt-file", prompt_file, "--mcp-config", mcp_file, "--strict-mcp-config", "--permission-mode", "dontAsk"]
@@ -372,7 +383,7 @@ mod tests {
             }),
         )
         .unwrap();
-        bridge.register(SessionMeta { id: "mal".into(), title: "Mal · app".into(), shell: "claude".into(), args: vec![], cwd: Some(project.clone()), project: None, pid: None, cols: 100, rows: 30, agent: Some("claude".into()) });
+        bridge.register(SessionMeta { id: "mal".into(), title: "Mal · app".into(), shell: "claude".into(), args: vec![], cwd: Some(project.clone()), project: None, pid: None, cols: 100, rows: 30, agent: Some("claude".into()), kind: None });
         bridge.output("mal", "⏺ Added `todo add`. It saves to todo.json.\r\n\r\n> \r\n".as_bytes());
         let (tx, rx) = std::sync::mpsc::channel();
         bridge.on_watchdog_update(Box::new(move |u| {

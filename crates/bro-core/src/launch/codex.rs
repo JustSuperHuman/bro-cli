@@ -40,6 +40,9 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     cmd.set_env("CODEX_HOME", home.to_string_lossy());
     // Best effort: a read-only CODEX_HOME must not block the launch.
     let _ = crate::skills::write_bro_open_skill(&home);
+    if spec.orchestrator {
+        let _ = crate::orchestrator::write_skill(&home);
+    }
     if ctx.justtools_skill {
         let _ = crate::justtools::write_skill(&home);
     }
@@ -107,21 +110,27 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         args.extend(["--model".into(), m.to_string()]);
     }
     args.extend(provider);
+    if spec.orchestrator {
+        args.extend(crate::orchestrator::codex_mcp_args(super::orchestrator_bridge(ctx).unwrap_or_default()));
+    }
+    // Instructions bro adds: caveman's rules, the orchestrator's brief.
+    let mut added: Vec<String> = vec![];
+    if spec.orchestrator {
+        added.push(crate::orchestrator::prompt(Harness::Codex));
+    }
     if let Some(level) = ctx.caveman.active() {
+        added.push(level.rules().to_string());
+        cmd.caveman = Some(level);
+    }
+    if !added.is_empty() {
         // `-c` replaces the login's own developer_instructions, so those come first.
         let own = std::fs::read_to_string(home.join("config.toml"))
             .ok()
             .and_then(|s| s.parse::<toml::Table>().ok())
             .and_then(|t| t.get("developer_instructions").and_then(|v| v.as_str()).map(str::to_string))
             .filter(|s| !s.trim().is_empty());
-        let text = match own {
-            Some(own) => format!("{}
-
-{}", own.trim_end(), level.rules()),
-            None => level.rules().to_string(),
-        };
+        let text = own.into_iter().chain(added).map(|s| s.trim_end().to_string()).collect::<Vec<_>>().join("\n\n");
         args.extend(["-c".into(), format!("developer_instructions={}", toml_str(&text))]);
-        cmd.caveman = Some(level);
     }
     args.extend(spec.extra_args.iter().cloned());
     (cmd.program, cmd.args) = super::program_and_args("codex", args);

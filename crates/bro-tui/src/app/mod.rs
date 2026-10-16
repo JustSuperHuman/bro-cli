@@ -18,6 +18,7 @@ mod overlays;
 mod screensaver;
 mod sessions;
 mod side_view;
+mod voice;
 mod watchdogs;
 mod welcome;
 
@@ -230,6 +231,12 @@ pub struct App {
     history: history::History,
     /// per watched session: when its watchdog should wake
     pub(crate) watch: HashMap<PaneId, crate::watchdog::Trigger>,
+    /// An orchestrator launch is building (since when): a second one waits for it instead.
+    pub(crate) orchestrator_pending: Option<Instant>,
+    /// bro is shutting down: sessions closing now weren't closed by you (the orchestrator is kept for next time).
+    quitting: bool,
+    /// push-to-talk messages on their way to the orchestrator, and spoken requests awaiting its answer
+    voice: voice::VoiceRoute,
     term_focused: bool,
     opts: Opts,
     _theme_watcher: Option<notify::RecommendedWatcher>,
@@ -315,6 +322,9 @@ impl App {
             grown: false,
             history: Default::default(),
             watch: HashMap::new(),
+            orchestrator_pending: None,
+            quitting: false,
+            voice: Default::default(),
             term_focused: true,
             opts,
             _theme_watcher: None,
@@ -556,6 +566,7 @@ impl App {
     /// Close a pane: end its session (bridge, proxy route, staged files) and drop it from its tab.
     pub(crate) fn close(&mut self, id: PaneId) {
         let mut remaining = None;
+        let was_orchestrator = self.panes.get(&id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.orchestrator);
         self.minimized.retain(|pane| *pane != id);
         if self.stack.contains(&id) {
             self.stack.retain(|x| *x != id);
@@ -617,6 +628,13 @@ impl App {
         }
         if let Some(id) = remaining {
             self.focus_pane(id);
+        }
+        if was_orchestrator && self.orchestrator_pane().is_none() {
+            self.orchestrator_closed();
+            // you ended the orchestrator: the next bro starts without one (quitting bro keeps it)
+            if !self.quitting && self.persist {
+                crate::orchestrator_state::clear();
+            }
         }
     }
 
@@ -769,6 +787,7 @@ impl App {
         self.track_agents();
         self.tick_watchdogs();
         self.update_insights();
+        self.pump_voice();
         self.toasts.expire();
     }
 
@@ -780,7 +799,7 @@ impl App {
             return;
         }
         self.last_focus = focused;
-        if let Some(t) = focused.and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()) {
+        if let Some(t) = focused.and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).filter(|t| !t.meta.orchestrator) {
             self.cur_project = Some(t.meta.project.root.clone());
         }
     }
@@ -793,6 +812,7 @@ impl App {
 
     /// Kill every session and stop the services.
     pub fn shutdown(&mut self) {
+        self.quitting = true;
         let ids: Vec<PaneId> = self.panes.keys().copied().collect();
         for id in ids {
             self.close(id);
@@ -985,6 +1005,7 @@ impl App {
             }
             Event::FolderCreated(request, result) => self.project_folder_created(request, result),
             Event::Watchdog(u) => self.watchdog_event(u),
+            Event::Voice(m) => self.voice_message(*m),
             Event::ThemeFilesChanged => {
                 if theme::is_custom(&self.theme.name) {
                     let name = self.theme.name.clone();

@@ -226,7 +226,7 @@ mod tests {
             let _ = tx.send(c);
         }))
         .unwrap();
-        bridge.register(bro_bridge::SessionMeta { id: "s1".into(), title: "t".into(), shell: "sh".into(), args: vec![], cwd: Some(dir.path().to_path_buf()), project: Some(dir.path().to_path_buf()), pid: None, cols: 80, rows: 24, agent: Some("claude".into()) });
+        bridge.register(bro_bridge::SessionMeta { id: "s1".into(), title: "t".into(), shell: "sh".into(), args: vec![], cwd: Some(dir.path().to_path_buf()), project: Some(dir.path().to_path_buf()), pid: None, cols: 80, rows: 24, agent: Some("claude".into()), kind: None });
         let found = bro_bridge::read_endpoint(&dir.path().join("bridge")).expect("discovery file");
         // from a subfolder the agent cd'ed into, and by a unique suffix the bridge resolves
         let ctx = Context { session: Some("s1".into()), bridge: Some(found.local_url()), cwd: dir.path().join("crates/x") };

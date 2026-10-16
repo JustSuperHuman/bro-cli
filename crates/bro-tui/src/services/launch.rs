@@ -91,6 +91,8 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
             let target = spec.profile_id.clone().ok_or("fork needs a target profile")?;
             staged = guard_res("sessions::stage_for_profile", || bro_core::sessions::stage_for_profile(s, &target))?;
         }
+        // the orchestrator drives bro through the bridge: start it when it's off and wait for it
+        let bridge_url = if spec.orchestrator { Some(orchestrator_bridge(svc)?) } else { svc.bridge_local_url() };
         let ctx = {
             let st = svc.state();
             let claude_env = st.settings.claude_env.clone();
@@ -106,8 +108,9 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
                     caveman,
                     justtools_skill,
                     justwatch_skill,
+                    bridge_url,
                 },
-                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, ..LaunchCtx::default() },
+                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, bridge_url, ..LaunchCtx::default() },
             }
         };
         let mut cmd = match guard("launch::build", || bro_core::launch::build(&spec, &ctx)) {
@@ -132,9 +135,34 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
     svc.send(Event::Launched(Box::new(Launched { spec, place, reply, name, remember, result, route_id, note, into })));
 }
 
+/// How long an orchestrator launch waits for a bridge it just turned on.
+const BRIDGE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The running bridge's loopback URL for an orchestrator launch, turning the bridge on first if it's off.
+fn orchestrator_bridge(svc: &Services) -> Result<String, String> {
+    if let Some(url) = svc.bridge_local_url() {
+        return Ok(url);
+    }
+    if !svc.state().bridge.enabled {
+        svc.set_bridge_enabled(true);
+        svc.send(Event::Toast(crate::alerts::Kind::Info, "turned on the bridge: the orchestrator drives bro through it".into()));
+    }
+    let until = std::time::Instant::now() + BRIDGE_WAIT;
+    while std::time::Instant::now() < until {
+        if let Some(url) = svc.bridge_local_url() {
+            return Ok(url);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    Err("the bridge didn't start, and the orchestrator needs it to reach your sessions · check the bridge view".into())
+}
+
 /// "claude · work · opus" for a spec (used before a CommandSpec exists).
 pub fn label_for(spec: &LaunchSpec) -> String {
     let mut parts = vec![spec.harness.label().to_string()];
+    if spec.orchestrator {
+        parts.insert(0, "orchestrator".into());
+    }
     if let Some(p) = spec.provider_id.as_deref().or(spec.profile_id.as_deref()) {
         parts.push(p.split(':').next_back().unwrap_or(p).to_string());
     }
@@ -262,7 +290,7 @@ mod tests {
     use bro_core::launch::Resume;
 
     fn spec(h: Harness) -> LaunchSpec {
-        LaunchSpec { harness: h, profile_id: Some("claude:work".into()), provider_id: None, model: Some("claude-opus-5".into()), cwd: PathBuf::from("."), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![] }
+        LaunchSpec { harness: h, profile_id: Some("claude:work".into()), provider_id: None, model: Some("claude-opus-5".into()), cwd: PathBuf::from("."), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false }
     }
 
     #[test]

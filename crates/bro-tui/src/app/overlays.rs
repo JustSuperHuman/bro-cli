@@ -232,7 +232,19 @@ pub(super) fn launcher_data_with_installed(app: &App, installed: Vec<(bro_core::
     launcher::Data {
         profiles: st.profiles.ready().cloned().unwrap_or_default(),
         providers: st.providers.ready().cloned().unwrap_or_default(),
-        usage: st.usage.iter().filter_map(|(k, e)| e.usage.as_ref().and_then(|u| u.five_hour.as_ref().or(u.weekly.as_ref())).map(|w| (k.clone(), w.used_pct))).collect(),
+        // % used of the tighter window (5h capped by the week), as the sidebar shows it: a login with a fresh
+        // 5h window but no week left reads 0% left, not 100%
+        usage: st.usage.iter().filter_map(|(k, e)| {
+            let u = e.usage.as_ref()?;
+            let left = match st.profiles.ready().and_then(|ps| ps.iter().find(|p| &p.id == k)) {
+                Some(p) => {
+                    let d = bro_core::usage::headroom_detail(p, u);
+                    [d.h5, d.wk].into_iter().flatten().reduce(f64::min)?
+                }
+                None => 100.0 - [&u.five_hour, &u.weekly].into_iter().flatten().map(|w| w.used_pct as f64).reduce(f64::max)?,
+            };
+            Some((k.clone(), (100.0 - left).clamp(0.0, 100.0) as f32))
+        }).collect(),
         usage_status: st.usage.iter().filter_map(|(k, e)| {
             let mut status = vec![];
             if e.usage.as_ref().is_some_and(|u| u.five_hour.is_none() && u.weekly.is_some()) {
@@ -248,6 +260,7 @@ pub(super) fn launcher_data_with_installed(app: &App, installed: Vec<(bro_core::
         installed,
         recents: app.recents.clone(),
         models: st.models.clone(),
+        orchestrator_running: app.orchestrator_pane().and_then(|id| app.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.label.clone()),
         keyed: {
             let cfg = st.config.clone().unwrap_or_default();
             st.providers.ready().map(|ps| ps.iter().filter(|p| app.svc.is_demo() || p.no_key || cfg.key_for(&p.id, p.key_env.as_deref()).is_some()).map(|p| p.id.clone()).collect()).unwrap_or_default()

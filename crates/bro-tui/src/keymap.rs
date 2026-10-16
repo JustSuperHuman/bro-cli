@@ -69,6 +69,8 @@ pub enum Act {
     RefreshUsage,
     UsageDetails,
     Continue,
+    /// Go to bro's orchestrator, or start one (the launcher on its tab).
+    Orchestrator,
     SwitchLogin,
     CloseProject,
     /// Show the file an agent last opened (`bro open`).
@@ -109,7 +111,7 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, SwitchLogin, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
@@ -170,6 +172,7 @@ impl Act {
             RefreshUsage => "refresh_usage".into(),
             UsageDetails => "usage_details".into(),
             Continue => "continue".into(),
+            Orchestrator => "orchestrator".into(),
             SwitchLogin => "switch_login".into(),
             CloseProject => "close_project".into(),
             OpenedFile => "opened_file".into(),
@@ -238,6 +241,7 @@ impl Act {
             UsageDetails => "sidebar usage: totals / every profile".into(),
             Continue => "continue an earlier session (search, resume in any login)".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
+            Orchestrator => "the orchestrator: go to it, or start the one session that runs all the others".into(),
             CloseProject => "close the current project (and its sessions)".into(),
             OpenedFile => "show the file an agent last opened (bro open)".into(),
             AgentFiles => "agent files: what it sent you and the files it touched".into(),
@@ -250,7 +254,7 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention | Continue | SwitchLogin | CloseProject | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
+            NewSession | NewShell | Rename | Close | Attention | Continue | Orchestrator | SwitchLogin | CloseProject | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | RefreshUsage => Group::Views,
@@ -294,6 +298,7 @@ impl Act {
             UsageDetails => vec!["alt+U"],
             SwitchLogin => vec!["alt+L"],
             Continue => vec!["alt+r"],
+            Orchestrator => vec!["alt+O"],
             Profiles => vec!["alt+o"],
             Proxy => vec!["alt+y"],
             Bridge => vec!["alt+g"],
@@ -342,6 +347,7 @@ impl Act {
             Stats => vec!["S"],
             Settings => vec!["A"],
             Continue => vec!["R"],
+            Orchestrator => vec!["O"],
             SwitchLogin => vec!["P"],
             CloseProject => vec!["X"],
             OpenedFile => vec!["f"],

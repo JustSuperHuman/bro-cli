@@ -57,9 +57,16 @@ impl App {
         if let Some(id) = into {
             self.resume_started(id);
         }
+        if spec.orchestrator {
+            self.orchestrator_pending = None;
+        }
         let cmd = match result {
             Ok(c) => c,
             Err(e) => {
+                // it can't start this way: don't try it again on every start
+                if spec.orchestrator && self.persist && self.orchestrator_pane().is_none() {
+                    crate::orchestrator_state::clear();
+                }
                 self.raise(Kind::Error, format!("couldn't launch {}: {e}", spec.harness.label()));
                 if let Some(r) = reply {
                     let _ = r.send(Err(anyhow::anyhow!(e)));
@@ -73,7 +80,7 @@ impl App {
         if remember {
             crate::recents::push(
                 &mut self.recents,
-                crate::recents::Recent { harness: spec.harness, profile_id: spec.profile_id.clone(), provider_id: spec.provider_id.clone(), model: spec.model.clone(), cwd: spec.cwd.clone(), permission: spec.permission, browser: spec.browser, at: crate::util::now_secs() },
+                crate::recents::Recent { harness: spec.harness, profile_id: spec.profile_id.clone(), provider_id: spec.provider_id.clone(), model: spec.model.clone(), cwd: spec.cwd.clone(), permission: spec.permission, browser: spec.browser, at: crate::util::now_secs(), orchestrator: spec.orchestrator },
             );
             if !self.svc.is_demo() {
                 crate::recents::save(self.recents.clone());
@@ -81,6 +88,8 @@ impl App {
         }
         let cwd = if cmd.cwd.as_os_str().is_empty() { spec.cwd.clone() } else { cmd.cwd.clone() };
         let label = if cmd.label.is_empty() { crate::services::launch::label_for(&spec) } else { cmd.label.clone() };
+        // the orchestrator's frame already says what it is
+        let label = if spec.orchestrator { label.trim_start_matches("orchestrator · ").to_string() } else { label };
         let meta = Meta {
             sid: uuid::Uuid::new_v4().to_string(),
             harness: Some(spec.harness),
@@ -91,15 +100,28 @@ impl App {
             // a name the bridge asked for (the orchestrator's "Toast · justgains") outlives the agent's own title
             renamed: name.is_some() && reply.is_some(),
             name,
-            project: self.svc.project_for(&cwd),
+            project: if spec.orchestrator { crate::panes::term::orchestrator_project(&cwd) } else { self.svc.project_for(&cwd) },
             cwd,
             started: Instant::now(),
             route_id,
             cleanup: cmd.cleanup.clone(),
             caveman: cmd.caveman,
+            orchestrator: spec.orchestrator,
         };
         let sid = meta.sid.clone();
         let term = Term::new(meta, Spawn { program: cmd.program, args: cmd.args, env: cmd.env, env_remove: cmd.env_remove }, self.svc.clone());
+        // there is only ever one orchestrator: a second that finished building is ended unstarted
+        if spec.orchestrator && let Some(existing) = self.orchestrator_pane() {
+            let id = self.add(Box::new(term));
+            self.close(id);
+            self.focus_pane(existing);
+            self.toast(Kind::Info, "the orchestrator is already running");
+            return;
+        }
+        let place = if spec.orchestrator { Place::Tab } else { place };
+        if spec.orchestrator && self.persist {
+            crate::orchestrator_state::save(&spec);
+        }
         if into.is_some() {
             match placeholder {
                 Some(id) => {
@@ -155,7 +177,7 @@ impl App {
         let (prog, args) = crate::util::default_shell(settings.shell.as_deref());
         let cwd = cwd.or_else(|| self.focused_cwd()).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
         let name = std::path::Path::new(&prog).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| prog.clone());
-        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: name, name: None, renamed: false, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], caveman: None };
+        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: name, name: None, renamed: false, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], caveman: None, orchestrator: false };
         let term = Term::new(meta, Spawn { program: prog, args, ..Spawn::default() }, self.svc.clone());
         self.open(Box::new(term), place)
     }
@@ -213,6 +235,7 @@ impl App {
                 }
             }
             BridgeCommand::OpenFile { id, path, line, column } => self.agent_opened_file(&id, path, line, column),
+            BridgeCommand::Orchestrator(c) => self.orchestrator_command(c),
             BridgeCommand::OpenInEditor { id, path, line, column } => {
                 let pane = self.term_id(&id);
                 self.open_in_editor(pane, path, line, column);
@@ -223,7 +246,7 @@ impl App {
                 match create_target(req.profile_id.as_deref()) {
                     Some((harness, profile_id)) => {
                         // a watchdog's second opinion asks for a model ("opus")
-                        let spec = LaunchSpec { harness, profile_id, provider_id: None, model: req.model.clone(), cwd, resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: req.args.clone() };
+                        let spec = LaunchSpec { harness, profile_id, provider_id: None, model: req.model.clone(), cwd, resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: req.args.clone(), orchestrator: false };
                         let mut lr = LaunchRequest::new(spec, Place::Tab);
                         lr.reply = Some(reply);
                         lr.name = req.title.clone();
@@ -234,7 +257,7 @@ impl App {
                         let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all);
                         let id = match req.shell.clone() {
                             Some(shell) => {
-                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: req.title.is_some(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], caveman: None };
+                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: req.title.is_some(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], caveman: None, orchestrator: false };
                                 let term = Term::new(meta, Spawn { program: shell, args: req.args.clone(), ..Spawn::default() }, self.svc.clone());
                                 self.new_tab(Box::new(term))
                             }
@@ -263,6 +286,22 @@ impl App {
         }
     }
 
+    /// At startup: start the orchestrator that was running when bro last stopped, with the same harness, login,
+    /// model, permissions and browser.
+    pub(crate) fn restore_orchestrator(&mut self) {
+        if !self.persist || self.orchestrator_pane().is_some() {
+            return;
+        }
+        if let Some(spec) = crate::orchestrator_state::load() {
+            self.launch_spec(spec, Place::Tab);
+        }
+    }
+
+    /// bro's orchestrator session, when one is open.
+    pub(crate) fn orchestrator_pane(&self) -> Option<PaneId> {
+        self.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.orchestrator)).map(|(id, _)| *id)
+    }
+
     /// Live sessions for the sidebar.
     pub(crate) fn live_infos(&self) -> Vec<LiveInfo> {
         self.panes
@@ -283,6 +322,7 @@ impl App {
                     note: self.notes.get(id).cloned(),
                     age_secs: t.meta.started.elapsed().as_secs(),
                     seq: self.seqs.get(id).copied().unwrap_or(*id),
+                    orchestrator: t.meta.orchestrator,
                 })
             })
             .collect()
@@ -355,7 +395,7 @@ impl App {
         }
         self.cur_project
             .clone()
-            .or_else(|| self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.root.clone()))
+            .or_else(|| self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).filter(|t| !t.meta.orchestrator).map(|t| t.meta.project.root.clone()))
             .or_else(|| self.open_projects.roots.first().cloned())
     }
 
@@ -508,6 +548,7 @@ impl App {
                 route_id: None,
                 cleanup: vec![],
                 caveman: None,
+                orchestrator: false,
             };
             let id = self.open(Box::new(Term::queued(meta, ahead, self.svc.clone())), Place::Tab);
             ahead += 1;
@@ -658,7 +699,7 @@ impl App {
                     return;
                 }
                 self.close(pane);
-                let spec = LaunchSpec { harness, profile_id: Some(profile.clone()), provider_id: None, model: None, cwd: cwd.clone(), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![] };
+                let spec = LaunchSpec { harness, profile_id: Some(profile.clone()), provider_id: None, model: None, cwd: cwd.clone(), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false };
                 let mut req = LaunchRequest::new(spec, Place::Tab);
                 req.name = Some(crate::ui::fit(&title, 28));
                 req.find_live = Some(crate::services::launch::FindLive { harness, store, cwd, since });
@@ -671,7 +712,7 @@ impl App {
     /// Stage `s` into `target` and resume it there as a fork.
     pub(super) fn fork_into(&mut self, s: SessionInfo, target: String) {
         let cwd = s.cwd.clone().or_else(|| s.project.as_ref().map(|p| p.root.clone())).or_else(dirs::home_dir).unwrap_or_default();
-        let spec = LaunchSpec { harness: s.harness, profile_id: Some(target.clone()), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: true }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![] };
+        let spec = LaunchSpec { harness: s.harness, profile_id: Some(target.clone()), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: true }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false };
         let mut req = LaunchRequest::new(spec, Place::Tab);
         req.name = Some(crate::ui::fit(&s.title, 28));
         req.stage = Some(s);
@@ -758,6 +799,7 @@ impl App {
                 route_id: None,
                 cleanup: vec![],
                 caveman: (i == 0 && d.harness == Some(bro_core::Harness::Claude)).then_some(bro_core::caveman::Level::Caveman),
+                orchestrator: false,
             };
             let mut term = if self.opts.fixed_demo {
                 Term::fixed(meta, &crate::services::demo::transcript(d.harness), self.svc.clone())
@@ -790,7 +832,7 @@ impl App {
 /// Resume `s` in its own login, named after it.
 fn resume_request(s: &SessionInfo) -> LaunchRequest {
     let cwd = s.cwd.clone().or_else(|| s.project.as_ref().map(|p| p.root.clone())).or_else(dirs::home_dir).unwrap_or_default();
-    let spec = LaunchSpec { harness: s.harness, profile_id: s.profile_id.clone(), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: false }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![] };
+    let spec = LaunchSpec { harness: s.harness, profile_id: s.profile_id.clone(), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: false }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false };
     let mut req = LaunchRequest::new(spec, Place::Tab);
     req.name = Some(crate::ui::fit(&s.title, 28));
     req

@@ -52,6 +52,8 @@ pub enum Event {
     FolderCreated(uuid::Uuid, Result<std::path::PathBuf, String>),
     /// A watchdog woke, stepped, reported or stood down (the snapshot cache is already updated).
     Watchdog(bro_bridge::WatchdogUpdate),
+    /// Push-to-talk: words for the orchestrator session.
+    Voice(Box<crate::services::VoiceMsg>),
 }
 
 /// Where a new pane goes.

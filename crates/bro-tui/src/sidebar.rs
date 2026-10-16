@@ -1,8 +1,9 @@
 //! The sidebar model: a pure function from live sessions + past sessions + UI state (filter) to the rows
 //! the sidebar draws and navigates. No I/O, no drawing.
 //!
-//! Order: projects with open sessions first, preserving project order within each group. Earlier
-//! sessions aren't rows: Continue is available in the session dialog.
+//! Order: the orchestrator (when one runs) pinned on top, then projects with open sessions first,
+//! preserving project order within each group. Earlier sessions aren't rows: Continue is available in
+//! the session dialog.
 
 use crate::pane::{Activity, PaneId};
 use bro_core::Harness;
@@ -30,6 +31,8 @@ pub struct LiveInfo {
     pub age_secs: u64,
     /// launch order (smaller = earlier)
     pub seq: u64,
+    /// bro's orchestrator: pinned above every project, first in the numbering
+    pub orchestrator: bool,
 }
 
 /// An earlier session, as the sidebar needs it: which project, and how long ago (for "last used").
@@ -92,7 +95,7 @@ struct Group<'a> {
 fn groups<'a>(live: &'a [LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<Group<'a>> {
     let mut order: Vec<Group> = open.iter().map(|o| Group { key: o.key.clone(), name: o.name.clone(), root: o.root.clone(), live: vec![], last_age: None }).collect();
     let mut at: HashMap<String, usize> = order.iter().enumerate().map(|(i, g)| (g.key.clone(), i)).collect();
-    let mut live_sorted: Vec<&LiveInfo> = live.iter().collect();
+    let mut live_sorted: Vec<&LiveInfo> = live.iter().filter(|l| !l.orchestrator).collect();
     live_sorted.sort_by_key(|l| l.seq);
     for l in live_sorted {
         let i = *at.entry(l.project_key.clone()).or_insert_with(|| {
@@ -113,7 +116,8 @@ fn groups<'a>(live: &'a [LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec
 
 /// Live sessions in sidebar order (for alt+1..9 and next/prev), ignoring the filter.
 pub fn live_order(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<PaneId> {
-    groups(live, past, open).iter().flat_map(|g| g.live.iter().map(|l| l.pane)).collect()
+    let pinned = live.iter().filter(|l| l.orchestrator).map(|l| l.pane);
+    pinned.chain(groups(live, past, open).iter().flat_map(|g| g.live.iter().map(|l| l.pane))).collect()
 }
 
 /// Project keys in sidebar order.
@@ -131,6 +135,11 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo], st: &SideS
     let q = st.filter.trim().to_lowercase();
     let numbering: HashMap<PaneId, usize> = live_order(live, past, open).into_iter().enumerate().map(|(i, p)| (p, i + 1)).collect();
     let mut rows = vec![];
+    for l in live.iter().filter(|l| l.orchestrator) {
+        if q.is_empty() || matches(&["orchestrator", l.name.as_deref().unwrap_or(""), l.harness.map(|h| h.label()).unwrap_or(""), l.profile.as_deref().unwrap_or("")], &q) {
+            rows.push(Row::Live { info: l.clone(), n: numbering.get(&l.pane).copied().filter(|n| *n <= 9) });
+        }
+    }
     for g in groups(live, past, open) {
         let project_hit = !q.is_empty() && matches(&[&g.name], &q);
         let live_rows: Vec<&LiveInfo> = g
@@ -170,6 +179,7 @@ mod tests {
             note: None,
             age_secs: 60,
             seq,
+            orchestrator: false,
         }
     }
 
@@ -228,6 +238,24 @@ mod tests {
         assert_eq!(kinds(&build(&l, &[], &open, &st)), "P:b L2#2");
         st.filter = "zzz".into();
         assert_eq!(kinds(&build(&l, &[], &open, &st)), "", "the project list honors its filter");
+    }
+
+    #[test]
+    fn orchestrator_is_pinned_on_top_and_numbered_first() {
+        let mut boss = live(9, "a", 99, Some(Activity::Working));
+        boss.orchestrator = true;
+        boss.project_key = "bro:orchestrator".into();
+        let l = vec![live(1, "a", 1, None), boss, live(2, "b", 2, None)];
+        let open = opened(&["a", "b"]);
+        let rows = build(&l, &[], &open, &SideState::default());
+        assert_eq!(kinds(&rows), "L9#1 P:a L1#2 P:b L2#3");
+        assert!(matches!(&rows[1], Row::Project { live: 1, .. }), "the orchestrator isn't counted in a project");
+        assert_eq!(live_order(&l, &[], &open), vec![9, 1, 2]);
+        assert_eq!(project_order(&l, &[], &open), vec!["a", "b"], "it never forms a project group");
+        let st = SideState { filter: "orch".into() };
+        assert_eq!(kinds(&build(&l, &[], &open, &st)), "L9#1");
+        let st = SideState { filter: "b".into() };
+        assert_eq!(kinds(&build(&l, &[], &open, &st)), "P:b L2#3");
     }
 
     #[test]

@@ -89,15 +89,6 @@ impl App {
             let style = if gear.contains(self.hover) { ui::bold_accent(&t).bg(current_tint(&t)) } else { muted(&t) };
             ui::line(f, gear, vec![Span::styled(format!(" {} ", ui::icon("settings")), style)]);
             self.side_hits.push((gear, SideHit::Settings));
-            // caveman mode, while it's on for new sessions: "⛏ ultracave", or just the pick when narrow
-            if let Some(l) = self.svc.settings().caveman.active() {
-                let full = format!(" {} {} ", ui::icon("caveman"), l.id());
-                let text = if area.width >= 16 + title_w + ui::width(&full) as u16 { full } else { format!(" {} ", ui::icon("caveman")) };
-                let badge = Rect { x: gear.right(), width: ui::width(&text) as u16, ..gear };
-                let style = if badge.contains(self.hover) { ui::bold_accent(&t).bg(current_tint(&t)) } else { fg(t.inline) };
-                ui::line(f, badge, vec![Span::styled(text, style)]);
-                self.side_hits.push((badge, SideHit::Settings));
-            }
         }
 
         // footer first (fixed height), rows get the rest
@@ -151,22 +142,40 @@ impl App {
             ui::line(f, Rect { y, height: 1, ..list }, vec![Span::styled("/ ", ui::bold_accent(&t)), Span::styled(format!("{}{cursor}", self.side.filter), ui::bold())]);
             y += 1;
         }
-        let room = list.bottom().saturating_sub(y);
         let projects = &rows[..];
         if projects.is_empty() {
             self.side_scroll = 0;
-            if !self.side.filter.is_empty() && room > 0 {
+            if !self.side.filter.is_empty() && y < list.bottom() {
                 ui::line(f, Rect { y, height: 1, ..list }, vec![Span::styled(" nothing matches", muted(&t))]);
             }
             return;
         }
-        if room == 0 {
+        // rows have heights (projects: a gap line + two lines)
+        let lines: Vec<(u16, u16)> = row_lines(projects);
+        // The orchestrator is sticky: drawn above the list, which scrolls beneath a hairline under it.
+        let pinned = usize::from(matches!(projects.first(), Some(Row::Live { info, .. }) if info.orchestrator));
+        if pinned == 1 {
+            let h = lines[0].1;
+            if y + h > list.bottom() {
+                return;
+            }
+            self.draw_side_row(f, Rect { y, height: h, ..list }, 0, &projects[0], focused, focus_pane, cur_key.as_deref(), &t, time);
+            y += h;
+            if y < list.bottom() {
+                let gold = crate::theme::gold(&t);
+                ui::line(f, Rect { y, height: 1, ..list }, vec![Span::styled("╌".repeat(list.width as usize), fg(crate::theme::mix(gold, t.frame, 0.7)))]);
+                y += 1;
+            }
+        }
+        let room = list.bottom().saturating_sub(y);
+        if room == 0 || projects.len() == pinned {
+            self.side_scroll = pinned;
             return;
         }
-        // rows have heights (projects: a gap line + two lines); scroll so the selection stays in view
-        let lines: Vec<(u16, u16)> = row_lines(projects);
+        // scroll the rest so the selection stays in view
         let total = |a: usize, b: usize| lines[a..=b].iter().map(|(g, h)| g + h).sum::<u16>();
-        if self.side_focus && !self.side_manual_scroll {
+        self.side_scroll = self.side_scroll.max(pinned);
+        if self.side_focus && !self.side_manual_scroll && self.side_sel >= pinned {
             let selected = self.side_sel;
             if selected < self.side_scroll {
                 self.side_scroll = selected;
@@ -177,7 +186,7 @@ impl App {
         }
         let mut last_start = projects.len();
         let mut acc = 0;
-        while last_start > 0 && acc + lines[last_start - 1].0 + lines[last_start - 1].1 <= room {
+        while last_start > pinned && acc + lines[last_start - 1].0 + lines[last_start - 1].1 <= room {
             last_start -= 1;
             acc += lines[last_start].0 + lines[last_start].1;
         }
@@ -187,13 +196,13 @@ impl App {
             self.side_nav();
         }
         // only when the list overflows, over the right border (fading into it)
-        if last_start > 0
+        if last_start > pinned
             && let Some(a) = self.side_nav_at.and_then(|at| bar_alpha(at.elapsed()))
             && area.width > 0
         {
             let span = |r: std::ops::Range<usize>| lines[r].iter().map(|(g, h)| g + h).sum::<u16>();
             let track = list.bottom().saturating_sub(y);
-            let (off, len) = thumb(track, room, span(0..projects.len()), span(0..self.side_scroll), span(0..last_start));
+            let (off, len) = thumb(track, room, span(pinned..projects.len()), span(pinned..self.side_scroll), span(pinned..last_start));
             let border = if focused { t.accent } else { t.frame };
             self.side_thumb = Rect { x: area.right() - 1, y: y + off, width: 1, height: len };
             for cy in self.side_thumb.y..self.side_thumb.bottom() {
@@ -203,7 +212,6 @@ impl App {
             }
         }
         for (offset, row) in projects.iter().enumerate().skip(self.side_scroll) {
-            let i = offset;
             let (gap, h) = lines[offset];
             // no gap above the first row on screen
             let gap = if offset == self.side_scroll { 0 } else { gap };
@@ -211,31 +219,36 @@ impl App {
                 break;
             }
             y += gap;
-            let r = Rect { y, height: h, ..list };
-            let selected = focused && i == self.side_sel;
-            let current = matches!(row, Row::Live { info, .. } if focus_pane == Some(info.pane) && !self.side_focus);
-            if selected {
-                f.buffer_mut().set_style(r, Style::default().bg(crate::theme::mix(t.user, ratatui::style::Color::Rgb(20, 20, 24), 0.35)));
-            } else if current {
-                let color = match row {
-                    Row::Live { info, .. } => self.project_color(&info.project_key),
-                    _ => t.accent,
-                };
-                f.buffer_mut().set_style(r, Style::default().bg(crate::theme::project_tint(color, &t)));
-            }
-            self.draw_row(f, r, row, selected, focus_pane, cur_key.as_deref(), &t, time);
-            if let Row::Project { root, live, .. } = row {
-                self.side_hits.push((Rect { x: r.right().saturating_sub(1), width: 1, height: 1, ..r }, SideHit::CloseProject(root.clone(), *live)));
-            }
-            if let Row::Live { info, .. } = row
-                && self.renaming.as_ref().is_none_or(|(id, _)| *id != info.pane)
-            {
-                // the × cell wins over the row (hits are searched in order)
-                self.side_hits.push((Rect { x: r.right().saturating_sub(1), width: 1, height: 1, ..r }, SideHit::Close(info.pane)));
-            }
-            self.side_hits.push((r, SideHit::Row(i)));
+            self.draw_side_row(f, Rect { y, height: h, ..list }, offset, row, focused, focus_pane, cur_key.as_deref(), &t, time);
             y += h;
         }
+    }
+
+    /// One sidebar row at `r` (row `i`): its selection / current highlight, the row itself, and its click targets.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_side_row(&mut self, f: &mut Frame, r: Rect, i: usize, row: &Row, focused: bool, focus_pane: Option<crate::layout::PaneId>, cur_key: Option<&str>, t: &Theme, time: f64) {
+        let selected = focused && i == self.side_sel;
+        let current = matches!(row, Row::Live { info, .. } if focus_pane == Some(info.pane) && !self.side_focus);
+        if selected {
+            f.buffer_mut().set_style(r, Style::default().bg(crate::theme::mix(t.user, ratatui::style::Color::Rgb(20, 20, 24), 0.35)));
+        } else if current {
+            let color = match row {
+                Row::Live { info, .. } => self.project_color(&info.project_key),
+                _ => t.accent,
+            };
+            f.buffer_mut().set_style(r, Style::default().bg(crate::theme::project_tint(color, t)));
+        }
+        self.draw_row(f, r, row, selected, focus_pane, cur_key, t, time);
+        if let Row::Project { root, live, .. } = row {
+            self.side_hits.push((Rect { x: r.right().saturating_sub(1), width: 1, height: 1, ..r }, SideHit::CloseProject(root.clone(), *live)));
+        }
+        if let Row::Live { info, .. } = row
+            && self.renaming.as_ref().is_none_or(|(id, _)| *id != info.pane)
+        {
+            // the × cell wins over the row (hits are searched in order)
+            self.side_hits.push((Rect { x: r.right().saturating_sub(1), width: 1, height: 1, ..r }, SideHit::Close(info.pane)));
+        }
+        self.side_hits.push((r, SideHit::Row(i)));
     }
 
     /// The sidebar scrolled or its selection moved: show the scrollbar for a moment.
@@ -295,7 +308,16 @@ impl App {
                 let model = info.model.as_deref().map(|m| crate::services::launch::short_model(m.rsplit('/').next().unwrap_or(m))).unwrap_or_default();
                 let detail = [who, model].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
                 // the logo already says which agent it is: lead with your name for it, else login · model
+                // the orchestrator says what it is first; its login (and its own title, if any) follow
                 let (primary, secondary) = match (&info.name, info.harness) {
+                    _ if info.orchestrator => {
+                        let mut rest = vec![];
+                        rest.extend(info.name.clone().filter(|n| !n.is_empty()));
+                        if !detail.is_empty() {
+                            rest.push(detail);
+                        }
+                        ("★ orchestrator".to_string(), rest.join(" · "))
+                    }
                     (Some(name), _) => (name.clone(), detail),
                     (None, Some(_)) if !detail.is_empty() => (detail, String::new()),
                     (None, Some(h)) => (h.label().to_string(), String::new()),
@@ -309,7 +331,11 @@ impl App {
                 }
                 let stacked = self.stack.contains(&info.pane);
                 let (bar, bar_style) = if is_focus { ("▶", fg(color)) } else if stacked { ("┃", fg(color)) } else { ("│", fg(color)) };
-                let primary_style = if is_focus || selected { fg(color).add_modifier(Modifier::BOLD) } else { Style::default().fg(t.fg) };
+                let primary_style = if is_focus || selected || info.orchestrator { fg(color).add_modifier(Modifier::BOLD) } else { Style::default().fg(t.fg) };
+                // pinned and gold: a quiet gold ground even when it isn't the current session
+                if info.orchestrator && !selected && !is_focus {
+                    f.buffer_mut().set_style(r, Style::default().bg(crate::theme::project_tint(color, t)));
+                }
                 let mut left = vec![
                     Span::styled(bar, bar_style.add_modifier(Modifier::BOLD)),
                     Span::styled(num, if is_focus { fg(color).add_modifier(Modifier::BOLD) } else { muted(t) }),
@@ -409,6 +435,8 @@ impl App {
                     return None;
                 }
                 let s: AppSummary = bro_core::usage::app_summary(family.iter().map(|p| (**p, state_of(&p.id))));
+                // the soonest any of them gets room back
+                let resets_at = family.iter().filter_map(|p| st.usage.get(&p.id).and_then(|e| e.usage.as_ref()).and_then(|u| tight_reset(p, u))).min();
                 let note = if s.h5.is_none() && s.wk.is_none() {
                     Some(if s.loading > 0 { "…".to_string() } else { "unavailable".to_string() })
                 } else if s.unavailable > 0 {
@@ -417,7 +445,7 @@ impl App {
                     None
                 };
                 let h = if claude { bro_core::Harness::Claude } else { bro_core::Harness::Codex };
-                Some(UsageLine { harness: Some(h), profile: None, label: h.label().into(), h5: s.h5, wk: s.wk, approx: s.h5_estimated, note, resets_at: None, fable: None })
+                Some(UsageLine { harness: Some(h), profile: None, label: h.label().into(), h5: s.h5, wk: s.wk, approx: s.h5_estimated, note, resets_at, fable: None })
             };
             let mut v: Vec<UsageLine> = [total(true), total(false)].into_iter().flatten().collect();
             // Fable has its own allowance: show it under Claude when any account has it
@@ -442,8 +470,7 @@ impl App {
                 let (h5, wk, approx, resets_at, note) = match e.and_then(|e| e.usage.as_ref()) {
                     Some(u) => {
                         let d = bro_core::usage::headroom_detail(p, u);
-                        let reset = [&u.five_hour, &u.weekly].into_iter().flatten().filter_map(|w| w.resets_at).min();
-                        (d.h5, d.wk, d.h5_estimated, reset, None)
+                        (d.h5, d.wk, d.h5_estimated, tight_reset(p, u), None)
                     }
                     None if e.is_some_and(|e| e.error.is_some()) => (None, None, false, None, Some("unavailable".to_string())),
                     None => (None, None, false, None, Some("…".to_string())),
@@ -465,8 +492,9 @@ impl App {
             let info = format!("{} ", ui::icon("info"));
             let info_at = Rect { x: head.x + ui::width(&label) as u16, width: (ui::width(&info) as u16).min(head.width), ..head };
             let info_style = if info_at.contains(self.hover) { ui::bold_accent(t) } else { muted(t) };
-            // column heads sit over the figures: " 46%" + " " + " 39%" + " "
-            let heads = " 5h   wk  ";
+            // column heads sit over the figures: " 46%" + " " + " 39%" + " "; holding alt, the rows say when they reset
+            let resets = self.alt_hints();
+            let heads = if resets { "resets " } else { " 5h   wk  " };
             let fill = (area.width as usize).saturating_sub(ui::width(&label) + ui::width(&info) + ui::width(heads) + 1);
             ui::line_lr(f, head, vec![Span::styled(label, ui::accent(t)), Span::styled(info, info_style), Span::styled("─".repeat(fill), fg(t.frame))], vec![Span::styled(heads, muted(t))]);
             // the ⓘ wins over the header (hits are searched in order)
@@ -497,6 +525,12 @@ impl App {
                 let mut right = vec![];
                 match &u.note {
                     Some(n) if u.h5.is_none() && u.wk.is_none() => right.push(Span::styled(format!("{n} "), muted(t))),
+                    _ if resets => {
+                        let tight = [u.h5, u.wk].into_iter().flatten().fold(f64::INFINITY, f64::min);
+                        let color = if tight.is_finite() { ui::left_color(tight, t) } else { t.muted };
+                        let when = u.resets_at.map(|at| format!("Resets @ {} ", crate::util::reset_time(at))).unwrap_or_else(|| "no reset reported ".into());
+                        right.push(Span::styled(when, fg(color)));
+                    }
                     _ => {
                         // the meter shows the tighter window
                         let tight = [u.h5, u.wk].into_iter().flatten().fold(f64::INFINITY, f64::min);
@@ -610,11 +644,25 @@ fn row_lines(rows: &[Row]) -> Vec<(u16, u16)> {
                 seen_project = true;
                 (gap, 2)
             }
+            // the sticky orchestrator: the hairline under it spaces the first project
+            Row::Live { info, .. } if info.orchestrator => (0, if info.note.is_some() { 2 } else { 1 }),
             // a running session with something to say gets a second line
             Row::Live { info, .. } if info.note.is_some() => (0, 2),
             _ => (0, 1),
         })
         .collect()
+}
+
+/// When a login gets room back: the reset of whichever window is tighter (the week once it's the limit, else the
+/// 5 hours), falling back to the other window's.
+fn tight_reset(p: &bro_core::profiles::Profile, u: &bro_core::usage::Usage) -> Option<i64> {
+    let d = bro_core::usage::headroom_detail(p, u);
+    let h5 = u.five_hour.as_ref().and_then(|w| w.resets_at);
+    let wk = u.weekly.as_ref().and_then(|w| w.resets_at);
+    match (d.h5, d.wk) {
+        (Some(h), Some(w)) if w <= h => wk.or(h5),
+        _ => h5.or(wk),
+    }
 }
 
 /// Hover background for sidebar actions: a quiet tint of the accent.

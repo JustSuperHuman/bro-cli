@@ -260,6 +260,9 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
 /// every session, workspace and bro window, whatever else is open. Painted themes pick from their palette;
 /// others from the whole hue circle, so different projects rarely share one. Never red, which reads as an error.
 pub fn project_color(key: &str, t: &Theme) -> Color {
+    if key == crate::panes::term::ORCHESTRATOR_KEY {
+        return gold(t);
+    }
     if t.name == "mono" || t.name == "terminal" {
         return t.accent;
     }
@@ -273,6 +276,16 @@ pub fn project_color(key: &str, t: &Theme) -> Color {
     let hue = 20.0 + (hash % 3200) as f32 / 10.0;
     let (saturation, lightness) = if t.is_light() { (0.55, 0.38) } else { (0.7, 0.72) };
     hsl(hue, saturation, lightness)
+}
+
+/// The orchestrator's color: gold, so its window and sidebar row stand out from every project.
+pub fn gold(t: &Theme) -> Color {
+    match t.name.as_str() {
+        "mono" => t.accent,
+        "terminal" => Color::LightYellow,
+        _ if t.is_light() => Color::Rgb(178, 128, 0),
+        _ => Color::Rgb(255, 200, 61),
+    }
 }
 
 fn hsl(hue: f32, s: f32, l: f32) -> Color {

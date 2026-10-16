@@ -210,11 +210,20 @@ pub(crate) async fn orchestrator_send(
 
 pub(crate) async fn orchestrator_clear(State(state): State<AppState>) -> Json<Value> {
     state.orchestrator.clear();
+    if state.orchestrator.routed() {
+        state.send_command(crate::BridgeCommand::Orchestrator(crate::OrchestratorCommand::ClearContext { handoff: None }));
+    }
     Json(state.orchestrator.status(None, true))
 }
 
 pub(crate) async fn orchestrator_cancel(State(state): State<AppState>) -> Json<Value> {
-    let cancelled = state.orchestrator.cancel();
+    let cancelled = if state.orchestrator.routed() {
+        state.orchestrator.cancel_routed();
+        state.send_command(crate::BridgeCommand::Orchestrator(crate::OrchestratorCommand::Cancel));
+        true
+    } else {
+        state.orchestrator.cancel()
+    };
     let mut status = state.orchestrator.status(None, false);
     status["cancelled"] = json!(cancelled);
     Json(status)

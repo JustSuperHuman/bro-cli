@@ -185,6 +185,10 @@ pub enum OrchestratorUpdate {
 pub type UpdateSink = std::sync::Arc<dyn Fn(OrchestratorUpdate) + Send + Sync>;
 
 pub struct Orchestrator {
+    /// Messages go to bro's orchestrator session instead of Hugh's own Claude Code.
+    routed: std::sync::atomic::AtomicBool,
+    /// Routed messages awaiting the session's answer: answer item id -> the sender's tag.
+    awaiting: Mutex<std::collections::HashMap<String, Option<String>>>,
     state: Mutex<State>,
     data_root: PathBuf,
     events: broadcast::Sender<ServerEvent>,
@@ -252,6 +256,8 @@ impl Orchestrator {
         }
         let seq = items.iter().map(|item| item.seq).max().unwrap_or(0);
         Self {
+            routed: std::sync::atomic::AtomicBool::new(false),
+            awaiting: Mutex::new(std::collections::HashMap::new()),
             state: Mutex::new(State {
                 config,
                 launch: OrchestratorLaunch::default(),
@@ -271,6 +277,67 @@ impl Orchestrator {
             data_root: data_root.to_path_buf(),
             events,
             sinks: parking_lot::RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn set_routed(&self, on: bool) {
+        self.routed.store(on, std::sync::atomic::Ordering::Relaxed);
+        if on && let Some(process) = self.state.lock().process.take() {
+            process.kill();
+        }
+    }
+
+    pub fn routed(&self) -> bool {
+        self.routed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A panel message for bro's orchestrator session: the user's words and a pending answer join the shared
+    /// transcript, and bro is asked to deliver it. The answer arrives through [`Orchestrator::answer`].
+    pub(crate) fn route(&self, app: &crate::state::AppState, text: String, context: MessageContext) -> Value {
+        let turn_id = uuid::Uuid::new_v4().simple().to_string();
+        let mut user = Orchestrator::new_item(&turn_id, "user", "done");
+        user.text = text.clone();
+        self.push_item(user);
+        let answer = self.push_item(Orchestrator::new_item(&turn_id, "assistant", "streaming"));
+        self.awaiting.lock().insert(answer.id.clone(), context.tag.clone());
+        self.emit(OrchestratorUpdate::Started { text: text.clone(), tag: context.tag.clone() });
+        app.send_command(crate::BridgeCommand::Orchestrator(crate::OrchestratorCommand::Message {
+            id: answer.id,
+            text,
+            voice: context.voice,
+            focused: context.focused_session,
+            tag: context.tag,
+        }));
+        {
+            let state = self.state.lock();
+            self.persist_history_locked(&state);
+        }
+        self.publish_status();
+        self.status(None, false)
+    }
+
+    /// bro's orchestrator session answered routed message `id`.
+    pub fn answer(&self, id: &str, text: &str, ok: bool) {
+        let Some(tag) = self.awaiting.lock().remove(id) else { return };
+        let text = text.trim().to_string();
+        self.update_item(id, true, |item| {
+            item.text = text.clone();
+            item.status = if ok { "done" } else { "error" }.into();
+            item.role = if ok { "assistant" } else { "error" }.into();
+            item.finished_at = Some(iso_now());
+        });
+        self.emit(if ok { OrchestratorUpdate::Reply { text, tag } } else { OrchestratorUpdate::Failed { message: text, tag } });
+        self.publish_status();
+    }
+
+    /// Cancelled while routed: the pending answers stop waiting.
+    pub fn cancel_routed(&self) {
+        let ids: Vec<String> = self.awaiting.lock().drain().map(|(id, _)| id).collect();
+        for id in ids {
+            self.update_item(&id, true, |item| {
+                item.status = "cancelled".into();
+                item.finished_at = Some(iso_now());
+            });
         }
     }
 

@@ -35,6 +35,7 @@ pub mod envfile;
 pub mod managed_skill;
 pub mod self_update;
 pub mod proc_tree;
+pub mod orchestrator;
 
 use serde::{Deserialize, Serialize};
 

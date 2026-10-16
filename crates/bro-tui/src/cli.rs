@@ -12,6 +12,9 @@ pub enum Command {
     Help,
     /// `bro proxy <upstream> …` — headless translating proxy.
     Proxy(crate::proxy_cmd::ProxyArgs),
+    /// `bro ctl [<tool> …]` — call bro's session tools (the orchestrator's) from a shell.
+    Ctl(crate::ctl_cmd::CtlArgs),
+    CtlHelp,
     /// `bro open <path>[:line]` — show a file to the user (from inside a bro pane).
     Open(crate::open_cmd::OpenArgs),
     OpenHelp,
@@ -42,6 +45,9 @@ usage
   bro open <path>[:line] [--editor]
                    from inside a bro session: show a file (at a line) in bro's preview and
                    on connected phones / browsers, or open it in the desktop editor
+  bro ctl [<tool> [key=value …]]
+                   drive bro's sessions from a shell: list, open, prompt and watch them
+                   (the orchestrator's tools; no tool: list them)
   bro update [--check]
                    install the newest bro release over this one (--check: only look)
   bro install [tools… | recommended | agents | all] [--force]
@@ -69,6 +75,9 @@ inside
 pub fn parse(args: &[String]) -> Result<Command, String> {
     if args.first().map(String::as_str) == Some("proxy") {
         return crate::proxy_cmd::parse(&args[1..]).map(Command::Proxy);
+    }
+    if args.first().map(String::as_str) == Some("ctl") {
+        return crate::ctl_cmd::parse(&args[1..]).map(|a| a.map_or(Command::CtlHelp, Command::Ctl));
     }
     if args.first().map(String::as_str) == Some("open") {
         return crate::open_cmd::parse(&args[1..]).map(|a| a.map_or(Command::OpenHelp, Command::Open));

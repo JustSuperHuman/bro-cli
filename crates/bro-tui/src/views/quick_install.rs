@@ -51,6 +51,7 @@ pub fn install_term(svc: &Services, cwd: PathBuf, ids: &[&str]) -> Term {
         route_id: None,
         cleanup: vec![],
         caveman: None,
+        orchestrator: false,
     };
     let args = ["install", "--wait"].into_iter().chain(ids.iter().copied()).map(String::from).collect();
     Term::new(meta, Spawn { program: exe, args, ..Spawn::default() }, svc.clone())

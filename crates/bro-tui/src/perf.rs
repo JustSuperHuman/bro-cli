@@ -62,6 +62,7 @@ fn kind(ev: &Event) -> &'static str {
         Event::OpenProject(_) => "open project",
         Event::FolderCreated(..) => "folder",
         Event::Watchdog(_) => "watchdog",
+        Event::Voice(_) => "voice",
     }
 }
 

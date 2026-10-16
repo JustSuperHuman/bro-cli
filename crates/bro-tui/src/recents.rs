@@ -21,12 +21,15 @@ pub struct Recent {
     pub browser: BrowserMode,
     /// unix seconds
     pub at: i64,
+    /// launched as bro's orchestrator (its own recents in the launcher)
+    #[serde(default)]
+    pub orchestrator: bool,
 }
 
 impl Recent {
     /// Same combo (ignores time).
     pub fn same(&self, o: &Recent) -> bool {
-        self.harness == o.harness && self.profile_id == o.profile_id && self.provider_id == o.provider_id && self.model == o.model && self.cwd == o.cwd
+        self.harness == o.harness && self.profile_id == o.profile_id && self.provider_id == o.provider_id && self.model == o.model && self.cwd == o.cwd && self.orchestrator == o.orchestrator
     }
 }
 
@@ -74,7 +77,7 @@ mod tests {
     use super::*;
 
     fn r(model: &str, at: i64) -> Recent {
-        Recent { harness: Harness::Claude, profile_id: Some("claude:work".into()), provider_id: None, model: Some(model.into()), cwd: PathBuf::from("/x"), permission: Permission::Default, browser: BrowserMode::Off, at }
+        Recent { harness: Harness::Claude, profile_id: Some("claude:work".into()), provider_id: None, model: Some(model.into()), cwd: PathBuf::from("/x"), permission: Permission::Default, browser: BrowserMode::Off, at, orchestrator: false }
     }
 
     #[test]

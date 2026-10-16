@@ -26,6 +26,10 @@ pub async fn send_message_with(
     if text.is_empty() {
         return Err((400, "Say something first.".into()));
     }
+    // bro's orchestrator session takes it
+    if orchestrator.routed() {
+        return Ok(orchestrator.route(app, text, context));
+    }
     {
         let mut state = orchestrator.state.lock();
         if state.turn.is_some() || state.discard_until_result {

@@ -28,9 +28,11 @@ impl App {
     }
 
     /// The tiled sessions by project: (key, name, panes), in tile order, each project where it first appears.
+    /// The orchestrator isn't in any: it has its own column (see [`App::orchestrator_column`]).
     pub(crate) fn tile_groups(&self) -> Vec<(String, String, Vec<crate::pane::PaneId>)> {
         let mut groups: Vec<(String, String, Vec<crate::pane::PaneId>)> = vec![];
-        for &id in &self.stack {
+        let column = self.orchestrator_column(self.body_panes()).map(|(id, _)| id);
+        for &id in self.stack.iter().filter(|id| Some(**id) != column) {
             let (key, name) = self.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| (t.meta.project.key.clone(), t.meta.project.name.clone())).unwrap_or_default();
             match groups.iter_mut().find(|(k, ..)| *k == key) {
                 Some((.., ids)) => ids.push(id),
@@ -38,6 +40,18 @@ impl App {
             }
         }
         groups
+    }
+
+    /// Tiled with other sessions, the orchestrator takes a full-height column on the right of `body`: (its pane,
+    /// its column). The rest tile in what's left.
+    pub(crate) fn orchestrator_column(&self, body: Rect) -> Option<(crate::pane::PaneId, Rect)> {
+        if !self.stacked() || self.stack_zoom || self.stack.len() < 2 {
+            return None;
+        }
+        let id = self.stack.iter().copied().find(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.orchestrator))?;
+        // a third of the width, never so narrow it can't work nor so wide the others starve
+        let w = (body.width / 3).clamp(44.min(body.width / 2), 96).min(body.width / 2);
+        (w >= 20).then(|| (id, Rect { x: body.right() - w, width: w, ..body }))
     }
 
     pub(crate) fn draw(&mut self, f: &mut Frame) {
@@ -120,6 +134,13 @@ impl App {
         // resizes the regions with the panes
         let mut regions: Vec<(Rect, bool)> = vec![];
         let mut group_tags: Vec<usize> = vec![];
+        // the orchestrator's column on the right; the others tile beside it
+        let column = self.orchestrator_column(body);
+        let body = match column {
+            Some((_, c)) => Rect { width: body.width - c.width, ..body },
+            None => body,
+        };
+        let tiled: Vec<crate::pane::PaneId> = self.stack.iter().copied().filter(|id| column.is_none_or(|(c, _)| c != *id)).collect();
         let (focus, zoomed) = if self.stacked() {
             let focus = self.focused().unwrap_or(0);
             let by_project = if self.stack_zoom { vec![] } else { self.tile_groups() };
@@ -141,7 +162,7 @@ impl App {
                 }
                 out
             } else {
-                crate::layout::stack_rects(body, &self.stack)
+                crate::layout::stack_rects(body, &tiled)
             };
             (focus, self.stack_zoom)
         } else {
@@ -166,6 +187,8 @@ impl App {
             rects = g.panes;
             folded = g.folded;
         }
+        // the column stays put while a tile beside it grows
+        rects.extend(column);
         self.outer = rects.clone();
         if self.tile_all && rects.is_empty() && !self.minimized.is_empty() {
             let message = "All sessions minimized · show minimized in the sidebar";
@@ -211,7 +234,8 @@ impl App {
                 if minimize.is_some() {
                     self.pane_minimize.push((button, id));
                 }
-                ui::session_frame(f, r, title, status, sub.as_deref(), label, minimize, hot, color, focused, &t)
+                let standout = p.as_term_ref().is_some_and(|t| t.meta.orchestrator);
+                ui::session_frame_as(f, r, title, status, sub.as_deref(), label, minimize, hot, color, focused, standout, &t)
             } else {
                 ui::frame_ex(f, r, title, status, sub.as_deref(), focused, &t)
             };

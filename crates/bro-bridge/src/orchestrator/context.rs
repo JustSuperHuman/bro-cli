@@ -148,7 +148,11 @@ pub fn session_records(app: &AppState, tail_lines: usize) -> Vec<Value> {
     views
         .iter()
         .map(|view| {
-            let (agent, activity, note) = agent_state(view);
+            let (agent, activity, mut note) = agent_state(view);
+            let orchestrator = view.summary.kind.as_deref() == Some("orchestrator");
+            if orchestrator {
+                note = format!("bro's orchestrator (drives the other sessions), {note}");
+            }
             let idle = idle_seconds(&view.summary.updated_at);
             let tail = screen_tail(&view.screen, tail_lines, TAIL_WIDTH);
             json!({
@@ -165,7 +169,8 @@ pub fn session_records(app: &AppState, tail_lines: usize) -> Vec<Value> {
                 "prompt": view.prompt,
                 "lastOutput": describe_idle(idle),
                 "idleSeconds": idle,
-                "screenTail": tail
+                "screenTail": tail,
+                "orchestrator": orchestrator
             })
         })
         .collect()

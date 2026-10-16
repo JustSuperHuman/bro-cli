@@ -114,11 +114,23 @@ pub fn frame(f: &mut Frame, area: Rect, title: &str, subtitle: Option<&str>, foc
 
 /// Project-colored session chrome. The active pane has a heavy outline and a full-width
 /// title band; terminal output keeps its own colors and every original row/column.
+///
+/// `standout` is the orchestrator's frame: a double border that keeps most of its color even when another
+/// session has focus.
 #[allow(clippy::too_many_arguments)]
-pub fn session_frame(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<Line<'_>>, subtitle: Option<&str>, project: &str, minimize: Option<bool>, minimize_hot: bool, color: Color, focused: bool, t: &Theme) -> Rect {
-    let border = if focused { color } else { mix(color, t.frame, 0.45) };
+pub fn session_frame_as(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<Line<'_>>, subtitle: Option<&str>, project: &str, minimize: Option<bool>, minimize_hot: bool, color: Color, focused: bool, standout: bool, t: &Theme) -> Rect {
+    let border = match (focused, standout) {
+        (true, _) => color,
+        (false, true) => mix(color, t.frame, 0.8),
+        (false, false) => mix(color, t.frame, 0.45),
+    };
+    let set = match (standout, focused) {
+        (true, _) => ratatui::symbols::border::DOUBLE,
+        (false, true) => t.skin.session_focus,
+        (false, false) => t.skin.border,
+    };
     let block = Block::default().borders(Borders::ALL)
-        .border_set(if focused { t.skin.session_focus } else { t.skin.border })
+        .border_set(set)
         .border_style(fg(border));
     let inner = block.inner(area);
     f.render_widget(block, area);

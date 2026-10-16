@@ -14,6 +14,7 @@ fn data() -> Data {
         recents: vec![],
         models: st.models.clone(),
         keyed: vec!["openrouter".into(), "openai".into()],
+        orchestrator_running: None,
     }
 }
 
@@ -132,7 +133,7 @@ fn headers_group_the_list_and_are_skipped() {
 #[test]
 fn recents_relaunch_and_remember_the_model() {
     let mut d = data();
-    d.recents = vec![Recent { harness: Harness::Codex, profile_id: None, provider_id: Some("openrouter".into()), model: Some("z-ai/glm-5.3".into()), cwd: PathBuf::from("/code/justgains"), permission: Permission::Auto, browser: BrowserMode::Off, at: 1 }];
+    d.recents = vec![Recent { harness: Harness::Codex, profile_id: None, provider_id: Some("openrouter".into()), model: Some("z-ai/glm-5.3".into()), cwd: PathBuf::from("/code/justgains"), permission: Permission::Auto, browser: BrowserMode::Off, at: 1, orchestrator: false }];
     let mut l = Launcher::new(d, None, Place::Tab);
     assert_eq!(l.harness, Harness::Codex, "opens on the last harness");
     assert_eq!(l.dir, PathBuf::from("/code/justgains"));
@@ -206,4 +207,89 @@ fn enter_on_a_missing_agent_installs_it() {
         key(&mut l, KeyCode::Right);
     }
     assert!(matches!(key(&mut l, KeyCode::Enter), Outcome::Install(Harness::Codex)));
+}
+
+fn shift(l: &mut Launcher, code: KeyCode) -> Outcome {
+    l.key(KeyEvent::new(code, KeyModifiers::SHIFT))
+}
+
+fn selected_profile(l: &Launcher) -> Option<String> {
+    l.spec().and_then(|s| s.profile_id.or(s.provider_id))
+}
+
+#[test]
+fn orchestrator_is_a_tab_after_the_agents() {
+    let mut l = Launcher::new(data(), Some(PathBuf::from("/code/bro")), Place::Split).with_harness(Harness::Omp);
+    key(&mut l, KeyCode::Right);
+    assert!(l.orchestrator);
+    assert_eq!(l.harness, Harness::Claude, "Claude Code first: its tools are native there");
+    let s = l.spec().unwrap();
+    assert!(s.orchestrator && s.harness == Harness::Claude);
+    // shift+←/→ picks the harness it runs on; plain ←/→ leaves the tab
+    shift(&mut l, KeyCode::Right);
+    assert!(l.orchestrator && l.harness == Harness::Codex);
+    assert!(l.spec().unwrap().profile_id.unwrap().starts_with("codex:"), "lands on a codex login");
+    shift(&mut l, KeyCode::Left);
+    shift(&mut l, KeyCode::Left);
+    assert_eq!(l.harness, Harness::Omp, "wraps");
+    key(&mut l, KeyCode::Right);
+    assert!(!l.orchestrator && l.harness == Harness::Claude);
+    key(&mut l, KeyCode::Left);
+    assert!(l.orchestrator);
+    key(&mut l, KeyCode::Left);
+    assert!(!l.orchestrator && l.harness == Harness::Omp);
+
+    // it always opens as its own session, whatever the placement switch says
+    let mut l = l.with_orchestrator();
+    ctrl(&mut l, 's');
+    assert_eq!(l.place, Place::Split, "^s does nothing on the orchestrator tab");
+    match key(&mut l, KeyCode::Enter) {
+        Outcome::Launch(s, place) => assert!(s.orchestrator && place == Place::Tab),
+        _ => panic!("expected a launch"),
+    }
+}
+
+#[test]
+fn orchestrator_starts_on_the_roomiest_login_unless_your_last_one_has_room() {
+    let mut d = data();
+    let claude: Vec<String> = d.profiles.iter().filter(|p| p.is_claude() && p.authenticated).map(|p| p.id.clone()).collect();
+    assert!(claude.len() >= 2, "{claude:?}");
+    let (busy, roomy) = (claude[0].clone(), claude[1].clone());
+    d.usage.insert(busy.clone(), 95.0);
+    d.usage.insert(roomy.clone(), 20.0);
+    let l = Launcher::new(d.clone(), None, Place::Tab).with_orchestrator();
+    assert_eq!(selected_profile(&l), Some(roomy.clone()), "most left wins");
+
+    // your last orchestrator combo comes first while its login has room…
+    let recent = |profile: &str| crate::recents::Recent { harness: Harness::Claude, profile_id: Some(profile.into()), provider_id: None, model: None, cwd: PathBuf::from("/x"), permission: Permission::Skip, browser: BrowserMode::Off, at: 1, orchestrator: true };
+    d.usage.insert(busy.clone(), 50.0);
+    d.recents = vec![recent(&busy)];
+    let l = Launcher::new(d.clone(), None, Place::Tab).with_orchestrator();
+    assert!(matches!(l.current(), Some(Item::Recent(_))));
+    assert_eq!(selected_profile(&l), Some(busy.clone()));
+    // …and is passed over once it's nearly out
+    d.usage.insert(busy.clone(), 95.0);
+    let l = Launcher::new(d.clone(), None, Place::Tab).with_orchestrator();
+    assert_eq!(selected_profile(&l), Some(roomy));
+
+    // orchestrator combos stay on its tab; plain ones stay off it
+    let l = Launcher::new(d.clone(), None, Place::Tab).with_harness(Harness::Claude);
+    assert!(!l.items().iter().any(|i| matches!(i, Item::Recent(_))));
+    let mut plain = recent(&busy);
+    plain.orchestrator = false;
+    d.recents = vec![plain];
+    let l = Launcher::new(d, None, Place::Tab).with_orchestrator();
+    assert!(!l.items().iter().any(|i| matches!(i, Item::Recent(_))));
+}
+
+#[test]
+fn orchestrator_harness_follows_your_last_one() {
+    let mut d = data();
+    let codex = d.profiles.iter().find(|p| p.is_codex()).unwrap().id.clone();
+    d.recents = vec![crate::recents::Recent { harness: Harness::Codex, profile_id: Some(codex), provider_id: None, model: None, cwd: PathBuf::from("/x"), permission: Permission::Skip, browser: BrowserMode::Off, at: 1, orchestrator: true }];
+    let l = Launcher::new(d.clone(), None, Place::Tab).with_orchestrator();
+    assert_eq!(l.harness, Harness::Codex);
+    d.installed = vec![(Harness::Codex, false), (Harness::Claude, false)];
+    let l = Launcher::new(d, None, Place::Tab).with_orchestrator();
+    assert_eq!(l.harness, Harness::Pi, "an installed harness when the usual ones aren't");
 }

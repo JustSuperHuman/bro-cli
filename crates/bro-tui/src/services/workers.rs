@@ -380,7 +380,7 @@ pub(super) fn spawn_voice(svc: &Services) {
                 Box::new(move |ev| match ev {
                     bro_voice::VoiceEvent::Listening => {
                         *spoken_to.lock() = v_svc.focused_session();
-                        v_svc.send(Event::Toast(Kind::Info, if live { "listening…" } else { "listening… release to send to Hugh" }.into()));
+                        v_svc.send(Event::Toast(Kind::Info, if live { "listening…" } else { "listening… release to send to the orchestrator" }.into()));
                     }
                     bro_voice::VoiceEvent::Heard(text) => v_svc.send(Event::Toast(Kind::Info, format!("you: {text}"))),
                     bro_voice::VoiceEvent::Said(text) => v_svc.send(Event::Toast(Kind::Info, format!("Hugh: {text}"))),
@@ -445,6 +445,8 @@ pub(super) fn spawn_bridge(svc: &Services) {
                 _ => {}
             }))
         });
+        // panels, schedules and stop / fresh start go to bro's orchestrator session, not Hugh's own Claude Code
+        let _ = guard("bridge::route_orchestrator", || b.route_orchestrator(true));
         let w_svc = svc.clone();
         let _ = guard("bridge::on_watchdog_update", || b.on_watchdog_update(Box::new(move |u| w_svc.on_watchdog_update(u))));
         let qr = guard("bridge::pairing_qr", || b.pairing_qr()).ok().flatten();

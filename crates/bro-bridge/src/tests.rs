@@ -28,6 +28,7 @@ enum Seen {
     Focus(String),
     OpenFile(String, PathBuf, Option<u32>, Option<u32>),
     OpenInEditor(String, PathBuf, Option<u32>, Option<u32>),
+    Orchestrator(crate::OrchestratorCommand),
 }
 
 struct Harness {
@@ -56,6 +57,7 @@ impl Harness {
                 BridgeCommand::Kill { id } => seen.lock().push(Seen::Kill(id)),
                 BridgeCommand::Rename { id, title } => seen.lock().push(Seen::Rename(id, title)),
                 BridgeCommand::Focus { id } => seen.lock().push(Seen::Focus(id)),
+                BridgeCommand::Orchestrator(c) => seen.lock().push(Seen::Orchestrator(c)),
                 BridgeCommand::OpenFile { id, path, line, column } => {
                     seen.lock().push(Seen::OpenFile(id, path, line, column))
                 }
@@ -96,6 +98,7 @@ impl Harness {
                             cols: 100,
                             rows: 30,
                             agent: None,
+                            kind: None,
                         });
                         let _ = reply.send(Ok(id));
                     });
@@ -143,6 +146,7 @@ impl Harness {
             cols: 100,
             rows: 30,
             agent: None,
+            kind: None,
         });
     }
 
@@ -637,6 +641,7 @@ async fn agent_awaiting_input_raises_needs_input() {
         cols: 100,
         rows: 30,
         agent: Some("claude".into()),
+        kind: None,
     });
     let mut socket = harness.socket().await;
     recv_type(&mut socket, "hello").await;
@@ -996,6 +1001,131 @@ async fn orchestrator_tools_are_served_over_mcp() {
     let hello = recv_type(&mut socket, "hello").await;
     assert_eq!(hello["orchestrator"]["state"], "idle");
     assert_eq!(hello["orchestrator"]["config"]["provider"], "claude-code");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orchestrator_session_never_acts_on_itself() {
+    let harness = Harness::start();
+    harness.register("worker", None, None);
+    harness.bridge.register(SessionMeta {
+        id: "boss".into(),
+        title: "orchestrator".into(),
+        shell: "claude".into(),
+        args: vec![],
+        cwd: None,
+        project: None,
+        pid: Some(7),
+        cols: 100,
+        rows: 30,
+        agent: Some("claude".into()),
+        kind: Some("orchestrator".into()),
+    });
+    let client = reqwest::Client::new();
+    let call = |id: u64, name: &str, arguments: Value| {
+        let client = client.clone();
+        let url = harness.url("/mcp");
+        let body = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        async move { client.post(url).json(&body).send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let text = |v: &Value| v["result"]["content"][0]["text"].as_str().unwrap_or_default().to_string();
+
+    let listed = call(1, "list_sessions", json!({})).await;
+    let sessions: Value = serde_json::from_str(&text(&listed)).unwrap();
+    let boss = sessions.as_array().unwrap().iter().find(|s| s["id"] == "boss").unwrap();
+    assert_eq!(boss["orchestrator"], true);
+    assert!(boss["summary"].as_str().unwrap().contains("orchestrator"));
+
+    for (i, (name, args)) in [
+        ("send_input", json!({ "sessionId": "boss", "text": "hi" })),
+        ("send_keys", json!({ "sessionId": "boss", "keys": ["enter"] })),
+        ("close_session", json!({ "sessionId": "boss" })),
+        ("wait_for_output", json!({ "sessionId": "boss", "timeoutSeconds": 1 })),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let out = call(10 + i as u64, name, args).await;
+        assert_eq!(out["result"]["isError"], true, "{name}: {out}");
+        assert!(text(&out).contains("orchestrator's own session"), "{name}: {out}");
+    }
+    // reading itself is fine
+    let read = call(20, "read_session", json!({ "sessionId": "boss" })).await;
+    assert_eq!(read["result"]["isError"], false, "{read}");
+
+    // "close everything" closes the workers, never the orchestrator
+    let closed = call(21, "close_all_sessions", json!({ "includeBusy": true })).await;
+    assert_eq!(closed["result"]["isError"], false, "{closed}");
+    let kills: Vec<String> = harness.seen.lock().iter().filter_map(|s| match s { Seen::Kill(id) => Some(id.clone()), _ => None }).collect();
+    assert_eq!(kills, vec!["worker".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routed_hugh_hands_panels_schedules_and_resets_to_the_orchestrator_session() {
+    let harness = Harness::start();
+    harness.bridge.route_orchestrator(true);
+    let client = reqwest::Client::new();
+    let seen_orch = |harness: &Harness| -> Vec<crate::OrchestratorCommand> {
+        harness.seen.lock().iter().filter_map(|s| match s { Seen::Orchestrator(c) => Some(c.clone()), _ => None }).collect()
+    };
+    let wait_for = |harness: &Harness, want: &dyn Fn(&crate::OrchestratorCommand) -> bool| {
+        let until = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < until {
+            if let Some(c) = seen_orch(harness).into_iter().find(|c| want(c)) {
+                return Some(c);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    };
+
+    // a panel message goes to the session, with a pending answer in the shared transcript
+    let sent = client.post(harness.url("/api/orchestrator/messages")).json(&json!({ "text": "what is Toast doing?" })).send().await.unwrap();
+    assert_eq!(sent.status(), 202);
+    let Some(crate::OrchestratorCommand::Message { id, text, voice, .. }) = wait_for(&harness, &|c| matches!(c, crate::OrchestratorCommand::Message { .. })) else { panic!("no routed message") };
+    assert_eq!((text.as_str(), voice), ("what is Toast doing?", false));
+    let status: Value = client.get(harness.url("/api/orchestrator")).send().await.unwrap().json().await.unwrap();
+    let items = status["transcript"].as_array().or(status["items"].as_array()).cloned().unwrap_or_default();
+    assert!(items.iter().any(|i| i["role"] == "user" && i["text"] == "what is Toast doing?"), "{status}");
+    assert!(items.iter().any(|i| i["id"] == id.as_str() && i["status"] == "streaming"), "{status}");
+    // the session's answer lands in the panel
+    harness.bridge.orchestrator_answer(&id, "Toast is running the tests.", true);
+    let status: Value = client.get(harness.url("/api/orchestrator")).send().await.unwrap().json().await.unwrap();
+    let items = status["transcript"].as_array().or(status["items"].as_array()).cloned().unwrap_or_default();
+    assert!(items.iter().any(|i| i["id"] == id.as_str() && i["status"] == "done" && i["text"] == "Toast is running the tests."), "{status}");
+
+    // stop and clear from a panel act on the session
+    client.post(harness.url("/api/orchestrator/cancel")).send().await.unwrap();
+    assert!(wait_for(&harness, &|c| *c == crate::OrchestratorCommand::Cancel).is_some());
+    client.delete(harness.url("/api/orchestrator/messages")).send().await.unwrap();
+    assert!(wait_for(&harness, &|c| *c == crate::OrchestratorCommand::ClearContext { handoff: None }).is_some());
+
+    // its own tools: a fresh start with a handoff, and the schedule
+    let call = |id: u64, name: &str, arguments: Value| {
+        let client = client.clone();
+        let url = harness.url("/mcp");
+        let body = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        async move { client.post(url).json(&body).send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let text_of = |v: &Value| v["result"]["content"][0]["text"].as_str().unwrap_or_default().to_string();
+    let cleared = call(1, "clear_own_context", json!({ "handoff": "Toast runs the tests in justgains." })).await;
+    assert_eq!(cleared["result"]["isError"], false, "{cleared}");
+    assert!(wait_for(&harness, &|c| *c == crate::OrchestratorCommand::ClearContext { handoff: Some("Toast runs the tests in justgains.".into()) }).is_some());
+
+    let added = call(2, "schedule_add", json!({ "prompt": "check on Toast", "name": "toast check", "every": "30m" })).await;
+    assert_eq!(added["result"]["isError"], false, "{added}");
+    let listed = call(3, "schedule_list", json!({})).await;
+    assert!(text_of(&listed).contains("toast check") && text_of(&listed).contains("every 30m"), "{listed}");
+    let bad = call(4, "schedule_add", json!({ "prompt": "x" })).await;
+    assert_eq!(bad["result"]["isError"], true);
+    let removed = call(5, "schedule_remove", json!({ "id": "toast check" })).await;
+    assert_eq!(removed["result"]["isError"], false, "{removed}");
+    assert_eq!(text_of(&call(6, "schedule_list", json!({})).await), "Nothing is scheduled.");
+
+    // bro's own timer fires a trigger: no agent involved
+    call(7, "schedule_add", json!({ "prompt": "say hi", "name": "soon", "in": "1s" })).await;
+    let fired = wait_for(&harness, &|c| matches!(c, crate::OrchestratorCommand::Scheduled { name, .. } if name == "soon"));
+    assert!(matches!(fired, Some(crate::OrchestratorCommand::Scheduled { ref prompt, persist: false, .. }) if prompt == "say hi"), "{fired:?}");
+    assert_eq!(text_of(&call(8, "schedule_list", json!({})).await), "Nothing is scheduled.", "a one-off is gone once it ran");
 }
 
 /// A workspace: `<root>/project` (project root) with cwd `project/app`.
@@ -1438,6 +1568,7 @@ async fn notifications_use_the_reason_and_the_recap() {
         cols: 100,
         rows: 30,
         agent: Some("claude".into()),
+        kind: None,
     });
     harness.register("done", None, None);
     let mut socket = harness.socket().await;

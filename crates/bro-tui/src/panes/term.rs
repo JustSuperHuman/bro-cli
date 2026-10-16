@@ -64,6 +64,17 @@ pub struct Meta {
     pub cleanup: Vec<PathBuf>,
     /// The caveman level it was launched with (the header's badge).
     pub caveman: Option<bro_core::caveman::Level>,
+    /// bro's orchestrator: the one session that drives the others (gold, pinned atop the sidebar).
+    pub orchestrator: bool,
+}
+
+/// The project key every orchestrator session carries: it belongs to no project, so it never joins a
+/// project's group, grid or close-all.
+pub const ORCHESTRATOR_KEY: &str = "bro:orchestrator";
+
+/// The orchestrator's stand-in project (named "★ orchestrator", rooted where it runs).
+pub fn orchestrator_project(cwd: &std::path::Path) -> ProjectKey {
+    ProjectKey { root: cwd.to_path_buf(), key: ORCHESTRATOR_KEY.into(), name: "★ orchestrator".into() }
 }
 
 /// What to run.
@@ -334,6 +345,10 @@ impl Term {
         }
         cmd.env("BRO", "1");
         cmd.env("BRO_SESSION_ID", &self.meta.sid);
+        // `bro open` / `bro ctl` when bro itself isn't on PATH
+        if let Ok(exe) = std::env::current_exe() {
+            cmd.env("BRO_BIN", exe);
+        }
         // `bro open` finds the bridge here (else via its discovery file)
         match self.svc.bridge_local_url() {
             Some(url) => cmd.env("BRO_BRIDGE_URL", url),
@@ -443,11 +458,12 @@ impl Term {
             shell: s.program.clone(),
             args: s.args.clone(),
             cwd: Some(self.meta.cwd.clone()),
-            project: Some(PathBuf::from(&self.meta.project.key)),
+            project: (!self.meta.orchestrator).then(|| PathBuf::from(&self.meta.project.key)),
             pid,
             cols: self.size.1,
             rows: self.size.0,
             agent: self.meta.harness.map(|h| h.label().to_string()),
+            kind: self.meta.orchestrator.then(|| "orchestrator".to_string()),
         }
     }
 
@@ -505,6 +521,25 @@ impl Term {
         self.typed += 1;
         self.scroll = 0;
         self.write(bytes);
+    }
+
+    /// Type `text` as one message and press Enter a moment later (a separate write, so the program doesn't
+    /// read the Enter as part of a paste).
+    pub fn submit(&mut self, text: &str) {
+        let bracketed = self.program_state.lock().bracketed_paste;
+        let text = text.replace("\r\n", "\n").replace(['\r', '\n'], " ");
+        if bracketed {
+            self.write(format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", "")).as_bytes());
+        } else {
+            self.write(text.as_bytes());
+        }
+        self.enter_at = Some(Instant::now() + Duration::from_millis(300));
+    }
+
+    /// Type a slash command key by key, let the program's command menu settle on it, then Enter.
+    pub fn type_command(&mut self, command: &str) {
+        self.write(command.as_bytes());
+        self.enter_at = Some(Instant::now() + Duration::from_millis(400));
     }
 
     /// Write to the program on bro's own behalf.

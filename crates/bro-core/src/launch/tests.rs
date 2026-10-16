@@ -22,6 +22,7 @@ fn spec(harness: Harness, profile: Option<&str>, provider: Option<&str>, model: 
         permission: Permission::Default,
         browser: BrowserMode::Off,
         extra_args: vec![],
+        orchestrator: false,
     }
 }
 
@@ -602,4 +603,87 @@ fn caveman_pi_and_omp_append_the_rules_file() {
     assert!(f.ends_with("megacave.md"), "{f}");
     let c = build(&spec(Harness::Omp, None, None, None), &caveman_ctx(crate::caveman::Level::Caveman)).unwrap();
     assert!(c.args.iter().any(|a| a.starts_with("--append-system-prompt=") && a.ends_with("caveman.md")), "{:?}", c.args);
+}
+
+fn orchestrator_ctx() -> LaunchCtx {
+    LaunchCtx { bridge_url: Some("http://127.0.0.1:7357".into()), ..ctx() }
+}
+
+fn orchestrator(harness: Harness) -> LaunchSpec {
+    LaunchSpec { orchestrator: true, ..spec(harness, None, None, None) }
+}
+
+#[test]
+fn orchestrator_needs_the_bridge() {
+    let _sb = setup();
+    let e = build(&orchestrator(Harness::Claude), &ctx()).unwrap_err();
+    assert!(format!("{e:#}").contains("bridge"), "{e:#}");
+}
+
+#[test]
+fn orchestrator_claude_gets_prompt_skill_and_mcp() {
+    let _sb = setup();
+    let c = build(&orchestrator(Harness::Claude), &orchestrator_ctx()).unwrap();
+    assert_eq!(env(&c, "BRO_ORCHESTRATOR"), Some("1"));
+    assert_eq!(c.cwd, crate::orchestrator::workspace(), "runs in ~/orchestrator, not the project");
+    assert!(c.cwd.is_dir() && c.cwd.ends_with("orchestrator"));
+    assert!(c.label.starts_with("orchestrator · claude"), "{}", c.label);
+    let prompt = std::fs::read_to_string(arg_after(&c.args, "--append-system-prompt-file").unwrap()).unwrap();
+    assert!(prompt.contains("You are the bro orchestrator") && prompt.contains("mcp__bro__"), "{prompt}");
+    let mcp: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--mcp-config").unwrap()).unwrap()).unwrap();
+    assert_eq!(mcp["mcpServers"]["bro"]["url"], "http://127.0.0.1:7357/mcp");
+    assert_eq!(arg_after(&c.args, "--allowedTools"), Some("mcp__bro"));
+    assert!(crate::orchestrator::skill_path(&crate::paths::claude_local_dir()).is_file());
+    // the variadic options come last, after every other option
+    let mcp_at = c.args.iter().position(|a| a == "--mcp-config").unwrap();
+    assert!(c.args[..mcp_at].iter().any(|a| a == "--append-system-prompt-file"));
+
+    // A plain launch gets none of it.
+    let c = build(&spec(Harness::Claude, None, None, None), &orchestrator_ctx()).unwrap();
+    assert!(env(&c, "BRO_ORCHESTRATOR").is_none() && !c.args.iter().any(|a| a == "--mcp-config"), "{:?}", c.args);
+}
+
+#[test]
+fn orchestrator_claude_merges_with_caveman() {
+    let _sb = setup();
+    let mut cx = caveman_ctx(crate::caveman::Level::Caveman);
+    cx.bridge_url = Some("http://127.0.0.1:7357".into());
+    let c = build(&orchestrator(Harness::Claude), &cx).unwrap();
+    assert_eq!(c.args.iter().filter(|a| *a == "--append-system-prompt-file").count(), 1, "{:?}", c.args);
+    let merged = std::fs::read_to_string(arg_after(&c.args, "--append-system-prompt-file").unwrap()).unwrap();
+    assert!(merged.contains("You are the bro orchestrator") && merged.contains("# Caveman mode"), "{merged}");
+}
+
+#[test]
+fn orchestrator_codex_gets_mcp_server_and_instructions() {
+    let _sb = setup();
+    let home = crate::paths::codex_local_dir();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "developer_instructions = \"Use tabs.\"\n").unwrap();
+    let mut cx = caveman_ctx(crate::caveman::Level::Caveman);
+    cx.bridge_url = Some("http://127.0.0.1:7357/".into());
+    let c = build(&orchestrator(Harness::Codex), &cx).unwrap();
+    assert!(has_seq(&c.args, &["-c", "mcp_servers.bro.url=\"http://127.0.0.1:7357/mcp\""]), "{:?}", c.args);
+    let all: Vec<&String> = c.args.iter().filter(|a| a.starts_with("developer_instructions=")).collect();
+    assert_eq!(all.len(), 1, "one -c developer_instructions carries everything");
+    let parsed: toml::Table = format!("v = {}", all[0].strip_prefix("developer_instructions=").unwrap()).parse().unwrap();
+    let text = parsed["v"].as_str().unwrap();
+    assert!(text.starts_with("Use tabs.\n\n# You are the bro orchestrator"), "{text}");
+    assert!(text.contains("# Caveman mode"));
+    assert!(crate::orchestrator::skill_path(&home).is_file());
+}
+
+#[test]
+fn orchestrator_pi_and_omp_get_the_ctl_brief() {
+    let _sb = setup();
+    let c = build(&orchestrator(Harness::Pi), &orchestrator_ctx()).unwrap();
+    let f = arg_after(&c.args, "--append-system-prompt").unwrap();
+    assert!(std::fs::read_to_string(f).unwrap().contains("bro ctl list_sessions"));
+    let mut cx = caveman_ctx(crate::caveman::Level::Caveman);
+    cx.bridge_url = Some("http://127.0.0.1:7357".into());
+    let c = build(&orchestrator(Harness::Omp), &cx).unwrap();
+    let flags: Vec<&String> = c.args.iter().filter(|a| a.starts_with("--append-system-prompt=")).collect();
+    assert_eq!(flags.len(), 1, "{:?}", c.args);
+    let body = std::fs::read_to_string(flags[0].strip_prefix("--append-system-prompt=").unwrap()).unwrap();
+    assert!(body.contains("You are the bro orchestrator") && body.contains("# Caveman mode"));
 }

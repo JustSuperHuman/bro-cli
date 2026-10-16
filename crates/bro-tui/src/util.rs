@@ -62,6 +62,21 @@ pub fn default_shell(configured: Option<&str>) -> (String, Vec<String>) {
 }
 
 /// Unix seconds now.
+/// A reset time, as short as it can be: "3:40pm" today, "Fri 3:40pm" this week, "Oct 21" after that.
+pub fn reset_time(at: i64) -> String {
+    use chrono::{Datelike, TimeZone};
+    let Some(when) = chrono::Local.timestamp_opt(at, 0).single() else { return "?".into() };
+    let now = chrono::Local::now();
+    let clock = when.format("%-I:%M%P").to_string();
+    if when.date_naive() == now.date_naive() {
+        clock
+    } else if when > now && when - now < chrono::Duration::days(6) {
+        format!("{} {clock}", when.weekday())
+    } else {
+        when.format("%b %-d").to_string()
+    }
+}
+
 pub fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }

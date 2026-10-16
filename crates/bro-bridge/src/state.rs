@@ -66,6 +66,8 @@ pub(crate) struct AppState {
     pub orchestrator: Arc<Orchestrator>,
     /// Every session's watchdog (see [`crate::watchdog`]).
     pub watchdogs: Arc<crate::watchdog::Watchdogs>,
+    /// The orchestrator's scheduled triggers (see [`crate::schedule`]).
+    pub schedule: Arc<crate::schedule::Schedule>,
     /// The bridge runtime, once it runs (timers need it; tests without a
     /// runtime fall back to immediate behaviour).
     pub runtime: Arc<OnceLock<tokio::runtime::Handle>>,
@@ -85,6 +87,7 @@ impl AppState {
         let (events, _) = broadcast::channel(4096);
         let data_root = config.data_root.clone();
         let orchestrator = Arc::new(Orchestrator::new(&data_root, events.clone()));
+        let schedule = Arc::new(crate::schedule::Schedule::new(&data_root));
         let projects = ProjectStore::load(&data_root);
         let published_projects = projects.visible(std::iter::empty());
         let (shutdown, _) = watch::channel(false);
@@ -109,6 +112,7 @@ impl AppState {
             config: Arc::new(config),
             orchestrator,
             watchdogs: Arc::new(crate::watchdog::Watchdogs::default()),
+            schedule,
             runtime: Arc::new(OnceLock::new()),
             clients: Arc::new(AtomicUsize::new(0)),
             viewers: Arc::new(Mutex::new(HashMap::new())),

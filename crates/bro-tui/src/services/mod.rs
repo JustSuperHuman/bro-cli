@@ -141,6 +141,16 @@ struct Inner {
     focused: Mutex<Option<String>>,
 }
 
+/// Words spoken with push-to-talk, on their way to the orchestrator session.
+#[derive(Clone, Debug)]
+pub struct VoiceMsg {
+    pub text: String,
+    /// bridge id of the session in focus when the key went down
+    pub focused: Option<String>,
+    /// the live voice's delegation id: the orchestrator's answer goes back to be spoken
+    pub tag: Option<String>,
+}
+
 /// GPT-Live's standing instructions: it is Hugh's voice; Hugh (Claude, through the bridge) does the work.
 pub(crate) const LIVE_INSTRUCTIONS: &str = "You are Hugh, the voice of bro, the user's terminal workspace. Coding agents \
 (Claude Code, Codex) run there in sessions named Mal, Pinky, Toast, Minty, Lilac, Sky and Bitty, in projects such as justgains. \
@@ -534,21 +544,35 @@ impl Services {
         self.inner.focused.lock().clone()
     }
 
-    /// A dictated message for Hugh, with the session the user was looking at when they started speaking.
+    /// A dictated message for the orchestrator session, with the session the user was looking at when they
+    /// started speaking. The UI delivers it (starting an orchestrator when none runs).
     pub(crate) fn orchestrator_send_voice(&self, text: String, focused: Option<String>, tag: Option<String>) {
-        if !self.bridge_running() {
-            self.send(Event::Toast(crate::alerts::Kind::Error, "Hugh needs the bridge: turn it on in settings".into()));
-            return;
+        self.send(Event::Voice(Box::new(VoiceMsg { text, focused, tag })));
+    }
+
+    /// The orchestrator session's answer to a panel message the bridge routed to it.
+    pub(crate) fn orchestrator_answer(&self, id: &str, text: &str, ok: bool) {
+        self.with_bridge("bridge::orchestrator_answer", |b| b.orchestrator_answer(id, text, ok));
+    }
+
+    /// The orchestrator closed: its session-only scheduled triggers go with it.
+    pub(crate) fn schedule_clear_session(&self) {
+        self.with_bridge("bridge::schedule_clear_session", |b| b.schedule_clear_session());
+    }
+
+    /// Claim a watchdog wake-up for the orchestrator: (generation, the reviewer brief).
+    pub fn watchdog_brief(&self, sid: &str, wake: bro_bridge::WatchdogWake) -> Result<(u64, String), String> {
+        if self.is_demo() {
+            return Err("the demo doesn't run reviews".into());
         }
-        let context = bro_bridge::MessageContext { voice: true, focused_session: focused, tag: tag.clone() };
-        self.with_bridge("bridge::orchestrator_send_with", |b| {
-            if let Err(e) = b.orchestrator_send_with(text, context) {
-                match &tag {
-                    Some(id) => self.voice_delegation_result(id, &format!("Hugh isn't available: {e}")),
-                    None => self.send(Event::Toast(crate::alerts::Kind::Error, format!("Hugh: {e}"))),
-                }
-            }
-        });
+        let mut out = Err("the bridge isn't running".to_string());
+        self.with_bridge("bridge::watchdog_brief", |b| out = b.watchdog_brief(sid, wake));
+        out
+    }
+
+    /// The orchestrator's review of a watchdog wake-up.
+    pub fn watchdog_finish(&self, sid: &str, generation: u64, summary: String, ok: bool) {
+        self.with_bridge("bridge::watchdog_finish", |b| b.watchdog_finish(sid, generation, summary, ok));
     }
 
     /// GPT-Live: Hugh's answer to a delegation, for the voice to speak.
@@ -642,16 +666,6 @@ impl Services {
         self.with_bridge("bridge::watchdog_pause", |b| {
             b.watchdog_pause(sid, paused);
         });
-    }
-
-    /// Wake the watchdog now: a reviewer starts on the bridge runtime.
-    pub fn watchdog_wake(&self, sid: &str, wake: bro_bridge::WatchdogWake) -> Result<(), String> {
-        if self.is_demo() {
-            return Err("the demo doesn't run reviewers".into());
-        }
-        let mut out = Err("the bridge isn't running".to_string());
-        self.with_bridge("bridge::watchdog_wake", |b| out = b.watchdog_wake(sid, wake));
-        out
     }
 
     /// Bridge updates: keep the cache current and hand the event to the UI.

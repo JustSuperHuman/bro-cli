@@ -133,25 +133,26 @@ impl App {
         }
     }
 
-    /// Start a reviewer for `pane`'s watchdog now. `manual`: you asked (a refusal is news, not an error).
+    /// Wake `pane`'s watchdog now: the orchestrator reviews it (started if none runs). `manual`: you asked (a
+    /// refusal is news, not an error).
     pub(crate) fn wake_watchdog(&mut self, pane: PaneId, reason: String, manual: bool) {
         let Some(t) = self.panes.get(&pane).and_then(|p| p.as_term_ref()) else { return };
-        let sid = t.meta.sid.clone();
+        if t.meta.orchestrator {
+            return;
+        }
         let session = WatchedSession { title: t.display_name(), agent: t.meta.label.clone(), cwd: t.meta.cwd.clone() };
         let name = self.watched_name(pane);
         let cfg = self.svc.settings().watchdog;
-        let reviewer = {
-            let st = self.svc.state();
-            st.profiles.ready().and_then(|ps| pick_reviewer(ps, &st.usage, &cfg)).map(|(p, _)| reviewer_launch(p, &cfg))
+        let prompt = cfg.prompt.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| bro_bridge::watchdog::DEFAULT_PROMPT.to_string());
+        let reviewer = bro_bridge::watchdog::ReviewerLaunch {
+            kind: bro_bridge::watchdog::ReviewerKind::Claude,
+            program: String::new(),
+            env: vec![],
+            env_remove: vec![],
+            model: None,
+            label: "the orchestrator".into(),
         };
-        let Some(reviewer) = reviewer else {
-            self.raise(Kind::NeedsYou, format!("{name} · watchdog can't wake: no signed-in Claude or Codex login has usage left"));
-            return;
-        };
-        let prompt = cfg.prompt.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| bro_bridge::watchdog::DEFAULT_PROMPT.to_string());
-        if let Err(e) = self.svc.watchdog_wake(&sid, WatchdogWake { reason, reviewer, prompt, session }) {
-            self.toast(if manual { Kind::Info } else { Kind::Error }, format!("{name} · watchdog: {e}"));
-        }
+        self.watchdog_to_orchestrator(pane, WatchdogWake { reason, reviewer, prompt, session }, &name, manual);
     }
 
     /// Each batch of events: wake the watchdogs whose sessions stopped and sat idle long enough.

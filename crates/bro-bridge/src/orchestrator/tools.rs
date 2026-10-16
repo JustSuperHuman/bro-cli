@@ -218,6 +218,41 @@ pub fn definitions() -> Vec<Value> {
             &["sessionId"],
         ),
         tool(
+            "clear_own_context",
+            "For bro's orchestrator: start yourself on a fresh conversation once this turn ends (Claude Code /clear, Codex /new), when your context is long, stale or full. bro does it after your reply, then sends you `handoff` as your first message, so put everything you still need in it: what is running where, what you promised the user, open questions. Finish your reply right after calling this.",
+            json!({
+                "handoff": { "type": "string", "description": "Notes to your fresh self: sessions and what each is doing, pending work, the user's preferences you learned." }
+            }),
+            &[],
+        ),
+        tool(
+            "schedule_add",
+            "Schedule a prompt for bro to give you later, once or on repeat; bro's own timer fires it (you don't need to keep time or poll). Say when with exactly one of: in (\"10m\", \"2h\"), at (\"17:30\", \"2026-10-20 09:00\"), every (\"30m\", \"1d\"; optional at = first run), daily (\"09:00\", optional days like [\"mon\",\"fri\"] or \"weekdays\"). persist=false (default) lasts while this orchestrator session runs; persist=true survives restarts and runs on whichever bro on this machine is up (only one of them runs each occurrence, within 60 seconds of its time; one more than 60 seconds late is skipped).",
+            json!({
+                "prompt": { "type": "string", "description": "What you'll be told when it fires: a self-contained instruction (\"check whether Toast's tests pass and tell me\")." },
+                "name": { "type": "string", "description": "Short name to list and remove it by." },
+                "in": { "type": "string" },
+                "at": { "type": "string" },
+                "every": { "type": "string" },
+                "daily": { "type": "string" },
+                "days": { "type": "array", "items": { "type": "string" } },
+                "persist": { "type": "boolean", "description": "Keep it across restarts and bro instances (default false: this session only)." }
+            }),
+            &["prompt"],
+        ),
+        tool(
+            "schedule_list",
+            "Every scheduled trigger: id, name, prompt, when, whether it persists, next and last run.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "schedule_remove",
+            "Remove a scheduled trigger by id (or unique id prefix, or its name).",
+            json!({ "id": { "type": "string" } }),
+            &["id"],
+        ),
+        tool(
             "notify_user",
             "Send a notification (sound + toast) to the user's connected devices, e.g. when something they asked you to watch finishes.",
             json!({
@@ -319,6 +354,25 @@ fn resolve_session(app: &AppState, args: &Value) -> Result<String, String> {
     ))
 }
 
+/// bro's orchestrator session (an agent driving bro through these tools).
+pub(crate) fn is_orchestrator(app: &AppState, session_id: &str) -> bool {
+    app.summary(session_id)
+        .is_some_and(|session| session.kind.as_deref() == Some("orchestrator"))
+}
+
+/// [`resolve_session`] for tools that act on a session: never the orchestrator itself, so it
+/// cannot type into, wait on or close its own terminal.
+fn resolve_worker(app: &AppState, args: &Value) -> Result<String, String> {
+    let id = resolve_session(app, args)?;
+    if is_orchestrator(app, &id) {
+        return Err(
+            "That is the orchestrator's own session. Act on the other sessions (list_sessions shows them)."
+                .into(),
+        );
+    }
+    Ok(id)
+}
+
 fn session_label(app: &AppState, session_id: &str) -> String {
     app.summary(session_id)
         .map(|session| session.title)
@@ -389,6 +443,10 @@ pub fn summarize(app: &AppState, name: &str, args: &Value) -> String {
                 .unwrap_or_default()
         ),
         "close_session" => format!("Closed {}", target()),
+        "clear_own_context" => "Asked bro for a fresh start after this turn".into(),
+        "schedule_add" => format!("Scheduled {}", string_arg(args, "name").or_else(|| string_arg(args, "prompt")).unwrap_or_default()),
+        "schedule_list" => "Listed the schedule".into(),
+        "schedule_remove" => format!("Removed {} from the schedule", string_arg(args, "id").unwrap_or_default()),
         "close_all_sessions" => match string_arg(args, "project") {
             Some(project) => format!("Closed the tabs in {project}"),
             None => "Closed every tab".into(),
@@ -517,7 +575,7 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             })
         }
         "send_input" => {
-            let id = resolve_session(app, args)?;
+            let id = resolve_worker(app, args)?;
             let text = args
                 .get("text")
                 .and_then(Value::as_str)
@@ -533,7 +591,7 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             ))
         }
         "send_keys" => {
-            let id = resolve_session(app, args)?;
+            let id = resolve_worker(app, args)?;
             let keys: Vec<String> = args
                 .get("keys")
                 .and_then(Value::as_array)
@@ -560,7 +618,7 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             ))
         }
         "answer_prompt" => {
-            let id = resolve_session(app, args)?;
+            let id = resolve_worker(app, args)?;
             let context = app
                 .input_context(&id)
                 .ok_or("The session is no longer available.")?;
@@ -616,7 +674,7 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             ))
         }
         "wait_for_output" => {
-            let id = resolve_session(app, args)?;
+            let id = resolve_worker(app, args)?;
             let timeout = Duration::from_secs(
                 integer_arg(args, "timeoutSeconds")
                     .unwrap_or(15)
@@ -678,8 +736,43 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             .await
             .map_err(|error| error.to_string())?
         }
+        "clear_own_context" => {
+            let handoff = string_arg(args, "handoff").filter(|h| !h.trim().is_empty());
+            app.send_command(crate::BridgeCommand::Orchestrator(crate::OrchestratorCommand::ClearContext { handoff: handoff.clone() }));
+            Ok(format!(
+                "bro will start you on a fresh conversation as soon as this turn ends{}. Finish your reply now.",
+                if handoff.is_some() { ", then send you your handoff notes" } else { " (no handoff: you'll start with nothing)" }
+            ))
+        }
+        "schedule_add" => {
+            let now = chrono::Utc::now().timestamp();
+            let trigger = crate::schedule::trigger_from_args(args, now)?;
+            let schedule = app.schedule.clone();
+            let added = tokio::task::spawn_blocking(move || schedule.add(trigger, now)).await.map_err(|e| e.to_string())??;
+            let mut out = added.public();
+            out["note"] = json!(if added.persist {
+                "Persistent: runs on whichever bro is up, even after restarts."
+            } else {
+                "Session only: ends when this orchestrator closes."
+            });
+            Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+        }
+        "schedule_list" => {
+            let schedule = app.schedule.clone();
+            let list = tokio::task::spawn_blocking(move || schedule.list()).await.map_err(|e| e.to_string())?;
+            if list.is_empty() {
+                return Ok("Nothing is scheduled.".into());
+            }
+            Ok(serde_json::to_string_pretty(&list.iter().map(|t| t.public()).collect::<Vec<_>>()).unwrap_or_default())
+        }
+        "schedule_remove" => {
+            let wanted = string_arg(args, "id").ok_or("id is required.")?;
+            let schedule = app.schedule.clone();
+            let removed = tokio::task::spawn_blocking(move || schedule.remove(&wanted)).await.map_err(|e| e.to_string())??;
+            Ok(format!("Removed \"{}\" ({}).", removed.name, removed.when.describe()))
+        }
         "close_session" => {
-            let id = resolve_session(app, args)?;
+            let id = resolve_worker(app, args)?;
             let label = session_label(app, &id);
             app.dispatch(&id, COMMAND_KILL, "", 0, 0)?;
             Ok(format!("Closed \"{label}\"."))
@@ -693,6 +786,13 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
                 None => None,
                 Some(project) => Some(resolve_project(app, &project)?),
             };
+            // the orchestrator never closes itself
+            except.extend(
+                app.summaries()
+                    .into_iter()
+                    .filter(|session| session.kind.as_deref() == Some("orchestrator"))
+                    .map(|session| session.id),
+            );
             let cleanup = crate::rest_sessions::Cleanup {
                 project_id,
                 except,
@@ -704,10 +804,11 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
         "wait_for_sessions" => {
             let mut ids = Vec::new();
             for wanted in string_list(args, "sessionIds") {
-                ids.push(resolve_session(app, &json!({ "sessionId": wanted }))?);
+                ids.push(resolve_worker(app, &json!({ "sessionId": wanted }))?);
             }
             if ids.is_empty() {
-                let summaries = app.summaries();
+                let mut summaries = app.summaries();
+                summaries.retain(|session| session.kind.as_deref() != Some("orchestrator"));
                 let agents: Vec<String> = summaries
                     .iter()
                     .filter(|session| session.agent.is_some())
@@ -917,7 +1018,7 @@ async fn type_text(app: &AppState, id: &str, text: &str, submit: bool) -> Result
 
 /// `/clear` (Claude Code) or `/new` (Codex, Pi, omp), then wait for the fresh prompt.
 async fn clear_context(app: &AppState, args: &Value) -> Result<String, String> {
-    let id = resolve_session(app, args)?;
+    let id = resolve_worker(app, args)?;
     let view = app.session_view(&id).ok_or("The session is no longer available.")?;
     let agent = view.summary.agent.clone().ok_or("That tab isn't running an agent.")?;
     match view.summary.agent_activity.as_deref() {

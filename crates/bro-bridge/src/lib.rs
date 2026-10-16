@@ -49,6 +49,7 @@ mod model;
 mod net;
 mod notifications;
 mod orchestrator;
+pub mod schedule;
 mod output_filter;
 mod profiles;
 mod project_store;
@@ -154,6 +155,9 @@ pub struct SessionMeta {
     pub rows: u16,
     /// "claude" | "codex" | "pi" | "omp" when bro launched an agent
     pub agent: Option<String>,
+    /// "orchestrator" for bro's orchestrator session (its tools never act on it).
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// Remote client wants a new session (POST /api/sessions or ws `create`).
@@ -213,6 +217,22 @@ pub enum BridgeCommand {
         line: Option<u32>,
         column: Option<u32>,
     },
+    /// For bro's orchestrator session (see [`Bridge::route_orchestrator`]).
+    Orchestrator(OrchestratorCommand),
+}
+
+/// What bro's orchestrator session is asked to do, once [`Bridge::route_orchestrator`] hands it everything
+/// the built-in orchestrator (Hugh) used to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrchestratorCommand {
+    /// A message from an orchestrator panel (web, phone): answer with [`Bridge::orchestrator_answer`] and `id`.
+    Message { id: String, text: String, voice: bool, focused: Option<String>, tag: Option<String> },
+    /// A scheduled trigger came due (bro fires it; type `prompt` in).
+    Scheduled { id: String, name: String, prompt: String, persist: bool },
+    /// Stop the running turn.
+    Cancel,
+    /// Start the orchestrator on a fresh conversation once its turn ends, then give it `handoff`.
+    ClearContext { handoff: Option<String> },
 }
 
 impl std::fmt::Debug for BridgeCommand {
@@ -244,6 +264,7 @@ impl std::fmt::Debug for BridgeCommand {
                 .field("line", line)
                 .field("column", column)
                 .finish(),
+            Self::Orchestrator(c) => f.debug_tuple("Orchestrator").field(c).finish(),
             Self::OpenInEditor { id, path, line, column } => f
                 .debug_struct("OpenInEditor")
                 .field("id", id)
@@ -362,6 +383,7 @@ impl Bridge {
                     }
                 };
                 let _ = host_state.runtime.set(runtime.handle().clone());
+                runtime.spawn(schedule::run(host_state.clone()));
                 runtime.block_on(run_host(host_state, cfg, ready_tx));
                 runtime.shutdown_timeout(Duration::from_secs(1));
             })?;
@@ -394,6 +416,7 @@ impl Bridge {
         );
         summary.pid = meta.pid;
         summary.args = meta.args;
+        summary.kind = meta.kind;
         let hint = meta.agent.as_deref().and_then(agents::Agent::parse);
         let project = meta
             .project
@@ -493,6 +516,11 @@ impl Bridge {
     /// Interrupts the orchestrator's running turn (and drops queued messages).
     pub fn orchestrator_cancel(&self) -> bool {
         let state = self.state().clone();
+        if state.orchestrator.routed() {
+            state.orchestrator.cancel_routed();
+            state.send_command(BridgeCommand::Orchestrator(OrchestratorCommand::Cancel));
+            return true;
+        }
         match state.runtime.get().cloned() {
             Some(runtime) => {
                 let _guard = runtime.enter();
@@ -500,6 +528,40 @@ impl Bridge {
             }
             None => false,
         }
+    }
+
+    /// Hand everything the built-in orchestrator did to bro's orchestrator session: panel messages arrive as
+    /// [`OrchestratorCommand::Message`], cancel / clear as commands, and scheduled triggers fire. Off: Hugh
+    /// answers panels himself again.
+    pub fn route_orchestrator(&self, on: bool) {
+        self.state().orchestrator.set_routed(on);
+    }
+
+    /// The orchestrator session's answer to a routed panel message (`id` from the command).
+    pub fn orchestrator_answer(&self, id: &str, text: &str, ok: bool) {
+        self.state().orchestrator.answer(id, text, ok);
+    }
+
+    /// The orchestrator closed: its session-only scheduled triggers go with it.
+    pub fn schedule_clear_session(&self) {
+        self.state().schedule.clear_session();
+    }
+
+    /// Every scheduled trigger (session ones first).
+    pub fn schedules(&self) -> Vec<schedule::Trigger> {
+        self.state().schedule.list()
+    }
+
+    /// A watchdog wake-up for the orchestrator session to do instead of a headless reviewer: claims the wake
+    /// (the watchdog shows it running) and returns its generation and the full brief (instructions, plan,
+    /// what happened). Report back with [`Bridge::watchdog_finish`].
+    pub fn watchdog_brief(&self, id: &str, wake: WatchdogWake) -> Result<(u64, String), String> {
+        watchdog::run::brief_for_orchestrator(self.state(), id, wake)
+    }
+
+    /// The orchestrator finished a watchdog wake-up from [`Bridge::watchdog_brief`].
+    pub fn watchdog_finish(&self, id: &str, generation: u64, summary: String, ok: bool) {
+        self.state().watchdogs.finish(id, generation, summary, ok);
     }
 
     /// Turn progress for bro's own UI. Runs on a bridge thread; don't block.
