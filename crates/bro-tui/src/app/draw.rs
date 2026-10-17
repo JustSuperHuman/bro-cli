@@ -27,19 +27,28 @@ impl App {
         crate::theme::project_color(key, &self.theme)
     }
 
-    /// The tiled sessions by project: (key, name, panes), in tile order, each project where it first appears.
-    /// The orchestrator isn't in any: it has its own column (see [`App::orchestrator_column`]).
+    /// The tiled sessions by what they share (project, agent, login, model, folder: [`Term::tile_group`]):
+    /// (project key, label, panes), in tile order, each group where it first appears. The orchestrator isn't in
+    /// any: it has its own column (see [`App::orchestrator_column`]).
     pub(crate) fn tile_groups(&self) -> Vec<(String, String, Vec<crate::pane::PaneId>)> {
-        let mut groups: Vec<(String, String, Vec<crate::pane::PaneId>)> = vec![];
+        let mut groups: Vec<(String, String, String, Vec<crate::pane::PaneId>)> = vec![];
         let column = self.orchestrator_column(self.body_panes()).map(|(id, _)| id);
         for &id in self.stack.iter().filter(|id| Some(**id) != column) {
-            let (key, name) = self.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| (t.meta.project.key.clone(), t.meta.project.name.clone())).unwrap_or_default();
-            match groups.iter_mut().find(|(k, ..)| *k == key) {
+            let (group, project, label) = self
+                .panes
+                .get(&id)
+                .and_then(|p| p.as_term_ref())
+                .map(|t| {
+                    let (group, label) = t.tile_group();
+                    (group, t.meta.project.key.clone(), label)
+                })
+                .unwrap_or_default();
+            match groups.iter_mut().find(|(g, ..)| *g == group) {
                 Some((.., ids)) => ids.push(id),
-                None => groups.push((key, name, vec![id])),
+                None => groups.push((group, project, label, vec![id])),
             }
         }
-        groups
+        groups.into_iter().map(|(_, project, label, ids)| (project, label, ids)).collect()
     }
 
     /// Tiled with other sessions, the orchestrator takes a full-height column on the right of `body`: (its pane,
@@ -87,6 +96,7 @@ impl App {
             self.draw_welcome(f, self.body);
         } else {
             self.draw_panes(f);
+            self.draw_tile_edges(f);
         }
         self.draw_selection(f);
         // the backdrop fills whatever is still empty; toasts and overlays then sit on top of it
@@ -118,6 +128,67 @@ impl App {
         }
     }
 
+    /// Shared borders (a setting): tiles side by side draw one line between them, not two.
+    pub(super) fn shared_borders(&self) -> bool {
+        self.stacked() && !self.stack_zoom && self.svc.settings().shared_borders
+    }
+
+    /// Held tile edges carry a handle; the edge under the mouse, or being dragged, lights up with one.
+    fn draw_tile_edges(&self, f: &mut Frame) {
+        if !self.stacked() || self.stack_zoom || self.grown || self.overlay.is_open() {
+            return;
+        }
+        use crate::priority::Lock;
+        let t = &self.theme;
+        let hot = match self.tile_drag {
+            Some((pane, ax, far, _)) => Some(Lock { pane, ax, far, at: 0 }),
+            None => self.tile_edge(self.hover).map(|(pane, ax, far)| {
+                let edge = Lock { pane, ax, far, at: 0 };
+                self.held_cut(edge).unwrap_or(edge)
+            }),
+        };
+        let side = |r: Rect, ax: usize, far: bool| match (ax, far) {
+            (0, true) => Rect { x: r.right() - 1, width: 1, ..r },
+            (0, false) => Rect { width: 1, ..r },
+            (_, true) => Rect { y: r.bottom() - 1, height: 1, ..r },
+            (_, false) => Rect { height: 1, ..r },
+        };
+        let shared = self.shared_borders();
+        for l in self.locks.iter().copied().chain(hot) {
+            let Some(&(_, r)) = self.outer.iter().find(|(id, _)| *id == l.pane) else { continue };
+            let across: Vec<Rect> = self.across(l.pane, r, l.ax, l.far).map(|x| x.1).collect();
+            let Some(&q) = across.first() else { continue };
+            let lit = hot.is_some_and(|h| (h.pane, h.ax, h.far) == (l.pane, l.ax, l.far));
+            let (first, second) = if l.far { (r, q) } else { (q, r) };
+            // with shared borders the one line is the right or lower pane's edge (the other pane is drawn onto it)
+            let touching = if l.ax == 0 { second.x == first.right() } else { second.y == first.bottom() };
+            if lit {
+                if shared && touching {
+                    let near: Vec<Rect> = if l.far { across.clone() } else { vec![r] };
+                    for q in near {
+                        f.buffer_mut().set_style(side(q, l.ax, false), ui::bold_accent(t));
+                    }
+                } else {
+                    f.buffer_mut().set_style(side(r, l.ax, l.far), ui::bold_accent(t));
+                    for &q in &across {
+                        f.buffer_mut().set_style(side(q, l.ax, !l.far), ui::bold_accent(t));
+                    }
+                }
+            }
+            // on the left or upper pane's frame (clear of the titles): under the mouse while it's there, else
+            // halfway along what the two share
+            let line = if shared && touching { side(second, l.ax, false) } else { side(first, l.ax, true) };
+            let at = |lo: u16, hi: u16, mouse: u16| if lit && (lo..hi).contains(&mouse) { mouse } else { lo + (hi - lo) / 2 };
+            let cell = if l.ax == 0 {
+                Rect { y: at(first.y.max(second.y), first.bottom().min(second.bottom()), self.hover.y), height: 1, ..line }
+            } else {
+                Rect { x: at(first.x.max(second.x), first.right().min(second.right()), self.hover.x), width: 1, ..line }
+            };
+            let glyph = if l.ax == 0 { "↔" } else { "↕" };
+            ui::line(f, cell, vec![Span::styled(glyph, if lit { ui::bold_accent(t) } else { fg(t.muted) })]);
+        }
+    }
+
     /// The visible sessions whose agent is mid-turn.
     pub(super) fn working_rects(&self) -> Vec<Rect> {
         self.inner.iter().filter(|(id, _)| self.panes.get(id).is_some_and(|p| p.is_terminal() && p.busy())).map(|(_, r)| *r).collect()
@@ -128,15 +199,16 @@ impl App {
         let time = self.start.elapsed().as_secs_f64();
         let body = self.body_panes();
         let mut rects = vec![];
-        // Tiled sessions from two or more projects: one colored frame per project around its sessions.
+        // Tiled sessions that share a project, agent, login, model and folder: one colored frame around them that
+        // names what they share once.
         let mut groups: Vec<(Rect, String, String, usize)> = vec![];
         // every project region (framed or not) and, per entry of `groups`, its index here: the priority grow
         // resizes the regions with the panes
         let mut regions: Vec<(Rect, bool)> = vec![];
         let mut group_tags: Vec<usize> = vec![];
         // the orchestrator's column on the right; the others tile beside it
-        let column = self.orchestrator_column(body);
-        let body = match column {
+        let mut column = self.orchestrator_column(body);
+        let mut body = match column {
             Some((_, c)) => Rect { width: body.width - c.width, ..body },
             None => body,
         };
@@ -146,12 +218,15 @@ impl App {
             let by_project = if self.stack_zoom { vec![] } else { self.tile_groups() };
             rects = if self.stack_zoom {
                 if focus == 0 { vec![] } else { vec![(focus, body)] }
-            } else if by_project.len() >= 2 {
-                let weights: Vec<usize> = by_project.iter().map(|(_, _, ids)| ids.len()).collect();
+            } else if by_project.len() >= 2 || by_project.first().is_some_and(|(_, _, ids)| ids.len() >= 2) {
+                // a lone session beside a big group keeps a working share, not a sliver
+                let floor = tiled.len().div_ceil(4);
+                let weights: Vec<usize> = by_project.iter().map(|(_, _, ids)| ids.len().max(floor)).collect();
                 let mut out = vec![];
                 for ((key, name, ids), region) in by_project.into_iter().zip(crate::layout::group_regions(body, &weights)) {
-                    // too small to spare a ring of cells: the panes keep the whole region
-                    let framed = region.width >= 14 && region.height >= 6;
+                    // a lone session's own header says it all; too small to spare a ring of cells: the panes keep
+                    // the whole region
+                    let framed = ids.len() >= 2 && region.width >= 14 && region.height >= 6;
                     let inside = if framed { Rect { x: region.x + 1, y: region.y + 1, width: region.width - 2, height: region.height - 2 } } else { region };
                     out.extend(crate::layout::stack_rects(inside, &ids));
                     if framed {
@@ -174,6 +249,29 @@ impl App {
             }
             (tab.focus, tab.zoom)
         };
+        // Tile edges you dragged hold where you left them, the orchestrator's column's too; the rest flow around.
+        if self.stacked() && !zoomed && !self.locks.is_empty() {
+            let all: Vec<_> = rects.iter().copied().chain(column).collect();
+            if let Some(held) = crate::priority::lock(self.body_panes(), &all, &regions, &self.locks) {
+                let at = |id| held.panes.iter().find(|(p, _)| *p == id).map(|x| x.1).unwrap_or_default();
+                for (i, (region, framed)) in regions.iter_mut().enumerate() {
+                    *region = if *framed {
+                        held.frames.iter().find(|(tag, _)| *tag == i).map_or(*region, |x| x.1)
+                    } else {
+                        rects.iter().filter(|(_, r)| region.contains(r.as_position())).fold(Rect::default(), |u, (id, _)| if u.is_empty() { at(*id) } else { u.union(at(*id)) })
+                    };
+                }
+                for (i, &tag) in group_tags.iter().enumerate() {
+                    groups[i].0 = regions[tag].0;
+                }
+                column = column.map(|(id, _)| (id, at(id)));
+                if let Some((_, c)) = column {
+                    body.width = c.x - body.x;
+                }
+                rects = rects.into_iter().map(|(id, _)| (id, at(id))).collect();
+            }
+        }
+        self.tile_regions = regions.clone();
         // A ctrl+clicked session grows to a working size inside this arrangement; its neighbours give way.
         let mut folded = vec![];
         let grown = self.priority.filter(|_| !zoomed).and_then(|id| crate::priority::prioritize(body, &rects, &regions, id, crate::priority::want(body)));
@@ -204,13 +302,31 @@ impl App {
             ui::group_frame(f, *region, name, *count, color, holds_focus, &t);
         }
         let grouped = !groups.is_empty();
+        // inside a frame a tile goes by its sidebar number (alt+1..9)
+        let numbers: Vec<crate::pane::PaneId> = if grouped { crate::sidebar::live_order(&self.live_infos(), &self.past_infos(), &self.open_infos()) } else { vec![] };
         let now = std::time::Instant::now();
         self.card_links.clear();
         self.flips.retain(|id, flip| self.panes.contains_key(id) && (flip.back || flip.turning(now)));
-        for (id, r) in rects {
+        // Shared borders: each tile is drawn one cell onto the neighbour to its right and below, so the two draw
+        // one line; its status moves up to the title band (the line below is the next tile's title). The layout
+        // (`outer`) stays as laid out. Top to bottom, left to right, so each title band lands over the line above.
+        let shared = self.shared_borders() && !zoomed;
+        let mut rects = rects;
+        if shared {
+            rects.sort_by_key(|(_, r)| (r.y, r.x));
+        }
+        let laid: Vec<Rect> = rects.iter().map(|(_, r)| *r).collect();
+        let mut drawn = vec![];
+        for (id, layout) in rects {
             let Some(p) = self.panes.get(&id) else { continue };
+            let r = if shared { onto_neighbours(layout, &laid) } else { layout };
+            drawn.push(r);
             let focused = id == focus && !self.side_focus && !self.overlay.is_open();
             let (mut title, status) = p.header(&t, time);
+            let in_frame = grouped && groups.iter().any(|(region, ..)| region.contains(layout.as_position()));
+            if in_frame && let Some(term) = p.as_term_ref() {
+                title = term.group_title(numbers.iter().position(|n| *n == id).map(|i| i + 1).filter(|n| *n <= 9));
+            }
             if !focused {
                 title = Line::from(title.spans.into_iter().map(|s| Span::styled(s.content, s.style.remove_modifier(Modifier::BOLD).fg(t.muted))).collect::<Vec<_>>());
             }
@@ -226,8 +342,8 @@ impl App {
             let project = p.as_term_ref().map(|p| &p.meta.project);
             let color = project.map(|p| self.project_color(&p.key)).unwrap_or(t.accent);
             let inner = if let Some(project) = project {
-                // inside a project frame the group title already names the project
-                let label = if grouped && groups.iter().any(|(region, ..)| region.contains(r.as_position())) { "" } else { project.name.as_str() };
+                // inside a frame the group title already names the project
+                let label = if in_frame { "" } else { project.name.as_str() };
                 let minimize = (self.tile_all && r.width >= 5).then_some(self.minimized.contains(&id));
                 let button = Rect { x: r.x + 1, y: r.y, width: 3, height: 1 };
                 let hot = minimize.is_some() && button.contains(self.hover);
@@ -235,19 +351,25 @@ impl App {
                     self.pane_minimize.push((button, id));
                 }
                 let standout = p.as_term_ref().is_some_and(|t| t.meta.orchestrator);
-                ui::session_frame_as(f, r, title, status, sub.as_deref(), label, minimize, hot, color, focused, standout, &t)
+                ui::session_frame_as(f, r, title, status, sub.as_deref(), label, minimize, hot, color, focused, standout, shared, &t)
             } else {
                 ui::frame_ex(f, r, title, status, sub.as_deref(), focused, &t)
             };
+            let inner = if shared { padded(inner, touching(layout, &laid)) } else { inner };
             // a folded pane takes no clicks inside: one focuses it, which unfolds it
             if !folded {
                 self.inner.push((id, inner));
             }
             if r.width > 24 {
-                let b = Rect { x: r.right() - 4, y: r.bottom().saturating_sub(1), width: 3, height: 1 };
+                // on the title band with shared borders, else on the bottom edge
+                let b = Rect { x: r.right() - 4, y: if shared { r.y } else { r.bottom().saturating_sub(1) }, width: 3, height: 1 };
                 if b.x > r.x + 2 && !zoomed {
                     let hot = b.contains(self.hover);
-                    let style = if hot { fg(t.danger).add_modifier(Modifier::BOLD | Modifier::REVERSED) } else { fg(color) };
+                    let style = match () {
+                        _ if hot => fg(t.danger).add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                        _ if shared && project.is_some() => ui::band_style(color, focused, &t),
+                        _ => fg(color),
+                    };
                     ui::line(f, b, vec![Span::styled("×", style)]);
                     self.pane_close.push((b, id));
                 }
@@ -297,6 +419,9 @@ impl App {
                 self.apply(id, actions);
                 let _ = self.tx.send(crate::pane::Event::Tick);
             }
+        }
+        if shared {
+            ui::join_borders(f.buffer_mut(), &drawn);
         }
     }
 
@@ -418,4 +543,39 @@ impl App {
             y += 1;
         }
     }
+}
+
+/// `r` grown one cell onto each neighbour it touches on the right and below (shared borders).
+fn onto_neighbours(r: Rect, all: &[Rect]) -> Rect {
+    let n = touching(r, all);
+    Rect { width: r.width + u16::from(n.right), height: r.height + u16::from(n.below), ..r }
+}
+
+/// Which sides of `r` another tile touches (as laid out); the others face the window's edge or a gutter.
+#[derive(Clone, Copy, Default)]
+struct Touching {
+    left: bool,
+    right: bool,
+    below: bool,
+}
+
+fn touching(r: Rect, all: &[Rect]) -> Touching {
+    let across_x = |q: &&Rect| q.y < r.bottom() && r.y < q.bottom();
+    let across_y = |q: &&Rect| q.x < r.right() && r.x < q.right();
+    Touching {
+        left: all.iter().filter(across_x).any(|q| q.right() == r.x),
+        right: all.iter().filter(across_x).any(|q| q.x == r.right()),
+        below: all.iter().filter(across_y).any(|q| q.y == r.bottom()),
+    }
+}
+
+/// A tile's content area with shared borders: a blank column / row inside each line it shares with a neighbour,
+/// so their text doesn't meet at it (the line under a tile is the next one's title band). Sides on the window's
+/// edge keep their content up to the border, as without shared borders.
+fn padded(inner: Rect, n: Touching) -> Rect {
+    let (l, r, b) = (u16::from(n.left), u16::from(n.right), u16::from(n.below));
+    if inner.width <= 20 || inner.height <= 4 {
+        return inner;
+    }
+    Rect { x: inner.x + l, width: inner.width - l - r, height: inner.height - b, ..inner }
 }

@@ -5,7 +5,7 @@ use crate::theme::{Theme, mix};
 use bro_core::Harness;
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -116,9 +116,10 @@ pub fn frame(f: &mut Frame, area: Rect, title: &str, subtitle: Option<&str>, foc
 /// title band; terminal output keeps its own colors and every original row/column.
 ///
 /// `standout` is the orchestrator's frame: a double border that keeps most of its color even when another
-/// session has focus.
+/// session has focus. `status_up` puts the status at the right of the title band (leaving room for the close
+/// button) instead of on the bottom edge, which shared borders hand to the session below.
 #[allow(clippy::too_many_arguments)]
-pub fn session_frame_as(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<Line<'_>>, subtitle: Option<&str>, project: &str, minimize: Option<bool>, minimize_hot: bool, color: Color, focused: bool, standout: bool, t: &Theme) -> Rect {
+pub fn session_frame_as(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<Line<'_>>, subtitle: Option<&str>, project: &str, minimize: Option<bool>, minimize_hot: bool, color: Color, focused: bool, standout: bool, status_up: bool, t: &Theme) -> Rect {
     let border = match (focused, standout) {
         (true, _) => color,
         (false, true) => mix(color, t.frame, 0.8),
@@ -138,8 +139,7 @@ pub fn session_frame_as(f: &mut Frame, area: Rect, title: Line<'_>, status: Opti
         return inner;
     }
     let head = Rect { x: area.x + 1, y: area.y, width: area.width - 2, height: 1 };
-    let ink = if t.is_light() { Color::Rgb(255, 255, 255) } else { t.deep() };
-    let style = if focused { fg(ink).bg(color).add_modifier(Modifier::BOLD) } else { fg(color).bg(crate::theme::project_tint(color, t)) };
+    let style = band_style(color, focused, t);
     f.render_widget(Block::default().style(style), head);
     let marker = if focused { t.skin.marker } else { " " };
     // the title brings its own leading space
@@ -152,6 +152,16 @@ pub fn session_frame_as(f: &mut Frame, area: Rect, title: Line<'_>, status: Opti
     }
     spans.push(Span::styled(lead, style));
     spans.extend(title.spans.into_iter().map(|s| Span::styled(s.content, style)));
+    if status_up {
+        // on the band: the focused one's ink, else each part's own color; three cells kept for the close button
+        let right: Vec<Span> = status.map(|s| s.spans).unwrap_or_default().into_iter().map(|s| Span::styled(s.content, if focused { style } else { s.style.bg(crate::theme::project_tint(color, t)) })).collect();
+        line_lr(f, Rect { width: head.width.saturating_sub(3), ..head }, spans, right);
+        if let Some(s) = subtitle {
+            let foot = Rect { x: area.x + 1, y: area.bottom() - 1, width: area.width.saturating_sub(7), height: 1 };
+            line_lr(f, foot, vec![], vec![Span::styled(format!(" {s} "), fg(color))]);
+        }
+        return inner;
+    }
     line(f, head, spans);
     // Status stays in its semantic color on the bottom edge. Reserve the close button on the right.
     let foot = Rect { x: area.x + 1, y: area.bottom() - 1, width: area.width.saturating_sub(7), height: 1 };
@@ -160,12 +170,84 @@ pub fn session_frame_as(f: &mut Frame, area: Rect, title: Line<'_>, status: Opti
     inner
 }
 
-/// The frame around one project's tiled sessions: a rounded border in the project color with the project's
-/// name and session count set into the top edge. The group holding the focused session is drawn at full
-/// strength, the others softened so the eye finds the active project.
+/// A session's title band: the project color with dark ink when focused, else the color on its tint.
+pub fn band_style(color: Color, focused: bool, t: &Theme) -> Style {
+    let ink = if t.is_light() { Color::Rgb(255, 255, 255) } else { t.deep() };
+    if focused { fg(ink).bg(color).add_modifier(Modifier::BOLD) } else { fg(color).bg(crate::theme::project_tint(color, t)) }
+}
+
+/// Where tiles share a border line, turn the corners they drew over each other into joins (┬ ┴ ├ ┤ ┼). Only cells
+/// on two or more of `rects`' edges that still hold a line glyph change, so titles on a shared edge stay.
+pub fn join_borders(buf: &mut ratatui::buffer::Buffer, rects: &[Rect]) {
+    const UP: u8 = 1;
+    const DOWN: u8 = 2;
+    const LEFT: u8 = 4;
+    const RIGHT: u8 = 8;
+    let mut arms: std::collections::HashMap<(u16, u16), (u8, u8)> = std::collections::HashMap::new();
+    for r in rects.iter().filter(|r| r.width >= 2 && r.height >= 2) {
+        let (x1, y1) = (r.right() - 1, r.bottom() - 1);
+        let mut add = |x: u16, y: u16, a: u8| {
+            let e = arms.entry((x, y)).or_default();
+            e.0 |= a;
+        };
+        for x in r.x..=x1 {
+            let a = if x > r.x { LEFT } else { 0 } | if x < x1 { RIGHT } else { 0 };
+            add(x, r.y, a);
+            add(x, y1, a);
+        }
+        for y in r.y..=y1 {
+            let a = if y > r.y { UP } else { 0 } | if y < y1 { DOWN } else { 0 };
+            add(r.x, y, a);
+            add(x1, y, a);
+        }
+        // how many tiles' edges pass through each cell
+        let mut seen = std::collections::HashSet::new();
+        for x in r.x..=x1 {
+            seen.insert((x, r.y));
+            seen.insert((x, y1));
+        }
+        for y in r.y..=y1 {
+            seen.insert((r.x, y));
+            seen.insert((x1, y));
+        }
+        for cell in seen {
+            arms.entry(cell).or_default().1 += 1;
+        }
+    }
+    let area = buf.area;
+    for ((x, y), (a, n)) in arms {
+        if n < 2 || !area.contains(Position { x, y }) {
+            continue;
+        }
+        let Some(cell) = buf.cell_mut(Position { x, y }) else { continue };
+        if !"─│╭╮╰╯┌┐└┘━┃┏┓┗┛═║╔╗╚╝├┤┬┴┼".contains(cell.symbol()) || cell.symbol().is_empty() || cell.symbol() == " " {
+            continue;
+        }
+        let glyph = match a {
+            x if x == UP | DOWN | LEFT | RIGHT => "┼",
+            x if x == UP | DOWN | RIGHT => "├",
+            x if x == UP | DOWN | LEFT => "┤",
+            x if x == LEFT | RIGHT | DOWN => "┬",
+            x if x == LEFT | RIGHT | UP => "┴",
+            x if x == UP | DOWN => "│",
+            x if x == LEFT | RIGHT => "─",
+            _ => continue,
+        };
+        cell.set_symbol(glyph);
+    }
+}
+
+/// The frame around a group of tiled sessions: a rule in the project color along the top with what they share
+/// and how many there are set into it. The ring's other sides stay blank, a gutter rather than a second border
+/// beside each session's own. The group holding the focused session is drawn at full strength, the others
+/// softened so the eye finds the active one.
 pub fn group_frame(f: &mut Frame, area: Rect, project: &str, sessions: usize, color: Color, focused: bool, t: &Theme) {
     let border = if focused { color } else { mix(color, t.frame, 0.5) };
-    f.render_widget(Block::default().borders(Borders::ALL).border_set(t.skin.border).border_style(fg(border)), area);
+    if area.height == 0 {
+        return;
+    }
+    let horizontal = t.skin.border.horizontal_top;
+    line(f, Rect { height: 1, ..area }, vec![Span::styled(horizontal.repeat(area.width as usize), fg(border))]);
     if area.width < 8 {
         return;
     }

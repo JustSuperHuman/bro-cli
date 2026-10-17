@@ -395,7 +395,7 @@ impl App {
         s.caveman.set_on(level.is_some());
         self.svc.save_settings(s);
         self.toast(Kind::Info, match level {
-            Some(l) => format!("caveman mode: {} (new sessions; ⛏ marks them)", l.id()),
+            Some(l) => format!("caveman mode: {} (new sessions)", l.id()),
             None => "caveman mode off (new sessions)".to_string(),
         });
     }

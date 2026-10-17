@@ -64,6 +64,9 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/ws", any(ws::upgrade))
         .route("/api/bootstrap", get(rest::bootstrap))
         .route("/api/health", get(rest::health))
+        .route("/api/host", get(rest::host))
+        .route("/api/hosts", get(rest::hosts))
+        .route("/api/folders", get(rest::folders))
         .route("/api/acp", get(rest::acp))
         .route("/api/acp/{*rest}", any(rest::unavailable))
         .route(
@@ -251,8 +254,8 @@ pub(crate) fn remove_server_info(state: &AppState) {
     }
 }
 
-/// Attachment cleanup and the observation sweep that settles sessions whose
-/// last chunk arrived inside the observation throttle.
+/// Attachment cleanup, the local host scan, and the observation sweep that
+/// settles sessions whose last chunk arrived inside the observation throttle.
 pub(crate) fn spawn_background(state: &AppState) {
     tokio::spawn(async {
         loop {
@@ -260,6 +263,7 @@ pub(crate) fn spawn_background(state: &AppState) {
             tokio::time::sleep(Duration::from_secs(60 * 60)).await;
         }
     });
+    crate::hosts::spawn(state);
     let observer = state.clone();
     tokio::spawn(async move {
         loop {

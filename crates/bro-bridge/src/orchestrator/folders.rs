@@ -23,7 +23,7 @@ pub struct FolderMatch {
     pub score: u32,
 }
 
-fn leaf(path: &str) -> String {
+pub(crate) fn leaf(path: &str) -> String {
     Path::new(path.trim_end_matches(['\\', '/']))
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -93,7 +93,7 @@ fn drive_roots() -> Vec<PathBuf> {
     }
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .filter(|home| !home.is_empty())
         .or_else(|| std::env::var_os("HOME"))
@@ -129,6 +129,11 @@ fn scanned() -> Scan {
 /// Best matches for `query`, highest score first, one entry per directory.
 /// A query that already is a directory is returned as the only match.
 pub fn find(app: &AppState, query: &str) -> Vec<FolderMatch> {
+    find_limited(app, query, MAX_MATCHES)
+}
+
+/// [`find`] with room for more than the orchestrator's handful.
+pub(crate) fn find_limited(app: &AppState, query: &str, limit: usize) -> Vec<FolderMatch> {
     let query = query.trim().trim_matches('"');
     let direct = Path::new(query);
     if direct.is_absolute() && direct.is_dir() {
@@ -185,7 +190,7 @@ pub fn find(app: &AppState, query: &str) -> Vec<FolderMatch> {
     matches.sort_by_cached_key(|found| {
         (std::cmp::Reverse(found.score), std::cmp::Reverse(modified(&found.path)), found.path.len())
     });
-    matches.truncate(MAX_MATCHES);
+    matches.truncate(limit);
     matches
 }
 

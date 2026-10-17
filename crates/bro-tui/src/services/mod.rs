@@ -213,6 +213,7 @@ pub fn fallback_settings() -> Settings {
         auto_resume: bro_core::config::AutoResumeSettings::default(),
         auto_approve: false,
         summary_screensaver_secs: 0,
+        shared_borders: false,
         permission: Default::default(),
         claude_env: Default::default(),
         caveman: Default::default(),

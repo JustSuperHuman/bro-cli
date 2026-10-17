@@ -137,10 +137,10 @@ fn cat_hook(event: &str, name: &str, context: &str) -> std::io::Result<serde_jso
     Ok(json!({ "type": "command", "command": format!("cat {}", shell_path(&reply)), "timeout": 10 }))
 }
 
-/// The `--settings` file for a Claude launch: hooks that hand subagents the rules and restate
-/// the mode on resume. None when nothing needs saying (off and never used, or off and a
-/// fresh session).
-pub fn claude_settings_file(s: &CavemanSettings, resuming: bool) -> std::io::Result<Option<PathBuf>> {
+/// The `--settings` file for a Claude launch: `base` (bro's own Claude settings, e.g. focus
+/// view) plus hooks that hand subagents the rules and restate the mode on resume. None when
+/// nothing needs saying (empty `base` and caveman off and never used, or off and a fresh session).
+pub fn claude_settings_file(s: &CavemanSettings, resuming: bool, base: serde_json::Map<String, serde_json::Value>) -> std::io::Result<Option<PathBuf>> {
     let mut hooks = serde_json::Map::new();
     match s.active() {
         Some(level) => {
@@ -157,9 +157,16 @@ pub fn claude_settings_file(s: &CavemanSettings, resuming: bool) -> std::io::Res
             let h = cat_hook("SessionStart", "resume-off.json", OFF_NOTE)?;
             hooks.insert("SessionStart".into(), json!([{ "matcher": "resume", "hooks": [h] }]));
         }
-        None => return Ok(None),
+        None => {}
     }
-    let body = serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap_or_default();
+    if hooks.is_empty() && base.is_empty() {
+        return Ok(None);
+    }
+    let mut settings = base;
+    if !hooks.is_empty() {
+        settings.insert("hooks".into(), hooks.into());
+    }
+    let body = serde_json::to_string_pretty(&settings).unwrap_or_default();
     let path = dir().join(format!("claude-settings-{}.json", short_hash(&body, 12)));
     ensure(&path, body.as_bytes())?;
     Ok(Some(path))
@@ -230,9 +237,9 @@ mod tests {
     fn settings_file_hooks_subagents_and_resume() {
         let _sb = sandbox();
         let mut s = CavemanSettings { level: Level::Ultracave, ..Default::default() };
-        assert!(claude_settings_file(&s, true).unwrap().is_none(), "never used: nothing to say");
+        assert!(claude_settings_file(&s, true, Default::default()).unwrap().is_none(), "never used: nothing to say");
         s.set_on(true);
-        let v = hooks(&claude_settings_file(&s, false).unwrap().unwrap());
+        let v = hooks(&claude_settings_file(&s, false, Default::default()).unwrap().unwrap());
         let sub = reply(&v["hooks"]["SubagentStart"][0]["hooks"][0]);
         assert_eq!(sub["hookSpecificOutput"]["hookEventName"], "SubagentStart");
         assert_eq!(sub["hookSpecificOutput"]["additionalContext"], Level::Ultracave.rules());
@@ -241,12 +248,12 @@ mod tests {
         assert!(res["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("(ultracave) is on"));
 
         s.subagents = false;
-        let v = hooks(&claude_settings_file(&s, false).unwrap().unwrap());
+        let v = hooks(&claude_settings_file(&s, false, Default::default()).unwrap().unwrap());
         assert!(v["hooks"].get("SubagentStart").is_none());
 
         s.set_on(false);
-        assert!(claude_settings_file(&s, false).unwrap().is_none(), "off, fresh session: nothing");
-        let v = hooks(&claude_settings_file(&s, true).unwrap().unwrap());
+        assert!(claude_settings_file(&s, false, Default::default()).unwrap().is_none(), "off, fresh session: nothing");
+        let v = hooks(&claude_settings_file(&s, true, Default::default()).unwrap().unwrap());
         let res = reply(&v["hooks"]["SessionStart"][0]["hooks"][0]);
         assert!(res["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("now off"));
     }

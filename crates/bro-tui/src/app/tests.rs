@@ -775,15 +775,109 @@ fn double_clicking_a_pane_goes_full_screen_and_back() {
     assert!(!a.tabs[a.cur].zoom);
 }
 
-#[test]
-fn tiled_projects_each_get_one_colored_frame_around_their_sessions() {
-    use ratatui::{backend::TestBackend, Terminal};
-    let mut a = app(true);
+/// A project's sessions as in a busy day: one on another login, five on the same one, two of them titled.
+fn same_login_workspace() -> App {
+    use crate::panes::term::{Meta, Term};
+    let mut a = app(false);
+    let cwd = crate::services::demo::root().join("bro-cli-v2");
+    let sessions = [("CPF", None), ("local", Some("Fix the proxy retry")), ("local", None), ("local", Some("Group the tiles")), ("local", None), ("local", None)];
+    for (i, (login, title)) in sessions.into_iter().enumerate() {
+        let meta = Meta {
+            sid: format!("same-{i}"),
+            harness: Some(bro_core::Harness::Claude),
+            profile: Some(format!("claude:{login}")),
+            store: None,
+            model: None,
+            label: format!("claude · {login}"),
+            name: None,
+            renamed: false,
+            project: a.svc.project_for(&cwd),
+            cwd: cwd.clone(),
+            started: Instant::now(),
+            route_id: None,
+            cleanup: vec![],
+            orchestrator: false,
+        };
+        let osc = title.map(|t| format!("\x1b]0;\u{2733} {t}\x07")).unwrap_or_default();
+        let screen = format!("{osc}{}", crate::services::demo::transcript(Some(bro_core::Harness::Claude)));
+        a.new_tab(Box::new(Term::fixed(meta, &screen, a.svc.clone())));
+    }
     a.run_act(Act::TileAll);
+    a
+}
+
+#[test]
+fn tiles_on_the_same_login_share_one_frame_that_names_it_once() {
+    let mut a = same_login_workspace();
+    let s = testkit::snapshot("tiles_same_login", 200, 50, |f| a.draw(f));
+    if std::env::var("BRO_PRINT_TILES").is_ok() {
+        eprintln!("{s}");
+    }
+    let claude = ui::harness_glyph(Some(bro_core::Harness::Claude));
+    let groups: Vec<(String, usize)> = a.tile_groups().into_iter().map(|(_, label, ids)| (label, ids.len())).collect();
+    assert_eq!(groups, vec![(format!("bro-cli-v2 · {claude} CPF"), 1), (format!("bro-cli-v2 · {claude} local"), 5)]);
+    assert_eq!(s.matches("bro-cli-v2 ·").count(), 2, "only the frame and the lone CPF tile name the project: {s}");
+    assert!(s.contains(&format!("● bro-cli-v2 · {claude} local · 5 sessions")), "{s}");
+    assert!(s.contains(" 2 · Fix the proxy retry "), "a framed tile goes by its number and title: {s}");
+    assert!(!s.contains("— "), "the project's own folder isn't repeated: {s}");
+}
+
+#[test]
+fn shared_borders_draw_one_line_between_tiles_and_keep_it_draggable() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut a = same_login_workspace();
+    let mut s = a.svc.settings();
+    s.shared_borders = true;
+    a.svc.save_settings(s);
+    let (w, h) = (200, 50);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| a.draw(f)).unwrap();
+    let buf = term.backend().buffer().clone();
+    let dump = testkit::snapshot("tiles_shared_borders", w, h, |f| a.draw(f));
+    if std::env::var("BRO_PRINT_TILES").is_ok() {
+        eprintln!("{dump}");
+    }
+    let sym = |x: u16, y: u16| buf[(x, y)].symbol().to_string();
+    // two tiles side by side, as laid out
+    let (left, right) = a.outer.iter().flat_map(|&(_, l)| a.outer.iter().map(move |&(_, r)| (l, r))).find(|(l, r)| r.x == l.right() && r.y == l.y).expect("tiles side by side");
+    let y = left.y + 4;
+    assert_eq!(sym(right.x, y), "│", "one line between them");
+    assert_ne!(sym(left.right() - 1, y), "│", "the left tile's own edge is gone: {dump}");
+    for row in left.y + 1..left.bottom() - 1 {
+        assert_eq!((sym(right.x - 1, row), sym(right.x + 1, row)), (" ".to_string(), " ".to_string()), "a blank column each side of the line, row {row}: {dump}");
+    }
+    // two tiles one above the other: the lower one's title band is the only line between them
+    let (upper, lower) = a.outer.iter().flat_map(|&(_, u)| a.outer.iter().map(move |&(_, l)| (u, l))).find(|(u, l)| l.y == u.bottom() && l.x == u.x).expect("tiles stacked");
+    let band: String = (lower.x + 1..lower.right() - 1).map(|x| sym(x, lower.y)).collect();
+    assert!(band.contains("○ idle"), "status moves up beside the title: {band:?}");
+    let above: String = (upper.x + 1..upper.right() - 1).map(|x| sym(x, upper.bottom() - 1)).collect();
+    assert!(!above.contains('─'), "no second line above the band: {above:?}");
+    let upper_inner = a.inner.iter().find(|(_, i)| upper.contains(i.as_position())).unwrap().1;
+    assert_eq!(upper_inner.bottom() + 1, lower.y, "a blank row between the upper tile's text and the band below");
+    let outer_left = a.outer.iter().map(|(_, r)| r.x).min().unwrap();
+    let edge_inner = a.inner.iter().map(|(_, i)| i.x).min().unwrap();
+    assert_eq!(edge_inner, outer_left + 1, "no padding on a side that faces the edge");
+    assert!(dump.contains('┼') || dump.contains('┬') || dump.contains('├'), "corners join: {dump}");
+    // the shared line still drags; the column it replaced is the left tile's content
+    let mid = left.y + left.height / 2;
+    assert!(a.tile_edge(Position { x: right.x, y: mid }).is_some_and(|e| e.1 == 0));
+    assert!(a.tile_edge(Position { x: left.right() - 1, y: mid }).is_none());
+
+    // off again: every tile its own outline
+    let mut s = a.svc.settings();
+    s.shared_borders = false;
+    a.svc.save_settings(s);
+    term.draw(|f| a.draw(f)).unwrap();
+    let buf = term.backend().buffer().clone();
+    assert_eq!(buf[(left.right() - 1, y)].symbol(), "│");
+}
+
+#[test]
+fn tile_groups_of_two_or_more_get_one_ruled_frame_and_lone_tiles_keep_their_header() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut a = same_login_workspace();
     let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
     term.draw(|f| a.draw(f)).unwrap();
-    let groups = a.tile_groups();
-    assert!(groups.len() >= 2, "the demo workspace tiles more than one project");
     let buf = term.backend().buffer().clone();
     if std::env::var("BRO_PRINT_TILES").is_ok() {
         for y in 0..H {
@@ -792,36 +886,42 @@ fn tiled_projects_each_get_one_colored_frame_around_their_sessions() {
         }
     }
     let rect_of = |id| a.outer.iter().find(|(i, _)| *i == id).unwrap().1;
-    for (key, name, ids) in &groups {
-        let color = a.project_color(key);
-        // The frame is the bounding box of the group's panes grown by one cell.
+    let head = |r: Rect| (r.x + 1..r.right() - 1).map(|x| buf[(x, r.y)].symbol().to_string()).collect::<String>();
+    for (key, name, ids) in a.tile_groups() {
+        if ids.len() == 1 {
+            assert!(head(rect_of(ids[0])).contains("bro-cli"), "{name}: a lone tile names its project itself");
+            continue;
+        }
+        let color = a.project_color(&key);
+        // The frame is the bounding box of the group's panes grown by one cell: a rule along the top, a gutter elsewhere.
         let x0 = ids.iter().map(|&id| rect_of(id).x).min().unwrap() - 1;
         let y0 = ids.iter().map(|&id| rect_of(id).y).min().unwrap() - 1;
         let x1 = ids.iter().map(|&id| rect_of(id).right()).max().unwrap();
         let y1 = ids.iter().map(|&id| rect_of(id).bottom()).max().unwrap();
-        assert_eq!(buf[(x0, y0)].symbol(), "╭", "{name}: top-left corner");
-        assert_eq!(buf[(x1, y1)].symbol(), "╯", "{name}: bottom-right corner");
+        assert_eq!(buf[(x0, y0)].symbol(), "─", "{name}: the rule starts at the frame's corner");
+        assert_eq!(buf[(x0, y0 + 1)].symbol(), " ", "{name}: no second border beside the sessions'");
         let title: String = (x0 + 2..x1).map(|x| buf[(x, y0)].symbol().to_string()).collect();
         assert!(title.contains(&format!("● {name}")), "{name}: title in {title:?}");
-        let holds_focus = ids.contains(&a.focused().unwrap());
-        if holds_focus {
-            assert_eq!(buf[(x0, y0)].fg, color, "{name}: the active project's frame is in its color");
-        } else {
-            assert_ne!(buf[(x0, y0)].fg, color, "{name}: other frames are softened");
-        }
-        // No other project's session sits inside this frame.
+        assert_eq!(buf[(x0, y0)].fg, color, "{name}: the active group's rule is in its project's color");
+        // No other session sits inside this frame.
         let frame = Rect { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
         for (id, r) in &a.outer {
             assert_eq!(frame.contains(r.as_position()), ids.contains(id), "{name}: only its own sessions inside");
         }
-        // Session heads inside a frame don't repeat the project name.
-        for &id in ids {
-            let r = rect_of(id);
-            let head: String = (r.x + 1..r.right() - 1).map(|x| buf[(x, r.y)].symbol().to_string()).collect();
-            assert!(!head.contains(&format!("{name} ·")), "{name}: head repeats the project: {head:?}");
+        for &id in &ids {
+            assert!(!head(rect_of(id)).contains("bro-cli-v2 ·"), "{name}: a head inside repeats the project");
         }
     }
-    shot(&mut a, "tiled-project-groups");
+
+    // the demo's sessions each differ: no frames, every tile says what it is
+    let mut a = app(true);
+    a.run_act(Act::TileAll);
+    let groups = a.tile_groups();
+    assert!(groups.iter().all(|(_, _, ids)| ids.len() == 1));
+    let s = shot(&mut a, "tiled-project-groups");
+    for (_, label, _) in &groups {
+        assert!(!s.contains(&format!("● {label}")), "{label}: no frame for a lone tile: {s}");
+    }
 }
 
 #[test]
@@ -2703,12 +2803,13 @@ fn settings_view_switches_presets_and_overrides_switches() {
     let id = a.focused().expect("settings pane");
     assert_eq!(a.panes[&id].view(), Some("settings"));
     let screen = draw(&mut a);
-    assert!(screen.contains("Auto-resume") && screen.contains("Caveman mode"), "{screen}");
-    // bro's own options come first: auto-approve (off by default) and recaps toggle in place
-    assert!(screen.contains("Auto-approve prompts"), "{screen}");
+    // every section is listed down the left; Appearance is open first, and only its settings show
+    for s in ["Appearance", "Sessions", "Caveman", "Watchdog", "Claude Code", "Integrations", "Updates"] {
+        assert!(screen.contains(s), "{s}: {screen}");
+    }
+    assert!(screen.contains("Summary screensaver") && !screen.contains("Auto-resume"), "{screen}");
     let recaps = a.svc.settings().insights.generate_recaps;
     // the summary screensaver: off, then steps through its waits
-    assert!(screen.contains("Summary screensaver"), "{screen}");
     for _ in 0..2 {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     }
@@ -2718,9 +2819,17 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert!(draw(&mut a).contains("after 1 min"));
     key(&mut a, KeyCode::Left, KeyModifiers::NONE);
     assert_eq!(a.svc.settings().summary_screensaver_secs, 0);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // shared tile borders
+    assert!(!a.svc.settings().shared_borders, "off until you try it");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().shared_borders);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().shared_borders);
     for _ in 0..3 {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     }
+    // on past the icons into Sessions: auto-approve (off by default) and recaps toggle in place
+    { let s = draw(&mut a); assert!(s.contains("Auto-resume") && s.contains("Auto-approve prompts") && !s.contains("Summary screensaver"), "{s}"); }
     assert!(!a.svc.settings().auto_approve);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(a.svc.settings().auto_approve);
@@ -2738,8 +2847,45 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // subagents
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().caveman.subagents);
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustTools: the demo never installs or looks for it
-    { let s = draw(&mut a); assert!(s.contains("integrations") && s.contains("not installed"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // watchdog prompt: opens the editor
+    { let s = draw(&mut a); assert!(s.contains("Watchdog prompt") && s.contains("bro's default"), "{s}"); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::WatchdogPrompt(_)));
+    { let s = draw(&mut a); assert!(s.contains("watchdog prompt") && s.contains("You are bro's watchdog"), "{s}"); }
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!a.overlay.is_open());
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // wake after
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().watchdog.idle_secs, 120);
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().watchdog.idle_secs, 60);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // reviewer
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // reviewer model
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().watchdog.model, "fable");
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // wake-up budget
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
+    assert_eq!(a.svc.settings().claude_env.preset, "quiet");
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // error reports: preset says off
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // → Claude default, an override
+    assert_eq!(a.svc.settings().claude_env.summary(), "Quiet + 1 change");
+    let screen = shot(&mut a, "settings");
+    assert!(screen.contains("+ 1 change") && screen.contains("changed"), "{screen}");
+    // the launch preview sits below the last switch
+    let knobs = bro_core::claude_env::KNOBS.len();
+    for _ in 1..knobs {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    }
+    let screen = draw(&mut a);
+    assert!(screen.contains("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"), "{screen}");
+    for _ in 1..knobs {
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE); // back to error reports
+    }
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().claude_env.summary(), "Quiet");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE); // tab: on to Integrations, JustTools first; the demo never installs or looks for it
+    { let s = draw(&mut a); assert!(s.contains("Tools your agents can call") && s.contains("not installed"), "{s}"); }
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // not installed: opens Quick Install with it ticked
     { let s = draw(&mut a); assert!(s.contains("QUICK INSTALL") && s.contains("[x] JustTools") && s.contains(".NET 11 SDK"), "{s}"); }
     key(&mut a, KeyCode::Char('i'), KeyModifiers::NONE); // the demo installs nothing
@@ -2765,46 +2911,17 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustImagine: the demo has none
     { let s = draw(&mut a); assert!(s.contains("JustImagine") && s.contains("not installed"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // bro version: the demo never looks
-    { let s = draw(&mut a); assert!(s.contains("updates") && s.contains(bro_core::self_update::CURRENT), "{s}"); }
+    { let s = draw(&mut a); assert!(s.contains("bro version") && s.contains(bro_core::self_update::CURRENT), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // check for updates: on unless you turn it off
     assert!(a.svc.settings().updates.check);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().updates.check);
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // watchdog prompt: opens the editor
-    { let s = draw(&mut a); assert!(s.contains("Watchdog prompt") && s.contains("bro's default"), "{s}"); }
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(matches!(a.overlay, Overlay::WatchdogPrompt(_)));
-    { let s = draw(&mut a); assert!(s.contains("watchdog prompt") && s.contains("You are bro's watchdog"), "{s}"); }
-    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
-    assert!(!a.overlay.is_open());
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // wake after
-    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
-    assert_eq!(a.svc.settings().watchdog.idle_secs, 120);
-    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
-    assert_eq!(a.svc.settings().watchdog.idle_secs, 60);
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // reviewer
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // reviewer model
-    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
-    assert_eq!(a.svc.settings().watchdog.model, "fable");
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // wake-up budget
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
-    assert_eq!(a.svc.settings().claude_env.preset, "quiet");
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // error reports: preset says off
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // → Claude default, an override
-    assert_eq!(a.svc.settings().claude_env.summary(), "Quiet + 1 change");
-    let screen = shot(&mut a, "settings");
-    assert!(screen.contains("+ 1 change"), "{screen}");
-    // the launch preview sits below the last switch
-    key(&mut a, KeyCode::End, KeyModifiers::NONE);
-    let screen = draw(&mut a);
-    assert!(screen.contains("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"), "{screen}");
-    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
-    for _ in 0..22 + usize::from(bro_core::justwatch::supported()) {
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // back to error reports
-    }
-    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
-    assert_eq!(a.svc.settings().claude_env.summary(), "Quiet");
+    // shift+tab goes back a section to its first setting; tab wraps round from the last
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    { let s = draw(&mut a); assert!(s.contains("Quick install") && !s.contains("Check for updates"), "{s}"); }
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    { let s = draw(&mut a); assert!(s.contains("Summary screensaver"), "{s}"); }
     a.run_palette(crate::palette::Cmd::ClaudePreset("presenter".into()));
     assert_eq!(a.svc.settings().claude_env.preset, "presenter");
 }
@@ -2815,6 +2932,8 @@ fn settings_show_a_justtools_update_its_progress_and_how_it_ended() {
     use bro_core::justtools::{Installed, Step};
     let mut a = app(false);
     a.run_act(Act::Settings);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     let _ = draw(&mut a);
     a.svc.update(|st| {
         st.justtools.installed = Some(Installed { bin: std::env::temp_dir(), version: Some("2.8.0".into()) });
@@ -2830,7 +2949,7 @@ fn settings_show_a_justtools_update_its_progress_and_how_it_ended() {
         st.justtools.error = Some("the JustTools installer failed: Checksum verification failed".into());
     });
     let s = draw(&mut a);
-    assert!(s.contains("✗ the JustTools installer failed") && s.contains("enter tries again"), "{s}");
+    assert!(s.contains("✗ the JustTools installer failed: Checksum verification failed · enter tries"), "{s}");
     a.svc.update(|st| {
         st.justtools.error = None;
         st.justtools.installed.as_mut().unwrap().version = Some("2.9.0".into());
@@ -2845,6 +2964,8 @@ fn settings_show_justimagine_behind_github_and_where_it_runs() {
     use bro_core::justimagine::{Behind, Installed};
     let mut a = app(false);
     a.run_act(Act::Settings);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     let _ = draw(&mut a);
     let sha = "0a50ae7c5f0e7c2b1d1e9f8a7b6c5d4e3f2a1b0c";
     a.svc.update(|st| {
@@ -2951,16 +3072,6 @@ fn font_row_only_where_the_terminal_can_switch_and_steps_through_fonts() {
     assert_eq!(a.svc.settings().font.as_deref(), Some("press-start-2p"), "wraps round to the wildest");
     let screen = draw(&mut a);
     assert!(screen.contains("8-bit arcade"), "{screen}");
-}
-
-#[test]
-fn caveman_sessions_carry_a_header_badge() {
-    // the demo's first Claude session was "launched" with caveman; the setting itself is off,
-    // so the sidebar shows no badge and this one is the pane header's
-    let mut a = app(true);
-    assert!(a.svc.settings().caveman.active().is_none());
-    let screen = draw(&mut a);
-    assert!(screen.contains("⛏ caveman"), "{screen}");
 }
 
 #[test]
@@ -3568,4 +3679,112 @@ fn the_orchestrator_clears_its_own_context_once_its_turn_ends() {
         assert!(after.contains("[fresh start · your handoff notes] Toast runs the tests in justgains"), "{after:?}");
         assert!(after.ends_with("[panel] status"), "then what came after, in order: {after:?}");
     }
+}
+
+#[test]
+fn a_phone_opens_the_one_orchestrator_by_its_profile_id() {
+    let create = |a: &mut App| {
+        let (reply, mut answer) = tokio::sync::oneshot::channel();
+        let req = bro_bridge::CreateRequest { profile_id: Some(crate::app::sessions::ORCHESTRATOR_PROFILE.into()), ..Default::default() };
+        a.bridge_command(bro_bridge::BridgeCommand::Create { req, reply });
+        answer.try_recv()
+    };
+    let mut a = app(true);
+    // none yet: it starts (the reply waits for the launch), and a second ask doesn't start another
+    assert!(create(&mut a).is_err(), "answered once the launch lands");
+    assert!(a.orchestrator_pending.is_some());
+    let again = create(&mut a).expect("answered at once").unwrap_err().to_string();
+    assert!(again.contains("already starting"), "{again}");
+
+    // running: its session id, no new pane
+    land_orchestrator(&mut a);
+    let boss = a.orchestrator_pane().unwrap();
+    let sid = a.panes[&boss].as_term_ref().unwrap().meta.sid.clone();
+    let panes = a.panes.len();
+    assert_eq!(create(&mut a).expect("answered at once").unwrap(), sid);
+    assert_eq!(a.panes.len(), panes);
+}
+
+#[test]
+fn tiled_edges_drag_hold_through_new_sessions_and_double_click_lets_go() {
+    use crate::panes::term::Term;
+    let mut a = app(true);
+    let meta = a.panes[&a.focused().unwrap()].as_term_ref().unwrap().meta.clone();
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    let ev = |kind, x, y| MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE };
+    let rect = |a: &App, id| a.outer.iter().find(|(p, _)| *p == id).unwrap().1;
+    // a pane with another tile across its right edge
+    let (id, r) = a.outer.iter().copied().find(|(_, r)| a.tile_edge(Position { x: r.right() - 1, y: r.y + r.height / 2 }).is_some_and(|e| e.1 == 0 && e.2)).expect("a vertical tile edge");
+    let (x, y) = (r.right() - 1, r.y + r.height / 2);
+    let cell = |a: &mut App, x, y| {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(W, H)).unwrap();
+        term.draw(|f| a.draw(f)).unwrap();
+        term.backend().buffer()[(x, y)].symbol().to_string()
+    };
+    a.mouse(ev(MouseEventKind::Moved, x, y));
+    assert_eq!(cell(&mut a, x, y), "↔", "hovering an edge shows its handle");
+    a.mouse(ev(MouseEventKind::Down(MouseButton::Left), x, y));
+    a.mouse(ev(MouseEventKind::Drag(MouseButton::Left), x - 6, y));
+    a.mouse(ev(MouseEventKind::Up(MouseButton::Left), x - 6, y));
+    draw(&mut a);
+    let held = r.right() - 6;
+    assert_eq!(rect(&a, id).right(), held, "the edge follows the drag");
+    assert_eq!(a.locks.len(), 1);
+    assert!(!a.stack_zoom && a.sel.is_none());
+    a.mouse(ev(MouseEventKind::Moved, 0, 0));
+    let now = rect(&a, id);
+    assert!((now.y..now.bottom()).any(|y| cell(&mut a, held - 1, y) == "↔"), "a held edge keeps its handle");
+    shot(&mut a, "tiled-held-edge");
+    // a new session re-flows the tiles; closing it brings back the same arrangement with the edge held
+    let added = a.new_tab(Box::new(Term::fixed(meta, "new session", a.svc.clone())));
+    draw(&mut a);
+    assert_eq!(a.locks.len(), 1);
+    a.close(added);
+    draw(&mut a);
+    assert_eq!(rect(&a, id).right(), held);
+    // grabbing the same divider from the other side moves the same lock
+    let other = a.outer.iter().copied().find(|(p, q)| *p != id && q.x >= held && q.x <= held + 2 && q.y <= y && y < q.bottom()).expect("the pane across").1;
+    a.mouse(ev(MouseEventKind::Down(MouseButton::Left), other.x, y));
+    a.mouse(ev(MouseEventKind::Drag(MouseButton::Left), other.x + 3, y));
+    a.mouse(ev(MouseEventKind::Up(MouseButton::Left), other.x + 3, y));
+    draw(&mut a);
+    assert_eq!(a.locks.len(), 1);
+    assert_eq!(a.locks[0].pane, id);
+    assert_eq!(rect(&a, id).right(), held + 3);
+    // double-click a held edge: it lets go (and doesn't zoom)
+    let (x, y) = (held + 2, y);
+    a.mouse(ev(MouseEventKind::Down(MouseButton::Left), x, y));
+    a.mouse(ev(MouseEventKind::Up(MouseButton::Left), x, y));
+    a.mouse(ev(MouseEventKind::Down(MouseButton::Left), x, y));
+    a.mouse(ev(MouseEventKind::Up(MouseButton::Left), x, y));
+    draw(&mut a);
+    assert!(a.locks.is_empty());
+    assert!(!a.stack_zoom);
+    assert_eq!(rect(&a, id), r, "back to the flowing layout");
+    // closing the pane drops its lock
+    a.mouse(ev(MouseEventKind::Down(MouseButton::Left), r.right() - 1, r.y + r.height / 2));
+    a.mouse(ev(MouseEventKind::Drag(MouseButton::Left), r.right() - 4, r.y + r.height / 2));
+    a.mouse(ev(MouseEventKind::Up(MouseButton::Left), r.right() - 4, r.y + r.height / 2));
+    assert_eq!(a.locks.len(), 1);
+    a.close(id);
+    a.after_events();
+    assert!(a.locks.is_empty());
+}
+
+#[test]
+fn settings_sections_open_from_the_left_or_say_where_they_sit() {
+    let mut a = app(false);
+    a.run_act(Act::Settings);
+    let s = draw(&mut a);
+    let (y, line) = s.lines().enumerate().find(|(_, l)| l.contains("Updates")).expect("Updates down the left");
+    let x = line[..line.find("Updates").unwrap()].chars().count();
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x as u16, row: y as u16, modifiers: KeyModifiers::NONE });
+    let s = draw(&mut a);
+    assert!(s.contains("Check for updates") && s.contains("New bro releases from GitHub"), "{s}");
+    // too narrow for the list: the title counts instead
+    let mut small = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, H)).unwrap();
+    small.draw(|f| a.draw(f)).unwrap();
+    let s = testkit::dump(small.backend().buffer());
+    assert!(s.contains("Updates  7 of 7") && !s.contains("SETTINGS"), "{s}");
 }

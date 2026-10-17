@@ -209,9 +209,10 @@ fn apply_caveman(cmd: &mut CommandSpec, args: &mut Vec<String>, spec: &LaunchSpe
     let opts = &args[..options_end(args)];
     let has = |names: &[&str]| opts.iter().any(|a| names.iter().any(|n| a == n || a.starts_with(&format!("{n}="))));
     let resuming = spec.resume.is_some() || has(&["--continue", "-c", "--resume", "-r"]);
-    // Claude Code keeps one --settings; yours wins (caveman then has no subagent / resume hooks).
+    // Claude Code keeps one --settings; yours wins (no focus view default, and caveman then has
+    // no subagent / resume hooks).
     if !has(&["--settings"])
-        && let Ok(Some(file)) = caveman::claude_settings_file(&ctx.caveman, resuming)
+        && let Ok(Some(file)) = caveman::claude_settings_file(&ctx.caveman, resuming, ctx.claude_env.settings())
     {
         args.splice(0..0, ["--settings".to_string(), file.to_string_lossy().into_owned()]);
     }

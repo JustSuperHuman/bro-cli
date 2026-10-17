@@ -9,6 +9,9 @@
 //! neighbours give most, far ones barely move. Only when the spare room is spent everywhere do neighbours
 //! fold, nearest first, to a strip that shows just their title. Nothing is reordered, and the base layout is
 //! never touched: the grow is applied when drawing, so dropping the priority restores the exact sizes.
+//!
+//! Held edges ([`lock`]) read the same tree: a tile edge you dragged moves its cut back to where you left it
+//! whatever arrangement the tiles take, while every other cut keeps flowing.
 
 use crate::layout::PaneId;
 use ratatui::layout::Rect;
@@ -44,22 +47,7 @@ pub fn prioritize(area: Rect, panes: &[(PaneId, Rect)], regions: &[(Rect, bool)]
     if panes.len() < 2 || !panes.iter().any(|(p, _)| *p == id) || panes.iter().any(|(_, r)| r.is_empty()) {
         return None;
     }
-    let leaf = |&(p, r): &(PaneId, Rect)| (r, Tile { size: [r.width, r.height], kind: Kind::Leaf(p) });
-    let mut tree = if regions.is_empty() {
-        cut(area, panes.iter().map(leaf).collect())?
-    } else {
-        let mut parts = vec![];
-        for (tag, &(region, framed)) in regions.iter().enumerate() {
-            let inside = if framed { Rect { x: region.x + 1, y: region.y + 1, width: region.width.checked_sub(2)?, height: region.height.checked_sub(2)? } } else { region };
-            let sub = cut(inside, panes.iter().filter(|(_, r)| inside.contains(r.as_position())).map(leaf).collect())?;
-            let tile = if framed { Tile { size: [region.width, region.height], kind: Kind::Frame(tag, Box::new(sub)) } } else { sub };
-            parts.push((region, tile));
-        }
-        cut(area, parts)?
-    };
-    if tree.count() != panes.len() {
-        return None;
-    }
+    let mut tree = tree(area, panes, regions)?;
     let before = tree.clone();
     tree.grow(id, want);
     if tree == before {
@@ -77,6 +65,84 @@ pub fn prioritize(area: Rect, panes: &[(PaneId, Rect)], regions: &[(Rect, bool)]
         .map(|(p, _)| *p)
         .collect();
     Some(Grown { panes: panes.iter().map(|(p, _)| (*p, at(*p))).collect(), frames, folded })
+}
+
+/// A tile edge you dragged and let go: `pane`'s right or bottom edge (`far`), else its left or top, along `ax`
+/// (0 = across, 1 = down), held `at` cells from the start of the area (the edge's first cell past the pane when
+/// `far`). Whatever arrangement the tiles take later, the cut that makes this edge moves back there; every
+/// other cut keeps flowing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lock {
+    pub pane: PaneId,
+    pub ax: usize,
+    pub far: bool,
+    pub at: u16,
+}
+
+/// The least a pane is squeezed to beside a held edge.
+pub const LOCK_MIN: [u16; 2] = [16, 5];
+
+/// `panes` as laid out in `area` (see [`prioritize`] for `regions`; panes outside every region, like the
+/// orchestrator's column, are parts of their own) with every edge in `locks` held where it was left. Outer cuts
+/// move first, so an edge inside a moved one still lands where it was left; of two locks on one cut, the later
+/// wins. A cut never squeezes a pane below [`LOCK_MIN`]. None when nothing would change.
+pub fn lock(area: Rect, panes: &[(PaneId, Rect)], regions: &[(Rect, bool)], locks: &[Lock]) -> Option<Grown> {
+    if panes.len() < 2 || locks.is_empty() || panes.iter().any(|(_, r)| r.is_empty()) {
+        return None;
+    }
+    let mut tree = tree(area, panes, regions)?;
+    let before = tree.clone();
+    let mut held: Vec<(usize, Vec<usize>, Lock)> = locks
+        .iter()
+        .filter_map(|l| {
+            let path = tree.path(l.pane)?;
+            Some((tree.cut_of(&path, l.ax, l.far)?, path, *l))
+        })
+        .collect();
+    held.sort_by_key(|(k, ..)| *k);
+    for (k, path, l) in held {
+        tree.hold(&path, k, l);
+    }
+    if tree == before {
+        return None;
+    }
+    let (mut placed, mut frames) = (vec![], vec![]);
+    tree.place(area.x, area.y, &mut placed, &mut frames);
+    let at = |p: PaneId| placed.iter().find(|(q, _)| *q == p).map(|x| x.1).unwrap_or_default();
+    Some(Grown { panes: panes.iter().map(|(p, _)| (*p, at(*p))).collect(), frames, folded: vec![] })
+}
+
+/// Whether two tile edges are one cut in this layout (a pane's right edge and the left edge of the one across
+/// it, or of any pane along the same divider).
+pub fn same_cut(area: Rect, panes: &[(PaneId, Rect)], regions: &[(Rect, bool)], a: Lock, b: Lock) -> bool {
+    let Some(tree) = tree(area, panes, regions) else { return false };
+    let id = |l: Lock| {
+        let path = tree.path(l.pane)?;
+        let k = tree.cut_of(&path, l.ax, l.far)?;
+        let i = if l.far { path[k] } else { path[k] - 1 };
+        Some((l.ax, path[..k].to_vec(), i))
+    };
+    a.ax == b.ax && id(a).is_some_and(|x| id(b) == Some(x))
+}
+
+/// The guillotine tree of `panes` tiling `area`: each of `regions` one part (inside its ring when framed), and
+/// each pane outside them another. None unless it holds every pane.
+fn tree(area: Rect, panes: &[(PaneId, Rect)], regions: &[(Rect, bool)]) -> Option<Tile> {
+    let leaf = |&(p, r): &(PaneId, Rect)| (r, Tile { size: [r.width, r.height], kind: Kind::Leaf(p) });
+    let tree = if regions.is_empty() {
+        cut(area, panes.iter().map(leaf).collect())?
+    } else {
+        let mut parts = vec![];
+        for (tag, &(region, framed)) in regions.iter().enumerate() {
+            let inside = if framed { Rect { x: region.x + 1, y: region.y + 1, width: region.width.checked_sub(2)?, height: region.height.checked_sub(2)? } } else { region };
+            let sub = cut(inside, panes.iter().filter(|(_, r)| inside.contains(r.as_position())).map(leaf).collect())?;
+            let tile = if framed { Tile { size: [region.width, region.height], kind: Kind::Frame(tag, Box::new(sub)) } } else { sub };
+            parts.push((region, tile));
+        }
+        parts.extend(panes.iter().filter(|(_, r)| !regions.iter().any(|(g, _)| g.contains(r.as_position()))).map(leaf));
+        cut(area, parts)?
+    };
+    (tree.count() == panes.len()).then_some(tree)
 }
 
 /// A node of the guillotine tree. `size` is (width, height); axis 0 is side by side, 1 is stacked.
@@ -293,6 +359,97 @@ impl Tile {
                 };
                 for (k, n) in kids.iter_mut().zip(new) {
                     k.fit(ax, n, near_end);
+                }
+            }
+        }
+    }
+
+    /// The depth of the cut that makes the edge of the pane at `path`: the innermost split along `ax` where the
+    /// pane isn't the last child (`far`) or the first. None on the area's own edge.
+    fn cut_of(&self, path: &[usize], ax: usize, far: bool) -> Option<usize> {
+        (0..path.len()).rev().find(|&k| match &self.node(&path[..k]).kind {
+            Kind::Split(a, kids) if *a == ax => if far { path[k] + 1 < kids.len() } else { path[k] > 0 },
+            _ => false,
+        })
+    }
+
+    /// Where the node at `path` starts along `ax`, from this one's start.
+    fn offset(&self, path: &[usize], ax: usize) -> u16 {
+        match (path.first(), &self.kind) {
+            (Some(_), Kind::Frame(_, t)) => 1 + t.offset(&path[1..], ax),
+            (Some(&i), Kind::Split(a, kids)) => {
+                let before: u16 = if *a == ax { kids[..i].iter().map(|k| k.size[ax]).sum() } else { 0 };
+                before + kids[i].offset(&path[1..], ax)
+            }
+            _ => 0,
+        }
+    }
+
+    /// Move the cut at depth `k` on `path` (see [`Tile::cut_of`]) so the pane's edge lands on `l.at`. The two
+    /// children beside the cut trade the room; once one is down to [`LOCK_MIN`] the next one along gives way
+    /// too, so an edge can be dragged past its neighbour.
+    fn hold(&mut self, path: &[usize], k: usize, l: Lock) {
+        let ax = l.ax;
+        let start = self.offset(&path[..k], ax);
+        // project frames between the cut and the pane: a ring cell each
+        let rings = (k + 1..path.len()).filter(|&j| matches!(self.node(&path[..j]).kind, Kind::Frame(..))).count() as u16;
+        let Kind::Split(_, kids) = &mut self.node_mut(&path[..k]).kind else { return };
+        let i = if l.far { path[k] } else { path[k] - 1 };
+        let cut = if l.far { l.at.saturating_add(rings) } else { l.at.saturating_sub(rings) };
+        let mut new: Vec<u16> = kids.iter().map(|c| c.size[ax]).collect();
+        let floors: Vec<u16> = kids.iter().map(|c| c.floor(ax, LOCK_MIN)).collect();
+        let sum = |s: &[u16]| s.iter().sum::<u16>();
+        let (cur, total) = (sum(&new[..=i]), sum(&new));
+        let (lo, hi) = (sum(&floors[..=i]), total.saturating_sub(sum(&floors[i + 1..])));
+        if lo > hi {
+            return;
+        }
+        let want = cut.saturating_sub(start).clamp(lo, hi);
+        // the child beside the cut takes or gives it all; the other side gives or takes it nearest first
+        let (grow, give): (usize, Vec<usize>) = if want >= cur { (i, (i + 1..new.len()).collect()) } else { (i + 1, (0..=i).rev().collect()) };
+        let mut left = want.abs_diff(cur);
+        new[grow] += left;
+        for j in give {
+            let d = left.min(new[j] - floors[j]);
+            new[j] -= d;
+            left -= d;
+        }
+        for (c, n) in kids.iter_mut().zip(new) {
+            c.scale(ax, n);
+        }
+    }
+
+    /// Resize to `len` along `ax`: growth spread in proportion to the children's sizes, shrinking taken from
+    /// their room above [`LOCK_MIN`] in proportion to that room (from the end, past it, on a tiny screen).
+    fn scale(&mut self, ax: usize, len: u16) {
+        let cur = self.size[ax];
+        self.size[ax] = len;
+        match &mut self.kind {
+            Kind::Leaf(_) => {}
+            Kind::Frame(_, t) => t.scale(ax, len.saturating_sub(2)),
+            Kind::Split(a, kids) if *a != ax => {
+                for k in kids {
+                    k.scale(ax, len);
+                }
+            }
+            Kind::Split(_, kids) => {
+                let sizes: Vec<u16> = kids.iter().map(|k| k.size[ax]).collect();
+                let new = if len >= cur {
+                    spread(&sizes, len - cur)
+                } else {
+                    let spare: Vec<u32> = kids.iter().map(|k| k.size[ax].saturating_sub(k.floor(ax, LOCK_MIN)) as u32).collect();
+                    let (need, room) = ((cur - len) as u32, spare.iter().sum::<u32>());
+                    let mut new = share(&sizes, &spare, &vec![1; kids.len()], need.min(room));
+                    let mut left = need.saturating_sub(room) as u16;
+                    for s in new.iter_mut().rev() {
+                        let d = left.min(*s);
+                        *s -= d;
+                        left -= d;
+                    }
+                    new
+                };
+                for (k, n) in kids.iter_mut().zip(new) {
+                    k.scale(ax, n);
                 }
             }
         }
@@ -628,6 +785,125 @@ mod tests {
                                 same_order(&base, &g.panes);
                                 let (old, new) = (base.iter().find(|(p, _)| *p == id).unwrap().1, find(&g, id));
                                 assert!(new.width >= old.width && new.height >= old.height, "{old:?} -> {new:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn held(pane: PaneId, ax: usize, far: bool, at: u16) -> Lock {
+        Lock { pane, ax, far, at }
+    }
+
+    #[test]
+    fn a_held_edge_stays_put_as_the_tiles_change() {
+        let area = Rect::new(0, 0, 200, 48);
+        let l = held(1, 0, true, 130);
+        let g = lock(area, &stack_rects(area, &[1, 2]), &[], &[l]).unwrap();
+        tiles(area, &g.panes);
+        assert_eq!((find(&g, 1).right(), find(&g, 2).width), (130, 70));
+        // a third session opens: 1 keeps its edge, the two beside it share the rest
+        let base = stack_rects(area, &[1, 2, 3]);
+        let g = lock(area, &base, &[], &[l]).unwrap();
+        tiles(area, &g.panes);
+        same_order(&base, &g.panes);
+        assert_eq!(find(&g, 1).right(), 130);
+        assert_eq!((find(&g, 2).x, find(&g, 3).x), (130, 130));
+        // in a grid it's the cut in 1's own row
+        let base = stack_rects(area, &(1..=5).collect::<Vec<_>>());
+        let g = lock(area, &base, &[], &[l]).unwrap();
+        tiles(area, &g.panes);
+        assert_eq!(find(&g, 1).right(), 130);
+        assert_eq!(find(&g, 4).width, base[3].1.width, "other rows keep flowing");
+        assert_eq!(lock(area, &base, &[], &[held(9, 0, true, 50)]), None, "not on screen");
+        assert_eq!(lock(area, &base, &[], &[held(3, 0, true, 120)]), None, "the area's own edge");
+    }
+
+    #[test]
+    fn near_edges_bottoms_and_two_locks() {
+        let area = Rect::new(0, 0, 200, 48);
+        let base = stack_rects(area, &[1, 2, 3]); // 1 | 2 over 3
+        let g = lock(area, &base, &[], &[held(2, 0, false, 80), held(2, 1, true, 30)]).unwrap();
+        tiles(area, &g.panes);
+        assert_eq!((find(&g, 2).x, find(&g, 2).bottom()), (80, 30));
+        assert_eq!((find(&g, 1).width, find(&g, 3).height), (80, 18));
+        // the bottom held from the pane below, the edge between them is the same cut
+        let g = lock(area, &base, &[], &[held(2, 1, true, 30), held(3, 1, false, 20)]).unwrap();
+        assert_eq!(find(&g, 3).y, 20, "the later of two locks on one cut wins");
+        assert!(same_cut(area, &base, &[], held(2, 1, true, 0), held(3, 1, false, 0)));
+        assert!(same_cut(area, &base, &[], held(1, 0, true, 0), held(3, 0, false, 0)), "3 is across the same divider");
+        assert!(!same_cut(area, &base, &[], held(1, 0, true, 0), held(2, 1, true, 0)));
+        // a 2x2 grid is two rows: the dividers in each row line up but are separate cuts
+        let grid = stack_rects(Rect::new(0, 0, 120, 60), &[1, 2, 3, 4]);
+        assert!(!same_cut(Rect::new(0, 0, 120, 60), &grid, &[], held(1, 0, true, 0), held(3, 0, true, 0)));
+    }
+
+    #[test]
+    fn held_edges_stop_short_of_squeezing_a_pane() {
+        let area = Rect::new(0, 0, 120, 40);
+        let base = stack_rects(area, &[1, 2]);
+        let g = lock(area, &base, &[], &[held(1, 0, true, 119)]).unwrap();
+        assert_eq!(find(&g, 2).width, LOCK_MIN[0]);
+        let g = lock(area, &base, &[], &[held(1, 0, true, 0)]).unwrap();
+        assert_eq!(find(&g, 1).width, LOCK_MIN[0]);
+    }
+
+    #[test]
+    fn held_edges_move_project_frames_and_the_column() {
+        let area = Rect::new(0, 0, 200, 44);
+        let tiles_area = Rect { width: 150, ..area };
+        let regions = group_regions(tiles_area, &[2, 1]);
+        let mut panes = vec![];
+        let mut framed = vec![];
+        for (r, ids) in regions.iter().zip([vec![1, 2], vec![3]]) {
+            let inside = Rect { x: r.x + 1, y: r.y + 1, width: r.width - 2, height: r.height - 2 };
+            panes.extend(stack_rects(inside, &ids));
+            framed.push((*r, true));
+        }
+        panes.push((9, Rect::new(150, 0, 50, 44))); // the orchestrator's column
+        // 2 is the last pane in the first frame: its right edge is the frame's
+        let g = lock(area, &panes, &framed, &[held(2, 0, true, 80)]).unwrap();
+        let outer: Vec<(PaneId, Rect)> = g.frames.iter().map(|&(t, r)| (100 + t as PaneId, r)).chain([(9, find(&g, 9))]).collect();
+        tiles(area, &outer);
+        for (tag, ids) in [(0, vec![1, 2]), (1, vec![3])] {
+            let f = frame_of(&g, tag);
+            let inside = Rect { x: f.x + 1, y: f.y + 1, width: f.width - 2, height: f.height - 2 };
+            tiles(inside, &g.panes.iter().filter(|(p, _)| ids.contains(p)).copied().collect::<Vec<_>>());
+        }
+        assert_eq!(find(&g, 2).right(), 80);
+        assert_eq!((frame_of(&g, 0).right(), frame_of(&g, 1).x, frame_of(&g, 1).right()), (81, 81, 150));
+        assert_eq!(find(&g, 3).x, 82);
+        assert_eq!(find(&g, 9).x, 150, "the column stays");
+        // the column's own edge
+        let g = lock(area, &panes, &framed, &[held(9, 0, false, 130)]).unwrap();
+        assert_eq!((find(&g, 9).x, find(&g, 9).width), (130, 70));
+        assert_eq!(frame_of(&g, 1).right(), 130);
+    }
+
+    fn frame_of(g: &Grown, tag: usize) -> Rect {
+        g.frames.iter().find(|(t, _)| *t == tag).unwrap().1
+    }
+
+    #[test]
+    fn held_edges_never_break_the_tiling() {
+        for w in [0, 1, 5, 17, 33, 40, 90, 200] {
+            for h in [0, 1, 3, 6, 11, 14, 50] {
+                let area = Rect::new(3, 1, w, h);
+                for n in 1..=7 {
+                    let ids: Vec<PaneId> = (1..=n).collect();
+                    let base = stack_rects(area, &ids);
+                    for &id in &ids {
+                        for ax in [0, 1] {
+                            for far in [false, true] {
+                                for at in [0, 1, w / 3, h / 2, w, u16::MAX] {
+                                    let locks = [held(id, ax, far, at), held(1, 1 - ax, !far, at / 2)];
+                                    if let Some(g) = lock(area, &base, &[], &locks) {
+                                        tiles(area, &g.panes);
+                                        same_order(&base, &g.panes);
+                                    }
+                                }
                             }
                         }
                     }

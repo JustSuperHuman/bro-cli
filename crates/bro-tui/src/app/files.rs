@@ -141,7 +141,7 @@ impl App {
     /// A terminal editor: a pane split beside the session it was opened from.
     pub(crate) fn editor_pane(&mut self, e: EditorPane) {
         let label = program_name(&e.program);
-        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: label.clone(), name: Some(format!("{label} {}", e.file)), renamed: false, project: self.svc.project_for(&e.cwd), cwd: e.cwd, started: Instant::now(), route_id: None, cleanup: vec![], caveman: None, orchestrator: false };
+        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: label.clone(), name: Some(format!("{label} {}", e.file)), renamed: false, project: self.svc.project_for(&e.cwd), cwd: e.cwd, started: Instant::now(), route_id: None, cleanup: vec![], orchestrator: false };
         let term = Term::new(meta, Spawn { program: e.program, args: e.args, ..Spawn::default() }, self.svc.clone());
         if let Some(p) = e.pane.filter(|p| self.panes.contains_key(p)) {
             self.focus_pane(p);

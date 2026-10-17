@@ -2,8 +2,9 @@
 //! every Claude launch, picked as one preset plus per-switch overrides (`[claude_env]` in
 //! `~/.bro/v2.toml`). Reference: https://code.claude.com/docs/en/env-vars
 //!
-//! Each [`Knob`] has options; the first is always "Claude's default" and sets nothing, so
-//! the `standard` preset leaves Claude Code exactly as it would run outside bro.
+//! Each [`Knob`] has options; the first is the default and is usually "Claude's default",
+//! which sets nothing. The `standard` preset leaves Claude Code as it ships apart from
+//! [`ALWAYS`] (the fullscreen renderer), focus view, and tool search behind the proxy.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -56,6 +57,9 @@ pub struct Opt {
     pub id: &'static str,
     pub label: &'static str,
     pub vars: &'static [(&'static str, &'static str)],
+    /// Claude Code settings (key, JSON value) bro passes in its `--settings` file. Unlike
+    /// settings.json, these stay switchable inside the session (`/focus` drops `viewMode`).
+    pub settings: &'static [(&'static str, &'static str)],
 }
 
 pub struct Knob {
@@ -69,7 +73,7 @@ pub struct Knob {
     pub options: &'static [Opt],
 }
 
-const DEFAULT: Opt = Opt { id: "default", label: "Claude default", vars: &[] };
+const DEFAULT: Opt = Opt { id: "default", label: "Claude default", vars: &[], settings: &[] };
 
 pub const KNOBS: &[Knob] = &[
     Knob {
@@ -78,7 +82,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "Crash and error reports sent to Anthropic. Turning them off costs no features.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("DISABLE_ERROR_REPORTING", "1")] }],
+        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("DISABLE_ERROR_REPORTING", "1")], settings: &[] }],
     },
     Knob {
         id: "feedback",
@@ -86,7 +90,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "\"How is Claude doing?\" surveys and Claude-drafted feedback. /bug still works.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1"), ("CLAUDE_CODE_SEND_FEEDBACK", "0")] }],
+        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1"), ("CLAUDE_CODE_SEND_FEEDBACK", "0")], settings: &[] }],
     },
     Knob {
         id: "fingerprint",
@@ -94,7 +98,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "Attribution block (client version + prompt fingerprint) at the top of the system prompt.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_ATTRIBUTION_HEADER", "0")] }],
+        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_ATTRIBUTION_HEADER", "0")], settings: &[] }],
     },
     Knob {
         id: "telemetry",
@@ -102,7 +106,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "Off also stops feature-flag fetches: no Remote Control, artifact comments, advisor or claude.ai skill sync.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("DISABLE_TELEMETRY", "1")] }],
+        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("DISABLE_TELEMETRY", "1")], settings: &[] }],
     },
     Knob {
         id: "network",
@@ -110,7 +114,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "Off blocks telemetry, error reports, auto-updates, release notes, PR badges and feature flags in one go.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"), ("CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1")] }],
+        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"), ("CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1")], settings: &[] }],
     },
     Knob {
         id: "connectors",
@@ -118,7 +122,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "MCP servers configured on claude.ai (Gmail, Drive, ...) loaded into every session.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("ENABLE_CLAUDEAI_MCP_SERVERS", "false")] }],
+        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("ENABLE_CLAUDEAI_MCP_SERVERS", "false")], settings: &[] }],
     },
     Knob {
         id: "secrets",
@@ -126,7 +130,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "Scrubbed: Bash, hooks and MCP servers don't see API keys/tokens from your env (limits prompt injection).",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "scrubbed", label: "scrubbed", vars: &[("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1")] }],
+        options: &[DEFAULT, Opt { id: "scrubbed", label: "scrubbed", vars: &[("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1")], settings: &[] }],
     },
     Knob {
         id: "mcp_env",
@@ -134,7 +138,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "Minimal: stdio MCP servers get a safe baseline + their own configured env, not your whole shell env.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "minimal", label: "minimal", vars: &[("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "1")] }],
+        options: &[DEFAULT, Opt { id: "minimal", label: "minimal", vars: &[("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "1")], settings: &[] }],
     },
     Knob {
         id: "history",
@@ -142,7 +146,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "Off writes nothing to disk: those sessions can't be continued, resumed or recapped by bro.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1")] }],
+        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1")], settings: &[] }],
     },
     Knob {
         id: "memory",
@@ -150,7 +154,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "Claude's own notes about you and your projects, written and read across sessions.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")] }],
+        options: &[DEFAULT, Opt { id: "off", label: "off", vars: &[("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")], settings: &[] }],
     },
     Knob {
         id: "screen_share",
@@ -158,7 +162,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Privacy,
         help: "Hides your email, org name and working directory from Claude's header and /status.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "on", label: "on", vars: &[("IS_DEMO", "1"), ("CLAUDE_CODE_HIDE_CWD", "1")] }],
+        options: &[DEFAULT, Opt { id: "on", label: "on", vars: &[("IS_DEMO", "1"), ("CLAUDE_CODE_HIDE_CWD", "1")], settings: &[] }],
     },
     Knob {
         id: "updates",
@@ -168,8 +172,8 @@ pub const KNOBS: &[Knob] = &[
         when: When::Always,
         options: &[
             DEFAULT,
-            Opt { id: "manual", label: "manual", vars: &[("DISABLE_AUTOUPDATER", "1")] },
-            Opt { id: "frozen", label: "frozen", vars: &[("DISABLE_UPDATES", "1")] },
+            Opt { id: "manual", label: "manual", vars: &[("DISABLE_AUTOUPDATER", "1")], settings: &[] },
+            Opt { id: "frozen", label: "frozen", vars: &[("DISABLE_UPDATES", "1")], settings: &[] },
         ],
     },
     Knob {
@@ -178,7 +182,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::LongRuns,
         help: "Ride out: retry 429/529 capacity errors indefinitely instead of giving up after 10 tries.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "ride_out", label: "ride out", vars: &[("CLAUDE_CODE_RETRY_WATCHDOG", "1")] }],
+        options: &[DEFAULT, Opt { id: "ride_out", label: "ride out", vars: &[("CLAUDE_CODE_RETRY_WATCHDOG", "1")], settings: &[] }],
     },
     Knob {
         id: "shell_timeout",
@@ -186,7 +190,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::LongRuns,
         help: "Long: 10 min default, 60 min max for Bash/PowerShell commands (builds, test suites) instead of 2 / 10.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "long", label: "long", vars: &[("BASH_DEFAULT_TIMEOUT_MS", "600000"), ("BASH_MAX_TIMEOUT_MS", "3600000")] }],
+        options: &[DEFAULT, Opt { id: "long", label: "long", vars: &[("BASH_DEFAULT_TIMEOUT_MS", "600000"), ("BASH_MAX_TIMEOUT_MS", "3600000")], settings: &[] }],
     },
     Knob {
         id: "cache_ttl",
@@ -196,8 +200,8 @@ pub const KNOBS: &[Knob] = &[
         when: When::Always,
         options: &[
             DEFAULT,
-            Opt { id: "1h", label: "1 hour", vars: &[("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h"), ("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "1h")] },
-            Opt { id: "5m", label: "5 minutes", vars: &[("FORCE_PROMPT_CACHING_5M", "1")] },
+            Opt { id: "1h", label: "1 hour", vars: &[("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h"), ("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "1h")], settings: &[] },
+            Opt { id: "5m", label: "5 minutes", vars: &[("FORCE_PROMPT_CACHING_5M", "1")], settings: &[] },
         ],
     },
     Knob {
@@ -208,8 +212,8 @@ pub const KNOBS: &[Knob] = &[
         when: When::Always,
         options: &[
             DEFAULT,
-            Opt { id: "early", label: "early (70%)", vars: &[("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "70")] },
-            Opt { id: "off", label: "off", vars: &[("DISABLE_AUTO_COMPACT", "1")] },
+            Opt { id: "early", label: "early (70%)", vars: &[("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "70")], settings: &[] },
+            Opt { id: "off", label: "off", vars: &[("DISABLE_AUTO_COMPACT", "1")], settings: &[] },
         ],
     },
     Knob {
@@ -218,7 +222,7 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Features,
         help: "Claude Code turns tool search off behind a proxy, loading every MCP tool upfront. Auto keeps it on for Claude upstreams.",
         when: When::ProxiedAnthropic,
-        options: &[Opt { id: "auto", label: "auto", vars: &[("ENABLE_TOOL_SEARCH", "true")] }, Opt { id: "off", label: "Claude default", vars: &[] }],
+        options: &[Opt { id: "auto", label: "auto", vars: &[("ENABLE_TOOL_SEARCH", "true")], settings: &[] }, Opt { id: "off", label: "Claude default", vars: &[], settings: &[] }],
     },
     Knob {
         id: "agent_teams",
@@ -226,21 +230,35 @@ pub const KNOBS: &[Knob] = &[
         group: Group::Features,
         help: "Experimental: Claude coordinates a team of teammate sessions on one task.",
         when: When::Always,
-        options: &[DEFAULT, Opt { id: "on", label: "on", vars: &[("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")] }],
+        options: &[DEFAULT, Opt { id: "on", label: "on", vars: &[("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")], settings: &[] }],
     },
     Knob {
-        id: "renderer",
-        label: "Claude renderer",
+        id: "focus",
+        label: "Focus view",
         group: Group::Features,
-        help: "Fullscreen: flicker-free, flat memory in long chats. Classic: output stays in bro's scrollback.",
+        help: "Only your prompt, a one-line summary of tool steps and the reply. /focus flips it for one session.",
         when: When::Always,
         options: &[
-            DEFAULT,
-            Opt { id: "fullscreen", label: "fullscreen", vars: &[("CLAUDE_CODE_NO_FLICKER", "1")] },
-            Opt { id: "classic", label: "classic", vars: &[("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1")] },
+            Opt { id: "on", label: "on", vars: &[], settings: &[("viewMode", "\"focus\"")] },
+            Opt { id: "off", label: "Claude default", vars: &[], settings: &[] },
+        ],
+    },
+    Knob {
+        id: "spinner_tips",
+        label: "Spinner tips",
+        group: Group::Features,
+        help: "The \"Tip: ...\" line Claude shows under its spinner while it works. Off keeps that space for the status.",
+        when: When::Always,
+        options: &[
+            Opt { id: "off", label: "off", vars: &[], settings: &[("spinnerTipsEnabled", "false")] },
+            Opt { id: "on", label: "Claude default", vars: &[], settings: &[] },
         ],
     },
 ];
+
+/// Set on every Claude launch, before the knobs: the fullscreen renderer, which focus view
+/// needs and which keeps long chats flicker-free. `[claude_env.extra]` can still undo it.
+pub const ALWAYS: &[(&str, &str)] = &[("CLAUDE_CODE_NO_FLICKER", "1")];
 
 pub struct Preset {
     pub id: &'static str,
@@ -349,7 +367,7 @@ impl ClaudeEnvSettings {
     /// The variables a Claude launch gets, in order. `proxied_anthropic`: the launch goes
     /// through bro-proxy to an Anthropic-format upstream.
     pub fn vars(&self, proxied_anthropic: bool) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = vec![];
+        let mut out: Vec<(String, String)> = ALWAYS.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect();
         for k in KNOBS {
             if k.when == When::ProxiedAnthropic && !proxied_anthropic {
                 continue;
@@ -362,6 +380,17 @@ impl ClaudeEnvSettings {
         for (name, value) in &self.extra {
             out.retain(|(n, _)| n != name);
             out.push((name.clone(), value.clone()));
+        }
+        out
+    }
+
+    /// The Claude Code settings a launch's `--settings` file carries, in knob order.
+    pub fn settings(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut out = serde_json::Map::new();
+        for k in KNOBS {
+            for (key, value) in k.options[self.choice(k).0].settings {
+                out.insert(key.to_string(), serde_json::from_str(value).unwrap_or_else(|_| (*value).into()));
+            }
         }
         out
     }
@@ -386,10 +415,22 @@ mod tests {
     }
 
     #[test]
-    fn standard_sets_nothing_but_proxy_tool_search() {
+    fn standard_sets_the_renderer_focus_view_no_tips_and_proxy_tool_search() {
         let s = ClaudeEnvSettings::default();
-        assert!(s.vars(false).is_empty());
-        assert_eq!(s.vars(true), vec![("ENABLE_TOOL_SEARCH".to_string(), "true".to_string())]);
+        let flicker = ("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
+        assert_eq!(s.vars(false), vec![flicker.clone()]);
+        assert_eq!(s.vars(true), vec![flicker, ("ENABLE_TOOL_SEARCH".to_string(), "true".to_string())]);
+        assert_eq!(serde_json::Value::Object(s.settings()), serde_json::json!({ "viewMode": "focus", "spinnerTipsEnabled": false }));
+    }
+
+    #[test]
+    fn settings_switch_back_to_claude_defaults_and_extra_can_drop_the_renderer() {
+        let mut s = ClaudeEnvSettings::default();
+        s.set_choice(knob("focus").unwrap(), 1);
+        s.set_choice(knob("spinner_tips").unwrap(), 1);
+        assert!(s.settings().is_empty());
+        s.extra.insert("CLAUDE_CODE_NO_FLICKER".into(), "0".into());
+        assert_eq!(get(&s.vars(false), "CLAUDE_CODE_NO_FLICKER"), Some("0"));
     }
 
     #[test]

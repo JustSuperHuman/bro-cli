@@ -14,7 +14,7 @@ use bro_core::caveman::Level;
 use bro_core::claude_env::{self, ClaudeEnvSettings, KNOBS, PRESETS, Source};
 use bro_core::config::RainMode;
 use bro_core::justtools::Step;
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -31,6 +31,7 @@ enum BroOpt {
     Font,
     Rain,
     Screensaver,
+    SharedBorders,
     Icons,
     AutoResume,
     AutoApprove,
@@ -38,7 +39,7 @@ enum BroOpt {
     Compression,
 }
 
-const BRO_OPTS: [BroOpt; 9] = [BroOpt::Theme, BroOpt::Font, BroOpt::Rain, BroOpt::Screensaver, BroOpt::Icons, BroOpt::AutoResume, BroOpt::AutoApprove, BroOpt::Recaps, BroOpt::Compression];
+const BRO_OPTS: [BroOpt; 10] = [BroOpt::Theme, BroOpt::Font, BroOpt::Rain, BroOpt::Screensaver, BroOpt::SharedBorders, BroOpt::Icons, BroOpt::AutoResume, BroOpt::AutoApprove, BroOpt::Recaps, BroOpt::Compression];
 
 /// bro's options this window can use: the font only where the terminal can switch it.
 fn bro_opts() -> Vec<BroOpt> {
@@ -57,6 +58,7 @@ impl BroOpt {
             BroOpt::Font => "Font",
             BroOpt::Rain => "Digital rain",
             BroOpt::Screensaver => "Summary screensaver",
+            BroOpt::SharedBorders => "Shared tile borders",
             BroOpt::Icons => "Nerd Font icons",
             BroOpt::AutoResume => "Auto-resume",
             BroOpt::AutoApprove => "Auto-approve prompts",
@@ -70,12 +72,17 @@ impl BroOpt {
             BroOpt::Font => "this window only, switches as you go: ←/→ to try them",
             BroOpt::Rain => "over any theme: everywhere, or only in sessions whose agent is mid-turn",
             BroOpt::Screensaver => "step away and every session turns over to what it's working on; any touch turns them back",
+            BroOpt::SharedBorders => "tiles that sit together share one line instead of two; status and × move up beside the title",
             BroOpt::Icons => "turn off if icons show as boxes",
             BroOpt::AutoResume => "types `continue` when an agent stops on an API error or a limit resets",
             BroOpt::AutoApprove => "answers Yes to Claude's \"Do you want to proceed?\" (bypass mode's rm / path safety checks)",
             BroOpt::Recaps => "asks Claude for a /recap of a pane left waiting unseen (a few cents each)",
             BroOpt::Compression => "routes new Claude sessions through bro-proxy to trim requests",
         }
+    }
+    /// How bro looks (Appearance) rather than what it does (Sessions).
+    fn looks(self) -> bool {
+        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::Icons)
     }
     /// The value as shown.
     fn value(self, cx: &Cx) -> String {
@@ -95,6 +102,7 @@ impl BroOpt {
                 n if n < 60 => format!("after {n} s"),
                 n => format!("after {} min", n / 60),
             },
+            BroOpt::SharedBorders => on(s.shared_borders),
             BroOpt::Icons => on(ui::NERD.load(Ordering::Relaxed)),
             BroOpt::AutoResume => on(s.auto_resume.enabled),
             BroOpt::AutoApprove => on(s.auto_approve),
@@ -134,6 +142,11 @@ impl BroOpt {
             BroOpt::AutoApprove => {
                 let mut s = cx.svc.settings();
                 s.auto_approve = !s.auto_approve;
+                cx.svc.save_settings(s);
+            }
+            BroOpt::SharedBorders => {
+                let mut s = cx.svc.settings();
+                s.shared_borders = !s.shared_borders;
                 cx.svc.save_settings(s);
             }
             BroOpt::Recaps => {
@@ -215,8 +228,8 @@ enum WatchOpt {
 
 const WATCH_OPTS: [WatchOpt; 5] = [WatchOpt::Prompt, WatchOpt::Wake, WatchOpt::Reviewer, WatchOpt::Model, WatchOpt::Budget];
 
-/// A selectable row: bro's options, caveman mode, JustTools, updates, watchdogs, then the Claude preset, then
-/// each [`KNOBS`] switch.
+/// A selectable row, in the order the sections run: bro's own options (Appearance, then Sessions), caveman mode,
+/// watchdogs, the Claude preset and each [`KNOBS`] switch, the integrations, then bro's updates.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
     Bro(BroOpt),
@@ -232,13 +245,187 @@ fn rows() -> Vec<Row> {
     bro_opts()
         .into_iter()
         .map(Row::Bro)
-        .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents), Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
-        .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
-        .chain([Row::Tool(ToolOpt::Imagine), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
+        .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents)])
         .chain(WATCH_OPTS.map(Row::Watch))
         .chain([Row::Preset])
         .chain((0..KNOBS.len()).map(Row::Knob))
+        .chain([Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
+        .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
+        .chain([Row::Tool(ToolOpt::Imagine), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
         .collect()
+}
+
+/// The sections down the left; every row belongs to one.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Section {
+    Appearance,
+    Sessions,
+    Caveman,
+    Watchdog,
+    Claude,
+    Integrations,
+    Updates,
+}
+
+const SECTIONS: [Section; 7] = [Section::Appearance, Section::Sessions, Section::Caveman, Section::Watchdog, Section::Claude, Section::Integrations, Section::Updates];
+
+impl Section {
+    fn of(r: Row) -> Section {
+        match r {
+            Row::Bro(o) if o.looks() => Section::Appearance,
+            Row::Bro(_) => Section::Sessions,
+            Row::Cave(_) => Section::Caveman,
+            Row::Watch(_) => Section::Watchdog,
+            Row::Preset | Row::Knob(_) => Section::Claude,
+            Row::Tool(_) => Section::Integrations,
+            Row::Update(_) => Section::Updates,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Section::Appearance => "Appearance",
+            Section::Sessions => "Sessions",
+            Section::Caveman => "Caveman",
+            Section::Watchdog => "Watchdog",
+            Section::Claude => "Claude Code",
+            Section::Integrations => "Integrations",
+            Section::Updates => "Updates",
+        }
+    }
+    /// Its [`ui::icon`] name.
+    fn icon(self) -> &'static str {
+        match self {
+            Section::Appearance => "theme",
+            Section::Sessions => "term",
+            Section::Caveman => "caveman",
+            Section::Watchdog => "watchdog",
+            Section::Claude => "claude",
+            Section::Integrations => "rocket",
+            Section::Updates => "history",
+        }
+    }
+    /// The line under its title.
+    fn blurb(self) -> &'static str {
+        match self {
+            Section::Appearance => "How bro looks. Every change shows up as you make it.",
+            Section::Sessions => "What bro does on its own while your agents work.",
+            Section::Caveman => "Terse replies with every fact kept, in new Claude, Codex and Pi sessions.",
+            Section::Watchdog => "A fresh reviewer reads a session that went quiet and hands it its next task. Prefix w on a session starts one.",
+            Section::Claude => "The environment bro sets on every Claude launch. Sessions launched from now on pick it up.",
+            Section::Integrations => "Tools your agents can call. bro installs them and tells you when GitHub has something newer.",
+            Section::Updates => "New bro releases from GitHub. Nothing installs until you say so.",
+        }
+    }
+}
+
+/// One setting as drawn: its name and value, what it does, then any status lines under that.
+struct Item {
+    row: Row,
+    label: String,
+    /// beside the name: "changed", "+ 2 changes"
+    tag: Option<Span<'static>>,
+    value: Vec<Span<'static>>,
+    help: String,
+    notes: Vec<Vec<Span<'static>>>,
+}
+
+impl Item {
+    fn new(row: Row, label: &str, value: Vec<Span<'static>>, help: impl Into<String>) -> Item {
+        Item { row, label: label.into(), tag: None, value, help: help.into(), notes: vec![] }
+    }
+    fn note(mut self, spans: Vec<Span<'static>>) -> Item {
+        self.notes.push(spans);
+        self
+    }
+}
+
+/// What a section is drawn from.
+enum Block {
+    Item(Item),
+    /// a heading inside a section
+    Sub(String),
+    /// a line that isn't a setting
+    Text(Vec<Span<'static>>),
+}
+
+/// "● on" / "○ off"; `live` false dims an on that does nothing yet.
+fn switch(on: bool, live: bool, t: &crate::theme::Theme) -> Vec<Span<'static>> {
+    match (on, live) {
+        (true, true) => vec![Span::styled("● on", fg(t.good).add_modifier(Modifier::BOLD))],
+        (true, false) => vec![Span::styled("● on", muted(t))],
+        _ => vec![Span::styled("○ off", muted(t))],
+    }
+}
+
+/// "‹ value ›": ←/→ step through the choices.
+fn choice(v: impl Into<String>, style: Style, t: &crate::theme::Theme) -> Vec<Span<'static>> {
+    vec![Span::styled("‹ ", muted(t)), Span::styled(v.into(), style), Span::styled(" ›", muted(t))]
+}
+
+/// A value enter acts on rather than steps.
+fn shown(v: impl Into<String>, style: Style) -> Vec<Span<'static>> {
+    vec![Span::styled(v.into(), style)]
+}
+
+/// `text` word-wrapped to `w` columns; a word wider than that is cut across lines.
+fn wrap(text: &str, w: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let w = w.max(8);
+    let mut out = vec![];
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        let mut word = word.to_string();
+        while ui::width(&word) > w {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            let mut used = 0;
+            let cut = word.char_indices().find(|(_, c)| {
+                used += c.width().unwrap_or(0);
+                used > w
+            });
+            let at = cut.map_or(word.len(), |(i, _)| i);
+            out.push(word[..at].to_string());
+            word = word[at..].to_string();
+        }
+        if !cur.is_empty() && ui::width(&cur) + 1 + ui::width(&word) > w {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(&word);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// `left`, then `right` against the far edge of `w` columns (the left side gives way when it's tight).
+fn spread(left: Vec<Span<'static>>, right: Vec<Span<'static>>, w: usize) -> Vec<Span<'static>> {
+    let rw: usize = right.iter().map(|s| ui::width(&s.content)).sum();
+    let room = w.saturating_sub(rw + 1);
+    let mut out = vec![];
+    let mut used = 0;
+    for s in left {
+        let text = ui::fit(&s.content, room.saturating_sub(used));
+        if text.is_empty() {
+            break;
+        }
+        used += ui::width(&text);
+        out.push(Span::styled(text, s.style));
+    }
+    out.push(Span::raw(" ".repeat(w.saturating_sub(used + rw))));
+    out.extend(right);
+    out
+}
+
+/// `spans` padded to `w` columns on the selection's background.
+fn lit(mut spans: Vec<Span<'static>>, w: usize, t: &crate::theme::Theme) -> Vec<Span<'static>> {
+    let used: usize = spans.iter().map(|s| ui::width(&s.content)).sum();
+    spans.push(Span::raw(" ".repeat(w.saturating_sub(used))));
+    spans.into_iter().map(|s| Span::styled(s.content, s.style.bg(t.frame))).collect()
 }
 
 /// The settings pane.
@@ -246,8 +433,13 @@ fn rows() -> Vec<Row> {
 pub struct SettingsView {
     sel: usize,
     scroll: usize,
+    /// the section `scroll` is for: another one starts at its top
+    scrolled: Option<usize>,
     /// (screen row, selectable row) from the last render, for clicks
     hits: Vec<(u16, usize)>,
+    /// (screen row, section) down the left, and the column it ends at, from the last render
+    nav_hits: Vec<(u16, Section)>,
+    nav_end: u16,
     /// The upstream Caveman plugin is installed in `~/.claude` (checked when the view opens)
     upstream_caveman: bool,
     /// JustTools has been looked for since the view opened
@@ -269,6 +461,16 @@ impl SettingsView {
 
     fn row(&self) -> Row {
         rows()[self.sel.min(rows().len() - 1)]
+    }
+
+    /// Select the first row of the section `dir` away (wrapping round).
+    fn jump(&mut self, dir: isize) {
+        let at = SECTIONS.iter().position(|s| *s == Section::of(self.row())).unwrap_or(0) as isize;
+        self.go(SECTIONS[(at + dir).rem_euclid(SECTIONS.len() as isize) as usize]);
+    }
+
+    fn go(&mut self, s: Section) {
+        self.sel = rows().iter().position(|r| Section::of(*r) == s).unwrap_or(0);
     }
 
     /// Enter on a JustTools row: open Quick Install (JustTools isn't installed), update or check for a release;
@@ -428,17 +630,319 @@ fn reviewer_choices(cx: &Cx) -> Vec<String> {
     all
 }
 
-/// "K=V  K=V" for the next direct launch.
-fn env_preview(env: &ClaudeEnvSettings) -> String {
-    let vars = env.vars(false);
-    if vars.is_empty() {
-        return "nothing — Claude Code runs with its own defaults".into();
+/// What the next direct launch sets: each `K=V`, then the `--settings` it passes.
+fn env_parts(env: &ClaudeEnvSettings) -> Vec<String> {
+    // never empty: `claude_env::ALWAYS` is on every launch
+    let mut parts: Vec<String> = env.vars(false).iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let settings = env.settings();
+    if !settings.is_empty() {
+        parts.push(format!("--settings {}", serde_json::Value::Object(settings)));
     }
-    vars.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("  ")
+    parts
 }
 
-fn heading(text: &str, t: &crate::theme::Theme) -> Vec<Span<'static>> {
-    vec![Span::styled(format!("──── {text} "), muted(t).add_modifier(Modifier::BOLD))]
+/// Section `s` as lines `w` columns wide: its title and blurb, then its blocks. Each line carries the selectable
+/// row it belongs to (None: headings, text and gaps).
+fn lay_out(s: Section, blocks: Vec<Block>, sel: usize, w: usize, t: &crate::theme::Theme) -> Vec<(Option<usize>, Vec<Span<'static>>)> {
+    let all = rows();
+    let idx = |r: Row| all.iter().position(|x| *x == r).unwrap_or(0);
+    let mut lines = vec![(None, vec![Span::styled(format!("{}{}", ui::lead(s.icon()), s.label()), ui::bold_accent(t))])];
+    lines.extend(wrap(s.blurb(), w).into_iter().map(|l| (None, vec![Span::styled(l, muted(t))])));
+    lines.push((None, vec![Span::styled("─".repeat(w), fg(t.frame))]));
+    for b in blocks {
+        match b {
+            Block::Item(it) => {
+                lines.push((None, vec![]));
+                let i = idx(it.row);
+                let on = i == sel;
+                // the selection is a bar down the setting's left edge, its name, help and notes all lit
+                let bar = || Span::styled(if on { "▌ " } else { "  " }, fg(t.accent));
+                let mut left = vec![bar(), Span::styled(it.label, if on { ui::bold() } else { Style::default() })];
+                left.extend(it.tag);
+                let mut right = it.value;
+                right.push(Span::raw(" "));
+                let mut block = vec![spread(left, right, w)];
+                block.extend(wrap(&it.help, w.saturating_sub(3)).into_iter().map(|l| vec![bar(), Span::styled(l, muted(t))]));
+                for n in it.notes {
+                    match n.as_slice() {
+                        // plain text wraps like the help; a progress bar stays on its line
+                        [one] => block.extend(wrap(&one.content, w.saturating_sub(3)).into_iter().map(|l| vec![bar(), Span::styled(l, one.style)])),
+                        _ => block.push(std::iter::once(bar()).chain(n).collect()),
+                    }
+                }
+                lines.extend(block.into_iter().map(|l| (Some(i), if on { lit(l, w, t) } else { l })));
+            }
+            Block::Sub(text) => {
+                lines.push((None, vec![]));
+                let head = format!("  {} ", text.to_uppercase());
+                let rest = w.saturating_sub(ui::width(&head));
+                lines.push((None, vec![Span::styled(head, muted(t).add_modifier(Modifier::BOLD)), Span::styled("─".repeat(rest), fg(t.frame))]));
+            }
+            Block::Text(spans) => match spans.as_slice() {
+                [one] => lines.extend(wrap(&one.content, w.saturating_sub(2)).into_iter().map(|l| (None, vec![Span::raw("  "), Span::styled(l, one.style)]))),
+                _ => lines.push((None, std::iter::once(Span::raw("  ")).chain(spans).collect())),
+            },
+        }
+    }
+    lines
+}
+
+impl SettingsView {
+    /// What section `s` is drawn from.
+    fn blocks(&self, s: Section, cx: &Cx) -> Vec<Block> {
+        let t = cx.theme;
+        let st = cx.svc.settings();
+        let bold = |c| fg(c).add_modifier(Modifier::BOLD);
+        match s {
+            Section::Appearance | Section::Sessions => bro_opts()
+                .into_iter()
+                .filter(|o| o.looks() == (s == Section::Appearance))
+                .map(|o| {
+                    let v = o.value(cx);
+                    let value = match o {
+                        BroOpt::Theme => shown(format!("{v} ›"), fg(t.inline)),
+                        BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver => {
+                            let style = if v == "off" { muted(t) } else { fg(t.inline) };
+                            choice(v, style, t)
+                        }
+                        _ => switch(v == "on", true, t),
+                    };
+                    // the font row says what the current pick is like
+                    let help = match st.font.as_deref().and_then(crate::fonts::get) {
+                        Some(f) if o == BroOpt::Font => format!("{} · ←/→ to try another", f.blurb),
+                        _ => o.help().to_string(),
+                    };
+                    Block::Item(Item::new(Row::Bro(o), o.label(), value, help))
+                })
+                .collect(),
+            Section::Caveman => {
+                let cave = &st.caveman;
+                let (value, help) = match cave.active() {
+                    Some(l) => (choice(l.id(), bold(t.shine), t), l.help()),
+                    None => (choice("off", muted(t), t), "agents write normally · rules from github.com/JuliusBrussee/caveman"),
+                };
+                let mut mode = Item::new(Row::Cave(CaveOpt::Mode), "Caveman mode", value, help);
+                if self.upstream_caveman {
+                    mode = mode.note(vec![Span::styled("the Caveman plugin is installed in ~/.claude too: bro keeps it quiet while this is on", muted(t))]);
+                }
+                let subagents = Item::new(Row::Cave(CaveOpt::Subagents), "Claude subagents too", switch(cave.subagents, cave.on, t), "their reports back to the main agent get shorter too");
+                vec![Block::Item(mode), Block::Item(subagents)]
+            }
+            Section::Watchdog => {
+                let w = &st.watchdog;
+                WATCH_OPTS
+                    .iter()
+                    .map(|&o| {
+                        let (label, value, help) = match o {
+                            WatchOpt::Prompt => match &w.prompt {
+                                Some(_) => ("Watchdog prompt", shown("customized ›", bold(t.shine)), "your instructions for every reviewer · enter edits · r goes back to bro's"),
+                                None => ("Watchdog prompt", shown("bro's default ›", fg(t.inline)), "what every reviewer is told before its brief · enter opens the editor"),
+                            },
+                            WatchOpt::Wake => ("Wake after", choice(format!("{} idle", crate::watchdog::human(w.idle_secs)), fg(t.inline), t), "how long a session sits quiet after it stops before its watchdog wakes"),
+                            WatchOpt::Reviewer if w.reviewer == "auto" => ("Reviewer", choice("auto", fg(t.inline), t), "the login with the most usage left, Claude first, Codex when Claude is out"),
+                            WatchOpt::Reviewer => ("Reviewer", choice(w.reviewer.clone(), bold(t.shine), t), "always this login, whatever its usage"),
+                            WatchOpt::Model => ("Reviewer model", choice(w.model.clone(), fg(t.inline), t), "the Claude model reviewers run on · a Codex reviewer uses its login's own"),
+                            WatchOpt::Budget => ("Wake-up budget", choice(format!("{} wake-ups", w.max_wakes), fg(t.inline), t), "per watchdog, then it stands down and tells you"),
+                        };
+                        Block::Item(Item::new(Row::Watch(o), label, value, help))
+                    })
+                    .collect()
+            }
+            Section::Claude => {
+                let env = &st.claude_env;
+                let p = claude_env::preset(&env.preset);
+                let mut preset = Item::new(Row::Preset, "Preset", choice(p.label, bold(t.shine), t), p.help);
+                preset.tag = match env.overrides.len() {
+                    0 => None,
+                    n => Some(Span::styled(format!("  + {n} change{}", if n == 1 { "" } else { "s" }), fg(t.inline))),
+                };
+                let mut out = vec![Block::Item(preset)];
+                let mut group = None;
+                for (k_i, k) in KNOBS.iter().enumerate() {
+                    if group != Some(k.group) {
+                        group = Some(k.group);
+                        out.push(Block::Sub(k.group.label().into()));
+                    }
+                    let (o, src) = env.choice(k);
+                    let style = match src {
+                        Source::Override => bold(t.shine),
+                        Source::Preset => fg(t.inline),
+                        Source::Default => muted(t),
+                    };
+                    let mut item = Item::new(Row::Knob(k_i), k.label, choice(k.options[o].label, style, t), k.help);
+                    if matches!(src, Source::Override) {
+                        item.tag = Some(Span::styled("  changed", fg(t.shine)));
+                    }
+                    out.push(Block::Item(item));
+                }
+                out.push(Block::Sub("next Claude launch sets".into()));
+                out.push(Block::Text(vec![]));
+                out.extend(env_parts(env).into_iter().map(|p| Block::Text(vec![Span::styled(p, fg(t.inline))])));
+                out.push(Block::Text(vec![]));
+                out.push(Block::Text(vec![Span::styled("more variables: [claude_env.extra] in ~/.bro/v2.toml", muted(t))]));
+                out
+            }
+            Section::Integrations => self.integrations(cx),
+            Section::Updates => {
+                let u = cx.svc.state().updates.clone();
+                let current = bro_core::self_update::CURRENT;
+                let (v, style, help): (String, Style, String) = match (&u.job, &u.installed, u.available()) {
+                    (Some(job), _, _) => (format!("{} updating", spinner(job.started)), bold(t.shine), String::new()),
+                    (_, Some(new), _) => (format!("{new} installed"), fg(t.good), "restart bro to run it".into()),
+                    _ if u.checking => ("checking…".into(), muted(t), String::new()),
+                    (_, _, Some(_)) if bro_core::self_update::target().is_none() => (current.into(), fg(t.inline), "a new release is out; there's no prebuilt bro for this platform, so build it from source".into()),
+                    (_, _, Some(new)) => (format!("{current} → {new}"), bold(t.shine), "a new release is out · enter installs it (checked against its SHA-256)".into()),
+                    _ if u.offline => (current.into(), fg(t.inline), "couldn't reach GitHub to look for a newer release · enter tries again".into()),
+                    _ if u.latest.is_some() => (current.into(), fg(t.inline), "the newest release · enter checks again".into()),
+                    _ => (current.into(), fg(t.inline), "enter checks GitHub for a newer release now".into()),
+                };
+                let mut version = Item::new(Row::Update(UpdOpt::Version), "bro version", shown(v, style), help);
+                if let Some(job) = &u.job {
+                    let at = bro_core::self_update::Step::ALL.iter().position(|s| *s == job.step).unwrap_or(0) + 1;
+                    let all = bro_core::self_update::Step::ALL.len();
+                    version = version.note(progress(at, all, &format!("{} · {}s", job.step.label(), job.started.elapsed().as_secs()), t));
+                } else if let Some(e) = &u.error {
+                    version = version.note(vec![Span::styled(format!("✗ {e} · enter tries again"), fg(t.danger))]);
+                }
+                let check = Item::new(
+                    Row::Update(UpdOpt::Check),
+                    "Check for updates",
+                    switch(st.updates.check, true, t),
+                    "when bro opens and every 12 hours; a new release is announced once, nothing installs on its own",
+                );
+                vec![Block::Item(version), Block::Item(check)]
+            }
+        }
+    }
+
+    /// JustTools, Quick Install, the skills and JustImagine.
+    fn integrations(&self, cx: &Cx) -> Vec<Block> {
+        let t = cx.theme;
+        let bold = |c| fg(c).add_modifier(Modifier::BOLD);
+        let jt = cx.svc.state().justtools.clone();
+        let st = cx.svc.settings();
+        let jts = &st.justtools;
+        let note = |text: String, style: Style| vec![Span::styled(text, style)];
+        let installing = jt.job.as_ref().filter(|j| j.kind != JobKind::Skill);
+        let version = jt.installed.as_ref().map(|f| f.version.clone().unwrap_or_else(|| "installed".into()));
+        let (v, style, help): (String, Style, &str) = match (installing, &version, jt.update()) {
+            (Some(job), _, _) => (format!("{} {}", spinner(job.started), if job.kind == JobKind::Update { "updating" } else { "installing" }), bold(t.shine), ""),
+            _ if jt.checking || !jt.checked => ("checking…".into(), muted(t), ""),
+            (_, None, _) => ("not installed".into(), muted(t), "enter opens Quick Install · image, video, PDF and port commands in one binary"),
+            (_, Some(v), Some(new)) => (format!("{v} → {new}"), bold(t.shine), "a newer release is out · enter updates"),
+            (_, Some(v), None) if jt.offline => (v.clone(), fg(t.inline), "couldn't reach GitHub to look for a newer release · enter tries again"),
+            (_, Some(v), None) => (v.clone(), fg(t.inline), "the newest release · enter checks again"),
+        };
+        let mut tools = Item::new(Row::Tool(ToolOpt::Install), "JustTools", shown(v, style), help);
+        if let Some(job) = installing {
+            // one segment per step, then where it is and how long it has taken
+            let at = Step::ALL.iter().position(|s| *s == job.step).unwrap_or(0) + 1;
+            tools = tools.note(progress(at, Step::ALL.len(), &format!("{} · {}s", step_label(job.step), job.started.elapsed().as_secs()), t));
+        } else if let Some(e) = &jt.error {
+            let retry = if version.is_none() || jt.update().is_some() { " · enter tries again" } else { "" };
+            tools = tools.note(note(format!("✗ {e}{retry}"), fg(t.danger)));
+        } else if let Some(done) = &jt.done {
+            tools = tools.note(note(format!("✓ {done}"), fg(t.good)));
+        } else if let Some(found) = jt.installed.as_ref().filter(|f| !f.on_path()) {
+            tools = tools.note(note(format!("in {} · restart bro so new sessions find it on PATH", found.bin.display()), muted(t)));
+        } else if jt.checked && version.is_none() {
+            tools = tools.note(note("github.com/JustGains/JustTools · the download is checked against its SHA-256 before it installs".into(), muted(t)));
+        }
+        let quick = Item::new(
+            Row::Tool(ToolOpt::QuickInstall),
+            "Quick install",
+            shown("open ›", fg(t.inline)),
+            "tick what to install: JustTools, JustWatch, JustImagine, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…",
+        );
+        let value = match &jt.job {
+            Some(job) if job.kind == JobKind::Skill => shown(format!("{} adding", spinner(job.started)), bold(t.shine)),
+            _ => switch(jts.skill, true, t),
+        };
+        let help = if jt.own_skill { "~/.claude has its own copy, which bro leaves alone" } else { "tells new Claude and Codex sessions when to use the just* commands" };
+        let skill = Item::new(Row::Tool(ToolOpt::Skill), "JustTools skill", value, help);
+        let auto = Item::new(Row::Tool(ToolOpt::AutoUpdate), "Auto-update JustTools", switch(jts.auto_update, true, t), "when bro opens, looks on GitHub for a newer release and installs it");
+        let mut out = vec![Block::Item(tools), Block::Item(quick), Block::Item(skill), Block::Item(auto)];
+        if bro_core::justwatch::supported() {
+            out.push(Block::Item(Item::new(
+                Row::Tool(ToolOpt::WatchSkill),
+                "JustWatch skill",
+                switch(st.justwatch.skill, true, t),
+                "lets new Claude and Codex sessions check, restart and tail your dev servers through JustWatch",
+            )));
+        }
+
+        let ji = cx.svc.state().justimagine.clone();
+        let (v, style, help): (String, Style, String) = match (&ji.installed, ji.update()) {
+            _ if self.imagine_update.is_some() => ("updating in a tab".into(), bold(t.shine), "pulling from GitHub, then npm install and a service restart".into()),
+            _ if ji.checking || !ji.checked => ("checking…".into(), muted(t), String::new()),
+            (None, _) => ("not installed".into(), muted(t), "enter opens Quick Install · image, video, song and voice studio that runs in the background".into()),
+            (Some(f), Some(n)) => (format!("+{}", commits(n)), bold(t.shine), format!("{} is behind GitHub · enter pulls them and restarts the service", f.describe())),
+            (Some(f), None) if f.dir.is_none() => (f.describe(), fg(t.inline), "runs from a copy bro doesn't manage, so bro leaves its updates to you".into()),
+            (Some(f), None) if ji.error.is_some() => (f.describe(), fg(t.inline), format!("couldn't compare with GitHub: {} · enter tries again", ji.error.as_deref().unwrap_or_default())),
+            (Some(f), None) if f.url.is_some() => (f.describe(), fg(t.inline), "up to date with GitHub · enter opens it in your browser, signed in".into()),
+            (Some(f), None) => (f.describe(), fg(t.inline), "up to date with GitHub · enter checks again".into()),
+        };
+        let mut imagine = Item::new(Row::Tool(ToolOpt::Imagine), "JustImagine", shown(v, style), help);
+        match ji.installed.as_ref() {
+            Some(f) if f.url.is_some() => imagine = imagine.note(note(format!("open at {} · starts at login through {}", f.url.as_deref().unwrap_or_default(), bro_core::justimagine::mechanism()), muted(t))),
+            Some(_) => imagine = imagine.note(note("its service isn't answering · `bro install justimagine --force` reinstalls and starts it".into(), fg(t.danger))),
+            None => {}
+        }
+        out.push(Block::Item(imagine));
+        out
+    }
+
+    /// What a section is at, beside its name down the left.
+    fn summary(&self, s: Section, cx: &Cx) -> Span<'static> {
+        let t = cx.theme;
+        let st = cx.svc.settings();
+        match s {
+            Section::Appearance => Span::styled(t.name.clone(), muted(t)),
+            Section::Sessions => {
+                let opts: Vec<BroOpt> = bro_opts().into_iter().filter(|o| !o.looks()).collect();
+                let on = opts.iter().filter(|o| o.value(cx) == "on").count();
+                Span::styled(format!("{on} of {} on", opts.len()), muted(t))
+            }
+            Section::Caveman => match st.caveman.active() {
+                Some(l) => Span::styled(l.id(), fg(t.shine)),
+                None => Span::styled("off", muted(t)),
+            },
+            Section::Watchdog => Span::styled(format!("{} idle", crate::watchdog::human(st.watchdog.idle_secs)), muted(t)),
+            Section::Claude => {
+                let label = claude_env::preset(&st.claude_env.preset).label;
+                match st.claude_env.overrides.len() {
+                    0 => Span::styled(label, muted(t)),
+                    n => Span::styled(format!("{label} +{n}"), fg(t.inline)),
+                }
+            }
+            Section::Integrations => {
+                let (jt, ji) = (cx.svc.state().justtools.clone(), cx.svc.state().justimagine.clone());
+                match &jt.job {
+                    Some(job) => Span::styled(spinner(job.started), fg(t.shine)),
+                    None if self.imagine_update.is_some() => Span::styled("updating", fg(t.shine)),
+                    None if jt.update().is_some() || ji.update().is_some() => Span::styled("update", fg(t.shine).add_modifier(Modifier::BOLD)),
+                    None => Span::raw(""),
+                }
+            }
+            Section::Updates => {
+                let u = cx.svc.state().updates.clone();
+                match (&u.job, u.available()) {
+                    (Some(job), _) => Span::styled(spinner(job.started), fg(t.shine)),
+                    (None, Some(new)) => Span::styled(format!("→ {new}"), fg(t.shine).add_modifier(Modifier::BOLD)),
+                    (None, None) => Span::styled(bro_core::self_update::CURRENT, muted(t)),
+                }
+            }
+        }
+    }
+}
+
+/// An install's progress: one segment per step done, the rest thin, then "3 of 5 · what · how long".
+fn progress(at: usize, of: usize, what: &str, t: &crate::theme::Theme) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("━━━━".repeat(at), fg(t.accent)),
+        Span::styled("────".repeat(of.saturating_sub(at)), muted(t)),
+        Span::styled(format!("  {at} of {of} · {what}"), muted(t)),
+    ]
 }
 
 impl Pane for SettingsView {
@@ -468,274 +972,96 @@ impl Pane for SettingsView {
                 cx.svc.refresh_justimagine();
             }
         }
-        let env = cx.svc.settings().claude_env;
-        let reset = matches!(self.row(), Row::Preset | Row::Knob(_));
-        let mut hints = vec![("j/k", "move"), ("enter/→", "change"), ("←", "back")];
-        if reset {
-            hints.push(("r", "reset to preset"));
-        }
-        if matches!(self.row(), Row::Watch(_)) {
-            hints.push(("r", "bro's default"));
-        }
-        let area = ui::hint_line(f, area, &hints, t);
-        let all = rows();
-        let idx = |r: Row| all.iter().position(|x| *x == r).unwrap_or(0);
-        let mark = |i: usize| if self.sel == i { "▌" } else { " " };
-        let name = |i: usize, label: &str| Span::styled(format!("{} {:<26}", mark(i), label), if self.sel == i { ui::bold() } else { Style::default() });
-        // (selectable row, spans); None = heading or text.
-        let mut lines: Vec<(Option<usize>, Vec<Span<'static>>)> = vec![];
-        lines.push((None, vec![Span::styled(" SETTINGS ", ui::bold_accent(t)), Span::styled("  saved to ~/.bro/v2.toml", muted(t))]));
-        lines.push((None, vec![]));
-        lines.push((None, heading("bro", t)));
-        for o in bro_opts() {
-            let i = idx(Row::Bro(o));
-            let v = o.value(cx);
-            let style = if v == "off" { muted(t) } else { fg(t.inline) };
-            // the font row says what the current pick is like
-            let help = match cx.svc.settings().font.as_deref().and_then(crate::fonts::get) {
-                Some(f) if o == BroOpt::Font => format!("{} · ←/→ to try another", f.blurb),
-                _ => o.help().to_string(),
-            };
-            lines.push((Some(i), vec![name(i, o.label()), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
-        }
-
-        lines.push((None, vec![]));
-        lines.push((None, heading("caveman · terse replies, every fact kept · new Claude, Codex and Pi sessions", t)));
-        let cave = cx.svc.settings().caveman;
-        let i = idx(Row::Cave(CaveOpt::Mode));
-        let (v, style, help) = match cave.active() {
-            Some(l) => (format!("‹ {} ›", l.id()), fg(t.shine).add_modifier(Modifier::BOLD), l.help()),
-            None => ("off".to_string(), muted(t), "agents write normally · rules from github.com/JuliusBrussee/caveman"),
-        };
-        lines.push((Some(i), vec![name(i, "Caveman mode"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
-        let i = idx(Row::Cave(CaveOpt::Subagents));
-        let sub_on = cave.subagents && cave.on;
-        lines.push((Some(i), vec![
-            name(i, "Claude subagents too"),
-            Span::styled(ui::pad(if cave.subagents { "on" } else { "off" }, 16), if sub_on { fg(t.inline) } else { muted(t) }),
-            Span::styled(" their reports back to the main agent get shorter too", muted(t)),
-        ]));
-        if self.upstream_caveman {
-            lines.push((None, vec![Span::styled(
-                format!("  {:<26}the Caveman plugin is installed in ~/.claude too: bro keeps it quiet while this is on", ""),
-                muted(t),
-            )]));
-        }
-
-        lines.push((None, vec![]));
-        lines.push((None, heading("integrations · tools your agents can call", t)));
-        let jt = cx.svc.state().justtools.clone();
-        let jts = cx.svc.settings().justtools;
-        self.tools_busy = jt.job.is_some();
-        let note = |text: String, style: Style| (None, vec![Span::styled(format!("  {:<26}{text}", ""), style)]);
-        let i = idx(Row::Tool(ToolOpt::Install));
-        let installing = jt.job.as_ref().filter(|j| j.kind != JobKind::Skill);
-        let version = jt.installed.as_ref().map(|f| f.version.clone().unwrap_or_else(|| "installed".into()));
-        let (v, style, help): (String, Style, &str) = match (installing, &version, jt.update()) {
-            (Some(job), _, _) => (format!("{} {}", spinner(job.started), if job.kind == JobKind::Update { "updating" } else { "installing" }), fg(t.shine).add_modifier(Modifier::BOLD), ""),
-            _ if jt.checking || !jt.checked => ("checking…".into(), muted(t), ""),
-            (_, None, _) => ("not installed".into(), muted(t), "enter opens Quick Install · image, video, PDF and port commands in one binary"),
-            (_, Some(v), Some(new)) => (format!("{v} → {new}"), fg(t.shine).add_modifier(Modifier::BOLD), "a newer release is out · enter updates"),
-            (_, Some(v), None) if jt.offline => (v.clone(), fg(t.inline), "couldn't reach GitHub to look for a newer release · enter tries again"),
-            (_, Some(v), None) => (v.clone(), fg(t.inline), "the newest release · enter checks again"),
-        };
-        lines.push((Some(i), vec![name(i, "JustTools"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
-        if let Some(job) = installing {
-            // one segment per step, then where it is and how long it has taken
-            let at = Step::ALL.iter().position(|s| *s == job.step).unwrap_or(0) + 1;
-            lines.push((None, vec![
-                Span::raw(format!("  {:<26}", "")),
-                Span::styled("━━━━".repeat(at), fg(t.accent)),
-                Span::styled("━━━━".repeat(Step::ALL.len() - at), fg(t.frame)),
-                Span::styled(format!("  {at} of {} · {} · {}s", Step::ALL.len(), step_label(job.step), job.started.elapsed().as_secs()), muted(t)),
-            ]));
-        } else if let Some(e) = &jt.error {
-            let retry = if version.is_none() || jt.update().is_some() { " · enter tries again" } else { "" };
-            lines.push(note(format!("✗ {e}{retry}"), fg(t.danger)));
-        } else if let Some(done) = &jt.done {
-            lines.push(note(format!("✓ {done}"), fg(t.good)));
-        } else if let Some(found) = jt.installed.as_ref().filter(|f| !f.on_path()) {
-            lines.push(note(format!("in {} · restart bro so new sessions find it on PATH", found.bin.display()), muted(t)));
-        } else if jt.checked && version.is_none() {
-            lines.push(note("github.com/JustGains/JustTools · the download is checked against its SHA-256 before it installs".into(), muted(t)));
-        }
-        let i = idx(Row::Tool(ToolOpt::QuickInstall));
-        lines.push((Some(i), vec![
-            name(i, "Quick install"),
-            Span::styled(ui::pad("open ›", 16), fg(t.inline)),
-            Span::styled(" tick what to install: JustTools, JustWatch, JustImagine, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…", muted(t)),
-        ]));
-        let i = idx(Row::Tool(ToolOpt::Skill));
-        let (v, style) = match &jt.job {
-            Some(job) if job.kind == JobKind::Skill => (format!("{} adding", spinner(job.started)), fg(t.shine).add_modifier(Modifier::BOLD)),
-            _ if jts.skill => ("on".into(), fg(t.inline)),
-            _ => ("off".into(), muted(t)),
-        };
-        let help = if jt.own_skill { "~/.claude has its own copy, which bro leaves alone" } else { "tells new Claude and Codex sessions when to use the just* commands" };
-        lines.push((Some(i), vec![name(i, "JustTools skill"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
-        let i = idx(Row::Tool(ToolOpt::AutoUpdate));
-        lines.push((Some(i), vec![
-            name(i, "Auto-update JustTools"),
-            Span::styled(ui::pad(if jts.auto_update { "on" } else { "off" }, 16), if jts.auto_update { fg(t.inline) } else { muted(t) }),
-            Span::styled(" when bro opens, looks on GitHub for a newer release and installs it", muted(t)),
-        ]));
-        if bro_core::justwatch::supported() {
-            let i = idx(Row::Tool(ToolOpt::WatchSkill));
-            let on = cx.svc.settings().justwatch.skill;
-            lines.push((Some(i), vec![
-                name(i, "JustWatch skill"),
-                Span::styled(ui::pad(if on { "on" } else { "off" }, 16), if on { fg(t.inline) } else { muted(t) }),
-                Span::styled(" lets new Claude and Codex sessions check, restart and tail your dev servers through JustWatch", muted(t)),
-            ]));
-        }
-
-        let ji = cx.svc.state().justimagine.clone();
-        let i = idx(Row::Tool(ToolOpt::Imagine));
-        let (v, style, help): (String, Style, String) = match (&ji.installed, ji.update()) {
-            _ if self.imagine_update.is_some() => ("updating in a tab".into(), fg(t.shine).add_modifier(Modifier::BOLD), "pulling from GitHub, then npm install and a service restart".into()),
-            _ if ji.checking || !ji.checked => ("checking…".into(), muted(t), String::new()),
-            (None, _) => ("not installed".into(), muted(t), "enter opens Quick Install · image, video, song and voice studio that runs in the background".into()),
-            (Some(f), Some(n)) => (format!("+{}", commits(n)), fg(t.shine).add_modifier(Modifier::BOLD), format!("{} is behind GitHub · enter pulls them and restarts the service", f.describe())),
-            (Some(f), None) if f.dir.is_none() => (f.describe(), fg(t.inline), "runs from a copy bro doesn't manage, so bro leaves its updates to you".into()),
-            (Some(f), None) if ji.error.is_some() => (f.describe(), fg(t.inline), format!("couldn't compare with GitHub: {} · enter tries again", ji.error.as_deref().unwrap_or_default())),
-            (Some(f), None) if f.url.is_some() => (f.describe(), fg(t.inline), "up to date with GitHub · enter opens it in your browser, signed in".into()),
-            (Some(f), None) => (f.describe(), fg(t.inline), "up to date with GitHub · enter checks again".into()),
-        };
-        lines.push((Some(i), vec![name(i, "JustImagine"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
-        match ji.installed.as_ref() {
-            Some(f) if f.url.is_some() => lines.push(note(format!("open at {} · starts at login through {}", f.url.as_deref().unwrap_or_default(), bro_core::justimagine::mechanism()), muted(t))),
-            Some(_) => lines.push(note("its service isn't answering · `bro install justimagine --force` reinstalls and starts it".into(), fg(t.danger))),
-            None => {}
-        }
-
-        lines.push((None, vec![]));
-        lines.push((None, heading("updates · new bro releases from GitHub", t)));
+        // spinners keep moving whichever section is open: the left side shows them too
+        self.tools_busy = cx.svc.state().justtools.job.is_some();
         let u = cx.svc.state().updates.clone();
         self.update_busy = u.job.is_some() || u.checking;
-        let current = bro_core::self_update::CURRENT;
-        let i = idx(Row::Update(UpdOpt::Version));
-        let bold = |c| fg(c).add_modifier(Modifier::BOLD);
-        let (v, style, help): (String, Style, String) = match (&u.job, &u.installed, u.available()) {
-            (Some(job), _, _) => (format!("{} updating", spinner(job.started)), bold(t.shine), String::new()),
-            (_, Some(new), _) => (format!("{new} installed"), fg(t.good), "restart bro to run it".into()),
-            _ if u.checking => ("checking…".into(), muted(t), String::new()),
-            (_, _, Some(_)) if bro_core::self_update::target().is_none() => (current.into(), fg(t.inline), "a new release is out; there's no prebuilt bro for this platform, so build it from source".into()),
-            (_, _, Some(new)) => (format!("{current} → {new}"), bold(t.shine), "a new release is out · enter installs it (checked against its SHA-256)".into()),
-            _ if u.offline => (current.into(), fg(t.inline), "couldn't reach GitHub to look for a newer release · enter tries again".into()),
-            _ if u.latest.is_some() => (current.into(), fg(t.inline), "the newest release · enter checks again".into()),
-            _ => (current.into(), fg(t.inline), "enter checks GitHub for a newer release now".into()),
-        };
-        lines.push((Some(i), vec![name(i, "bro version"), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
-        if let Some(job) = &u.job {
-            let at = bro_core::self_update::Step::ALL.iter().position(|s| *s == job.step).unwrap_or(0) + 1;
-            let all = bro_core::self_update::Step::ALL.len();
-            lines.push((None, vec![
-                Span::raw(format!("  {:<26}", "")),
-                Span::styled("━━━━".repeat(at), fg(t.accent)),
-                Span::styled("━━━━".repeat(all - at), fg(t.frame)),
-                Span::styled(format!("  {at} of {all} · {} · {}s", job.step.label(), job.started.elapsed().as_secs()), muted(t)),
-            ]));
-        } else if let Some(e) = &u.error {
-            lines.push(note(format!("✗ {e} · enter tries again"), fg(t.danger)));
-        }
-        let i = idx(Row::Update(UpdOpt::Check));
-        let check = cx.svc.settings().updates.check;
-        lines.push((Some(i), vec![
-            name(i, "Check for updates"),
-            Span::styled(ui::pad(if check { "on" } else { "off" }, 16), if check { fg(t.inline) } else { muted(t) }),
-            Span::styled(" when bro opens and every 12 hours; a new release is announced once, nothing installs on its own", muted(t)),
-        ]));
 
-        lines.push((None, vec![]));
-        lines.push((None, heading("watchdog · a fresh reviewer hands an idle session its next task (prefix w on a session)", t)));
-        let w = cx.svc.settings().watchdog;
-        for o in WATCH_OPTS {
-            let i = idx(Row::Watch(o));
-            let (v, style, help): (String, Style, String) = match o {
-                WatchOpt::Prompt => match &w.prompt {
-                    Some(_) => ("customized".into(), fg(t.shine).add_modifier(Modifier::BOLD), "your instructions for every reviewer · enter edits · r goes back to bro's".into()),
-                    None => ("bro's default".into(), fg(t.inline), "what every reviewer is told before its brief · enter opens the editor".into()),
-                },
-                WatchOpt::Wake => (format!("{} idle", crate::watchdog::human(w.idle_secs)), fg(t.inline), "how long a session sits quiet after it stops before its watchdog wakes".into()),
-                WatchOpt::Reviewer if w.reviewer == "auto" => ("auto".into(), fg(t.inline), "the login with the most usage left, Claude first, Codex when Claude is out".into()),
-                WatchOpt::Reviewer => (w.reviewer.clone(), fg(t.shine).add_modifier(Modifier::BOLD), "always this login, whatever its usage".into()),
-                WatchOpt::Model => (w.model.clone(), fg(t.inline), "the Claude model reviewers run on · a Codex reviewer uses its login's own".into()),
-                WatchOpt::Budget => (format!("{} wake-ups", w.max_wakes), fg(t.inline), "per watchdog, then it stands down and tells you".into()),
-            };
-            let label = match o {
-                WatchOpt::Prompt => "Watchdog prompt",
-                WatchOpt::Wake => "Wake after",
-                WatchOpt::Reviewer => "Reviewer",
-                WatchOpt::Model => "Reviewer model",
-                WatchOpt::Budget => "Wake-up budget",
-            };
-            lines.push((Some(i), vec![name(i, label), Span::styled(ui::pad(&v, 16), style), Span::styled(format!(" {help}"), muted(t))]));
+        let row = self.row();
+        let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
+        match row {
+            Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
+            Row::Watch(_) => hints.push(("r", "bro's default")),
+            _ => {}
         }
+        let area = ui::hint_line(f, area, &hints, t);
+        let section = Section::of(row);
 
-        lines.push((None, vec![]));
-        lines.push((None, heading("Claude Code · applies to sessions launched from now on", t)));
-        let p = claude_env::preset(&env.preset);
-        let i = idx(Row::Preset);
-        lines.push((Some(i), vec![
-            name(i, "Preset"),
-            Span::styled(format!("‹ {} ›", p.label), fg(t.shine).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                match env.overrides.len() {
-                    0 => String::new(),
-                    n => format!("  + {n} change{}", if n == 1 { "" } else { "s" }),
-                },
-                fg(t.inline),
-            ),
-        ]));
-        lines.push((None, vec![Span::styled(format!("  {:<26}{}", "", p.help), muted(t))]));
-        let mut group = None;
-        for (k_i, k) in KNOBS.iter().enumerate() {
-            if group != Some(k.group) {
-                group = Some(k.group);
-                lines.push((None, vec![]));
-                lines.push((None, heading(k.group.label(), t)));
+        // the sections down the left, when there's room for them beside the settings
+        let nav_w: u16 = if area.width >= 76 { 28 } else { 0 };
+        self.nav_hits.clear();
+        self.nav_end = area.x + nav_w;
+        if nav_w > 0 {
+            let nav = Rect { width: nav_w - 2, ..area };
+            let w = nav.width as usize;
+            ui::line(f, Rect { height: 1, ..nav }, vec![Span::styled(" SETTINGS", ui::bold_accent(t))]);
+            for (n, s) in SECTIONS.into_iter().enumerate() {
+                let y = nav.y + 2 + n as u16;
+                if y >= nav.bottom() {
+                    break;
+                }
+                let on = s == section;
+                let left = vec![
+                    Span::styled(if on { "▌" } else { " " }, fg(t.accent)),
+                    Span::styled(format!(" {}{}", ui::lead(s.icon()), s.label()), if on { ui::bold() } else { Style::default() }),
+                ];
+                let spans = spread(left, vec![self.summary(s, cx), Span::raw(" ")], w);
+                ui::line(f, Rect { y, height: 1, ..nav }, if on { lit(spans, w, t) } else { spans });
+                self.nav_hits.push((y, s));
             }
-            let (o, src) = env.choice(k);
-            let style = match src {
-                Source::Override => fg(t.shine).add_modifier(Modifier::BOLD),
-                Source::Preset => fg(t.inline),
-                Source::Default => muted(t),
-            };
-            let tag = if matches!(src, Source::Override) { "*" } else { " " };
-            let i = idx(Row::Knob(k_i));
-            lines.push((Some(i), vec![
-                name(i, k.label),
-                Span::styled(format!("{}{tag}", ui::pad(k.options[o].label, 15)), style),
-                Span::styled(format!(" {}", k.help), muted(t)),
-            ]));
+            if nav.height as usize > SECTIONS.len() + 4 {
+                ui::line(f, Rect { y: nav.bottom() - 1, height: 1, ..nav }, vec![Span::styled(" saved to ~/.bro/v2.toml", muted(t))]);
+            }
+            for y in area.y..area.bottom() {
+                ui::line(f, Rect { x: area.x + nav_w - 1, y, width: 1, height: 1 }, vec![Span::styled("│", fg(t.frame))]);
+            }
         }
-        lines.push((None, vec![]));
-        lines.push((None, heading("next Claude launch sets", t)));
-        lines.push((None, vec![Span::styled(format!("  {}", env_preview(&env)), fg(t.inline))]));
-        lines.push((None, vec![Span::styled("  * changed from the preset · more variables: [claude_env.extra] in ~/.bro/v2.toml", muted(t))]));
 
-        // Keep the selection on screen.
-        let room = area.height as usize;
-        let at = lines.iter().position(|(s, _)| *s == Some(self.sel)).unwrap_or(0);
-        if at < self.scroll {
-            self.scroll = at.saturating_sub(2);
-        } else if at >= self.scroll + room {
-            self.scroll = at + 1 - room;
+        let body = Rect { x: area.x + nav_w + 1, width: area.width.saturating_sub(nav_w + 2), ..area };
+        let w = (body.width as usize).min(80);
+        let mut lines = lay_out(section, self.blocks(section, cx), self.sel, w, t);
+        let at = SECTIONS.iter().position(|s| *s == section);
+        if nav_w == 0 {
+            // no list down the left: the title says where this section sits
+            lines[0].1.push(Span::styled(format!("  {} of {}", at.unwrap_or(0) + 1, SECTIONS.len()), muted(t)));
         }
-        // the last switch brings the launch preview under it into view
-        if self.sel + 1 == all.len() {
+
+        // Keep the selected setting on screen; another section starts at its top.
+        let room = body.height as usize;
+        if self.scrolled != at {
+            self.scrolled = at;
+            self.scroll = 0;
+        }
+        let first = lines.iter().position(|(s, _)| *s == Some(self.sel)).unwrap_or(0);
+        let last = lines.iter().rposition(|(s, _)| *s == Some(self.sel)).unwrap_or(first);
+        let all = rows();
+        if all.iter().position(|r| Section::of(*r) == section) == Some(self.sel) {
+            self.scroll = 0;
+        } else if all.iter().rposition(|r| Section::of(*r) == section) == Some(self.sel) {
+            // the last setting brings what's under it into view (the Claude launch preview)
             self.scroll = lines.len().saturating_sub(room);
+        } else if first <= self.scroll {
+            self.scroll = first.saturating_sub(1);
+        } else if last >= self.scroll + room {
+            self.scroll = last + 1 - room;
         }
         self.scroll = self.scroll.min(lines.len().saturating_sub(room));
+        let (above, below) = (self.scroll > 0, lines.len() > self.scroll + room);
         self.hits.clear();
         for (n, (sel, spans)) in lines.into_iter().skip(self.scroll).take(room).enumerate() {
-            let r = Rect { y: area.y + n as u16, height: 1, ..area };
-            let selected = sel == Some(self.sel);
+            let r = Rect { y: body.y + n as u16, height: 1, width: w as u16, ..body };
             if let Some(s) = sel {
                 self.hits.push((r.y, s));
             }
-            let spans = if selected { spans.into_iter().map(|s| Span::styled(s.content, s.style.bg(t.frame))).collect() } else { spans };
             ui::line(f, r, spans);
+        }
+        // more above / below, at the right edge
+        let edge = Rect { x: body.x + w as u16, y: body.y, width: 1, height: 1 };
+        if above && edge.x < area.right() {
+            ui::line(f, edge, vec![Span::styled("▲", muted(t))]);
+        }
+        if below && edge.x < area.right() && body.height > 0 {
+            ui::line(f, Rect { y: body.bottom() - 1, ..edge }, vec![Span::styled("▼", muted(t))]);
         }
     }
     fn tick_every(&self) -> Option<Duration> {
@@ -751,6 +1077,10 @@ impl Pane for SettingsView {
             KeyCode::Char('k') | KeyCode::Up => self.sel = self.sel.saturating_sub(1),
             KeyCode::Char('g') | KeyCode::Home => self.sel = 0,
             KeyCode::Char('G') | KeyCode::End => self.sel = last,
+            // shift+tab arrives as Tab+SHIFT on some paths (Windows console input)
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => self.jump(-1),
+            KeyCode::Tab => self.jump(1),
+            KeyCode::BackTab => self.jump(-1),
             KeyCode::Enter | KeyCode::Char(' ' | 'l') | KeyCode::Right => self.step(1, cx),
             KeyCode::Char('h') | KeyCode::Left => self.step(-1, cx),
             KeyCode::Char('r') => self.reset(cx),
@@ -763,6 +1093,11 @@ impl Pane for SettingsView {
         match ev.kind {
             MouseEventKind::ScrollDown => self.sel = (self.sel + 1).min(last),
             MouseEventKind::ScrollUp => self.sel = self.sel.saturating_sub(1),
+            MouseEventKind::Down(MouseButton::Left) if ev.column < self.nav_end => {
+                if let Some(&(_, s)) = self.nav_hits.iter().find(|(y, _)| *y == ev.row) {
+                    self.go(s);
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(&(_, s)) = self.hits.iter().find(|(y, _)| *y == ev.row) {
                     if s == self.sel {
@@ -781,27 +1116,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preview_lists_vars_or_says_nothing() {
+    fn preview_lists_vars_and_settings() {
         let mut env = ClaudeEnvSettings::default();
-        assert!(env_preview(&env).starts_with("nothing"));
+        assert_eq!(env_parts(&env), ["CLAUDE_CODE_NO_FLICKER=1", r#"--settings {"viewMode":"focus","spinnerTipsEnabled":false}"#]);
         env.use_preset("presenter");
-        let p = env_preview(&env);
-        assert!(p.contains("IS_DEMO=1") && p.contains("CLAUDE_CODE_HIDE_CWD=1"), "{p}");
+        let p = env_parts(&env);
+        assert!(p.iter().any(|v| v == "IS_DEMO=1") && p.iter().any(|v| v == "CLAUDE_CODE_HIDE_CWD=1"), "{p:?}");
     }
 
     #[test]
-    fn rows_are_bro_then_caveman_then_justtools_then_preset_then_knobs() {
+    fn rows_run_in_section_order() {
         let r = rows();
         assert_eq!(r[0], Row::Bro(BroOpt::Theme));
-        assert_eq!(r[bro_opts().len()], Row::Cave(CaveOpt::Mode));
-        assert_eq!(r[bro_opts().len() + 2], Row::Tool(ToolOpt::Install));
-        assert_eq!(r[bro_opts().len() + 3], Row::Tool(ToolOpt::QuickInstall));
+        let n = bro_opts().len();
+        assert_eq!(r[n], Row::Cave(CaveOpt::Mode));
+        assert_eq!(r[n + 2], Row::Watch(WatchOpt::Prompt));
+        assert_eq!(r[n + 2 + WATCH_OPTS.len()], Row::Preset);
+        let tools = n + 3 + WATCH_OPTS.len() + KNOBS.len();
+        assert_eq!(r[tools], Row::Tool(ToolOpt::Install));
+        assert_eq!(r[tools + 1], Row::Tool(ToolOpt::QuickInstall));
         let watch = usize::from(bro_core::justwatch::supported());
-        assert_eq!(r[bro_opts().len() + 6 + watch], Row::Tool(ToolOpt::Imagine));
-        assert_eq!(r[bro_opts().len() + 7 + watch], Row::Update(UpdOpt::Version));
-        assert_eq!(r[bro_opts().len() + 9 + watch], Row::Watch(WatchOpt::Prompt));
-        assert_eq!(r[bro_opts().len() + 9 + watch + WATCH_OPTS.len()], Row::Preset);
-        assert_eq!(r.len(), bro_opts().len() + 10 + watch + WATCH_OPTS.len() + KNOBS.len());
+        assert_eq!(r[tools + 4 + watch], Row::Tool(ToolOpt::Imagine));
+        assert_eq!(r[tools + 5 + watch], Row::Update(UpdOpt::Version));
+        assert_eq!(r.len(), tools + 7 + watch);
+        // each section's rows sit together, in the order the sections are listed
+        let order: Vec<usize> = r.iter().map(|row| SECTIONS.iter().position(|s| *s == Section::of(*row)).unwrap()).collect();
+        assert!(order.is_sorted(), "{order:?}");
+        assert!((0..SECTIONS.len()).all(|i| order.contains(&i)), "every section has a row");
+    }
+
+    #[test]
+    fn wrap_breaks_at_spaces_and_cuts_long_words() {
+        assert_eq!(wrap("one two three four", 9), ["one two", "three", "four"]);
+        assert_eq!(wrap("abcdefghijkl x", 8), ["abcdefgh", "ijkl x"]);
+        assert!(wrap("", 20).is_empty());
     }
 
     #[test]

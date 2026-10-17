@@ -36,6 +36,9 @@ pub(crate) struct ResumeQueue {
 
 /// What a remote create's `profile_id` asks for: an agent (harness + bro profile) or None for a shell.
 /// Accepts bro profile ids ("claude:work"), bare harness names ("claude", "pi") and "shell".
+/// The profile id a remote client sends to open bro's orchestrator session.
+pub(crate) const ORCHESTRATOR_PROFILE: &str = "orchestrator";
+
 pub(crate) fn create_target(profile_id: Option<&str>) -> Option<(Harness, Option<String>)> {
     let id = profile_id?;
     if let Some(h) = Harness::ALL.iter().find(|h| h.label() == id) {
@@ -105,7 +108,6 @@ impl App {
             started: Instant::now(),
             route_id,
             cleanup: cmd.cleanup.clone(),
-            caveman: cmd.caveman,
             orchestrator: spec.orchestrator,
         };
         let sid = meta.sid.clone();
@@ -177,7 +179,7 @@ impl App {
         let (prog, args) = crate::util::default_shell(settings.shell.as_deref());
         let cwd = cwd.or_else(|| self.focused_cwd()).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
         let name = std::path::Path::new(&prog).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| prog.clone());
-        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: name, name: None, renamed: false, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], caveman: None, orchestrator: false };
+        let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: name, name: None, renamed: false, project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], orchestrator: false };
         let term = Term::new(meta, Spawn { program: prog, args, ..Spawn::default() }, self.svc.clone());
         self.open(Box::new(term), place)
     }
@@ -240,6 +242,22 @@ impl App {
                 let pane = self.term_id(&id);
                 self.open_in_editor(pane, path, line, column);
             }
+            BridgeCommand::Create { req, reply } if req.profile_id.as_deref() == Some(ORCHESTRATOR_PROFILE) => {
+                // the launcher's ★ tab from a phone: one per bro, so the running one answers
+                if let Some(sid) = self.orchestrator_pane().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()) {
+                    let _ = reply.send(Ok(sid));
+                } else if self.orchestrator_pending.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(90)) {
+                    let _ = reply.send(Err(anyhow::anyhow!("The orchestrator is already starting. It shows up here in a moment.")));
+                } else if let Some(spec) = self.voice_orchestrator_spec() {
+                    self.orchestrator_pending = Some(Instant::now());
+                    let mut lr = LaunchRequest::new(spec, Place::Tab);
+                    lr.reply = Some(reply);
+                    lr.remember = true;
+                    self.svc.launch(lr);
+                } else {
+                    let _ = reply.send(Err(anyhow::anyhow!("No Claude or Codex login can run the orchestrator. Add one in bro's profiles.")));
+                }
+            }
             BridgeCommand::Create { req, reply } => {
                 // no folder from the phone → the current project, like alt+n
                 let cwd = req.cwd.clone().filter(|c| c.is_dir()).or_else(|| self.current_project()).or_else(dirs::home_dir).unwrap_or_default();
@@ -257,7 +275,7 @@ impl App {
                         let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all);
                         let id = match req.shell.clone() {
                             Some(shell) => {
-                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: req.title.is_some(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], caveman: None, orchestrator: false };
+                                let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: req.title.is_some(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], orchestrator: false };
                                 let term = Term::new(meta, Spawn { program: shell, args: req.args.clone(), ..Spawn::default() }, self.svc.clone());
                                 self.new_tab(Box::new(term))
                             }
@@ -547,7 +565,6 @@ impl App {
                 started: Instant::now(),
                 route_id: None,
                 cleanup: vec![],
-                caveman: None,
                 orchestrator: false,
             };
             let id = self.open(Box::new(Term::queued(meta, ahead, self.svc.clone())), Place::Tab);
@@ -798,7 +815,6 @@ impl App {
                 started: Instant::now() - std::time::Duration::from_secs([420, 1_900, 60, 5_400, 12_000][i % 5]),
                 route_id: None,
                 cleanup: vec![],
-                caveman: (i == 0 && d.harness == Some(bro_core::Harness::Claude)).then_some(bro_core::caveman::Level::Caveman),
                 orchestrator: false,
             };
             let mut term = if self.opts.fixed_demo {

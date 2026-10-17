@@ -10,7 +10,7 @@ mod cast;
 mod chats;
 pub(crate) mod claude;
 mod context;
-mod folders;
+pub(crate) mod folders;
 pub(crate) mod mcp;
 pub(crate) mod tools;
 mod turn;

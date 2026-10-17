@@ -24,6 +24,8 @@
 //! | `commands` | create-session round trip, paced compose |
 //! | `project_store` / `projects` | project ids, names, order |
 //! | `net` | access URLs and the pairing QR code |
+//! | `folders` | `/api/folders`: where a session can start (bro's projects, recents, path completion) |
+//! | `hosts` | the other bridges on this machine (`/api/hosts`), so clients switch between bro windows without pairing again |
 //! | `orchestrator` | Hugh, the built-in agent over every session: a headless Claude Code process using the tools at `/mcp` |
 //! | `watchdog` | per-session watchdogs: milestones, a log, and a fresh reviewer agent per wake-up on the same tools |
 //!
@@ -32,7 +34,8 @@
 //! `<data_root>` (default `~/.bro/bridge`, `$BRO_DIR/bridge` when set) holds
 //! `.terminal-web-token`, `.terminal-web-projects.json`,
 //! `.terminal-web-server.json` (`{pid,host,port,startedAt,runtime:"bro"}`) and
-//! the orchestrator config/history. On first start the token is imported from
+//! the orchestrator config/history, and `hosts/<id>.json` for every running
+//! bridge (see `hosts`). On first start the token is imported from
 //! Just Terminal (`%LOCALAPPDATA%\TerminalWeb` or its MSIX-redirected
 //! `%LOCALAPPDATA%\Packages\*Terminal*\LocalCache\Local\TerminalWeb`) so
 //! phones paired with Just Terminal keep working; see [`StartOptions`].
@@ -45,6 +48,8 @@ pub mod file_links;
 pub mod file_preview;
 pub mod insights;
 mod file_search;
+mod folders;
+mod hosts;
 mod model;
 mod net;
 mod notifications;
@@ -70,6 +75,7 @@ mod ws;
 mod tests;
 
 pub use auth::is_authorized;
+pub use hosts::LocalHost;
 pub use insights::{AgentFiles, Attention, AttentionState, Recap, RecapSource, SentFile, SessionInsights, TouchKind, TouchedFile};
 pub use model::TerminalProfile;
 pub use orchestrator::{MessageContext, OrchestratorLaunch, OrchestratorUpdate};
@@ -695,6 +701,12 @@ impl Bridge {
         net::render_qr(&url)
     }
 
+    /// Every bridge on this machine from the last scan, this one first
+    /// (`current`). Scans run while remote clients are connected; cheap.
+    pub fn local_hosts(&self) -> Vec<LocalHost> {
+        self.state().local_hosts()
+    }
+
     /// The URL [`Bridge::pairing_qr`] encodes.
     pub fn pairing_url(&self) -> Option<String> {
         let status = self.status();
@@ -754,6 +766,7 @@ async fn run_host(
         inner.port = port;
     }
     server::write_server_info(&state);
+    hosts::register(&state);
     server::spawn_background(&state);
     state.running.store(true, Ordering::Relaxed);
     let _ = ready.send(Ok(()));
@@ -761,5 +774,6 @@ async fn run_host(
         *state.last_error.lock() = Some(error.to_string());
     }
     state.running.store(false, Ordering::Relaxed);
+    hosts::unregister(&state);
     server::remove_server_info(&state);
 }

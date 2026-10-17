@@ -5,7 +5,7 @@ use super::overlays::Overlay;
 use super::{App, Sel, SideHit};
 use crate::layout::{Dir, split_rect};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 use std::time::{Duration, Instant};
 
 impl App {
@@ -119,6 +119,26 @@ impl App {
             }
             return;
         }
+        // A tile edge being dragged holds the gesture the same way; it's held where the drag leaves it.
+        if let Some((pane, ax, far, offset)) = self.tile_drag {
+            match m.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let body = self.body_panes();
+                    let (p, start) = if ax == 0 { (pos.x, body.x) } else { (pos.y, body.y) };
+                    let at = (p as i32 + offset - start as i32).clamp(0, u16::MAX as i32) as u16;
+                    self.locks.retain(|l| (l.pane, l.ax, l.far) != (pane, ax, far));
+                    self.locks.push(crate::priority::Lock { pane, ax, far, at });
+                    self.last_pane_click = None;
+                    return;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.tile_drag = None;
+                    return;
+                }
+                MouseEventKind::Down(_) => self.tile_drag = None,
+                _ => {}
+            }
+        }
         let on_edge = self.side_area.width > 0 && pos.x == self.side_area.right() - 1
             && pos.y >= self.side_area.y && pos.y < self.side_area.bottom();
         if on_edge && matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -215,6 +235,33 @@ impl App {
                         self.drag = Some((path, dir, area));
                         return;
                     }
+                }
+            }
+            // A tile edge: dragging it holds it there. A plain click still focuses the pane and a double-click
+            // still zooms it, except on a held edge, where a double-click lets the edge go.
+            if m.modifiers.is_empty()
+                && let Some((id, ax, far)) = self.tile_edge(pos)
+            {
+                let pressed = crate::priority::Lock { pane: id, ax, far, at: 0 };
+                let held = self.held_cut(pressed);
+                let double = self.last_pane_click.is_some_and(|(at, pane, first)| pane == id && first == pos && at.elapsed() < Duration::from_millis(400));
+                if double && held.is_some() {
+                    self.locks = self.locks.iter().copied().filter(|l| !self.same_cut(*l, pressed)).collect();
+                    self.last_pane_click = None;
+                    return;
+                }
+                // one lock per cut: keep the one already there, so the edge stays tied to its pane
+                let anchor = held.unwrap_or(pressed);
+                self.locks = self.locks.iter().copied().filter(|l| *l == anchor || !self.same_cut(*l, pressed)).collect();
+                if let Some(&(_, r)) = self.outer.iter().find(|(p, _)| *p == anchor.pane) {
+                    let edge = match (ax, anchor.far) {
+                        (0, true) => r.right(),
+                        (0, false) => r.x,
+                        (_, true) => r.bottom(),
+                        (_, false) => r.y,
+                    };
+                    let grab = if ax == 0 { pos.x } else { pos.y };
+                    self.tile_drag = Some((anchor.pane, ax, anchor.far, edge as i32 - grab as i32));
                 }
             }
         }
@@ -447,6 +494,46 @@ impl App {
             t.focus = id;
             t.zoom = !t.zoom;
         }
+    }
+
+    /// The tile edge at `pos` in the tiled view, when another tile is across it: (pane, axis, far side).
+    pub(super) fn tile_edge(&self, pos: Position) -> Option<(crate::pane::PaneId, usize, bool)> {
+        if !self.stacked() || self.stack_zoom || self.grown {
+            return None;
+        }
+        let &(id, r) = self.outer.iter().find(|(_, r)| r.contains(pos))?;
+        // with shared borders a pane is drawn onto the one touching it on the right / below: its own last column /
+        // row is content, and the line between them is the neighbour's edge
+        let shared = self.shared_borders();
+        [(0, true, pos.x + 1 == r.right()), (0, false, pos.x == r.x), (1, true, pos.y + 1 == r.bottom()), (1, false, pos.y == r.y)]
+            .into_iter()
+            .find(|&(ax, far, on)| {
+                let mut across = self.across(id, r, ax, far).filter(|(_, q)| if ax == 0 { q.y <= pos.y && pos.y < q.bottom() } else { q.x <= pos.x && pos.x < q.right() });
+                on && across.next().is_some_and(|(_, q)| !(shared && far && if ax == 0 { q.x == r.right() } else { q.y == r.bottom() }))
+            })
+            .map(|(ax, far, _)| (id, ax, far))
+    }
+
+    /// The tiles across `r`'s edge (`ax`, `far` side): touching it, or up to two cells on past project frames.
+    pub(super) fn across(&self, pane: crate::pane::PaneId, r: Rect, ax: usize, far: bool) -> impl Iterator<Item = (crate::pane::PaneId, Rect)> + '_ {
+        self.outer.iter().copied().filter(move |&(id, q)| {
+            let (gap, overlap) = if ax == 0 {
+                (if far { q.x as i32 - r.right() as i32 } else { r.x as i32 - q.right() as i32 }, q.y < r.bottom() && r.y < q.bottom())
+            } else {
+                (if far { q.y as i32 - r.bottom() as i32 } else { r.y as i32 - q.bottom() as i32 }, q.x < r.right() && r.x < q.right())
+            };
+            id != pane && (0..=2).contains(&gap) && overlap
+        })
+    }
+
+    /// Whether two tile edges are one divider in the tiled view as last drawn.
+    fn same_cut(&self, a: crate::priority::Lock, b: crate::priority::Lock) -> bool {
+        crate::priority::same_cut(self.body_panes(), &self.outer, &self.tile_regions, a, b)
+    }
+
+    /// The newest lock on the same divider as `edge`.
+    pub(super) fn held_cut(&self, edge: crate::priority::Lock) -> Option<crate::priority::Lock> {
+        self.locks.iter().rev().find(|l| self.same_cut(**l, edge)).copied()
     }
 
     pub(super) fn save_sidebar_width(&self) {

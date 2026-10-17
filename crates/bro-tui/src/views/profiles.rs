@@ -99,7 +99,6 @@ impl ProfilesView {
                     started: std::time::Instant::now(),
                     route_id: None,
                     cleanup: vec![],
-                    caveman: None,
                     orchestrator: false,
                 };
                 let term = Term::new(meta, Spawn { program: c.program, args: c.args, env: c.env, env_remove: c.env_remove }, cx.svc.clone());

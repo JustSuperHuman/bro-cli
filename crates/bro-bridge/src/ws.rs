@@ -3,8 +3,8 @@
 //! On connect the server sends `hello`. Clients `subscribe` a session into a
 //! slot (`main` by default) and get its `snapshot`, then live `output` for
 //! every subscribed session and a data-free `activity` ping for the rest.
-//! Global events (`sessions`, `session`, `projects`, `profiles`, `notify`,
-//! `orchestrator*`, `exit`) go to everyone. Client actions become
+//! Global events (`sessions`, `session`, `projects`, `profiles`, `hosts`,
+//! `notify`, `orchestrator*`, `exit`) go to everyone. Client actions become
 //! [`crate::BridgeCommand`]s.
 
 use crate::BridgeCommand;
@@ -94,6 +94,8 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     if *shutdown.borrow() || sender.send(text(&state.hello())).await.is_err() {
         return;
     }
+    // `hello` carried the last scan; a stale one is redone and arrives as `hosts`.
+    crate::hosts::refresh_soon(&state);
     // Per-connection replies from background tasks (create results).
     let (direct_tx, mut direct_rx) = mpsc::unbounded_channel::<Value>();
     let mut subscriptions = Subscriptions::new(&state);

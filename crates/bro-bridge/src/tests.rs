@@ -423,9 +423,12 @@ async fn client_actions_become_bridge_commands() {
     harness.seen.lock().clear();
 
     // Create resolves through the reply channel and returns the summary.
+    let work = harness.root.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let work_text = work.to_string_lossy().into_owned();
     let created: Value = client
         .post(harness.url("/api/sessions"))
-        .json(&json!({ "title": "From phone", "profileId": "claude", "cwd": "C:\\work" }))
+        .json(&json!({ "title": "From phone", "profileId": "claude", "cwd": work_text }))
         .send()
         .await
         .unwrap()
@@ -436,7 +439,7 @@ async fn client_actions_become_bridge_commands() {
         .unwrap();
     assert!(created["id"].as_str().unwrap().starts_with("created-"));
     assert_eq!(created["title"], "From phone");
-    assert_eq!(created["cwd"], "C:\\work");
+    assert_eq!(created["cwd"], work_text);
     assert_eq!(
         created["shell"], "claude",
         "the profile filled in the shell"
@@ -463,6 +466,18 @@ async fn client_actions_become_bridge_commands() {
             .unwrap()
             .contains("no PTY for you")
     );
+
+    // A folder that isn't there is refused before bro is asked.
+    harness.seen.lock().clear();
+    let missing = client
+        .post(harness.url("/api/sessions"))
+        .json(&json!({ "profileId": "claude", "cwd": work.join("nope").to_string_lossy() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 400);
+    assert!(missing.json::<Value>().await.unwrap()["message"].as_str().unwrap().contains("no folder"));
+    assert!(harness.seen.lock().is_empty(), "bro never saw it");
 
     // ws create: success shows up as a new session, failure as an error event.
     send(
@@ -1723,4 +1738,165 @@ async fn cleanup_usage_and_fleet_tools() {
     let closed = call(3, "close_all_sessions", json!({ "except": ["charlie"] })).await;
     assert_eq!(closed["closed"].as_array().unwrap().len(), 2, "{closed}");
     assert_eq!(kills(&harness), ["alpha", "bravo"]);
+}
+
+// ----- other bridges on this machine (hosts.rs) --------------------------------
+
+fn plain_bridge(data_root: PathBuf) -> Bridge {
+    Bridge::start_with(
+        BridgeConfig { port: 0, automatic_port: false, bind: "127.0.0.1".into(), data_root, web_interface: false },
+        StartOptions { import_legacy_token: false },
+        Box::new(|_| {}),
+    )
+    .unwrap()
+}
+
+fn agent_meta(id: &str, cwd: PathBuf) -> SessionMeta {
+    SessionMeta {
+        id: id.into(),
+        title: format!("{id} title"),
+        shell: "claude".into(),
+        args: vec![],
+        cwd: Some(cwd),
+        project: None,
+        pid: Some(7),
+        cols: 100,
+        rows: 30,
+        agent: Some("claude".into()),
+        kind: None,
+    }
+}
+
+/// Like [`recv_until`], for events on the host scan's cadence (seconds apart).
+async fn recv_slow(socket: &mut Socket, accept: impl Fn(&Value) -> bool) -> Option<Value> {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let message = serde_json::from_str::<Value>(&text).unwrap();
+                    if accept(&message) {
+                        return message;
+                    }
+                }
+                Some(Ok(_)) => continue,
+                other => panic!("socket ended: {other:?}"),
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+async fn hosts_of(port: u16) -> Vec<Value> {
+    let body: Value = reqwest::get(format!("http://127.0.0.1:{port}/api/hosts")).await.unwrap().json().await.unwrap();
+    body["hosts"].as_array().cloned().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridges_on_one_machine_list_each_other_for_one_tap_switching() {
+    let harness = Harness::start();
+    let data_root = harness.root.path().join("bridge");
+    let peer = plain_bridge(data_root.clone());
+    let peer_port = peer.status().port;
+    assert_eq!(peer.status().token, harness.bridge.status().token, "one data root, one token");
+    peer.register(agent_meta("build", harness.root.path().join("justgains")));
+    peer.set_insights("build", blocked("Bash: npm publish"));
+    assert_eq!(std::fs::read_dir(data_root.join("hosts")).unwrap().count(), 2, "both registered");
+
+    // Its card: loopback callers get the token, so other data roots can hand clients over.
+    let card: Value = reqwest::get(format!("http://127.0.0.1:{peer_port}/api/host")).await.unwrap().json().await.unwrap();
+    assert_eq!(card["runtime"], "bro");
+    assert_eq!(card["port"], peer_port);
+    assert_eq!(card["bind"], "127.0.0.1");
+    assert_eq!(card["token"], peer.status().token);
+    assert_eq!((card["sessions"].as_u64(), card["running"].as_u64(), card["awaiting"].as_u64()), (Some(1), Some(1), Some(1)));
+    assert_eq!(card["projects"], json!(["Justgains"]));
+
+    // This bridge first, then the peer; a shared token is not repeated.
+    let hosts = hosts_of(harness.port).await;
+    assert_eq!(hosts.len(), 2, "{hosts:?}");
+    assert_eq!(hosts[0]["port"], harness.port);
+    assert_eq!(hosts[0]["current"], true);
+    assert!(hosts[0].get("token").is_none());
+    assert_eq!(hosts[1]["port"], peer_port);
+    assert_eq!(hosts[1]["current"], false);
+    assert_eq!(hosts[1]["awaiting"], 1);
+    assert!(hosts[1].get("token").is_none(), "same token: clients reuse theirs");
+    assert_eq!(hosts_of(peer_port).await[1]["port"], harness.port, "and the other way round");
+
+    // `hello` carries them; a peer that changes arrives as a `hosts` event.
+    let mut socket = harness.socket().await;
+    let hello = recv_type(&mut socket, "hello").await;
+    assert_eq!(hello["hosts"][1]["port"], peer_port);
+    peer.register(agent_meta("review", harness.root.path().join("bro")));
+    let update = recv_slow(&mut socket, |message| message["type"] == "hosts" && message["hosts"][1]["running"] == 2)
+        .await
+        .expect("a hosts event after the peer changed");
+    assert_eq!(update["hosts"][0]["current"], true);
+
+    // A bridge with its own data root and token: its token is listed.
+    let other_root = harness.root.path().join("other");
+    let other = plain_bridge(other_root.clone());
+    let other_token = other.status().token;
+    assert_ne!(other_token, harness.bridge.status().token);
+    for entry in std::fs::read_dir(other_root.join("hosts")).unwrap().flatten() {
+        std::fs::copy(entry.path(), data_root.join("hosts").join(entry.file_name())).unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let hosts = hosts_of(harness.port).await;
+    let listed = hosts.iter().find(|host| host["port"] == other.status().port).expect("the other bridge");
+    assert_eq!(listed["token"], other_token);
+
+    // Gone bridges drop out and leave the registry.
+    peer.shutdown();
+    other.shutdown();
+    assert!(!data_root.join("hosts").read_dir().unwrap().flatten().any(|entry| {
+        std::fs::read_to_string(entry.path()).unwrap().contains(&format!("\"port\": {peer_port}"))
+    }));
+    let gone = recv_slow(&mut socket, |message| message["type"] == "hosts" && message["hosts"].as_array().is_some_and(|hosts| hosts.len() == 1))
+        .await
+        .expect("a hosts event once the peers left");
+    assert_eq!(gone["hosts"][0]["port"], harness.port);
+}
+
+// ----- folders a session can start in (folders.rs) -----------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn folders_suggest_bro_projects_and_complete_typed_paths() {
+    let harness = Harness::start();
+    let code = harness.root.path().join("code");
+    for dir in ["JustGains", "JustGains-Mobile", "bro-cli-v2"] {
+        std::fs::create_dir_all(code.join(dir)).unwrap();
+    }
+    harness.bridge.set_known_folders(vec![code.join("bro-cli-v2"), code.join("gone")]);
+    let get = |query: String| {
+        let url = harness.url("/api/folders");
+        async move {
+            reqwest::Client::new().get(url::Url::parse_with_params(&url, &[("q", query)]).unwrap()).send().await.unwrap().json::<Value>().await.unwrap()
+        }
+    };
+    let paths = |body: &Value| -> Vec<String> {
+        body["folders"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap().to_owned()).collect()
+    };
+
+    // Nothing typed: where bro has been working, existing folders only.
+    let suggested = get(String::new()).await;
+    assert_eq!(suggested["mode"], "suggest");
+    assert_eq!(paths(&suggested), [code.join("bro-cli-v2").to_string_lossy()]);
+    assert_eq!(suggested["folders"][0]["name"], "bro-cli-v2");
+    assert_eq!(suggested["folders"][0]["source"], "known");
+
+    // A path: completion inside its parent.
+    let sep = std::path::MAIN_SEPARATOR;
+    let typed = get(format!("{}{sep}just", code.to_string_lossy())).await;
+    assert_eq!(typed["mode"], "path");
+    assert_eq!(paths(&typed), [code.join("JustGains").to_string_lossy(), code.join("JustGains-Mobile").to_string_lossy()]);
+    let children = get(format!("{}{sep}", code.to_string_lossy())).await;
+    assert_eq!(paths(&children).len(), 3);
+
+    // A name: the spoken-name search over everything bro knows.
+    let named = get("bro cli".into()).await;
+    assert_eq!(named["mode"], "search");
+    // (drive folders are candidates too, so only membership is certain here)
+    assert!(paths(&named).contains(&code.join("bro-cli-v2").to_string_lossy().into_owned()), "{named}");
 }

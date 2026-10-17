@@ -7,8 +7,12 @@ use std::path::Path;
 
 const PROXY: &str = "http://127.0.0.1:3458";
 
+/// Focus view and spinner tips at Claude's defaults, so `--settings` only shows up in the tests about it.
 fn ctx() -> LaunchCtx {
-    LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: Some("tok".into()), route_native: false, ..Default::default() }
+    let mut claude_env = crate::claude_env::ClaudeEnvSettings::default();
+    claude_env.set_choice(crate::claude_env::knob("focus").unwrap(), 1);
+    claude_env.set_choice(crate::claude_env::knob("spinner_tips").unwrap(), 1);
+    LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: Some("tok".into()), route_native: false, claude_env, ..Default::default() }
 }
 
 fn spec(harness: Harness, profile: Option<&str>, provider: Option<&str>, model: Option<&str>) -> LaunchSpec {
@@ -526,14 +530,31 @@ fn caveman_off_changes_nothing() {
 }
 
 #[test]
+fn claude_runs_fullscreen_in_focus_view_without_tips_unless_turned_off() {
+    let _sb = setup();
+    let mut cx = ctx();
+    cx.claude_env = Default::default();
+    let c = build(&spec(Harness::Claude, None, None, None), &cx).unwrap();
+    assert_eq!(env(&c, "CLAUDE_CODE_NO_FLICKER"), Some("1"));
+    let settings: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").unwrap()).unwrap()).unwrap();
+    assert_eq!(settings, serde_json::json!({ "viewMode": "focus", "spinnerTipsEnabled": false }), "caveman off: no hooks");
+    let c = build(&spec(Harness::Claude, None, None, None), &ctx()).unwrap();
+    assert!(c.args.iter().all(|a| a != "--settings"), "{:?}", c.args);
+    assert_eq!(env(&c, "CLAUDE_CODE_NO_FLICKER"), Some("1"));
+}
+
+#[test]
 fn caveman_claude_gets_rules_hooks_and_quiets_the_plugin() {
     let _sb = setup();
-    let c = build(&spec(Harness::Claude, None, None, None), &caveman_ctx(crate::caveman::Level::Ultracave)).unwrap();
+    let mut cx = caveman_ctx(crate::caveman::Level::Ultracave);
+    cx.claude_env = Default::default();
+    let c = build(&spec(Harness::Claude, None, None, None), &cx).unwrap();
     assert_eq!(c.caveman, Some(crate::caveman::Level::Ultracave));
     let prompt = arg_after(&c.args, "--append-system-prompt-file").unwrap();
     assert_eq!(std::fs::read_to_string(prompt).unwrap(), crate::caveman::Level::Ultracave.rules());
     let settings: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").unwrap()).unwrap()).unwrap();
     assert!(settings["hooks"]["SubagentStart"].is_array());
+    assert_eq!(settings["viewMode"], "focus", "one --settings file carries both");
     assert_eq!(env(&c, "CAVEMAN_DEFAULT_MODE"), Some("off"));
 }
 

@@ -227,6 +227,13 @@ pub struct App {
     pub(crate) saver: Vec<PaneId>,
     /// The priority grow changed the layout in the last draw (the split dividers aren't where the tree says).
     grown: bool,
+    /// Tile edges you dragged in the tiled view: each holds where you left it as the tiles change around it
+    /// (double-click one to let it go).
+    pub(crate) locks: Vec<crate::priority::Lock>,
+    /// The tile edge being dragged: (pane, axis, far side, the edge's offset from the grab).
+    tile_drag: Option<(PaneId, usize, bool, i32)>,
+    /// The project regions of the tiled view as last drawn, (region, framed), to tell which tile edges are one cut.
+    tile_regions: Vec<(Rect, bool)>,
     /// back/forward through the sessions you looked at (mouse back/forward buttons)
     history: history::History,
     /// per watched session: when its watchdog should wake
@@ -320,6 +327,9 @@ impl App {
             stack_zoom: false,
             priority: None,
             grown: false,
+            locks: vec![],
+            tile_drag: None,
+            tile_regions: vec![],
             history: Default::default(),
             watch: HashMap::new(),
             orchestrator_pending: None,
@@ -778,6 +788,9 @@ impl App {
         // the grown session snaps back once you work somewhere else
         if self.priority.is_some() && self.priority != self.focused() {
             self.priority = None;
+        }
+        if !self.locks.is_empty() {
+            self.locks.retain(|l| self.panes.contains_key(&l.pane));
         }
         self.follow_focus();
         self.record_view();

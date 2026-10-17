@@ -35,7 +35,7 @@ pub fn is_authorized(
     uri: &Uri,
     token: &str,
 ) -> bool {
-    if peer.is_none_or(|peer| peer.ip().is_loopback() || is_mapped_loopback(peer)) {
+    if peer.is_none_or(is_loopback) {
         return true;
     }
     let presented = headers
@@ -51,6 +51,11 @@ pub fn is_authorized(
         })
         .or_else(|| query_token(uri));
     presented.is_some_and(|presented| constant_time_eq(presented.as_bytes(), token.as_bytes()))
+}
+
+/// A peer on this machine (IPv4, IPv6 or IPv4-mapped loopback).
+pub(crate) fn is_loopback(peer: SocketAddr) -> bool {
+    peer.ip().is_loopback() || is_mapped_loopback(peer)
 }
 
 fn is_mapped_loopback(peer: SocketAddr) -> bool {

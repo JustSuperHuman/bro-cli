@@ -75,6 +75,10 @@ pub(crate) async fn launch_terminal(
     body: Value,
 ) -> Result<TerminalSessionSummary, String> {
     let request = create_request(state, &body);
+    // A mistyped folder must not quietly become bro's current project.
+    if let Some(cwd) = &request.cwd {
+        crate::folders::check_start_folder(cwd)?;
+    }
     let requested_title = request.title.clone();
     let requested_project = request.project_id.clone();
     let (reply, answer) = oneshot::channel();

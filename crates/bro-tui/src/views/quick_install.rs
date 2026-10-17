@@ -50,7 +50,6 @@ pub fn install_term(svc: &Services, cwd: PathBuf, ids: &[&str]) -> Term {
         started: Instant::now(),
         route_id: None,
         cleanup: vec![],
-        caveman: None,
         orchestrator: false,
     };
     let args = ["install", "--wait"].into_iter().chain(ids.iter().copied()).map(String::from).collect();

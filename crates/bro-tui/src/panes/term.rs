@@ -62,8 +62,6 @@ pub struct Meta {
     pub route_id: Option<String>,
     /// Staged files to delete when it exits.
     pub cleanup: Vec<PathBuf>,
-    /// The caveman level it was launched with (the header's badge).
-    pub caveman: Option<bro_core::caveman::Level>,
     /// bro's orchestrator: the one session that drives the others (gold, pinned atop the sidebar).
     pub orchestrator: bool,
 }
@@ -710,6 +708,41 @@ impl Term {
         self.agent_title().or_else(|| self.meta.name.clone())
     }
 
+    /// The launch label without the agent's name, which the logo already gives: "claude · work · opus-5" → "work · opus-5".
+    fn who(&self) -> String {
+        match self.meta.harness {
+            Some(h) => self.meta.label.strip_prefix(&format!("{} · ", h.label())).unwrap_or(&self.meta.label).to_string(),
+            None => self.meta.label.clone(),
+        }
+    }
+
+    /// The folder for a header, when it isn't the project's root (the project's name already says that one).
+    fn cwd_note(&self, width: usize) -> Option<String> {
+        (self.meta.cwd != self.meta.project.root).then(|| crate::util::short_path(&self.meta.cwd, width))
+    }
+
+    /// Tiles that share a project, agent, login, model and folder sit in one frame that names them once:
+    /// (what they share, the frame's label) — "bro-cli-v2 · ✱ local".
+    pub fn tile_group(&self) -> (String, String) {
+        let m = &self.meta;
+        let key = format!("{}\u{1f}{:?}\u{1f}{:?}\u{1f}{:?}\u{1f}{}", m.project.key, m.harness, m.profile, m.model, m.cwd.display());
+        let mut label = format!("{} · {} {}", m.project.name, crate::ui::harness_glyph(m.harness), self.who());
+        if let Some(cwd) = self.cwd_note(32) {
+            label.push_str(&format!(" — {cwd}"));
+        }
+        (key, label)
+    }
+
+    /// The header title inside a [`Self::tile_group`] frame, which carries everything else: its number, then its
+    /// own title when it has one.
+    pub fn group_title(&self, n: Option<usize>) -> Line<'static> {
+        let mut text = n.map(|n| format!(" {n}")).unwrap_or_default();
+        if let Some(title) = self.display_title() {
+            text.push_str(&if text.is_empty() { format!(" {title}") } else { format!(" · {title}") });
+        }
+        Line::from(Span::styled(format!("{text} "), Style::default().add_modifier(Modifier::BOLD)))
+    }
+
     /// The program's window title (OSC 0/2), cleaned: spinner / status glyphs off the front, and nothing
     /// that's just the program's own name or path.
     pub fn agent_title(&self) -> Option<String> {
@@ -943,22 +976,16 @@ impl Pane for Term {
     }
     fn header(&self, t: &Theme, time: f64) -> (Line<'static>, Option<Line<'static>>) {
         let brand = crate::ui::harness_color(self.meta.harness, t);
-        let cwd = crate::util::short_path(&self.meta.cwd, 32);
         let mut spans = vec![Span::raw(" "), Span::styled(format!("{} ", crate::ui::harness_glyph(self.meta.harness)), Style::default().fg(brand))];
         if let Some(n) = self.display_title() {
             spans.push(Span::styled(format!("{n}  "), Style::default().add_modifier(Modifier::BOLD)));
         }
-        // "claude · work · opus-5" → "work · opus-5": the logo already says which agent
-        let label = match self.meta.harness {
-            Some(h) => self.meta.label.strip_prefix(&format!("{} · ", h.label())).unwrap_or(&self.meta.label).to_string(),
-            None => self.meta.label.clone(),
-        };
-        spans.push(Span::styled(label, Style::default().fg(brand).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(format!(" — {cwd} "), Style::default().fg(t.muted)));
-        let mut right = vec![];
-        if let Some(l) = self.meta.caveman {
-            right.push(Span::styled(format!(" {} {} ", crate::ui::icon("caveman"), l.id()), Style::default().fg(t.inline)));
+        spans.push(Span::styled(self.who(), Style::default().fg(brand).add_modifier(Modifier::BOLD)));
+        match self.cwd_note(32) {
+            Some(cwd) => spans.push(Span::styled(format!(" — {cwd} "), Style::default().fg(t.muted))),
+            None => spans.push(Span::raw(" ")),
         }
+        let mut right = vec![];
         if self.scroll > 0 {
             right.push(Span::styled(format!(" ↑{} ", self.scroll), Style::default().fg(t.inline)));
         }

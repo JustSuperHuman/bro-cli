@@ -159,6 +159,9 @@ pub struct Settings {
     /// Summary screensaver: after this many seconds with no keys or mouse, every session on screen turns over
     /// to its summary (the card back), and they turn back at the next touch. 0 = off.
     pub summary_screensaver_secs: u64,
+    /// Tiles that sit side by side share one border line instead of each drawing its own, and each tile's status
+    /// moves up into its title band. Off by default (trying it out).
+    pub shared_borders: bool,
     /// Permission mode new sessions start on: the one last picked in the launcher.
     pub permission: crate::launch::Permission,
     /// Privacy / update / behaviour env for Claude launches (preset + overrides).
@@ -329,6 +332,7 @@ impl Default for Settings {
             auto_resume: AutoResumeSettings::default(),
             auto_approve: false,
             summary_screensaver_secs: 0,
+            shared_borders: false,
             permission: Default::default(),
             claude_env: Default::default(),
             caveman: Default::default(),

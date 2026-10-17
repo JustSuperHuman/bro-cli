@@ -6,11 +6,12 @@ use crate::orchestrator;
 use crate::state::AppState;
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 /// `{ "message": ... }` with a status, the error shape every client reads.
 pub(crate) fn api_error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -34,6 +35,32 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Value> {
         "endpoint": format!("127.0.0.1:{port}"),
         "orchestrator": true
     }))
+}
+
+/// bro addition: this bridge's card for the other bridges on the machine
+/// (`crate::hosts`). Loopback callers also get the token: they need none here,
+/// and a bridge with another data root needs it to hand clients over.
+pub(crate) async fn host(State(state): State<AppState>, request: axum::extract::Request) -> Json<Value> {
+    let peer = request.extensions().get::<ConnectInfo<SocketAddr>>().map(|connect| connect.0);
+    let local = peer.is_none_or(crate::auth::is_loopback);
+    Json(json!(state.host_card(local)))
+}
+
+/// bro addition: every bridge on this machine, this one first (`current`).
+/// Clients switch to a peer on the address they reached this one, port
+/// swapped, reusing their token unless the peer lists its own.
+pub(crate) async fn hosts(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "hosts": crate::hosts::current(&state).await }))
+}
+
+/// bro addition: folders a session can start in, for a client's "new session
+/// in…" field: suggestions, path completion or name search (`crate::folders`).
+pub(crate) async fn folders(Query(query): Query<HashMap<String, String>>, State(state): State<AppState>) -> Response {
+    let text = query.get("q").cloned().unwrap_or_default();
+    match tokio::task::spawn_blocking(move || crate::folders::search(&state, &text)).await {
+        Ok(body) => Json(body).into_response(),
+        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "The folder search failed."),
+    }
 }
 
 /// bro addition: every login's subscription meters and headroom, from bro's usage

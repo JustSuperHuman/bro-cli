@@ -80,6 +80,8 @@ pub(crate) struct AppState {
     pub last_error: Arc<Mutex<Option<String>>>,
     /// Flipped to true on shutdown; websocket loops close on it.
     pub shutdown: watch::Sender<bool>,
+    /// This bridge's id and the other bridges on this machine (see [`crate::hosts`]).
+    pub hosts: Arc<crate::hosts::HostDirectory>,
 }
 
 impl AppState {
@@ -119,6 +121,7 @@ impl AppState {
             running: Arc::new(AtomicBool::new(false)),
             last_error: Arc::new(Mutex::new(None)),
             shutdown,
+            hosts: Arc::new(crate::hosts::HostDirectory::new()),
         }
     }
 
@@ -577,6 +580,7 @@ impl AppState {
             "profiles": profiles,
             "hostProcesses": [],
             "peerHosts": [],
+            "hosts": self.local_hosts(),
             "projects": projects,
             "server": server,
             "bridgeCommands": {
