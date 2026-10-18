@@ -1,4 +1,4 @@
-//! Key routing: overlays → inline editors (rename, sidebar filter) → prefix table → direct chords → sidebar →
+//! Key routing: overlays → inline editors (rename) → prefix table → direct chords → sidebar →
 //! the focused pane. Terminals get every key that isn't one of ours.
 
 use super::App;
@@ -35,10 +35,6 @@ impl App {
         }
         if self.renaming.is_some() {
             self.rename_key(k);
-            return;
-        }
-        if self.side_filtering {
-            self.filter_key(k);
             return;
         }
         // alt+v: paste a clipboard image / copied files into the terminal as paths
@@ -223,50 +219,65 @@ impl App {
         }
     }
 
-    fn filter_key(&mut self, k: KeyEvent) {
-        match k.code {
-            KeyCode::Esc => {
-                self.side.filter.clear();
-                self.side_filtering = false;
-            }
-            KeyCode::Enter | KeyCode::Down | KeyCode::Tab => {
-                self.side_filtering = false;
-                self.side_sel = 0;
-            }
-            KeyCode::Backspace => {
-                self.side.filter.pop();
-                self.side_sel = 0;
-            }
-            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.side.filter.push(c);
-                self.side_sel = 0;
-            }
-            _ => {}
+    pub(crate) fn sidebar_filter_changed(&mut self) {
+        self.side_filtering = true;
+        self.side_scroll = 0;
+        self.side_manual_scroll = false;
+        let rows = self.rows();
+        self.side_sel = rows.iter().position(|r| matches!(r, Row::Project { .. })).unwrap_or(0);
+        if let Some(root) = rows.get(self.side_sel).and_then(|r| self.row_root(&rows, r)) {
+            self.pick_project(root);
         }
-        if k.code != KeyCode::Esc {
-            self.side_sel = 0;
-            self.side_scroll = 0;
-            self.side_manual_scroll = false;
+    }
+
+    pub(crate) fn clear_sidebar_filter(&mut self) {
+        self.side_filtering = false;
+        if self.side.filter.is_empty() {
+            return;
         }
+        let selected = self.rows().get(self.side_sel).cloned();
+        self.side.filter.clear();
+        self.side_scroll = 0;
+        self.side_manual_scroll = false;
+        self.side_sel = self.rows().iter().position(|row| match (&selected, row) {
+            (Some(Row::Project { key, .. }), Row::Project { key: other, .. }) => key == other,
+            (Some(Row::Live { info, .. }), Row::Live { info: other, .. }) => info.pane == other.pane,
+            _ => false,
+        }).unwrap_or(0);
+    }
+
+    pub(crate) fn leave_sidebar(&mut self) {
+        self.clear_sidebar_filter();
+        self.side_focus = false;
     }
 
     /// Keys while the sidebar has focus (alt+b).
     fn sidebar_key(&mut self, k: KeyEvent) {
         self.side_manual_scroll = false;
+        if let KeyCode::Char(c) = k.code
+            && k.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+            && !c.is_control()
+        {
+            if c != '/' || self.side_filtering || !self.side.filter.is_empty() {
+                self.side.filter.push(c);
+            }
+            self.sidebar_filter_changed();
+            return;
+        }
         let rows = self.rows();
         let n = rows.len();
         let sel = self.side_sel.min(n.saturating_sub(1));
         match k.code {
-            KeyCode::Char('j') | KeyCode::Down => self.side_sel = (sel + 1).min(n.saturating_sub(1)),
-            KeyCode::Char('k') | KeyCode::Up => self.side_sel = sel.saturating_sub(1),
-            KeyCode::Char('g') | KeyCode::Home => self.side_sel = 0,
-            KeyCode::Char('G') | KeyCode::End => self.side_sel = n.saturating_sub(1),
+            KeyCode::Down => self.side_sel = (sel + 1).min(n.saturating_sub(1)),
+            KeyCode::Up => self.side_sel = sel.saturating_sub(1),
+            KeyCode::Home => self.side_sel = 0,
+            KeyCode::End => self.side_sel = n.saturating_sub(1),
             KeyCode::PageDown => self.side_sel = (sel + 10).min(n.saturating_sub(1)),
             KeyCode::PageUp => self.side_sel = sel.saturating_sub(10),
-            KeyCode::Char('h') | KeyCode::Left => self.side_parent(),
-            KeyCode::Char('l') | KeyCode::Right => {
+            KeyCode::Left => self.side_parent(),
+            KeyCode::Right => {
                 if matches!(rows.get(sel), Some(Row::Live { .. })) {
-                    self.side_focus = false; // → back into the panes
+                    self.leave_sidebar(); // → back into the panes
                 } else {
                     self.side_step_in();
                 }
@@ -277,62 +288,39 @@ impl App {
                     self.side_focus = true;
                 }
             }
-            KeyCode::Char('+') => {
-                if let Some(Row::Live { info, .. }) = rows.get(sel) {
-                    self.toggle_stack(info.pane);
-                    self.side_focus = true;
-                }
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => self.activate_row(sel),
-            KeyCode::Char('f') => match rows.get(sel) {
-                Some(Row::Live { info, .. }) => self.open_switch(info.pane),
-                _ => self.toast(Kind::Info, "f moves a running session to another login"),
-            },
-            KeyCode::Char('r') => match rows.get(sel) {
-                Some(Row::Live { info, .. }) => self.start_rename(info.pane),
-                _ => self.open_continue(),
-            },
-            KeyCode::Char('c') => self.open_continue(),
-            KeyCode::Char('x') | KeyCode::Delete => match rows.get(sel) {
+            KeyCode::Enter => self.activate_row(sel),
+            KeyCode::Delete => match rows.get(sel) {
                 Some(Row::Live { info, .. }) => self.ask_close(info.pane),
                 Some(Row::Project { root, live, .. }) => self.close_project(root.clone(), *live),
                 _ => {}
             },
-            KeyCode::Char('n') => {
-                let dir = self.preferred_dir();
-                self.open_launcher(dir, crate::pane::Place::Tab);
+            KeyCode::Backspace => {
+                self.side.filter.pop();
+                self.sidebar_filter_changed();
             }
-            KeyCode::Char('s') => {
-                let dir = self.preferred_dir();
-                self.open_shell(dir, crate::pane::Place::Tab);
-                self.side_focus = false;
-            }
-            KeyCode::Char('/') => {
-                self.side_filtering = true;
-                self.side_sel = 0;
-            }
-            KeyCode::Char('?') => self.run_act(crate::keymap::Act::Help),
             KeyCode::Esc => {
-                if !self.side.filter.is_empty() {
-                    self.side.filter.clear();
+                if self.side_filtering || !self.side.filter.is_empty() {
+                    self.clear_sidebar_filter();
                 } else if !self.tabs.is_empty() {
-                    self.side_focus = false;
+                    self.leave_sidebar();
                 }
             }
             KeyCode::Tab
                 if !self.tabs.is_empty() => {
-                    self.side_focus = false;
+                    self.leave_sidebar();
                 }
             _ => {}
         }
         // a move shows the scrollbar, even one that's stopped at the end
-        let nav = matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Char('j' | 'k' | 'g' | 'G'));
+        let nav = matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown);
         if nav || self.side_sel != sel {
             self.side_nav();
         }
-        let rows = self.rows();
-        if let Some(root) = rows.get(self.side_sel).and_then(|r| self.row_root(&rows, r)) {
-            self.pick_project(root);
+        if self.side_focus {
+            let rows = self.rows();
+            if let Some(root) = rows.get(self.side_sel).and_then(|r| self.row_root(&rows, r)) {
+                self.pick_project(root);
+            }
         }
     }
 }

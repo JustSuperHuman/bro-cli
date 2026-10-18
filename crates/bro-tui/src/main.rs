@@ -175,7 +175,6 @@ fn main() -> ExitCode {
         }
     }
 }
-
 /// Set up the terminal, start services, run the app, restore the terminal.
 fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     use crossterm::{event, execute, terminal};
@@ -191,7 +190,6 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
         return Ok(());
     }
     services::guard::install_panic_hook();
-    end_sessions_when_the_window_closes();
     util::probe_local_offset();
     // demo mode never reads or writes your real settings
     let (settings, problem) = if demo { (services::fallback_settings(), None) } else { services::load_settings() };
@@ -277,24 +275,3 @@ fn enable_vt_output() {
         unsafe { std::env::set_var("TERM", "xterm-256color") };
     }
 }
-
-/// Closing the console window (or signing out) ends bro without its own quit running: end every
-/// session's processes first, the way quitting does. Windows gives the handler a few seconds.
-#[cfg(windows)]
-fn end_sessions_when_the_window_closes() {
-    use windows_sys::Win32::System::Console::{CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, SetConsoleCtrlHandler};
-    unsafe extern "system" fn handler(event: u32) -> i32 {
-        if matches!(event, CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT) {
-            bro_core::proc_tree::kill_all_tracked();
-        }
-        // not handled: Windows goes on to end bro
-        0
-    }
-    unsafe {
-        SetConsoleCtrlHandler(Some(handler), 1);
-    }
-}
-
-/// On Unix the closing terminal hangs up bro and, through their ptys, each session's process group.
-#[cfg(not(windows))]
-fn end_sessions_when_the_window_closes() {}

@@ -43,6 +43,7 @@ pub(crate) struct RecapJob {
     pub cwd: PathBuf,
     pub session_id: String,
     pub transcript: PathBuf,
+    pub closed: Arc<AtomicBool>,
 }
 
 /// Runs a recap job: Ok((text, cost)) or why not. Swapped out in tests.
@@ -187,6 +188,7 @@ fn recap_job(term: &Term, snap: &Snapshot) -> Option<RecapJob> {
         cwd: term.meta.cwd.clone(),
         session_id: snap.session_id.clone()?,
         transcript: snap.transcript.clone()?,
+        closed: term.closed_signal(),
     })
 }
 
@@ -293,6 +295,9 @@ impl App {
 /// `claude -p --resume <sid> --fork-session --no-session-persistence --output-format json /recap` in the
 /// session's folder with the pane's env (minus bro's own), no console window, killed after `recap::TIMEOUT`.
 fn run_recap(job: &RecapJob) -> Result<(String, Option<f64>), String> {
+    if job.closed.load(Ordering::SeqCst) {
+        return Err("the session closed".into());
+    }
     use std::io::Read;
     use std::process::{Command, Stdio};
     let (program, pre) = crate::panes::term::resolve(&job.program);
@@ -317,7 +322,7 @@ fn run_recap(job: &RecapJob) -> Result<(String, Option<f64>), String> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("couldn't start {program}: {e}"))?;
+    let (mut child, mut tree) = bro_core::proc_tree::ProcessTree::spawn(&mut cmd).map_err(|e| format!("couldn't start {program}: {e}"))?;
     let mut stdout = child.stdout.take().ok_or("no stdout")?;
     let reader = std::thread::spawn(move || {
         let mut out = String::new();
@@ -326,16 +331,24 @@ fn run_recap(job: &RecapJob) -> Result<(String, Option<f64>), String> {
     });
     let deadline = Instant::now() + recap::TIMEOUT;
     loop {
+        if job.closed.load(Ordering::SeqCst) {
+            tree.terminate();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the session closed".into());
+        }
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(250)),
             _ => {
+                tree.terminate();
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("recap timed out".into());
             }
         }
     }
+    tree.terminate();
     let out = reader.join().unwrap_or_default();
     recap::parse_output(&out).map_err(|f| f.to_string())
 }
@@ -343,6 +356,44 @@ fn run_recap(job: &RecapJob) -> Result<(String, Option<f64>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_session_cancels_active_recap_and_its_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("recap.pid");
+        let script = dir.path().join("recap.cmd");
+        std::fs::write(&script, format!("@\"{}\" --exact panes::term::process_tests::session_process_worker --ignored --nocapture\r\n", std::env::current_exe().unwrap().display())).unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let job = RecapJob {
+            program: script.to_string_lossy().into_owned(),
+            env: vec![("SESSION_PROCESS_TEST_MODE".into(), "stay".into()),
+                ("SESSION_PROCESS_TEST_MARKER".into(), marker.to_string_lossy().into_owned())],
+            env_remove: vec![], cwd: dir.path().into(), session_id: "local-test".into(),
+            transcript: dir.path().join("transcript"), closed: closed.clone(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || { tx.send(run_recap(&job)).ok(); });
+        let until = Instant::now() + Duration::from_secs(15);
+        let pid: u32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&marker).ok().and_then(|s| s.trim().parse().ok()) { break pid; }
+            assert!(Instant::now() < until, "the local recap worker did not start: {:?}", rx.try_recv());
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        closed.store(true, Ordering::SeqCst);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap_err(), "the session closed");
+        worker.join().unwrap();
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+        unsafe {
+            let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if !process.is_null() {
+                let result = WaitForSingleObject(process, 5000);
+                CloseHandle(process);
+                assert_eq!(result, WAIT_OBJECT_0, "the recap's descendant survived session close");
+            }
+        }
+    }
 
     #[test]
     fn states_map_from_the_sidebar_dot() {

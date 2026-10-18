@@ -125,9 +125,10 @@ mod tempfile_like {
     }
 }
 
-struct KillOnDrop(Child);
+struct KillOnDrop(Child, crate::proc_tree::ProcessTree);
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
+        self.1.terminate();
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -180,7 +181,8 @@ pub fn fetch(home: &Path) -> anyhow::Result<Usage> {
     let (server_home, _temp) = app_server_home(home)?;
     let mut cmd = codex_command()?;
     cmd.env("CODEX_HOME", &server_home).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = KillOnDrop(cmd.spawn().context("starting codex app-server")?);
+    let (child, tree) = crate::proc_tree::ProcessTree::spawn(&mut cmd).context("starting codex app-server")?;
+    let mut child = KillOnDrop(child, tree);
     let stdout = child.0.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let stdin = child.0.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
 

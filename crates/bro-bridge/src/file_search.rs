@@ -120,7 +120,7 @@ fn git_list_files(cwd: &str) -> Option<Vec<String>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     hide_window(&mut command);
-    let mut child = command.spawn().ok()?;
+    let (mut child, mut tree) = bro_core::proc_tree::ProcessTree::spawn(&mut command).ok()?;
     let mut stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut buffer = Vec::new();
@@ -138,12 +138,14 @@ fn git_list_files(cwd: &str) -> Option<Vec<String>> {
                 std::thread::sleep(Duration::from_millis(20))
             }
             _ => {
+                tree.terminate();
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
             }
         }
     };
+    tree.terminate();
     let buffer = reader.join().ok()?;
     if !status.success() || buffer.len() > GIT_MAX_BUFFER {
         return None;

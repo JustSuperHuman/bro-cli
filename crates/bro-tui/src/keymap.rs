@@ -221,7 +221,7 @@ impl Act {
             PrevTab => "previous tab".into(),
             Attention => "jump to the session that needs you".into(),
             ToggleSidebar => "show / hide the sidebar".into(),
-            FocusSidebar => "focus the sidebar (j/k, enter, f fork, / filter)".into(),
+            FocusSidebar => "focus the sidebar (type to filter, arrows to move, enter to open)".into(),
             Palette => "command palette".into(),
             Usage => "usage: meters for every profile".into(),
             Profiles => "profiles: accounts and logins".into(),

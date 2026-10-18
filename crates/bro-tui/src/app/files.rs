@@ -87,7 +87,7 @@ impl App {
                     Some(p) => {
                         self.overlay = Overlay::None;
                         self.focus_pane(p);
-                        self.side_focus = false;
+                        self.leave_sidebar();
                         self.with_pane(p, |pane, cx| pane.paste(&format!("{mention} "), cx));
                     }
                     None => self.toast(Kind::Info, "that session has closed"),
@@ -146,7 +146,7 @@ impl App {
         if let Some(p) = e.pane.filter(|p| self.panes.contains_key(p)) {
             self.focus_pane(p);
         }
-        self.side_focus = false;
+        self.leave_sidebar();
         let place = if self.tabs.is_empty() { Place::Tab } else { Place::Split };
         self.open(Box::new(term), place);
     }

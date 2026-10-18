@@ -1149,6 +1149,203 @@ fn palette_runs_actions_and_previews_themes() {
 }
 
 #[test]
+fn sidebar_typing_filters_immediately_and_keeps_selecting_the_first_project() {
+    use crate::sidebar::Row;
+    let mut a = app(true);
+    let focused = a.focused();
+    a.run_act(Act::FocusSidebar);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    a.side_scroll = 10;
+    a.side_manual_scroll = true;
+    for c in "JuSt".chars() {
+        key(&mut a, KeyCode::Char(c), if c.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE });
+        let rows = a.rows();
+        let first = rows.iter().position(|r| matches!(r, Row::Project { .. })).unwrap();
+        assert_eq!(a.side_sel, first);
+        assert_eq!(a.side_scroll, 0);
+        assert!(!a.side_manual_scroll);
+    }
+    assert_eq!(a.side.filter, "JuSt");
+    assert!(matches!(&a.rows()[a.side_sel], Row::Project { name, root, .. } if name == "justgains" && Some(root.clone()) == a.preferred_dir()));
+    assert_eq!(a.focused(), focused, "filtering must not switch terminals");
+    assert!(matches!(a.overlay, Overlay::None));
+    assert!(draw(&mut a).contains("/ JuSt▏"));
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    assert!(matches!(&a.rows()[a.side_sel], Row::Live { .. }));
+    key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+    assert_eq!(a.side.filter, "JuS");
+    assert!(matches!(&a.rows()[a.side_sel], Row::Project { name, .. } if name == "justgains"));
+    for c in "zzz".chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    assert!(a.rows().is_empty());
+    assert!(draw(&mut a).contains("nothing matches"));
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.side_focus && a.side_sel == 0);
+    for _ in 0..3 {
+        key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+    }
+    assert!(matches!(&a.rows()[a.side_sel], Row::Project { name, .. } if name == "justgains"));
+}
+
+#[test]
+fn sidebar_letters_and_punctuation_are_filter_text() {
+    let mut a = app(true);
+    let panes = a.panes.len();
+    let projects = a.open_projects.roots.clone();
+    a.run_act(Act::FocusSidebar);
+    let text = "jkgGh l+frcxns? 世界";
+    for c in text.chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    assert_eq!(a.side.filter, text);
+    assert!(a.side_focus && a.side_filtering);
+    assert_eq!(a.panes.len(), panes);
+    assert_eq!(a.open_projects.roots, projects);
+    assert!(a.renaming.is_none() && matches!(a.overlay, Overlay::None));
+}
+
+#[test]
+fn sidebar_filter_selects_a_project_below_a_matching_orchestrator() {
+    use crate::sidebar::Row;
+    let mut a = app(true);
+    let id = a.focused().unwrap();
+    let t = a.panes.get_mut(&id).unwrap().as_term().unwrap();
+    t.meta.orchestrator = true;
+    t.meta.name = Some("just orchestrator".into());
+    a.run_act(Act::FocusSidebar);
+    a.paste("just\n");
+    assert_eq!(a.side.filter, "just");
+    assert!(matches!(&a.rows()[0], Row::Live { info, .. } if info.orchestrator));
+    assert_eq!(a.side_sel, 1);
+    assert!(matches!(&a.rows()[a.side_sel], Row::Project { name, .. } if name == "justgains"));
+}
+
+#[test]
+fn sidebar_filter_allows_arrow_navigation_and_enter_activation() {
+    use crate::sidebar::Row;
+    let mut a = app(true);
+    let all_rows = a.rows().len();
+    a.run_act(Act::FocusSidebar);
+    for c in "just".chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    let Row::Live { info, .. } = a.rows()[a.side_sel].clone() else { panic!("matching live session") };
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.focused(), Some(info.pane));
+    assert!(!a.side_focus && !a.side_filtering && a.side.filter.is_empty());
+    assert_eq!(a.rows().len(), all_rows);
+    assert!(matches!(&a.rows()[a.side_sel], Row::Live { info: selected, .. } if selected.pane == info.pane));
+    assert_eq!(a.preferred_dir(), Some(info.project_root));
+}
+
+#[test]
+fn sidebar_filter_clears_on_keyboard_focus_changes() {
+    for (code, modifiers) in [
+        (KeyCode::Tab, KeyModifiers::NONE),
+        (KeyCode::Char('b'), KeyModifiers::ALT),
+        (KeyCode::Char('s'), KeyModifiers::ALT),
+        (KeyCode::Right, KeyModifiers::ALT),
+        (KeyCode::Char('j'), KeyModifiers::ALT),
+        (KeyCode::Tab, KeyModifiers::CONTROL),
+        (KeyCode::Char('n'), KeyModifiers::ALT),
+        (KeyCode::Char('p'), KeyModifiers::ALT),
+        (KeyCode::F(1), KeyModifiers::NONE),
+    ] {
+        let mut a = app(true);
+        draw(&mut a);
+        a.run_act(Act::FocusSidebar);
+        a.paste("just");
+        let project = a.preferred_dir();
+        key(&mut a, code, modifiers);
+        assert!(a.side.filter.is_empty() && !a.side_filtering, "{code:?} {modifiers:?}");
+        assert!(!a.side_focus, "{code:?} {modifiers:?}");
+        if let Overlay::Launcher(l) = &a.overlay {
+            assert_eq!(Some(l.dir.clone()), project, "opening a launcher keeps the filtered project");
+        }
+    }
+}
+
+#[test]
+fn sidebar_click_focus_accepts_typing_and_wheel_keeps_the_filter() {
+    let mut a = app(true);
+    draw(&mut a);
+    let side = a.side_area;
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: side.x, row: side.y, modifiers: KeyModifiers::NONE });
+    assert!(a.side_focus);
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+    assert_eq!(a.side.filter, "j");
+    a.mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: side.x + 3, row: side.y + 3, modifiers: KeyModifiers::NONE });
+    assert_eq!(a.side.filter, "j");
+    assert!(a.side_focus && a.side_manual_scroll);
+    key(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);
+    assert_eq!(a.side.filter, "ju");
+    assert_eq!(a.side_scroll, 0);
+    assert!(!a.side_manual_scroll);
+}
+
+#[test]
+fn sidebar_filtered_project_activation_clears_filter_and_keeps_its_identity() {
+    use crate::sidebar::Row;
+    for mouse in [false, true] {
+        let mut a = app(true);
+        let all_rows = a.rows().len();
+        a.run_act(Act::FocusSidebar);
+        a.paste("just");
+        let Row::Project { key: project_key, root, .. } = a.rows()[a.side_sel].clone() else { panic!("selected project") };
+        if mouse {
+            draw(&mut a);
+            let r = a.side_hits.iter().find_map(|(r, hit)| matches!(hit, SideHit::Row(i) if *i == a.side_sel).then_some(*r)).unwrap();
+            a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
+        } else {
+            key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        }
+        assert_eq!(a.tile_project, Some(project_key));
+        assert_eq!(a.preferred_dir(), Some(root));
+        assert!(!a.side_focus && !a.side_filtering && a.side.filter.is_empty());
+        assert_eq!(a.rows().len(), all_rows);
+    }
+}
+
+#[test]
+fn sidebar_filter_clears_on_outside_clicks_and_window_blur() {
+    for button in [MouseButton::Left, MouseButton::Right] {
+        let mut a = app(true);
+        draw(&mut a);
+        a.run_act(Act::FocusSidebar);
+        a.paste("just");
+        draw(&mut a);
+        let body = a.body;
+        a.mouse(MouseEvent { kind: MouseEventKind::Moved, column: body.x + 3, row: body.y + 3, modifiers: KeyModifiers::NONE });
+        assert_eq!(a.side.filter, "just", "hovering does not move keyboard focus");
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(button), column: body.x + 3, row: body.y + 3, modifiers: KeyModifiers::NONE });
+        assert!(!a.side_focus && !a.side_filtering && a.side.filter.is_empty());
+    }
+    let mut a = app(true);
+    a.run_act(Act::FocusSidebar);
+    a.paste("just");
+    a.handle(Event::Input(crossterm::event::Event::FocusLost));
+    assert!(a.side.filter.is_empty() && !a.side_filtering);
+}
+
+#[test]
+fn sidebar_filter_escape_restores_the_selected_project_in_the_full_list() {
+    use crate::sidebar::Row;
+    let mut a = app(true);
+    a.run_act(Act::FocusSidebar);
+    a.paste("just");
+    let selected = a.preferred_dir();
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.side_focus && !a.side_filtering && a.side.filter.is_empty());
+    assert_eq!(a.preferred_dir(), selected);
+    assert!(matches!(&a.rows()[a.side_sel], Row::Project { name, .. } if name == "justgains"));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!a.side_focus);
+}
+
+#[test]
 fn keyboard_navigation() {
     let mut a = app(true);
     let _ = draw(&mut a);
@@ -1173,29 +1370,29 @@ fn keyboard_navigation() {
     // sidebar: alt+b, move, collapse, filter
     key(&mut a, KeyCode::Char('b'), KeyModifiers::ALT);
     assert!(a.side_focus);
-    key(&mut a, KeyCode::Char('g'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
     let header = a.side_sel;
-    key(&mut a, KeyCode::Char('l'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     assert_eq!(a.side_sel, header + 1);
-    key(&mut a, KeyCode::Char('h'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Left, KeyModifiers::NONE);
     assert_eq!(a.side_sel, header);
     key(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
     for c in "just".chars() {
         key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
     }
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     let s = draw(&mut a);
     assert!(s.contains("justgains") && !s.contains("dotfiles"), "{s}");
     // rename the selected live session
-    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
-    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    a.run_act(Act::Rename);
     assert!(a.renaming.is_some());
     for c in "timer fix".chars() {
         key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
     }
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(a.live_infos().iter().any(|l| l.name.as_deref() == Some("timer fix")));
-    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    a.run_act(Act::FocusSidebar);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(!a.side_focus);
 }
@@ -1645,10 +1842,12 @@ fn resuming_offers_every_login_of_that_kind() {
     assert!(s.contains("resume in") && s.contains("current") && s.contains("% left"), "{s}");
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     a.run_act(Act::FocusSidebar);
-    // a running claude session: f moves it to another login
+    // a running claude session: the switch-login action moves it to another login
     let live = a.rows().iter().position(|r| matches!(r, Row::Live { info, .. } if info.harness == Some(bro_core::Harness::Claude))).unwrap();
     a.side_sel = live;
-    key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+    let Row::Live { info, .. } = a.rows()[live].clone() else { panic!("live session") };
+    a.focus_pane(info.pane);
+    a.run_act(Act::SwitchLogin);
     let Overlay::Resume(p) = &a.overlay else { panic!("switch picker") };
     assert!(matches!(p.from, ResumeFrom::Live { .. }));
     assert!(!p.targets[p.sel].current, "starts on another login");
@@ -1671,7 +1870,7 @@ fn projects_are_opened_explicitly_and_new_sessions_start_in_the_current_one() {
     std::fs::create_dir_all(&project).unwrap();
     // The path bar opens the folder picker; a typed path opens that folder.
     a.run_act(Act::FocusSidebar);
-    key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::ALT);
     key(&mut a, KeyCode::Char('p'), KeyModifiers::ALT);
     assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.project_picker.is_some()));
     a.paste(&project.to_string_lossy());
@@ -1682,10 +1881,10 @@ fn projects_are_opened_explicitly_and_new_sessions_start_in_the_current_one() {
     let Overlay::Launcher(l) = &a.overlay else { panic!("launcher") };
     assert_eq!(l.dir, a.svc.project_for(&project).root);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
-    // x on the project takes it off the list
+    // Delete on the project takes it off the list
     a.side_focus = true;
     a.side_sel = a.rows().iter().position(|r| matches!(r, Row::Project { name, .. } if name == "fresh")).unwrap();
-    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Delete, KeyModifiers::NONE);
     assert!(!a.rows().iter().any(|r| matches!(r, Row::Project { name, .. } if name == "fresh")));
 }
 
@@ -2221,6 +2420,7 @@ fn paste_stays_in_the_focused_editor_or_terminal() {
     assert_eq!(a.side.filter, "project");
     a.side_filtering = false;
     a.paste("sidebar has no active input");
+    assert_eq!(a.side.filter, "projectsidebar has no active input", "focused sidebar paste starts filtering without a separate input mode");
     a.run_act(Act::Palette);
     a.paste("theme ocean");
     assert_eq!(a.theme.name, "ocean", "pasted palette search preserves preview");
@@ -2284,8 +2484,48 @@ fn launcher_works_with_the_mouse() {
     let Overlay::Launcher(l) = &a.overlay else { panic!() };
     assert_eq!(l.permission, bro_core::launch::Permission::Auto, "the next launcher opens on the mode picked last");
     assert_eq!(a.svc.settings().permission, bro_core::launch::Permission::Auto);
-    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 0, row: 0, modifiers: KeyModifiers::NONE });
+    // the × in the corner closes it
+    click(&mut a, &|h| *h == Hit::Close);
     assert!(matches!(a.overlay, Overlay::None));
+}
+
+#[test]
+fn launcher_fills_the_body_and_the_sidebar_beside_it_picks_its_project() {
+    use crate::sidebar::Row;
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    a.open_projects.add(first.clone());
+    a.open_projects.add(second.clone());
+    a.pick_project(first.clone());
+    let before = (a.cur, a.focused());
+    a.open_launcher(None, Place::Tab);
+    let _ = draw_buf(&mut a, 160, 40);
+    let Overlay::Launcher(l) = &a.overlay else { panic!("launcher") };
+    assert_eq!(l.area, a.body, "the launcher takes the body, like a view");
+    assert!(a.side_area.width > 0, "the sidebar stays beside it");
+    assert_eq!(l.dir, first);
+    // clicking a project in the sidebar makes it the one the session starts in, and the launcher stays
+    let rows = a.rows();
+    let i = rows.iter().position(|r| matches!(r, Row::Project { root, .. } if *root == a.svc.project_for(&second).root)).unwrap();
+    let r = a.side_hits.iter().find_map(|(r, h)| matches!(h, SideHit::Row(j) if *j == i).then_some(*r)).expect("project row on screen");
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
+    let Overlay::Launcher(l) = &a.overlay else { panic!("the launcher stays open") };
+    assert_eq!(l.dir, a.svc.project_for(&second).root);
+    assert_eq!(a.preferred_dir(), Some(a.svc.project_for(&second).root));
+    crate::testkit::snapshot("launcher-in-body", 160, 40, |f| a.draw(f));
+    // the sidebar's Continue switches its tab instead of opening another
+    let _ = draw_buf(&mut a, 160, 40);
+    let r = a.side_hits.iter().find_map(|(r, h)| matches!(h, SideHit::Continue).then_some(*r)).unwrap();
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
+    assert!(matches!(a.overlay, Overlay::Launcher(ref l) if l.tab == crate::launcher::SessionTab::Continue));
+    // esc goes back where you were
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::None));
+    assert_eq!((a.cur, a.focused()), before);
 }
 
 #[test]

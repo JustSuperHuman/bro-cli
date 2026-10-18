@@ -98,9 +98,13 @@ impl App {
             self.draw_panes(f);
             self.draw_tile_edges(f);
         }
+        let time = self.start.elapsed().as_secs_f64();
+        // the session launcher fills the body the way a view does, with the sidebar still beside it
+        if let super::overlays::Overlay::Launcher(l) = &mut self.overlay {
+            crate::launcher::view::draw(f, self.body, l, &t, time);
+        }
         self.draw_selection(f);
         // the backdrop fills whatever is still empty; toasts and overlays then sit on top of it
-        let time = self.start.elapsed().as_secs_f64();
         for (r, bd, skip) in self.backdrops(area) {
             crate::skin::backdrop(f.buffer_mut(), r, &t, time, bd, &skip);
         }

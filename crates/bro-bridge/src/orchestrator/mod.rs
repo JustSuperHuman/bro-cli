@@ -685,7 +685,7 @@ impl Orchestrator {
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        match tokio::time::timeout(Duration::from_secs(20), command.output()).await {
+        match tokio::time::timeout(Duration::from_secs(20), claude::owned_output(&mut command)).await {
             Ok(Ok(output)) if output.status.success() => json!({
                 "ok": true,
                 "message": format!("Claude Code {} is ready.", String::from_utf8_lossy(&output.stdout).trim())

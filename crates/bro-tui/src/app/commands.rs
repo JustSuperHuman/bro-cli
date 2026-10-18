@@ -73,8 +73,14 @@ impl App {
             Act::PrevSession => self.cycle_session(-1),
             Act::NextProject => self.cycle_project(1),
             Act::PrevProject => self.cycle_project(-1),
-            Act::NextTab if !self.tabs.is_empty() => self.cur = (self.cur + 1) % self.tabs.len(),
-            Act::PrevTab if !self.tabs.is_empty() => self.cur = (self.cur + self.tabs.len() - 1) % self.tabs.len(),
+            Act::NextTab if !self.tabs.is_empty() => {
+                self.cur = (self.cur + 1) % self.tabs.len();
+                self.leave_sidebar();
+            }
+            Act::PrevTab if !self.tabs.is_empty() => {
+                self.cur = (self.cur + self.tabs.len() - 1) % self.tabs.len();
+                self.leave_sidebar();
+            }
             Act::NextTab | Act::PrevTab => {}
             Act::Attention => match self.attention_target() {
                 Some(id) => self.go_session(id),
@@ -83,13 +89,15 @@ impl App {
             Act::ToggleSidebar => {
                 self.sidebar = !self.sidebar;
                 if !self.sidebar {
-                    self.side_focus = false;
+                    self.leave_sidebar();
                 }
             }
             Act::FocusSidebar => {
                 self.sidebar = true;
-                self.side_focus = !self.side_focus;
                 if self.side_focus {
+                    self.leave_sidebar();
+                } else {
+                    self.side_focus = true;
                     self.side_manual_scroll = false;
                     self.select_focused_row();
                 }
@@ -165,6 +173,9 @@ impl App {
                 }
             }
         }
+        if self.overlay.is_open() {
+            self.leave_sidebar();
+        }
     }
 
     /// Close a pane, asking first if an agent is working in it.
@@ -179,10 +190,20 @@ impl App {
     }
 
     fn move_focus(&mut self, dx: i32, dy: i32) {
+        if self.side_focus && dx > 0 {
+            self.leave_sidebar();
+            return;
+        }
         let Some(from) = self.focused() else { return };
         match neighbor(&self.outer, from, dx, dy) {
-            Some(to) if self.stacked() => self.stack_focus = Some(to),
-            Some(to) => self.tabs[self.cur].focus = to,
+            Some(to) => {
+                if self.stacked() {
+                    self.stack_focus = Some(to);
+                } else {
+                    self.tabs[self.cur].focus = to;
+                }
+                self.leave_sidebar();
+            }
             // off the left edge: into the sidebar
             None if dx < 0 && self.sidebar => {
                 self.side_focus = true;
@@ -211,7 +232,7 @@ impl App {
             self.cur_project = Some(t.meta.project.root.clone());
         }
         self.focus_pane(id);
-        self.side_focus = false;
+        self.leave_sidebar();
     }
 
     fn cycle_session(&mut self, d: i32) {
@@ -258,6 +279,7 @@ impl App {
         self.svc.refresh_usage();
         self.svc.refresh_sessions();
         let cwd = cwd.or_else(|| self.preferred_dir());
+        self.leave_sidebar();
         self.overlay = Overlay::Launcher(Box::new(self.session_launcher(cwd, place)));
     }
 
@@ -273,7 +295,7 @@ impl App {
         if let Some(id) = self.orchestrator_pane() {
             self.overlay = Overlay::None;
             self.focus_pane(id);
-            self.side_focus = false;
+            self.leave_sidebar();
             return;
         }
         self.svc.refresh_usage();
@@ -299,7 +321,7 @@ impl App {
         self.follow_focus();
         let Some(h) = h else {
             self.open_shell(self.preferred_dir(), Place::Tab);
-            self.side_focus = false;
+            self.leave_sidebar();
             return;
         };
         self.svc.refresh_usage();
@@ -307,7 +329,7 @@ impl App {
         match l.quick_spec() {
             Some(spec) => {
                 self.launch_spec(spec, Place::Tab);
-                self.side_focus = false;
+                self.leave_sidebar();
             }
             None => self.overlay = Overlay::Launcher(Box::new(l)),
         }
@@ -329,7 +351,7 @@ impl App {
         match launcher.quick_spec() {
             Some(spec) => {
                 self.launch_spec(spec, Place::Tab);
-                self.side_focus = false;
+                self.leave_sidebar();
             }
             None => self.overlay = Overlay::Launcher(Box::new(launcher)),
         }
@@ -341,7 +363,7 @@ impl App {
             // one per bro: go to the running one, or wait for the one starting
             if let Some(id) = self.orchestrator_pane() {
                 self.focus_pane(id);
-                self.side_focus = false;
+                self.leave_sidebar();
                 self.toast(Kind::Info, "the orchestrator is already running · here it is");
                 return;
             }
@@ -369,19 +391,21 @@ impl App {
             if self.focused() == Some(id) && self.tabs.len() > 1 {
                 // pressing the key again goes back where you were
                 self.cur = (self.cur + self.tabs.len() - 1) % self.tabs.len();
+                self.leave_sidebar();
                 return;
             }
             self.focus_pane(id);
-            self.side_focus = false;
+            self.leave_sidebar();
             return;
         }
         if let Some(p) = crate::views::open(name) {
             self.new_tab(p);
-            self.side_focus = false;
+            self.leave_sidebar();
         }
     }
 
     pub(crate) fn open_palette(&mut self, query: &str) {
+        self.leave_sidebar();
         let themes = crate::theme::names();
         self.overlay = Overlay::Palette(Box::new(Palette::new(&self.keymap, &self.recents, &themes, &self.theme.name, query).with_presets(&self.svc.settings().claude_env.preset).with_caveman(self.svc.settings().caveman.active())));
     }
@@ -534,7 +558,7 @@ impl App {
         rows.iter().position(|r| matches!(r, Row::Project { key: k, .. } if k == key))
     }
 
-    /// h / ←: up to the project's header (from any of its rows).
+    /// ←: up to the project's header (from any of its rows).
     pub(crate) fn side_parent(&mut self) {
         let rows = self.rows();
         let Some(r) = rows.get(self.side_sel) else { return };
@@ -543,7 +567,7 @@ impl App {
         }
     }
 
-    /// l / →: step into a project.
+    /// →: step into a project.
     pub(crate) fn side_step_in(&mut self) {
         let rows = self.rows();
         if matches!(rows.get(self.side_sel), Some(Row::Project { .. })) {

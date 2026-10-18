@@ -1,289 +1,208 @@
-//! Ending a session's whole process tree, not just its first process.
+//! Own the lifetime of a session and every process it starts.
 //!
-//! Killing the program a session started leaves behind what it started in turn: on Windows a
-//! `TerminateProcess` ends one process, and agents start MCP servers, shells and dev servers with
-//! their own hidden consoles, so closing the session's console doesn't reach them.
+//! Windows uses a non-inheritable, kill-on-close Job Object. ConPTY assigns the job during
+//! CreateProcess; ordinary commands start suspended and join before their first instruction.
+//! A root-process watcher ends the job when the root exits, even if descendants keep its output
+//! pipes open. Dropping the owner or terminating Bro also ends the job. No PID walk or executable
+//! subsystem heuristic can lose descendants after a launcher exits.
 //!
-//! Windows: the tree is walked from the session's process (parent ids, checked against start times
-//! so a reused id can't pull in an unrelated process) and every console program in it is ended.
-//! A GUI app the session opened (a browser for a login, an editor) and everything under it is left
-//! running: closing a terminal shouldn't close windows you're using.
-//!
-//! Unix: the session's process is its own session and process-group leader (the pty made it so),
-//! so the whole group gets SIGKILL. Anything that moved itself into another session or group
-//! (`setsid`, `nohup … &` in some shells) is beyond reach, as it is in any terminal.
-//!
-//! [`track`] / [`untrack`] keep the live sessions' process ids so [`kill_all_tracked`] can end them
-//! all when bro is closed without going through its own quit (the window's close button).
-use parking_lot::Mutex;
+//! Unix children lead their own process group (the PTY creates a session; ordinary commands use
+//! process_group). Cleanup signals that group even after its leader has exited. Processes that
+//! deliberately create another session remain outside that group.
 
-static TRACKED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+use std::io;
+use std::process::{Child, Command};
 
-/// Remember a live session's process for [`kill_all_tracked`].
-pub fn track(pid: u32) {
-    let mut t = TRACKED.lock();
-    if !t.contains(&pid) {
-        t.push(pid);
+/// Keep this owner until the session or task ends. Dropping it terminates its process tree.
+pub struct ProcessTree {
+    root: Option<u32>,
+    #[cfg(windows)]
+    job: std::sync::Arc<imp::Job>,
+}
+
+impl ProcessTree {
+    pub fn new() -> io::Result<Self> {
+        Ok(Self {
+            root: None,
+            #[cfg(windows)]
+            job: std::sync::Arc::new(imp::Job::new()?),
+        })
     }
-}
 
-/// Forget it (its session ended).
-pub fn untrack(pid: u32) {
-    TRACKED.lock().retain(|p| *p != pid);
-}
-
-/// End every tracked session's tree.
-pub fn kill_all_tracked() {
-    let pids: Vec<u32> = std::mem::take(&mut *TRACKED.lock());
-    for pid in pids {
-        kill_tree(pid);
+    /// Configure a background command before spawning it. Call `attach` immediately afterwards.
+    pub fn configure_command(&self, command: &mut Command) {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // The child must not execute or start descendants before job assignment.
+            command.creation_flags(0x0800_0004); // CREATE_NO_WINDOW | CREATE_SUSPENDED
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        #[cfg(not(any(windows, unix)))]
+        let _ = command;
     }
-}
 
-/// End `root` and the console programs it started (see the module docs). Best effort.
-pub fn kill_tree(root: u32) {
-    untrack(root);
-    imp::kill_tree(root);
-}
+    /// Assign a background child, start its exit watcher, then let it execute.
+    pub fn attach(&mut self, pid: u32) -> io::Result<()> {
+        self.root = Some(pid);
+        #[cfg(windows)]
+        imp::attach(&self.job, pid, true)?;
+        Ok(())
+    }
 
-/// The processes to end for `root`, from `(pid, parent, created, gui)` rows: `root` first, then its
-/// descendants, skipping GUI processes and everything below them. A row only counts as a child
-/// when it started after its parent (a parent id can be reused after the parent exits).
-#[cfg_attr(not(windows), allow(dead_code))]
-fn plan(root: u32, procs: &[(u32, u32, u64, bool)]) -> Vec<u32> {
-    let Some(&(_, _, root_created, _)) = procs.iter().find(|p| p.0 == root) else { return vec![root] };
-    let mut out = vec![root];
-    let mut queue = vec![(root, root_created)];
-    while let Some((parent, parent_created)) = queue.pop() {
-        for &(pid, ppid, created, gui) in procs {
-            if ppid != parent || pid == parent || created < parent_created || out.contains(&pid) {
-                continue;
-            }
-            if gui {
-                continue;
-            }
-            out.push(pid);
-            queue.push((pid, created));
+    /// Watch a PTY child that was born in this job (or its own Unix session).
+    pub fn watch_pty(&mut self, pid: u32) -> io::Result<()> {
+        self.root = Some(pid);
+        #[cfg(windows)]
+        imp::attach(&self.job, pid, false)?;
+        Ok(())
+    }
+
+    /// Borrow the job for ConPTY's process-creation attribute. The owner must outlive the spawn.
+    #[cfg(windows)]
+    pub fn job_handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        use std::os::windows::io::AsHandle;
+        self.job.0.as_handle()
+    }
+
+    /// Spawn a background command with cleanup on every return path.
+    pub fn spawn(command: &mut Command) -> io::Result<(Child, Self)> {
+        let mut tree = Self::new()?;
+        tree.configure_command(command);
+        let mut child = command.spawn()?;
+        if let Err(error) = tree.attach(child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok((child, tree))
+    }
+
+    /// End all owned processes. Repeated calls cannot target a reused PID.
+    pub fn terminate(&mut self) {
+        #[cfg(windows)]
+        self.job.terminate();
+        #[cfg(unix)]
+        if let Some(root) = self.root.take().and_then(|pid| i32::try_from(pid).ok()).filter(|pid| *pid > 1) {
+            // The group can outlive its leader, so getpgid(root) is not a useful guard here.
+            unsafe { libc::killpg(root, libc::SIGKILL) };
         }
     }
-    out
+}
+
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        self.terminate();
+    }
 }
 
 #[cfg(windows)]
 mod imp {
-    use std::path::Path;
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
+    use std::io;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::sync::Arc;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+    };
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
+        INFINITE, OpenProcess, OpenThread, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, ResumeThread, THREAD_SUSPEND_RESUME, TerminateProcess,
+        WaitForSingleObject,
     };
 
-    /// (pid, parent pid) of every process.
-    fn snapshot() -> Vec<(u32, u32)> {
-        let mut out = vec![];
-        unsafe {
-            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if snap == INVALID_HANDLE_VALUE {
-                return out;
+    pub struct Job(pub OwnedHandle);
+
+    impl Job {
+        pub fn new() -> io::Result<Self> {
+            // NULL security attributes make this handle non-inheritable. Children must never keep
+            // the last job handle alive after Bro exits.
+            let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if raw.is_null() {
+                return Err(io::Error::last_os_error());
             }
-            let mut e: PROCESSENTRY32W = std::mem::zeroed();
-            e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-            if Process32FirstW(snap, &mut e) != 0 {
-                loop {
-                    out.push((e.th32ProcessID, e.th32ParentProcessID));
-                    if Process32NextW(snap, &mut e) == 0 {
-                        break;
-                    }
+            let job = Self(unsafe { OwnedHandle::from_raw_handle(raw) });
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = unsafe {
+                SetInformationJobObject(
+                    raw,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const _,
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(job)
+        }
+
+        pub fn terminate(&self) {
+            unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) };
+        }
+    }
+
+    pub fn attach(job: &Arc<Job>, pid: u32, suspended: bool) -> io::Result<()> {
+        let raw = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
+        if raw.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let result = (|| {
+            if suspended && unsafe { AssignProcessToJobObject(job.0.as_raw_handle(), raw) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let watching = job.clone();
+            let watched_process = process.try_clone()?;
+            std::thread::Builder::new().name("bro-process-exit".into()).spawn(move || {
+                if unsafe { WaitForSingleObject(watched_process.as_raw_handle(), INFINITE) } == WAIT_OBJECT_0 {
+                    watching.terminate();
                 }
+            })?;
+            if suspended {
+                resume(pid)?;
             }
-            CloseHandle(snap);
+            Ok(())
+        })();
+        if result.is_err() {
+            // Also covers assignment failure: an unassigned suspended child must never survive.
+            unsafe { TerminateProcess(raw, 1) };
+            job.terminate();
         }
-        out
+        result
     }
 
-    fn open(pid: u32, access: u32) -> Option<HANDLE> {
-        let h = unsafe { OpenProcess(access, 0, pid) };
-        (!h.is_null()).then_some(h)
-    }
-
-    /// When it started (FILETIME ticks) and whether its executable is a GUI program.
-    fn details(pid: u32) -> Option<(u64, bool)> {
-        let h = open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
-        let mut times: [FILETIME; 4] = unsafe { std::mem::zeroed() };
-        let [created, exited, kernel, user] = &mut times;
-        let ok = unsafe { GetProcessTimes(h, created, exited, kernel, user) } != 0;
-        let mut buf = vec![0u16; 1024];
-        let mut len = buf.len() as u32;
-        let named = unsafe { QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) } != 0;
-        unsafe { CloseHandle(h) };
-        if !ok {
-            return None;
+    fn resume(pid: u32) -> io::Result<()> {
+        let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
         }
-        let created = (u64::from(times[0].dwHighDateTime) << 32) | u64::from(times[0].dwLowDateTime);
-        let gui = named && super::is_gui_exe(Path::new(&String::from_utf16_lossy(&buf[..len as usize])));
-        Some((created, gui))
-    }
-
-    pub fn kill_tree(root: u32) {
-        let rows = snapshot();
-        // everything that names a process in the tree as its parent; plan() sorts out reused ids
-        let mut ids = vec![root];
-        let mut i = 0;
-        while i < ids.len() {
-            let parent = ids[i];
-            for &(pid, ppid) in &rows {
-                if ppid == parent && pid != parent && !ids.contains(&pid) {
-                    ids.push(pid);
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of_val(&entry) as u32;
+        let mut next = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) } != 0;
+        while next {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() {
+                    return Err(io::Error::last_os_error());
                 }
+                let result = unsafe { ResumeThread(thread) };
+                let error = io::Error::last_os_error();
+                unsafe { CloseHandle(thread) };
+                return if result == u32::MAX { Err(error) } else { Ok(()) };
             }
-            i += 1;
+            next = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) } != 0;
         }
-        let procs: Vec<(u32, u32, u64, bool)> = ids
-            .iter()
-            .filter_map(|&pid| {
-                let ppid = rows.iter().find(|r| r.0 == pid)?.1;
-                details(pid).map(|(created, gui)| (pid, ppid, created, gui))
-            })
-            .collect();
-        for pid in super::plan(root, &procs) {
-            if let Some(h) = open(pid, PROCESS_TERMINATE) {
-                unsafe {
-                    TerminateProcess(h, 1);
-                    CloseHandle(h);
-                }
-            }
-        }
+        Err(io::Error::new(io::ErrorKind::NotFound, "the suspended child's primary thread was not found"))
     }
-}
-
-#[cfg(unix)]
-mod imp {
-    pub fn kill_tree(root: u32) {
-        let Ok(pid) = i32::try_from(root) else { return };
-        if pid <= 1 {
-            return;
-        }
-        unsafe {
-            // the pty made it a session and group leader: its group is everything it runs in the foreground
-            if libc::getpgid(pid) == pid {
-                libc::killpg(pid, libc::SIGKILL);
-            }
-            libc::kill(pid, libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(not(any(windows, unix)))]
-mod imp {
-    pub fn kill_tree(_root: u32) {}
-}
-
-/// The executable is a Windows GUI program (PE subsystem 2) rather than a console one.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn is_gui_exe(path: &std::path::Path) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    let read = || -> std::io::Result<bool> {
-        let mut f = std::fs::File::open(path)?;
-        let mut dos = [0u8; 64];
-        f.read_exact(&mut dos)?;
-        if &dos[..2] != b"MZ" {
-            return Ok(false);
-        }
-        let pe = u32::from_le_bytes([dos[60], dos[61], dos[62], dos[63]]) as u64;
-        // "PE\0\0", the 20-byte file header, then the optional header: Subsystem is at offset 68
-        f.seek(SeekFrom::Start(pe))?;
-        let mut sig = [0u8; 4];
-        f.read_exact(&mut sig)?;
-        if &sig != b"PE\0\0" {
-            return Ok(false);
-        }
-        f.seek(SeekFrom::Start(pe + 4 + 20 + 68))?;
-        let mut sub = [0u8; 2];
-        f.read_exact(&mut sub)?;
-        Ok(u16::from_le_bytes(sub) == 2)
-    };
-    read().unwrap_or(false)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plans_the_tree_without_gui_apps_or_reused_ids() {
-        // 10 → 11 (shell) → 12 (node server); 10 → 13 (browser, GUI) → 14 (its helper)
-        // 15 claims parent 11 but started before it: 11's id was reused, so it isn't ours
-        let procs = [(10, 1, 100, false), (11, 10, 110, false), (12, 11, 120, false), (13, 10, 115, true), (14, 13, 130, false), (15, 11, 50, false), (16, 99, 140, false)];
-        let mut got = plan(10, &procs);
-        got.sort();
-        assert_eq!(got, vec![10, 11, 12]);
-        assert_eq!(plan(7, &procs), vec![7], "an unknown root is still ended");
-    }
-
-    #[test]
-    fn tracking_forgets_ended_sessions() {
-        track(4_000_000_001);
-        track(4_000_000_001);
-        assert_eq!(TRACKED.lock().iter().filter(|p| **p == 4_000_000_001).count(), 1);
-        untrack(4_000_000_001);
-        assert!(!TRACKED.lock().contains(&4_000_000_001));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn reads_the_pe_subsystem() {
-        let win = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).unwrap();
-        assert!(is_gui_exe(&win.join("notepad.exe")) || is_gui_exe(&win.join("System32").join("notepad.exe")));
-        assert!(!is_gui_exe(&win.join("System32").join("cmd.exe")));
-        assert!(!is_gui_exe(std::path::Path::new("Z:\\no\\such.exe")));
-    }
-
-    /// A shell that starts a grandchild with its own (hidden) console, which closing the shell's
-    /// console doesn't reach: ending the tree ends it.
-    #[cfg(windows)]
-    #[test]
-    fn ends_grandchildren_with_their_own_console() {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("grandchild.pid");
-        // full paths: other tests swap PATH while this one runs
-        let ps = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-        let script = format!(
-            "$p = Start-Process '{}' -ArgumentList '-NoProfile','-Command','Start-Sleep 120' -WindowStyle Hidden -PassThru; Set-Content -Path '{}' -Value $p.Id; Start-Sleep 120",
-            ps.display(),
-            marker.display()
-        );
-        let mut shell = Command::new(&ps).args(["-NoProfile", "-Command", &script]).creation_flags(0x0800_0000).spawn().unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let grandchild: u32 = loop {
-            if let Some(pid) = std::fs::read_to_string(&marker).ok().and_then(|s| s.trim().parse().ok()) {
-                break pid;
-            }
-            assert!(std::time::Instant::now() < deadline, "the grandchild never started");
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        };
-        let alive = |pid: u32| imp_alive(pid);
-        assert!(alive(grandchild));
-        kill_tree(shell.id());
-        let _ = shell.wait();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!alive(grandchild), "the grandchild outlived its session");
-    }
-
-    #[cfg(windows)]
-    fn imp_alive(pid: u32) -> bool {
-        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-        unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if h.is_null() {
-                return false;
-            }
-            let mut code = 0u32;
-            let ok = GetExitCodeProcess(h, &mut code) != 0;
-            CloseHandle(h);
-            ok && code == STILL_ACTIVE as u32
-        }
-    }
-}
+mod tests;

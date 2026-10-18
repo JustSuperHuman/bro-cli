@@ -15,10 +15,16 @@ impl App {
         }
         let pos = Position { x: m.column, y: m.row };
         self.hover = pos;
+        if matches!(m.kind, MouseEventKind::Down(_)) && !self.side_area.contains(pos) {
+            self.leave_sidebar();
+        }
         if matches!(m.kind, MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
             self.link_press = None;
         }
-        if self.overlay.is_open() {
+        // the launcher fills the body like a view, so the sidebar beside it keeps working
+        let beside_launcher = matches!(&self.overlay, Overlay::Launcher(l) if l.project_picker.is_none())
+            && (self.side_drag || (self.side_area.width > 0 && self.side_area.contains(pos)));
+        if self.overlay.is_open() && !beside_launcher {
             let left = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
             if matches!(self.overlay, super::overlays::Overlay::Confirm(_)) {
                 if left && let Some(&(_, yes)) = self.confirm_hits.iter().find(|(r, _)| r.contains(pos)) {
@@ -173,6 +179,13 @@ impl App {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let double = self.last_click.is_some_and(|(t, x, y)| t.elapsed() < Duration::from_millis(400) && x == m.column && y == m.row);
                     self.last_click = Some((Instant::now(), m.column, m.row));
+                    if self.launcher_side_click(&hit) {
+                        return;
+                    }
+                    if matches!(hit, SideHit::Row(_)) {
+                        self.side_focus = true;
+                        self.side_manual_scroll = false;
+                    }
                     match hit {
                         SideHit::Row(i) if m.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
                             // ctrl+click (terminals keep shift+click for their own selection) or shift+click: show it alongside
@@ -200,6 +213,9 @@ impl App {
                         SideHit::TileAll => self.run_act(crate::keymap::Act::TileAll),
                         SideHit::Minimized => self.toggle_minimized_visibility(),
                     }
+                    if self.overlay.is_open() {
+                        self.leave_sidebar();
+                    }
                 }
                 MouseEventKind::Down(MouseButton::Middle) => {
                     if let SideHit::Row(i) = hit
@@ -209,6 +225,13 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+        if self.side_area.contains(pos) && matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) && !self.overlay.is_open() {
+            self.side_focus = true;
+            self.side_manual_scroll = false;
+        }
+        if self.overlay.is_open() {
             return;
         }
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
@@ -359,7 +382,7 @@ impl App {
             } else if let Some(t) = self.tabs.get_mut(self.cur) {
                 t.focus = id;
             }
-            self.side_focus = false;
+            self.leave_sidebar();
             self.sel = None;
             self.last_pane_click = None;
             if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
@@ -399,7 +422,7 @@ impl App {
             } else if let Some(t) = self.tabs.get_mut(self.cur) {
                 t.focus = id;
             }
-            self.side_focus = false;
+            self.leave_sidebar();
         }
         if let Some(uri) = link {
             self.link_press = Some((id, pos, uri));
@@ -410,12 +433,48 @@ impl App {
         }
     }
 
+    /// A sidebar click while the launcher is open. A project becomes the one it starts in and + New / Continue
+    /// switch its tab, all without closing it; toggles leave it open; anything else closes it first. True when
+    /// the click is handled here.
+    fn launcher_side_click(&mut self, hit: &SideHit) -> bool {
+        if !matches!(self.overlay, Overlay::Launcher(_)) {
+            return false;
+        }
+        match hit {
+            SideHit::Row(i) => {
+                if let Some(crate::sidebar::Row::Project { root, .. }) = self.rows().get(*i) {
+                    let root = root.clone();
+                    self.select_launcher_project(root);
+                    return true;
+                }
+                self.overlay = Overlay::None;
+                false
+            }
+            SideHit::Launcher | SideHit::Continue => {
+                if let Overlay::Launcher(l) = &mut self.overlay {
+                    if matches!(hit, SideHit::Continue) {
+                        l.show_continue();
+                    } else {
+                        l.tab = crate::launcher::SessionTab::New;
+                        l.hits.clear();
+                    }
+                }
+                true
+            }
+            SideHit::Fable | SideHit::UsageToggle | SideHit::Minimized => false,
+            _ => {
+                self.overlay = Overlay::None;
+                false
+            }
+        }
+    }
+
     /// Focus `id` and turn its card over: the back says what it's working on; again turns it face up.
     pub(crate) fn flip_pane(&mut self, id: crate::pane::PaneId) {
         if !self.panes.get(&id).is_some_and(|p| p.as_term_ref().is_some()) {
             return;
         }
-        self.side_focus = false;
+        self.leave_sidebar();
         if self.stacked() {
             self.stack_focus = Some(id);
         } else if let Some(t) = self.tabs.get_mut(self.cur) {
@@ -471,7 +530,7 @@ impl App {
     pub(crate) fn toggle_priority(&mut self, id: crate::pane::PaneId) {
         self.sel = None;
         self.last_pane_click = None;
-        self.side_focus = false;
+        self.leave_sidebar();
         if self.priority == Some(id) {
             self.priority = None;
             return;
@@ -486,7 +545,7 @@ impl App {
 
     /// Focus `id` and toggle full screen for it (the tiled grid or the tab's splits come back unchanged).
     fn zoom_pane(&mut self, id: crate::pane::PaneId) {
-        self.side_focus = false;
+        self.leave_sidebar();
         if self.stacked() {
             self.stack_focus = Some(id);
             self.stack_zoom = !self.stack_zoom;

@@ -157,7 +157,7 @@ impl App {
                 let _ = r.send(Ok(sid));
             }
         } else {
-            self.side_focus = false;
+            self.leave_sidebar();
         }
         if let Some(n) = note {
             self.toast(Kind::Info, n);
@@ -580,7 +580,7 @@ impl App {
         } else {
             self.focus_pane(ids[0]);
         }
-        self.side_focus = false;
+        self.leave_sidebar();
         let n = sessions.len();
         self.toast(Kind::Info, if n == 1 { format!("resuming “{}”…", crate::ui::fit(&sessions[0].title, 40)) } else { format!("resuming {n} sessions, one at a time") });
         self.pump_resumes();

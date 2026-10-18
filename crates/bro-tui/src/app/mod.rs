@@ -437,7 +437,7 @@ impl App {
         }
         self.retile(Some(id));
         self.sel = None;
-        self.side_focus = false;
+        self.leave_sidebar();
         self.last_pane_click = None;
     }
 
@@ -484,7 +484,7 @@ impl App {
             self.tile_project = None;
             self.stack_zoom = false;
         }
-        self.side_focus = false;
+        self.leave_sidebar();
     }
 
     /// Click / ⏎ on a project: tile only its sessions; again: back to every session.
@@ -506,7 +506,7 @@ impl App {
             self.tile_all = true;
         }
         self.tile_project = Some(key.to_string());
-        self.side_focus = false;
+        self.leave_sidebar();
     }
 
     /// shift+click / shift+⏎ on a session: add it to the stacked view, or take it out again.
@@ -542,7 +542,7 @@ impl App {
                 self.focus_pane(r);
             }
         }
-        self.side_focus = false;
+        self.leave_sidebar();
     }
 
     /// Open a pane at `place` relative to the focused pane; returns its id.
@@ -923,6 +923,7 @@ impl App {
             }
             Event::Input(CEvent::FocusLost) => {
                 self.term_focused = false;
+                self.clear_sidebar_filter();
                 // alt+tab away: the release goes to the other window
                 self.alt_held(false);
                 if self.side_drag {
@@ -1014,7 +1015,7 @@ impl App {
                     let _ = out.flush();
                 }
                 self.add_project(dir);
-                self.side_focus = false;
+                self.leave_sidebar();
             }
             Event::FolderCreated(request, result) => self.project_folder_created(request, result),
             Event::Watchdog(u) => self.watchdog_event(u),
@@ -1054,9 +1055,9 @@ impl App {
             text.extend(s.chars().filter(|c| !c.is_control()).take(40usize.saturating_sub(text.chars().count())));
             return;
         }
-        if self.side_filtering {
+        if self.side_focus && !self.prefix_armed {
             self.side.filter.extend(s.chars().filter(|c| !c.is_control()));
-            self.side_sel = 0;
+            self.sidebar_filter_changed();
             return;
         }
         if self.side_focus || self.prefix_armed {

@@ -2,6 +2,10 @@
 //! and drawn cell by cell. Ported from z4-oriel with: lazy spawn at the real pane size, the DSR reply written
 //! without holding the parser lock, output teed to the bridge, OSC titles, and session metadata for the sidebar.
 
+#[cfg(all(test, windows))]
+#[path = "process_tests.rs"]
+mod process_tests;
+
 use super::keys::{encode_key, encode_mouse};
 use crate::pane::{Activity, Cx, Pane, Waker};
 use crate::services::Services;
@@ -122,8 +126,18 @@ impl ProgramState {
 }
 
 struct Live {
+    tree: bro_core::proc_tree::ProcessTree,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        // End descendants before closing ConPTY: inherited output handles can hold its close open.
+        self.tree.terminate();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// The terminal pane.
@@ -138,6 +152,8 @@ pub struct Term {
     cached_cursor: Option<(u16, u16)>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     exited: Arc<AtomicBool>,
+    /// Cancels background work tied to this pane, including an in-progress recap.
+    closed: Arc<AtomicBool>,
     /// Preserve the process status independently of whether the PTY output pipe has closed.
     exit_status: Option<i32>,
     /// rows, cols
@@ -228,6 +244,7 @@ impl Term {
             cached_cursor: None,
             writer: Arc::new(Mutex::new(None)),
             exited: Arc::new(AtomicBool::new(false)),
+            closed: Arc::new(AtomicBool::new(false)),
             exit_status: None,
             size: (24, 80),
             base: (24, 80),
@@ -358,20 +375,26 @@ impl Term {
         for (k, v) in &s.env {
             cmd.env(k, v);
         }
+        let tree = bro_core::proc_tree::ProcessTree::new().map_err(|e| format!("session process owner: {e}"))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: tree owns this job until after spawn_command returns, including error paths.
+            unsafe { cmd.set_windows_job_handle(tree.job_handle().as_raw_handle()) };
+        }
         let child = pair.slave.spawn_command(cmd).map_err(|e| format!("couldn't start {}: {e}", s.program))?;
         drop(pair.slave);
-        let writer = pair.master.take_writer().map_err(|e| format!("pty writer: {e}"))?;
-        let reader = pair.master.try_clone_reader().map_err(|e| format!("pty reader: {e}"))?;
+        let pid = child.process_id();
+        let mut live = Live { tree, master: pair.master, child };
+        live.tree.watch_pty(pid.ok_or("the session has no process id")?).map_err(|e| format!("session exit watcher: {e}"))?;
+        // Keep ownership local through every fallible setup step, so failures also end the child.
+        let writer = live.master.take_writer().map_err(|e| format!("pty writer: {e}"))?;
+        let reader = live.master.try_clone_reader().map_err(|e| format!("pty reader: {e}"))?;
         *self.writer.lock() = Some(Box::new(super::writer::Writer::new(writer).map_err(|e| format!("pty input worker: {e}"))?));
         self.parser.lock().screen_mut().set_size(rows, cols);
         self.size = (rows, cols);
         self.base = (rows, cols);
-        let pid = child.process_id();
-        // so closing the window (not just quitting) still ends this session's processes
-        if let Some(p) = pid.filter(|_| !self.svc.is_demo()) {
-            bro_core::proc_tree::track(p);
-        }
-        self.live = Some(Live { master: pair.master, child });
+        self.live = Some(live);
         self.svc.bridge_register(self.bridge_meta(s, pid));
         self.launch = Some(s.clone());
         if let Some(spec) = self.bind_spec(s, pid)
@@ -424,6 +447,10 @@ impl Term {
     /// The transcript worker's handle (a finished `/recap` is handed to it).
     pub fn insights_handle(&self) -> Option<&super::insights::Insights> {
         self.insights.as_ref()
+    }
+
+    pub fn closed_signal(&self) -> Arc<AtomicBool> {
+        self.closed.clone()
     }
 
     /// Tests: give a fixed pane transcript facts.
@@ -644,16 +671,11 @@ impl Term {
         self.size
     }
 
-    /// Kill the program and what it started (bridge kill, close, quit): console programs in its
-    /// process tree end with it; GUI apps it opened stay (see `bro_core::proc_tree`).
+    /// Kill the program and everything owned by its session (bridge kill, close, quit).
     pub fn kill(&mut self) {
-        if self.exit_code().is_some() {
-            return;
-        }
+        self.closed.store(true, Ordering::SeqCst);
         if let Some(l) = &mut self.live {
-            if let Some(pid) = l.child.process_id() {
-                bro_core::proc_tree::kill_tree(pid);
-            }
+            l.tree.terminate();
             let _ = l.child.kill();
         }
     }
@@ -663,9 +685,10 @@ impl Term {
         if self.exit_status.is_none() {
             self.exit_status = self.live.as_mut().and_then(|l| l.child.try_wait().ok().flatten()).map(|s| s.exit_code() as i32);
             if self.exit_status.is_some()
-                && let Some(pid) = self.live.as_ref().and_then(|l| l.child.process_id())
+                && let Some(live) = &mut self.live
             {
-                bro_core::proc_tree::untrack(pid);
+                self.closed.store(true, Ordering::SeqCst);
+                live.tree.terminate();
             }
         }
         self.exit_status

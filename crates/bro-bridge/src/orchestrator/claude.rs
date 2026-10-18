@@ -237,8 +237,8 @@ pub(super) fn spawn(
         command.env("MAX_THINKING_TOKENS", "0");
     }
     command.envs(launch.env.iter().map(|(key, value)| (key, value)));
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let mut tree = bro_core::proc_tree::ProcessTree::new().map_err(|error| format!("Claude Code process owner: {error}"))?;
+    tree.configure_command(command.as_std_mut());
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -246,6 +246,7 @@ pub(super) fn spawn(
             launch.program.display()
         )
     })?;
+    tree.attach(child.id().ok_or("Claude Code has no process id.")?).map_err(|error| format!("Claude Code process ownership: {error}"))?;
     let mut stdin = child.stdin.take().ok_or("Claude Code has no stdin.")?;
     let stdout = child.stdout.take().ok_or("Claude Code has no stdout.")?;
     let stderr = child.stderr.take().ok_or("Claude Code has no stderr.")?;
@@ -292,12 +293,14 @@ pub(super) fn spawn(
                     _ => break,
                 },
                 _ = &mut killed => {
+                    tree.terminate();
                     let _ = child.start_kill();
                     break;
                 }
             }
         }
         let status = child.wait().await.ok();
+        tree.terminate();
         let detail = stderr_tail.lock().join("\n");
         for_stdout.on_process_exit(generation, status.and_then(|status| status.code()), detail);
     });
@@ -319,6 +322,22 @@ pub(super) fn command_for(launch: &OrchestratorLaunch, args: Vec<String>) -> tok
     command.args(args);
     command
 }
+
+/// A bounded caller can drop this future: its command and descendants end together.
+pub(super) async fn owned_output(command: &mut tokio::process::Command) -> std::io::Result<std::process::Output> {
+    let mut tree = bro_core::proc_tree::ProcessTree::new()?;
+    tree.configure_command(command.as_std_mut());
+    command.kill_on_drop(true);
+    let child = command.spawn()?;
+    tree.attach(child.id().ok_or_else(|| std::io::Error::other("the command has no process id"))?)?;
+    let result = child.wait_with_output().await;
+    tree.terminate();
+    result
+}
+
+#[cfg(all(test, windows))]
+#[path = "process_tests.rs"]
+mod process_tests;
 
 fn tool_result_text(content: &Value) -> String {
     match content {

@@ -135,9 +135,10 @@ async fn review(app: &AppState, session_id: &str, generation: u64, snapshot: &Wa
         command.env_remove(name);
     }
     command.envs(wake.reviewer.env.iter().map(|(k, v)| (k, v)));
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let mut tree = bro_core::proc_tree::ProcessTree::new().map_err(|e| format!("reviewer process owner: {e}"))?;
+    tree.configure_command(command.as_std_mut());
     let mut child = command.spawn().map_err(|e| format!("couldn't start {} ({program}): {e}", wake.reviewer.label))?;
+    tree.attach(child.id().ok_or("the reviewer has no process id")?).map_err(|e| format!("reviewer process ownership: {e}"))?;
     let mut stdin = child.stdin.take().ok_or("the reviewer has no stdin")?;
     let stdout = child.stdout.take().ok_or("the reviewer has no stdout")?;
     let stderr = child.stderr.take().ok_or("the reviewer has no stderr")?;
@@ -178,16 +179,19 @@ async fn review(app: &AppState, session_id: &str, generation: u64, snapshot: &Wa
                 _ => break,
             },
             _ = &mut killed => {
-                let _ = child.start_kill();
+                tree.terminate();
+                let _ = child.kill().await;
                 return Err("stopped before it finished".into());
             }
             _ = &mut deadline => {
-                let _ = child.start_kill();
+                tree.terminate();
+                let _ = child.kill().await;
                 return Err(format!("the reviewer took longer than {} minutes and was stopped", RUN_TIMEOUT.as_secs() / 60));
             }
         }
     }
     let status = child.wait().await.ok();
+    tree.terminate();
     let stderr = tail.lock().join(" ").trim().to_string();
     if let Some(error) = parsed.error {
         return Err(error);

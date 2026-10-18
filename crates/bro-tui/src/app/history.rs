@@ -100,7 +100,7 @@ impl App {
                 if matches!(self.overlay, Overlay::Launcher(_)) {
                     self.overlay = Overlay::None;
                 }
-                self.side_focus = false;
+                self.leave_sidebar();
                 self.focus_pane(id);
                 // a zoomed view zooms the session you step to (a lone pane is full screen already)
                 if full

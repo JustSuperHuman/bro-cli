@@ -17,14 +17,14 @@ use ratatui::{
     text::{Line, Span},
 };
 
-/// Draw the launcher centered on `screen`.
-pub fn draw(f: &mut Frame, screen: Rect, l: &mut Launcher, t: &Theme, time: f64) {
+/// Draw the launcher filling `area`: the body, where a view pane would go.
+pub fn draw(f: &mut Frame, area: Rect, l: &mut Launcher, t: &Theme, time: f64) {
     let mut hits = vec![];
-    let area = draw_inner(f, screen, l, t, time, &mut hits);
+    draw_inner(f, area, l, t, time, &mut hits);
     l.hits = hits;
     l.area = area;
     if let Some(p) = &mut l.project_picker {
-        crate::folder::draw_for_session(f, screen, p, &l.dir, t);
+        crate::folder::draw_for_session(f, area, p, &l.dir, t);
     }
 }
 
@@ -33,8 +33,7 @@ const SIDE_MIN_WIDTH: u16 = 84;
 /// Rows the switches (heading, three rows) and the Launch button take, with a blank row between.
 const SETTINGS_H: u16 = 6;
 
-fn draw_inner(f: &mut Frame, screen: Rect, l: &mut Launcher, t: &Theme, _time: f64, hits: &mut Vec<(Rect, Hit)>) -> Rect {
-    let r = ui::centered(screen, 110, 30);
+fn draw_inner(f: &mut Frame, r: Rect, l: &mut Launcher, t: &Theme, _time: f64, hits: &mut Vec<(Rect, Hit)>) {
     ui::clear(f, r, t);
     let heading = if l.tab == SessionTab::Continue { "Continue a session" } else { "New session" };
     let title = Line::from(vec![Span::raw(" "), Span::styled(heading, ui::bold_accent(t)), Span::raw(" ")]);
@@ -68,7 +67,7 @@ fn draw_inner(f: &mut Frame, screen: Rect, l: &mut Launcher, t: &Theme, _time: f
         for (rect, index) in &l.continue_picker.hits {
             hits.push((*rect, Hit::ContinueRow(*index)));
         }
-        return r;
+        return;
     }
 
     // the agents, and on the orchestrator tab the harness it runs on
@@ -120,7 +119,6 @@ fn draw_inner(f: &mut Frame, screen: Rect, l: &mut Launcher, t: &Theme, _time: f
         ui::line(f, row(hints_y), ui::hints(&hints, t));
         hits.push((Rect { x: inner.x, y: hints_y, width: 3 + ui::width(enter) as u16, height: 1 }, Hit::Launch));
     }
-    r
 }
 
 fn key_style(t: &Theme) -> Style {

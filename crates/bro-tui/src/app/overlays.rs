@@ -102,7 +102,8 @@ impl App {
         let time = self.start.elapsed().as_secs_f64();
         match &mut self.overlay {
             Overlay::None => {}
-            Overlay::Launcher(l) => launcher::view::draw(f, area, l, &t, time),
+            // drawn with the panes, in the body
+            Overlay::Launcher(_) => {}
             Overlay::Palette(p) => p.draw(f, area, &t),
             Overlay::Help(h) => h.draw(f, area, &self.keymap, &t, time),
             Overlay::Resume(p) => draw_resume(f, area, p, &t),
