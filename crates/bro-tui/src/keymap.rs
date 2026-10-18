@@ -73,6 +73,8 @@ pub enum Act {
     Orchestrator,
     SwitchLogin,
     CloseProject,
+    /// Open the folder whose path is on the clipboard as a project.
+    OpenClipboardFolder,
     /// Show the file an agent last opened (`bro open`).
     OpenedFile,
     /// What the focused agent sent you and the files it touched.
@@ -111,7 +113,7 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenClipboardFolder, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
@@ -175,6 +177,7 @@ impl Act {
             Orchestrator => "orchestrator".into(),
             SwitchLogin => "switch_login".into(),
             CloseProject => "close_project".into(),
+            OpenClipboardFolder => "open_clipboard_folder".into(),
             OpenedFile => "opened_file".into(),
             AgentFiles => "agent_files".into(),
             Watchdog => "watchdog".into(),
@@ -243,6 +246,7 @@ impl Act {
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
             Orchestrator => "the orchestrator: go to it, or start the one session that runs all the others".into(),
             CloseProject => "close the current project (and its sessions)".into(),
+            OpenClipboardFolder => "open the folder whose path you copied as a project".into(),
             OpenedFile => "show the file an agent last opened (bro open)".into(),
             AgentFiles => "agent files: what it sent you and the files it touched".into(),
             Watchdog => "watchdog: keep this session working through your milestones while you're away".into(),
@@ -254,7 +258,7 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention | Continue | Orchestrator | SwitchLogin | CloseProject | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
+            NewSession | NewShell | Rename | Close | Attention | Continue | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | RefreshUsage => Group::Views,
@@ -299,6 +303,7 @@ impl Act {
             SwitchLogin => vec!["alt+L"],
             Continue => vec!["alt+r"],
             Orchestrator => vec!["alt+O"],
+            OpenClipboardFolder => vec!["ctrl+shift+o"],
             Profiles => vec!["alt+o"],
             Proxy => vec!["alt+y"],
             Bridge => vec!["alt+g"],
@@ -363,7 +368,7 @@ impl Act {
             RefreshUsage => vec!["r"],
             Quit => vec!["q"],
             QuickInstall => vec!["I"],
-            Split | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt => vec![],
+            Split | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder => vec![],
         }
     }
 }
@@ -708,6 +713,10 @@ mod tests {
         // Windows console input reports shift+tab as Tab+SHIFT, other terminals as BackTab
         assert_eq!(km.direct(&KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Act::PrevSession));
         assert_eq!(km.direct(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Act::PrevSession));
+        // terminals report ctrl+shift+o as 'O' or as 'o' with shift
+        for c in ['O', 'o'] {
+            assert_eq!(km.direct(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Act::OpenClipboardFolder));
+        }
         assert_eq!(km.direct(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)), None, "plain tab still goes to the agent");
     }
 }

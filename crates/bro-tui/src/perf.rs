@@ -60,6 +60,7 @@ fn kind(ev: &Event) -> &'static str {
         Event::EditorPane(_) => "editor",
         Event::ThemeFilesChanged => "theme files",
         Event::OpenProject(_) => "open project",
+        Event::ClipboardFolder(_) => "clipboard folder",
         Event::FolderCreated(..) => "folder",
         Event::Watchdog(_) => "watchdog",
         Event::Voice(_) => "voice",

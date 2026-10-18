@@ -295,6 +295,26 @@ pub fn looks_like_path(s: &str) -> bool {
     s.starts_with('~') || s.starts_with('/') || s.starts_with('.') || s.starts_with('\\') || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
 }
 
+/// The folder a copied path names (one line, maybe quoted, `~` expanded). Touches the disk: call it off the
+/// UI thread.
+pub fn clipboard_folder(text: Option<&str>) -> Result<PathBuf, String> {
+    let s = unquote_path(text.unwrap_or_default().trim()).trim();
+    if s.is_empty() {
+        return Err("nothing on the clipboard · copy a folder's path first".into());
+    }
+    if s.contains(['\r', '\n']) {
+        return Err("the clipboard holds more than one line · copy just the folder's path".into());
+    }
+    let dir = expand(s);
+    if dir.is_dir() {
+        Ok(dir)
+    } else if dir.exists() {
+        Err(format!("{s} is a file, not a folder"))
+    } else {
+        Err(format!("no folder at {s}"))
+    }
+}
+
 /// Expand a leading `~`.
 pub fn expand(s: &str) -> PathBuf {
     match s.strip_prefix('~') {
@@ -404,5 +424,21 @@ mod tests {
         p.filter.clear();
         p.paste(&root.path().join("beta").display().to_string());
         assert!(matches!(key(&mut p, KeyCode::Enter), Outcome::Open(ref x) if x.ends_with("beta")));
+    }
+
+    #[test]
+    fn clipboard_folder_opens_only_an_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("copied project");
+        std::fs::create_dir(&dir).unwrap();
+        let file = root.path().join("notes.txt");
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(clipboard_folder(Some(&format!("\"{}\"\r\n", dir.display()))), Ok(dir.clone()));
+        assert_eq!(clipboard_folder(Some(&format!("  {}  ", dir.display()))), Ok(dir.clone()));
+        assert!(clipboard_folder(Some(&file.display().to_string())).unwrap_err().contains("is a file"));
+        assert!(clipboard_folder(Some(&root.path().join("missing").display().to_string())).unwrap_err().starts_with("no folder at"));
+        assert!(clipboard_folder(Some(&format!("{}\n{}", dir.display(), dir.display()))).is_err());
+        assert!(clipboard_folder(Some("   ")).is_err());
+        assert!(clipboard_folder(None).is_err());
     }
 }

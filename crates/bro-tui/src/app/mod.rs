@@ -1017,6 +1017,11 @@ impl App {
                 self.add_project(dir);
                 self.leave_sidebar();
             }
+            Event::ClipboardFolder(Ok(dir)) => {
+                self.add_project(dir);
+                self.leave_sidebar();
+            }
+            Event::ClipboardFolder(Err(why)) => self.toast(Kind::Info, why),
             Event::FolderCreated(request, result) => self.project_folder_created(request, result),
             Event::Watchdog(u) => self.watchdog_event(u),
             Event::Voice(m) => self.voice_message(*m),

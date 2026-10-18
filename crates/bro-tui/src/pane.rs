@@ -48,6 +48,8 @@ pub enum Event {
     ThemeFilesChanged,
     /// Another `bro` was started in this folder: open it here as a project.
     OpenProject(std::path::PathBuf),
+    /// ctrl+shift+o read the clipboard: the folder to open as a project, or why there isn't one.
+    ClipboardFolder(Result<std::path::PathBuf, String>),
     /// The folder picker finished creating a directory on a background thread.
     FolderCreated(uuid::Uuid, Result<std::path::PathBuf, String>),
     /// A watchdog woke, stepped, reported or stood down (the snapshot cache is already updated).

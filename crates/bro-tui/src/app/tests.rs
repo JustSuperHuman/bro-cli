@@ -2374,6 +2374,18 @@ fn clipboard_shortcuts_and_terminal_paste_open_a_copied_project_path() {
 }
 
 #[test]
+fn a_copied_folder_opens_as_a_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("copied folder");
+    std::fs::create_dir(&project).unwrap();
+    let mut a = app(false);
+    a.handle(Event::ClipboardFolder(crate::folder::clipboard_folder(Some(&project.display().to_string()))));
+    assert!(a.open_projects.contains(&a.svc.project_for(&project).root));
+    let Overlay::Launcher(l) = &a.overlay else { panic!("opening a copied folder shows the session picker") };
+    assert_eq!(l.dir, a.svc.project_for(&project).root);
+}
+
+#[test]
 fn delayed_clipboard_reads_do_not_paste_into_a_new_popup() {
     let mut a = app(false);
     open_project_picker(&mut a);

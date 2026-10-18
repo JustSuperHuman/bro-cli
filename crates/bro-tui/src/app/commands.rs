@@ -8,7 +8,7 @@ use crate::keymap::Act;
 use crate::launcher::Launcher;
 use crate::layout::{Dir, PaneId, neighbor};
 use crate::palette::{Cmd, Palette};
-use crate::pane::Place;
+use crate::pane::{Event, Place};
 use crate::services::LaunchRequest;
 use crate::sidebar::{self, Row};
 use std::path::PathBuf;
@@ -150,6 +150,13 @@ impl App {
                     let live = self.live_infos().iter().filter(|l| l.project_key == key).count();
                     self.close_project(root, live);
                 }
+            }
+            Act::OpenClipboardFolder => {
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let text = crate::clip::grab_text();
+                    let _ = tx.send(Event::ClipboardFolder(crate::folder::clipboard_folder(text.as_deref())));
+                });
             }
             Act::OpenedFile => self.show_last_opened(),
             Act::AgentFiles => self.show_agent_files(),
