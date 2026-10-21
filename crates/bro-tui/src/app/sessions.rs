@@ -67,7 +67,7 @@ impl App {
             Ok(c) => c,
             Err(e) => {
                 // it can't start this way: don't try it again on every start
-                if spec.orchestrator && self.persist && self.orchestrator_pane().is_none() {
+                if spec.orchestrator && self.persist && !self.guest && self.orchestrator_pane().is_none() {
                     crate::orchestrator_state::clear();
                 }
                 self.raise(Kind::Error, format!("couldn't launch {}: {e}", spec.harness.label()));
@@ -121,7 +121,7 @@ impl App {
             return;
         }
         let place = if spec.orchestrator { Place::Tab } else { place };
-        if spec.orchestrator && self.persist {
+        if spec.orchestrator && self.persist && !self.guest {
             crate::orchestrator_state::save(&spec);
         }
         if into.is_some() {
@@ -146,7 +146,7 @@ impl App {
         }
         let background = reply.is_some();
         let here = self.cur;
-        let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all);
+        let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all, self.tile_project.clone());
         let id = self.open(Box::new(term), if self.tabs.is_empty() { Place::Tab } else { place });
         if background {
             // a remote client asked: start it now and stay where you are
@@ -196,6 +196,17 @@ impl App {
         Some(self.open(Box::new(term), Place::Tab))
     }
 
+    /// Sign in to Gemini with a Google account (`bro gemini login` in a tab: it opens the browser and waits).
+    pub(crate) fn sign_in_gemini(&mut self) -> Option<PaneId> {
+        if self.svc.is_demo() {
+            self.toast(Kind::Info, "the demo doesn't sign in to anything");
+            return None;
+        }
+        let cwd = self.focused_cwd().or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+        let term = crate::views::quick_install::bro_term(&self.svc, cwd, "sign in · gemini", &["gemini", "login", "--wait"]);
+        Some(self.open(Box::new(term), Place::Tab))
+    }
+
     /// The cwd of the focused session, if it is one.
     pub(crate) fn focused_cwd(&self) -> Option<PathBuf> {
         self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.cwd.clone())
@@ -238,6 +249,13 @@ impl App {
             }
             BridgeCommand::OpenFile { id, path, line, column } => self.agent_opened_file(&id, path, line, column),
             BridgeCommand::Orchestrator(c) => self.orchestrator_command(c),
+            BridgeCommand::Tile { project } => {
+                let tab = match project {
+                    Some(dir) => super::project_tabs::StripTab::Project(self.svc.project_for(&dir).key),
+                    None => super::project_tabs::StripTab::All,
+                };
+                self.show_tab(tab);
+            }
             BridgeCommand::OpenInEditor { id, path, line, column } => {
                 let pane = self.term_id(&id);
                 self.open_in_editor(pane, path, line, column);
@@ -272,7 +290,7 @@ impl App {
                     }
                     None => {
                         let here = self.cur;
-                        let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all);
+                        let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all, self.tile_project.clone());
                         let id = match req.shell.clone() {
                             Some(shell) => {
                                 let meta = Meta { sid: uuid::Uuid::new_v4().to_string(), harness: None, profile: None, store: None, model: None, label: std::path::Path::new(&shell).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| shell.clone()), name: req.title.clone(), renamed: req.title.is_some(), project: self.svc.project_for(&cwd), cwd, started: Instant::now(), route_id: None, cleanup: vec![], orchestrator: false };
@@ -294,13 +312,18 @@ impl App {
 
     // ------------------------------------------------------------------ sidebar data
 
-    /// A remote launch joins an all-sessions grid without stealing focus or unzooming it.
-    fn restore_background_tiles(&mut self, before: (Vec<PaneId>, Option<PaneId>, bool, bool)) {
-        if before.3 {
-            self.stack_focus = before.1;
-            self.stack_zoom = before.2;
+    /// A remote launch joins the grid it belongs in (every session's, or the project's on screen when it's
+    /// one of its own) without stealing focus, unzooming it, or moving you to another project's tab.
+    fn restore_background_tiles(&mut self, before: (Vec<PaneId>, Option<PaneId>, bool, bool, Option<String>)) {
+        let (stack, focus, zoom, tile_all, project) = before;
+        if tile_all {
+            self.tile_all = true;
+            self.tile_project = project;
+            self.stack = self.tile_ids(self.tile_project.as_deref());
+            self.stack_focus = focus.filter(|id| self.stack.contains(id)).or_else(|| self.stack.first().copied());
+            self.stack_zoom = zoom;
         } else {
-            (self.stack, self.stack_focus, self.stack_zoom, self.tile_all) = before;
+            (self.stack, self.stack_focus, self.stack_zoom, self.tile_all, self.tile_project) = (stack, focus, zoom, false, None);
         }
     }
 
@@ -775,10 +798,14 @@ impl App {
         }
     }
 
-    /// The session that most needs you: blocked first, then finished-unseen.
+    /// The next session that needs you, in sidebar order after the focused one (so pressing again moves on):
+    /// one waiting on you first, then one that finished unseen.
     pub(crate) fn attention_target(&self) -> Option<PaneId> {
-        let order = sidebar::live_order(&self.live_infos(), &self.past_infos(), &self.open_infos());
+        let mut order = sidebar::live_order(&self.live_infos(), &self.past_infos(), &self.open_infos());
         let cur = self.focused();
+        if let Some(i) = cur.and_then(|c| order.iter().position(|id| *id == c)) {
+            order.rotate_left(i + 1);
+        }
         let pick = |want: &dyn Fn(PaneId) -> bool| order.iter().copied().filter(|id| Some(*id) != cur).find(|id| want(*id));
         pick(&|id| self.panes.get(&id).and_then(|p| p.activity()) == Some(Activity::Blocked)).or_else(|| pick(&|id| self.done.contains(&id)))
     }

@@ -42,6 +42,10 @@ pub struct JustToolsState {
     pub done: Option<String>,
     /// why the last job didn't work
     pub error: Option<String>,
+    /// JustPaste's Smart Paste (Windows), once looked at; None when this JustTools has none
+    pub paste: Option<bro_core::justpaste::Status>,
+    /// Smart Paste is being switched on or off
+    pub paste_busy: Option<Instant>,
 }
 
 impl JustToolsState {
@@ -110,11 +114,12 @@ impl Services {
         std::thread::spawn(move || {
             let found = guard("justtools::installed", justtools::installed).ok().flatten();
             let own_skill = guard("justtools::has_own_skill", || justtools::has_own_skill(&bro_core::paths::claude_local_dir())).unwrap_or(false);
+            let paste = found.as_ref().filter(|_| bro_core::justpaste::supported()).and_then(|f| guard("justpaste::status", || bro_core::justpaste::status(f)).ok()?.ok()?);
             // nothing to compare a release with until it's installed
             let latest = found.as_ref().map(|_| guard_res("justtools::latest_version", justtools::latest_version));
             svc.update(|st| {
                 let jt = &mut st.justtools;
-                (jt.checked, jt.checking, jt.installed, jt.own_skill) = (true, false, found, own_skill);
+                (jt.checked, jt.checking, jt.installed, jt.own_skill, jt.paste) = (true, false, found, own_skill, paste);
                 match latest {
                     Some(Ok(v)) => (jt.latest, jt.offline) = (Some(v), false),
                     Some(Err(_)) => jt.offline = true,

@@ -49,9 +49,9 @@ impl ReasoningCache {
         content
             .iter()
             .filter(|b| match b {
-                ContentBlock::Thinking { signature, .. } => signature
-                    .as_deref()
-                    .is_some_and(|s| !s.is_empty() && !s.starts_with("bro.")),
+                ContentBlock::Thinking { signature, .. } => {
+                    signature.as_deref().is_some_and(super::carries_signature)
+                }
                 ContentBlock::RedactedThinking { .. } => true,
                 _ => false,
             })

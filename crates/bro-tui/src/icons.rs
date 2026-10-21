@@ -1,4 +1,5 @@
-//! The real harness logos (Claude, Codex) drawn as small images where bro shows a harness glyph.
+//! The real logos (Claude, Codex and the API providers: Gemini, OpenRouter, DeepSeek…) drawn as small images
+//! where bro shows a harness or provider glyph.
 //!
 //! Port of bro v1's `icons.js` + `term-images.js`. When a terminal can show pictures, [`crate::ui::harness_glyph`]
 //! hands out a marker character instead of the text glyph (one cell, like the glyph, so layout is unchanged; the
@@ -34,12 +35,10 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(test)]
 const CLAUDE_PNG: &[u8] = include_bytes!("../assets/claude.png");
+#[cfg(test)]
 const CODEX_PNG: &[u8] = include_bytes!("../assets/codex.png");
-
-/// Supplementary Private Use Area plane 16: never in real text. One cell wide, like the glyphs they stand for.
-const CLAUDE_MARK: &str = "\u{10FF00}";
-const CODEX_MARK: &str = "\u{10FF01}";
 
 /// Every icon is two cells wide, one row tall.
 const ICON_CELLS: u16 = 2;
@@ -72,43 +71,118 @@ impl Mode {
 enum Icon {
     Claude,
     Codex,
+    Gemini,
+    OpenRouter,
+    DeepSeek,
+    Groq,
+    Mistral,
+    Moonshot,
+    Kimi,
+    Xai,
+    Grok,
+    Zai,
+    Zhipu,
+    Meta,
+    Ollama,
+    LmStudio,
+    Qwen,
+    Sakana,
 }
 
+/// How a logo is coloured.
+#[derive(Debug, Clone, Copy)]
+enum Ink {
+    /// one brand colour on the mark's alpha
+    Brand([u8; 3]),
+    /// the theme's text colour (white on dark, ink on light)
+    Text,
+    /// the PNG's own colours (Gemini's gradient, Meta's blue)
+    Own,
+}
+
+struct Logo {
+    /// the name [`glyph`] takes; for Claude / Codex also their [`crate::ui::icon`] name
+    name: &'static str,
+    /// Supplementary Private Use Area plane 16: never in real text. One cell wide, like the glyphs they stand for.
+    mark: &'static str,
+    png: &'static [u8],
+    /// how much of the 2-cell slot the mark fills (dense or tall marks a little smaller)
+    scale: f64,
+    ink: Ink,
+    /// text glyph when the image can't be shown (Claude / Codex use their Nerd Font icon instead)
+    text: &'static str,
+}
+
+/// Provider marks from LobeHub's icon set (MIT), cropped and fitted to 64×64: monochrome ones as grey + alpha
+/// (inked at runtime), coloured ones as RGBA. Same order as [`Icon`].
+const LOGOS: [Logo; 18] = [
+    Logo { name: "claude", mark: "\u{10FF00}", png: include_bytes!("../assets/claude.png"), scale: 0.74, ink: Ink::Brand([0xd9, 0x77, 0x57]), text: "✻" },
+    Logo { name: "codex", mark: "\u{10FF01}", png: include_bytes!("../assets/codex.png"), scale: 0.62, ink: Ink::Text, text: "◎" },
+    Logo { name: "gemini", mark: "\u{10FF02}", png: include_bytes!("../assets/logos/gemini.png"), scale: 0.74, ink: Ink::Own, text: "✦" },
+    Logo { name: "openrouter", mark: "\u{10FF03}", png: include_bytes!("../assets/logos/openrouter.png"), scale: 0.74, ink: Ink::Text, text: "⇉" },
+    Logo { name: "deepseek", mark: "\u{10FF04}", png: include_bytes!("../assets/logos/deepseek.png"), scale: 0.72, ink: Ink::Own, text: "◈" },
+    Logo { name: "groq", mark: "\u{10FF05}", png: include_bytes!("../assets/logos/groq.png"), scale: 0.66, ink: Ink::Brand([0xf5, 0x50, 0x36]), text: "ϟ" },
+    Logo { name: "mistral", mark: "\u{10FF06}", png: include_bytes!("../assets/logos/mistral.png"), scale: 0.7, ink: Ink::Own, text: "▚" },
+    Logo { name: "moonshot", mark: "\u{10FF07}", png: include_bytes!("../assets/logos/moonshot.png"), scale: 0.66, ink: Ink::Text, text: "☾" },
+    Logo { name: "kimi", mark: "\u{10FF08}", png: include_bytes!("../assets/logos/kimi.png"), scale: 0.66, ink: Ink::Text, text: "☾" },
+    Logo { name: "xai", mark: "\u{10FF09}", png: include_bytes!("../assets/logos/xai.png"), scale: 0.66, ink: Ink::Text, text: "✕" },
+    Logo { name: "grok", mark: "\u{10FF0A}", png: include_bytes!("../assets/logos/grok.png"), scale: 0.7, ink: Ink::Text, text: "✕" },
+    Logo { name: "zai", mark: "\u{10FF0B}", png: include_bytes!("../assets/logos/zai.png"), scale: 0.66, ink: Ink::Text, text: "ℤ" },
+    Logo { name: "zhipu", mark: "\u{10FF0C}", png: include_bytes!("../assets/logos/zhipu.png"), scale: 0.86, ink: Ink::Own, text: "ℤ" },
+    Logo { name: "meta", mark: "\u{10FF0D}", png: include_bytes!("../assets/logos/meta.png"), scale: 0.78, ink: Ink::Own, text: "∞" },
+    Logo { name: "ollama", mark: "\u{10FF0E}", png: include_bytes!("../assets/logos/ollama.png"), scale: 0.72, ink: Ink::Text, text: "◕" },
+    Logo { name: "lmstudio", mark: "\u{10FF0F}", png: include_bytes!("../assets/logos/lmstudio.png"), scale: 0.74, ink: Ink::Text, text: "▤" },
+    Logo { name: "qwen", mark: "\u{10FF10}", png: include_bytes!("../assets/logos/qwen.png"), scale: 0.7, ink: Ink::Own, text: "◭" },
+    Logo { name: "sakana", mark: "\u{10FF11}", png: include_bytes!("../assets/logos/sakana.png"), scale: 0.72, ink: Ink::Brand([0xe5, 0x48, 0x4d]), text: "∝" },
+];
+
 impl Icon {
-    const ALL: [Icon; 2] = [Icon::Claude, Icon::Codex];
+    const ALL: [Icon; 18] = [
+        Icon::Claude,
+        Icon::Codex,
+        Icon::Gemini,
+        Icon::OpenRouter,
+        Icon::DeepSeek,
+        Icon::Groq,
+        Icon::Mistral,
+        Icon::Moonshot,
+        Icon::Kimi,
+        Icon::Xai,
+        Icon::Grok,
+        Icon::Zai,
+        Icon::Zhipu,
+        Icon::Meta,
+        Icon::Ollama,
+        Icon::LmStudio,
+        Icon::Qwen,
+        Icon::Sakana,
+    ];
+    fn logo(self) -> &'static Logo {
+        &LOGOS[self as usize]
+    }
+    fn named(name: &str) -> Option<Icon> {
+        Icon::ALL.into_iter().find(|i| i.logo().name == name)
+    }
     fn from_symbol(s: &str) -> Option<Icon> {
-        match s {
-            CLAUDE_MARK => Some(Icon::Claude),
-            CODEX_MARK => Some(Icon::Codex),
-            _ => None,
-        }
+        // every mark is one char from U+10FF00, so ordinary text is skipped with a range check
+        let c = s.chars().next().filter(|c| ('\u{10FF00}'..='\u{10FFFF}').contains(c))?;
+        Icon::ALL.into_iter().find(|i| i.logo().mark.starts_with(c) && i.logo().mark == s)
     }
     /// How much of the icon slot the mark fills.
     fn scale(self) -> f64 {
-        match self {
-            Icon::Claude => 0.74,
-            Icon::Codex => 0.62,
-        }
+        self.logo().scale
     }
     fn png(self) -> &'static [u8] {
-        match self {
-            Icon::Claude => CLAUDE_PNG,
-            Icon::Codex => CODEX_PNG,
-        }
+        self.logo().png
     }
     /// The text glyph shown when the image can't be.
     fn fallback(self) -> &'static str {
-        crate::ui::icon(match self {
-            Icon::Claude => "claude",
-            Icon::Codex => "codex",
-        })
+        let g = crate::ui::icon(self.logo().name);
+        if g.is_empty() { self.logo().text } else { g }
     }
     /// kitty image id; carried in a 256-colour foreground, so < 256.
     fn kitty_id(self) -> u8 {
-        match self {
-            Icon::Claude => 201,
-            Icon::Codex => 202,
-        }
+        201 + self as u8
     }
 }
 
@@ -204,10 +278,17 @@ pub fn marker(h: Option<Harness>) -> Option<&'static str> {
         return None;
     }
     match h {
-        Some(Harness::Claude) => Some(CLAUDE_MARK),
-        Some(Harness::Codex) => Some(CODEX_MARK),
+        Some(Harness::Claude) => Some(Icon::Claude.logo().mark),
+        Some(Harness::Codex) => Some(Icon::Codex.logo().mark),
         _ => None,
     }
+}
+
+/// The glyph for logo `name` ("gemini", "openrouter", see [`LOGOS`]): its image marker when images are on, else
+/// its text glyph. "" for an unknown name.
+pub fn glyph(name: &str) -> &'static str {
+    let Some(icon) = Icon::named(name) else { return "" };
+    if ENABLED.load(Ordering::Relaxed) { icon.logo().mark } else { icon.fallback() }
 }
 
 /// Inside the draw closure, after everything is drawn: resolve the frame's markers (see module docs).
@@ -278,7 +359,12 @@ impl Painter {
         let mut images = HashMap::new();
         for icon in Icon::ALL {
             // drawn inside the 2-cell slot with a margin; OpenAI's mark is denser, so a little smaller
-            let img = Rgba::decode(icon.png())?.inked(ink(icon, light)).padded(icon.scale());
+            let img = Rgba::decode(icon.png())?;
+            let img = match ink(icon, light) {
+                Some(c) => img.inked(c),
+                None => img,
+            }
+            .padded(icon.scale());
             let seq = match mode {
                 Mode::Text => return None,
                 Mode::Sixel => sixel_mark(&img, (cw * ICON_CELLS) as u32, ch as u32).into_bytes(),
@@ -361,12 +447,14 @@ impl Painter {
 
 // ------------------------------------------------------------------ images
 
-/// Claude's mark in Anthropic's coral; OpenAI's in the theme's text colour (white on dark, ink on light).
-fn ink(icon: Icon, light: bool) -> [u8; 3] {
-    match (icon, light) {
-        (Icon::Claude, _) => [0xd9, 0x77, 0x57],
-        (Icon::Codex, false) => [0xff, 0xff, 0xff],
-        (Icon::Codex, true) => [0x1f, 0x23, 0x28],
+/// The colour to ink `icon` with: Claude's mark in Anthropic's coral; OpenAI's (and the other monochrome marks)
+/// in the theme's text colour (white on dark, ink on light). None keeps the logo's own colours.
+fn ink(icon: Icon, light: bool) -> Option<[u8; 3]> {
+    match (icon.logo().ink, light) {
+        (Ink::Brand(c), _) => Some(c),
+        (Ink::Text, false) => Some([0xff, 0xff, 0xff]),
+        (Ink::Text, true) => Some([0x1f, 0x23, 0x28]),
+        (Ink::Own, _) => None,
     }
 }
 
@@ -483,7 +571,11 @@ fn sixel_mark(img: &Rgba, w: u32, h: u32) -> String {
                     palette.push(rgb);
                     (palette.len() - 1) as i16
                 }
-                None => 0,
+                // a gradient (Gemini) can outrun the palette: nearest colour
+                None => {
+                    let d = |c: &[u8; 3]| (0..3).map(|i| (c[i] as i32 - rgb[i] as i32).pow(2)).sum::<i32>();
+                    palette.iter().enumerate().min_by_key(|(_, c)| d(c)).map_or(0, |(i, _)| i as i16)
+                }
             }
         })
         .collect();
@@ -627,7 +719,7 @@ mod tests {
 
     #[test]
     fn sixel_framing() {
-        let img = Rgba::decode(CLAUDE_PNG).unwrap().inked(ink(Icon::Claude, false));
+        let img = Rgba::decode(CLAUDE_PNG).unwrap().inked(ink(Icon::Claude, false).unwrap());
         let s = sixel_mark(&img, 20, 20);
         assert!(s.starts_with("\x1bP0;1;0q\"1;1;20;20#0;2;85;47;34"), "Claude coral, as sixel percentages: {s:?}");
         assert!(s.ends_with("\x1b\\"));
@@ -656,7 +748,7 @@ mod tests {
 
     #[test]
     fn iterm_and_kitty_sequences() {
-        let img = Rgba::decode(CODEX_PNG).unwrap().inked(ink(Icon::Codex, false));
+        let img = Rgba::decode(CODEX_PNG).unwrap().inked(ink(Icon::Codex, false).unwrap());
         let png = img.encode_png().unwrap();
         assert!(Rgba::decode(&png).is_some());
         let s = iterm_image(&png, 2, 1);

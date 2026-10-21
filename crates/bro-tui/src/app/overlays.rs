@@ -264,7 +264,17 @@ pub(super) fn launcher_data_with_installed(app: &App, installed: Vec<(bro_core::
         orchestrator_running: app.orchestrator_pane().and_then(|id| app.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.label.clone()),
         keyed: {
             let cfg = st.config.clone().unwrap_or_default();
-            st.providers.ready().map(|ps| ps.iter().filter(|p| app.svc.is_demo() || p.no_key || cfg.key_for(&p.id, p.key_env.as_deref()).is_some()).map(|p| p.id.clone()).collect()).unwrap_or_default()
+            // a Google sign-in is one small file: cheap enough to look at when the launcher opens
+            let google = st.providers.ready().is_some_and(|ps| ps.iter().any(|p| p.is_google_login())) && bro_core::gemini::signed_in(&bro_core::gemini::creds_path());
+            st.providers
+                .ready()
+                .map(|ps| {
+                    ps.iter()
+                        .filter(|p| app.svc.is_demo() || p.no_key || if p.is_google_login() { google } else { cfg.key_for(&p.id, p.key_env.as_deref()).is_some() })
+                        .map(|p| p.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
         },
     }
 }

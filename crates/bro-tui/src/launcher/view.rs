@@ -107,7 +107,7 @@ fn draw_inner(f: &mut Frame, r: Rect, l: &mut Launcher, t: &Theme, _time: f64, h
             _ => "launch",
         };
         let enter = if l.orchestrator && l.data.orchestrator_running.is_some() { "go to it" } else { enter };
-        let mut hints = vec![("⏎", enter), ("↑↓", "move"), ("←→", "agent"), ("type", "filter")];
+        let mut hints = vec![("⏎", enter), ("↑↓", "move"), ("←→", "agent"), ("type", if l.focus == Focus::List { "project" } else { "filter" })];
         if l.orchestrator {
             hints.insert(3, ("shift+←→", "runs on"));
         }
@@ -307,7 +307,7 @@ fn select_row(f: &mut Frame, r: Rect, focused: bool, t: &Theme) -> Span<'static>
 
 fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
     let focused = l.focus == Focus::List;
-    filter_line(f, Rect { height: 1, ..area }, &l.list_filter, "run on… type to filter", focused, t);
+    filter_line(f, Rect { height: 1, ..area }, &l.list_filter, "run on… ↑↓ to pick · type a project", focused, t);
     let items = l.items();
     let top = area.y + 2;
     let rows = area.bottom().saturating_sub(top) as usize;
@@ -330,7 +330,14 @@ fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Ve
                 let rc = &l.data.recents[*i];
                 let who = rc.provider_id.clone().or_else(|| rc.profile_id.as_ref().map(|p| p.split(':').next_back().unwrap_or(p).to_string())).unwrap_or_else(|| "own login".into());
                 let model = rc.model.as_deref().map(|m| crate::services::launch::short_model(m.rsplit('/').next().unwrap_or(m)));
-                let mut spans = vec![mark, Span::styled(" ↻ ", fg(t.shine)), Span::styled(who, label_style)];
+                let kind = match (&rc.provider_id, &rc.profile_id) {
+                    (Some(p), _) if p == "pool" => AccountKind::Pool,
+                    (Some(p), _) => AccountKind::Provider(p.clone()),
+                    (None, Some(p)) => AccountKind::Profile(p.clone()),
+                    (None, None) => AccountKind::Native,
+                };
+                let (g, c) = account_glyph(&kind, l.harness, t);
+                let mut spans = vec![mark, Span::raw(" "), Span::styled(format!("{g} "), fg(c)), Span::styled(who, label_style)];
                 if let Some(m) = model {
                     spans.push(Span::styled(format!("  {m}"), muted(t)));
                 }
@@ -338,13 +345,8 @@ fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Ve
                 ui::line_lr(f, r, spans, vec![Span::styled(format!("{age} ago "), muted(t))]);
             }
             Item::Account(a) => {
-                let glyph = match a.kind {
-                    AccountKind::Pool => ("⇄ ", t.shine),
-                    AccountKind::Provider(_) => ("◇ ", if a.ready { t.shine } else { t.muted }),
-                    AccountKind::Native => ("● ", t.good),
-                    AccountKind::Profile(_) if a.ready => ("● ", t.good),
-                    AccountKind::Profile(_) => ("○ ", t.danger),
-                };
+                let (g, c) = account_glyph(&a.kind, l.harness, t);
+                let glyph = (format!("{g} "), if a.ready { c } else { t.muted });
                 let label_style = if on || a.ready { label_style } else { muted(t) };
                 let mut right = vec![];
                 if let Some(left) = a.left {
@@ -362,6 +364,18 @@ fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Ve
     }
     if items.is_empty() {
         ui::line(f, Rect { y: top, height: 1, ..area }, vec![Span::styled("   nothing matches · esc clears the filter", muted(t))]);
+    }
+}
+
+/// The brand mark for a run-on row: Claude / Codex logins show their logo, providers theirs (see
+/// [`ui::provider_glyph`]), the pool the Claude mark (it's Claude accounts), a harness's own login its own mark.
+fn account_glyph(kind: &AccountKind, harness: Harness, t: &Theme) -> (&'static str, Color) {
+    let brand = |h: Harness| (ui::harness_glyph(Some(h)), ui::harness_color(Some(h), t));
+    match kind {
+        AccountKind::Profile(p) if p.starts_with("codex:") => brand(Harness::Codex),
+        AccountKind::Profile(_) | AccountKind::Pool => brand(Harness::Claude),
+        AccountKind::Provider(id) => ui::provider_glyph(id, t.shine, t),
+        AccountKind::Native => brand(harness),
     }
 }
 

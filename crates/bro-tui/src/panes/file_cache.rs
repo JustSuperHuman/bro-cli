@@ -95,6 +95,12 @@ impl FileCache {
         Lookup { cache: self, shared: self.shared.lock() }
     }
 
+    /// Paths are waiting to be checked, or a worker is checking them (the desktop app looks again after).
+    pub fn busy(&self) -> bool {
+        let s = self.shared.lock();
+        s.busy || !s.queue.is_empty()
+    }
+
     /// Resolve `paths` now (the worker's body; tests call it directly). Absolute paths go first so a bare name
     /// in the same batch can be found in the folder they name; `dirs` collects those folders.
     fn resolve_batch(roots: &ResolveRoots, dirs: &mut Vec<PathBuf>, paths: &[String]) -> Vec<(String, Option<PathBuf>)> {

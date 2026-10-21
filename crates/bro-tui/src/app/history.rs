@@ -1,6 +1,7 @@
 //! Back/forward through what you looked at, like a browser: the mouse's back/forward buttons (and a keyboard's
-//! browser keys) step through recently focused sessions and the new-session screen. A full-screen (zoomed) view
-//! stays full screen while you step; in a tiled view only the tiled sessions are stepped through.
+//! browser keys) step through recently focused sessions, the grids you tiled (every session, or one project's)
+//! and the new-session screen. A full-screen (zoomed) view stays full screen while you step; in your own stack
+//! of sessions only the stacked ones are stepped through.
 
 use super::App;
 use super::overlays::Overlay;
@@ -10,9 +11,11 @@ use crate::pane::Place;
 /// Entries kept; older ones fall off the back.
 const MAX: usize = 200;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Seen {
     Pane(PaneId),
+    /// a grid (every session, or one project's: the project tabs) with this session focused
+    Grid(Option<String>, PaneId),
     /// the new-session screen
     NewSession,
 }
@@ -31,7 +34,7 @@ impl History {
             return;
         }
         // a new-session screen closed without starting anything isn't somewhere you went
-        if self.at > 0 && self.entries[self.at] == Seen::NewSession && self.entries[self.at - 1] == now {
+        if self.at > 0 && self.entries.get(self.at) == Some(&Seen::NewSession) && self.entries[self.at - 1] == now {
             self.entries.truncate(self.at);
             self.at -= 1;
             return;
@@ -45,22 +48,24 @@ impl History {
     }
 
     /// The nearest entry behind (`back`) or ahead of where you are that `ok` accepts.
-    fn step(&self, back: bool, ok: impl Fn(Seen) -> bool) -> Option<usize> {
+    fn step(&self, back: bool, ok: impl Fn(&Seen) -> bool) -> Option<usize> {
         if back {
-            (0..self.at.min(self.entries.len())).rev().find(|&i| ok(self.entries[i]))
+            (0..self.at.min(self.entries.len())).rev().find(|&i| ok(&self.entries[i]))
         } else {
-            (self.at + 1..self.entries.len()).find(|&i| ok(self.entries[i]))
+            (self.at + 1..self.entries.len()).find(|&i| ok(&self.entries[i]))
         }
     }
 }
 
 impl App {
-    /// What's on screen for history: the new-session screen while it's open, else the focused session.
+    /// What's on screen for history: the new-session screen while it's open, a grid you tiled, else the
+    /// focused session.
     fn seen_now(&self) -> Option<Seen> {
         if matches!(self.overlay, Overlay::Launcher(_)) {
             return Some(Seen::NewSession);
         }
-        self.focused().map(Seen::Pane)
+        let focus = self.focused()?;
+        Some(if self.tile_all { Seen::Grid(self.tile_project.clone(), focus) } else { Seen::Pane(focus) })
     }
 
     /// After each batch of events: remember a view you moved to.
@@ -86,15 +91,34 @@ impl App {
             return;
         }
         self.record_view();
-        let tiled = self.stacked() && !self.stack_zoom;
-        let ok = |seen: Seen| match seen {
+        // your own stack keeps you in it; a grid steps to other grids and sessions freely
+        let stacked = self.stacked() && !self.stack_zoom && !self.tile_all;
+        let ok = |seen: &Seen| match seen {
             Seen::NewSession => true,
-            Seen::Pane(id) => self.panes.contains_key(&id) && (!tiled || self.stack.contains(&id)),
+            Seen::Pane(id) => self.panes.contains_key(id) && (!stacked || self.stack.contains(id)),
+            Seen::Grid(_, id) => self.panes.contains_key(id) && !stacked,
         };
         let Some(i) = self.history.step(back, ok) else { return };
         self.history.at = i;
-        match self.history.entries[i] {
+        match self.history.entries[i].clone() {
             Seen::NewSession => self.open_launcher(None, Place::Tab),
+            Seen::Grid(project, id) => {
+                if matches!(self.overlay, Overlay::Launcher(_)) {
+                    self.overlay = Overlay::None;
+                }
+                self.leave_sidebar();
+                let shown = match project {
+                    Some(key) => self.show_project_tiles(&key, Some(id)),
+                    None if self.tile_all && self.tile_project.is_none() => true,
+                    None => {
+                        self.toggle_tiles();
+                        self.tile_all
+                    }
+                };
+                if shown && self.stack.contains(&id) {
+                    self.focus_pane(id);
+                }
+            }
             Seen::Pane(id) => {
                 let full = self.full_screen();
                 if matches!(self.overlay, Overlay::Launcher(_)) {
@@ -127,10 +151,10 @@ mod tests {
         }
         h.record(Seen::Pane(3));
         assert_eq!(h.entries.len(), 3, "the same view isn't recorded twice");
-        let any = |_| true;
+        let any = |_: &Seen| true;
         h.at = h.step(true, any).unwrap();
         assert_eq!(h.entries[h.at], Seen::Pane(2));
-        h.at = h.step(true, |s| s != Seen::Pane(1)).unwrap_or(h.at);
+        h.at = h.step(true, |s| *s != Seen::Pane(1)).unwrap_or(h.at);
         assert_eq!(h.entries[h.at], Seen::Pane(2), "nothing acceptable behind: stay");
         h.at = h.step(false, any).unwrap();
         assert_eq!(h.entries[h.at], Seen::Pane(3));

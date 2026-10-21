@@ -1,0 +1,31 @@
+[package]
+name = "bro-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "bro media previews: image decoding (incl. animated and SVG), thumbnails, and video/audio playback for the desktop sidebar"
+
+[dependencies]
+cpal.workspace = true
+serde_json.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
+resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images", "svgz"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Imaging",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Variant",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true

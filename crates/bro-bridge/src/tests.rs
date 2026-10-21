@@ -29,6 +29,7 @@ enum Seen {
     OpenFile(String, PathBuf, Option<u32>, Option<u32>),
     OpenInEditor(String, PathBuf, Option<u32>, Option<u32>),
     Orchestrator(crate::OrchestratorCommand),
+    Tile(Option<PathBuf>),
 }
 
 struct Harness {
@@ -58,6 +59,7 @@ impl Harness {
                 BridgeCommand::Rename { id, title } => seen.lock().push(Seen::Rename(id, title)),
                 BridgeCommand::Focus { id } => seen.lock().push(Seen::Focus(id)),
                 BridgeCommand::Orchestrator(c) => seen.lock().push(Seen::Orchestrator(c)),
+                BridgeCommand::Tile { project } => seen.lock().push(Seen::Tile(project)),
                 BridgeCommand::OpenFile { id, path, line, column } => {
                     seen.lock().push(Seen::OpenFile(id, path, line, column))
                 }
@@ -779,6 +781,45 @@ async fn projects_come_from_the_session_project_root() {
         .await
         .unwrap();
     assert_eq!(bad.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bro_sees_the_names_and_order_clients_give_projects_and_the_orchestrator_tiles_them() {
+    let harness = Harness::start();
+    let one = harness.root.path().join("one");
+    let two = harness.root.path().join("two");
+    for dir in [&one, &two] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    harness.register("a", Some(one.clone()), Some(one.clone()));
+    harness.register("b", Some(two.clone()), Some(two.clone()));
+    let id = |dir: &PathBuf| crate::projects::automatic_id(&crate::projects::cwd_key(&dir.to_string_lossy()));
+    let _ = reqwest::get(harness.url("/api/projects")).await.unwrap();
+    let plain = harness.bridge.client_projects();
+    assert_eq!(plain.len(), 2);
+    assert!(plain.iter().all(|p| p.name.is_none() && p.order.is_none()), "folder names, nobody's order: {plain:?}");
+
+    let client = reqwest::Client::new();
+    client.patch(harness.url(&format!("/api/projects/{}", id(&two)))).json(&json!({ "name": "Second" })).send().await.unwrap();
+    client.patch(harness.url("/api/projects/order")).json(&json!({ "ids": [id(&two), id(&one)] })).send().await.unwrap();
+    let arranged = harness.bridge.client_projects();
+    let of = |dir: &PathBuf| arranged.iter().find(|p| p.cwd == *dir).unwrap().clone();
+    assert_eq!((of(&two).name.as_deref(), of(&two).order), (Some("Second"), Some(0)));
+    assert_eq!((of(&one).name, of(&one).order), (None, Some(1)));
+
+    let call = |id: u64, arguments: Value| {
+        let client = client.clone();
+        let url = harness.url("/mcp");
+        let body = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "show_project", "arguments": arguments } });
+        async move { client.post(url).json(&body).send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let shown = call(1, json!({ "project": "Second" })).await;
+    assert_eq!(shown["result"]["isError"], false, "{shown}");
+    let all = call(2, json!({})).await;
+    assert_eq!(all["result"]["isError"], false, "{all}");
+    let seen = harness.seen.lock().clone();
+    assert!(seen.contains(&Seen::Tile(Some(two.clone()))), "{seen:?}");
+    assert!(seen.contains(&Seen::Tile(None)), "{seen:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

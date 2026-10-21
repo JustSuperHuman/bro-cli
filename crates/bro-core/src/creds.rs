@@ -31,7 +31,7 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One lock per credential directory: concurrent callers (proxy requests, usage
 /// fetches) wait for a single refresh instead of racing refresh-token rotation.
-fn dir_lock(dir: &Path) -> Arc<Mutex<()>> {
+pub(crate) fn dir_lock(dir: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
     LOCKS.get_or_init(Default::default).lock().entry(path_key(dir)).or_default().clone()
 }
@@ -346,12 +346,12 @@ pub fn codex_login(codex_home: &Path) -> CodexLogin {
 }
 
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) {
+pub(crate) fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) {}
+pub(crate) fn restrict_permissions(_path: &Path) {}
 
 /// macOS Keychain fallback for the machine's default Claude login (v1 behaviour).
 /// A no-op everywhere else.

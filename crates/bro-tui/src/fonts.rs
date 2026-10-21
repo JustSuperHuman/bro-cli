@@ -56,10 +56,12 @@ pub const FONTS: &[Font] = &[
 ];
 
 /// Kept behind every font so Nerd Font icons still draw.
-const SYMBOLS: Font = font!("symbols", "Symbols Nerd Font Mono", "Symbols Nerd Font Mono", "SymbolsNerdFontMono-Regular.ttf", "");
+pub const SYMBOLS: Font = font!("symbols", "Symbols Nerd Font Mono", "Symbols Nerd Font Mono", "SymbolsNerdFontMono-Regular.ttf", "");
 
 /// bro-app opened bro in the fork (`--app-window`).
 pub static APP_WINDOW: AtomicBool = AtomicBool::new(false);
+/// The desktop app (`bro gui`) draws the terminal font itself: the choice shows, nothing goes to a terminal.
+pub static GUI: AtomicBool = AtomicBool::new(false);
 /// An OSC 50 waiting for the next frame (written between frames so it never splits one).
 static PENDING: Mutex<Option<String>> = Mutex::new(None);
 /// A font was switched this run, so restore the terminal's own on exit.
@@ -76,7 +78,7 @@ pub fn available() -> bool {
     #[cfg(test)]
     return TEST_APP_WINDOW.with(|w| w.get());
     #[cfg(not(test))]
-    return APP_WINDOW.load(Ordering::Relaxed) || std::env::var_os("BRO_TERMINAL_FONTS").is_some_and(|v| v == "1");
+    return APP_WINDOW.load(Ordering::Relaxed) || GUI.load(Ordering::Relaxed) || std::env::var_os("BRO_TERMINAL_FONTS").is_some_and(|v| v == "1");
 }
 
 pub fn get(id: &str) -> Option<&'static Font> {
@@ -106,7 +108,7 @@ fn osc(font: Option<&Font>) -> String {
 /// Switch to `id` (None = the terminal's own font): unpack it off the UI thread, then wake the loop to send the
 /// sequence. Does nothing where the terminal can't switch.
 pub fn apply(id: Option<&str>, tx: &Sender<Event>) {
-    if !available() {
+    if !available() || GUI.load(Ordering::Relaxed) {
         return;
     }
     let font = id.and_then(get);

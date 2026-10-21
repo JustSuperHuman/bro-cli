@@ -197,6 +197,7 @@ pub fn to_proxy(t: UpstreamTarget) -> Upstream {
         UpstreamTarget::Anthropic { base_url, api_key, bearer } => Upstream::Anthropic { base_url, api_key, bearer },
         UpstreamTarget::ClaudeOAuth { config_dir } => Upstream::ClaudeOAuth { config_dir },
         UpstreamTarget::ClaudePool { config_dirs } => Upstream::ClaudePool { config_dirs },
+        UpstreamTarget::GeminiCodeAssist { creds_file } => Upstream::GeminiCodeAssist { creds_file },
     }
 }
 
@@ -216,6 +217,13 @@ pub fn map_upstream(upstream: &str, st: &State) -> Result<Upstream, String> {
     }
     let providers = st.providers.ready().ok_or("providers aren't loaded")?;
     let prov = providers.iter().find(|p| p.id == upstream).ok_or_else(|| format!("no provider {upstream}"))?;
+    if prov.is_google_login() {
+        let creds_file = bro_core::gemini::creds_path();
+        if !bro_core::gemini::signed_in(&creds_file) {
+            return Err(bro_core::gemini::SIGN_IN_HINT.into());
+        }
+        return Ok(Upstream::GeminiCodeAssist { creds_file });
+    }
     let key = st.config.as_ref().and_then(|c| guard("config::key_for", || c.key_for(&prov.id, prov.key_env.as_deref())).ok().flatten());
     if key.is_none() && !prov.no_key {
         return Err(format!("no API key for {} — add one to ~/.bro/config.json", prov.name));
@@ -228,6 +236,8 @@ pub fn map_upstream(upstream: &str, st: &State) -> Result<Upstream, String> {
         },
         ProviderMode::Anthropic => Upstream::Anthropic { base_url: prov.base_url.clone().unwrap_or_else(|| "https://api.anthropic.com".into()), api_key: key, bearer: true },
         ProviderMode::Native => Upstream::Anthropic { base_url: prov.base_url.clone().unwrap_or_else(|| "https://api.anthropic.com".into()), api_key: key, bearer: false },
+        // signed-in Google logins returned above
+        ProviderMode::Antigravity => return Err(bro_core::gemini::SIGN_IN_HINT.into()),
     })
 }
 

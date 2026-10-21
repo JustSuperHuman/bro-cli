@@ -1,0 +1,6 @@
+data: {"response": {"responseId": "g1", "candidates": [{"content": {"role": "model", "parts": [{"text": "Need both files.", "thought": true}]}}], "usageMetadata": {"promptTokenCount": 300}}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "Reading both."}]}}]}}
+
+data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"functionCall": {"name": "Read", "args": {"path": "a.txt"}}, "thoughtSignature": "GSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIGGSIG"}, {"functionCall": {"name": "Read", "args": {"path": "b.txt"}}}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 300, "cachedContentTokenCount": 200, "candidatesTokenCount": 25, "thoughtsTokenCount": 15}}}
+

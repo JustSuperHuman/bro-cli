@@ -61,8 +61,9 @@
             Expand-Archive $zip -DestinationPath $tmp -Force
 
             New-Item -ItemType Directory -Force $dir | Out-Null
-            # only the executables: the README and LICENSE don't belong in a folder on PATH
-            foreach ($file in Get-ChildItem (Join-Path $tmp $name) -File -Filter *.exe) {
+            # only the programs (bro.exe, bro-app.exe, the bro-cli.cmd launcher): the README and LICENSE don't
+            # belong in a folder on PATH
+            foreach ($file in Get-ChildItem (Join-Path $tmp $name) -File | Where-Object { $_.Extension -in '.exe', '.cmd' }) {
                 $dest = Join-Path $dir $file.Name
                 $staged = Join-Path $dir ".$($file.Name).new"
                 Copy-Item $file.FullName $staged -Force
@@ -104,5 +105,5 @@
             & $bro install
         }
     }
-    if (-not $update) { Write-Host "Run: bro" }
+    if (-not $update) { Write-Host "Run: bro (the desktop app) or bro-cli (in the terminal)" }
 }

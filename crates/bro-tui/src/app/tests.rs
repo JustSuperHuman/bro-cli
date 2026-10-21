@@ -50,6 +50,21 @@ fn new_session_picker_requests_usage_on_every_launch_path() {
 }
 
 #[test]
+fn quick_agent_runs_your_last_login_in_your_home_folder() {
+    let mut a = app(false);
+    let recent = |harness, profile: &str, orchestrator| crate::recents::Recent { harness, profile_id: Some(profile.into()), provider_id: None, model: None, cwd: std::env::temp_dir(), permission: bro_core::launch::Permission::Auto, browser: bro_core::browser::BrowserMode::Off, at: 1, orchestrator };
+    a.recents.insert(0, recent(bro_core::Harness::Codex, "codex:team", false));
+    a.recents.insert(0, recent(bro_core::Harness::Claude, "work", true));
+    let l = a.quick_agent_launcher();
+    assert_eq!(l.harness, bro_core::Harness::Codex, "the orchestrator's launch isn't your last agent");
+    let spec = l.quick_spec().expect("nothing left to pick");
+    assert_eq!(spec.cwd, bro_core::util::home_dir());
+    assert_eq!(spec.profile_id.as_deref(), Some("codex:team"));
+    assert!(!spec.orchestrator);
+    assert_eq!(a.keymap.primary(Act::QuickAgent), "alt+q");
+}
+
+#[test]
 fn new_session_picker_updates_usage_without_losing_choices() {
     let mut a = app(false);
     a.open_launcher(Some(std::env::temp_dir()), Place::SplitRight);
@@ -370,6 +385,67 @@ fn project_row_tiles_only_its_sessions_then_all() {
     a.run_act(Act::TileAll);
     assert!(a.tile_all && a.tile_project.is_none());
     assert_eq!(a.visible().len(), all);
+}
+
+/// A project tab's hit (`None`: All).
+fn tab_hit(h: &SideHit, key: Option<&str>) -> bool {
+    use super::project_tabs::{StripHit, StripTab};
+    match (h, key) {
+        (SideHit::Strip(StripHit::Tab(StripTab::All)), None) => true,
+        (SideHit::Strip(StripHit::Tab(StripTab::Project(k))), Some(key)) => k == key,
+        _ => false,
+    }
+}
+
+#[test]
+fn project_tabs_over_the_sessions_tile_everything_or_one_project_in_its_color() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut a = app(true);
+    let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+    term.draw(|f| a.draw(f)).unwrap();
+    let tab_at = |a: &App, key: Option<&str>| a.side_hits.iter().find_map(|(r, h)| tab_hit(h, key).then_some(*r));
+    assert!(tab_at(&a, None).is_none(), "off until you turn it on");
+    let body_y = a.body.y;
+    let mut s = a.svc.settings();
+    s.project_tabs = true;
+    a.svc.save_settings(s);
+    term.draw(|f| a.draw(f)).unwrap();
+    assert_eq!(a.body.y, body_y + 1, "the strip takes the top row over the sessions");
+    let all_tab = tab_at(&a, None).expect("All tab");
+    assert!(all_tab.x >= a.side_area.right(), "beside the sidebar, not in it");
+
+    let live = a.live_infos();
+    let tabs = a.project_tabs();
+    assert!(tabs.len() >= 2, "demo has two projects with sessions");
+    for t in &tabs {
+        let r = tab_at(&a, Some(&t.key)).unwrap_or_else(|| panic!("a tab for {}", t.key));
+        assert_eq!(term.backend().buffer()[(r.x + 1, r.y)].fg, a.project_color(&t.key), "in the project's color");
+    }
+    let key = tabs.iter().find(|t| t.live >= 2).expect("a project with two sessions").key.clone();
+    let mine = live.iter().filter(|l| l.project_key == key).count();
+    let click = |a: &mut App, r: Rect| a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+
+    let r = tab_at(&a, Some(&key)).unwrap();
+    click(&mut a, r);
+    assert_eq!(a.tile_project.as_deref(), Some(key.as_str()));
+    assert_eq!(a.visible().len(), mine);
+    assert!(a.visible().iter().all(|id| live.iter().any(|l| l.pane == *id && l.project_key == key)));
+    term.draw(|f| a.draw(f)).unwrap();
+    let r = tab_at(&a, Some(&key)).unwrap();
+    assert_eq!(term.backend().buffer()[(r.x + 1, r.y)].bg, a.project_color(&key), "the showing tab is solid in its color");
+    shot(&mut a, "project-tabs");
+    click(&mut a, r);
+    assert_eq!(a.tile_project.as_deref(), Some(key.as_str()), "the showing tab stays");
+
+    draw(&mut a);
+    let r = tab_at(&a, None).unwrap();
+    click(&mut a, r);
+    assert!(a.tile_all && a.tile_project.is_none());
+    assert_eq!(a.visible().len(), a.panes.values().filter(|p| p.is_terminal()).count());
+    draw(&mut a);
+    let r = tab_at(&a, None).unwrap();
+    click(&mut a, r);
+    assert!(!a.tile_all && !a.stacked(), "All again: back to the one session, like the shortcut");
 }
 
 #[test]
@@ -1057,11 +1133,16 @@ fn launcher_open() {
     let s = shot(&mut a, "launcher");
     assert!(s.contains("your logins") && s.contains("providers") && s.contains("pool") && s.contains("openrouter"), "{s}");
     assert!(!s.contains("model…"), "no model list for your own login\n{s}");
-    // → codex tab, then openrouter shows its model list beside the run-on list
+    // → codex tab, then openrouter shows its model list beside the run-on list (typing goes to the project
+    // picker now, "type a project", so the arrows pick it)
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     assert!(draw(&mut a).contains("team"));
-    for c in "openrouter".chars() {
-        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    for _ in 0..20 {
+        // the run-on cursor (▌) on openrouter's row (the sidebar has an "openrouter" session too)
+        if draw(&mut a).contains("▌ ⇉ openrouter") {
+            break;
+        }
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     }
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     let s = shot(&mut a, "launcher-openrouter");
@@ -1302,7 +1383,7 @@ fn sidebar_filtered_project_activation_clears_filter_and_keeps_its_identity() {
         } else {
             key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         }
-        assert_eq!(a.tile_project, Some(project_key));
+        assert_eq!(a.showing_tab(), Some(super::project_tabs::StripTab::Project(project_key)), "its one session, on its own");
         assert_eq!(a.preferred_dir(), Some(root));
         assert!(!a.side_focus && !a.side_filtering && a.side.filter.is_empty());
         assert_eq!(a.rows().len(), all_rows);
@@ -3077,6 +3158,12 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert!(a.svc.settings().shared_borders);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().shared_borders);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // project tabs
+    assert!(!a.svc.settings().project_tabs, "off until you turn them on");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().project_tabs);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().project_tabs);
     for _ in 0..3 {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     }
@@ -3160,6 +3247,12 @@ fn settings_view_switches_presets_and_overrides_switches() {
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert!(!a.svc.settings().justwatch.skill);
     }
+    if bro_core::justpaste::supported() {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Smart Paste: comes with JustTools, which the demo has none of
+        { let s = draw(&mut a); assert!(s.contains("Smart Paste in Explorer") && s.contains("needs JustTools") && s.contains("Ctrl+V in File Explorer"), "{s}"); }
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // the demo never touches Explorer
+        assert!(a.svc.state().justtools.paste_busy.is_none());
+    }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustImagine: the demo has none
     { let s = draw(&mut a); assert!(s.contains("JustImagine") && s.contains("not installed"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // bro version: the demo never looks
@@ -3209,6 +3302,36 @@ fn settings_show_a_justtools_update_its_progress_and_how_it_ended() {
     });
     let s = draw(&mut a);
     assert!(s.contains("✓ updated 2.8.0 → 2.9.0") && s.contains("the newest release · enter checks again"), "{s}");
+}
+
+#[test]
+fn settings_say_smart_paste_leaves_file_copies_to_windows_unless_filters_are_on() {
+    if !bro_core::justpaste::supported() {
+        return;
+    }
+    use bro_core::justpaste::Status;
+    use bro_core::justtools::Installed;
+    let mut a = app(false);
+    a.run_act(Act::Settings);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
+    for _ in 0..4 + usize::from(bro_core::justwatch::supported()) {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // on to Smart Paste
+    }
+    let _ = draw(&mut a);
+    let on = Status { running: true, at_sign_in: true, paused: false, filters: false };
+    a.svc.update(|st| {
+        (st.justtools.checked, st.justtools.checking) = (true, false);
+        st.justtools.installed = Some(Installed { bin: std::env::temp_dir(), version: Some("2.8.0".into()) });
+        st.justtools.paste = Some(on);
+    });
+    let s = draw(&mut a);
+    assert!(s.contains("Smart Paste in Explorer") && s.contains("normal Windows way"), "{s}");
+    a.svc.update(|st| st.justtools.paste = Some(Status { filters: true, at_sign_in: false, ..on }));
+    let s = draw(&mut a);
+    assert!(s.contains("copy filters are on: JustPaste") && s.contains("won't start at sign-in"), "{s}");
+    a.svc.update(|st| st.justtools.paste_busy = Some(Instant::now()));
+    assert!(draw(&mut a).contains("switching"));
 }
 
 #[test]
@@ -4039,4 +4162,323 @@ fn settings_sections_open_from_the_left_or_say_where_they_sit() {
     small.draw(|f| a.draw(f)).unwrap();
     let s = testkit::dump(small.backend().buffer());
     assert!(s.contains("Updates  7 of 7") && !s.contains("SETTINGS"), "{s}");
+}
+
+fn tabs_on(a: &mut App) {
+    let mut s = a.svc.settings();
+    s.project_tabs = true;
+    a.svc.save_settings(s);
+}
+
+fn tab_key(a: &App, name: &str) -> String {
+    a.project_tabs().into_iter().find(|t| t.name == name).unwrap_or_else(|| panic!("a {name} tab")).key
+}
+
+fn strip_line(a: &mut App) -> String {
+    let s = draw(a);
+    let y = a.strip.y as usize;
+    s.lines().nth(y).unwrap_or_default().to_string()
+}
+
+fn strip_hit(a: &App, want: &super::project_tabs::StripHit) -> Option<Rect> {
+    a.side_hits.iter().find_map(|(r, h)| matches!(h, SideHit::Strip(x) if x == want).then_some(*r))
+}
+
+fn click_at(a: &mut App, r: Rect, button: MouseButton) {
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(button), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+}
+
+#[test]
+fn project_tabs_say_what_each_project_is_doing_by_shape() {
+    let mut a = app(true);
+    tabs_on(&mut a);
+    let tabs = a.project_tabs();
+    let bro = tabs.iter().find(|t| t.name == "bro-cli-v2").unwrap();
+    assert_eq!((bro.live, bro.working, bro.blocked, bro.done), (3, 1, 0, 1));
+    let gains = tabs.iter().find(|t| t.name == "justgains").unwrap();
+    assert_eq!((gains.live, gains.blocked), (1, 1));
+    let strip = strip_line(&mut a);
+    assert!(strip.contains("▦ All 5"), "{strip}");
+    assert!(strip.contains("bro-cli-v2 3 ✓1"), "finished unseen: a tick, not a dot: {strip}");
+    assert!(strip.contains("justgains 1 ●1"), "waiting on you: a dot: {strip}");
+    assert!(["◐", "◓", "◑", "◒"].iter().any(|g| strip.contains(&format!("{g} bro-cli-v2"))), "an agent works there: a spinner: {strip}");
+    assert!(strip.contains("○ terminal"), "nothing working: a ring: {strip}");
+    // the sidebar's tile row gives way to All
+    assert!(!a.side_hits.iter().any(|(_, h)| matches!(h, SideHit::TileAll)));
+}
+
+#[test]
+fn a_project_tab_unzooms_picks_the_project_and_its_light_follows_the_screen() {
+    use super::project_tabs::StripTab;
+    let mut a = app(true);
+    tabs_on(&mut a);
+    a.run_act(Act::TileAll);
+    a.run_act(Act::Zoom);
+    assert!(a.stack_zoom);
+    let bro = tab_key(&a, "bro-cli-v2");
+    a.show_tab(StripTab::Project(bro.clone()));
+    assert!(!a.stack_zoom, "the project's grid, not the session zoomed in All");
+    assert_eq!(a.visible().len(), 3);
+    let root = a.project_tabs().into_iter().find(|t| t.key == bro).unwrap().root;
+    assert_eq!(a.preferred_dir(), Some(root), "new sessions start in the project you're looking at");
+
+    // out of a grid, a one-session project shows on its own, and its tab lights only while that's on screen
+    a.clear_stack();
+    let gains = tab_key(&a, "justgains");
+    a.show_tab(StripTab::Project(gains.clone()));
+    assert!(!a.tile_all && a.tile_project.is_none());
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(gains.clone())));
+    a.run_act(Act::NextSession);
+    assert_ne!(a.showing_tab(), Some(StripTab::Project(gains)));
+}
+
+#[test]
+fn a_session_started_from_the_phone_keeps_you_on_your_project_tab() {
+    use super::project_tabs::StripTab;
+    let mut a = app(true);
+    tabs_on(&mut a);
+    let bro = tab_key(&a, "bro-cli-v2");
+    a.show_tab(StripTab::Project(bro.clone()));
+    let looking = a.focused();
+    let mut spec = orchestrator_spec(bro_core::Harness::Claude);
+    spec.orchestrator = false;
+    spec.cwd = crate::services::demo::root().join("justgains");
+    let cmd = bro_core::launch::CommandSpec { program: "definitely-not-a-program-xyz".into(), label: "claude".into(), cwd: spec.cwd.clone(), ..Default::default() };
+    let (reply, _answer) = tokio::sync::oneshot::channel();
+    a.launched(crate::services::Launched { spec, place: Place::Tab, reply: Some(reply), name: None, remember: false, result: Ok(cmd), route_id: None, note: None, into: None });
+    assert_eq!(a.tile_project.as_deref(), Some(bro.as_str()), "still on your project's tab");
+    assert_eq!(a.focused(), looking);
+    assert_eq!(a.visible().len(), 3);
+    // one you start yourself in another project takes you to its tab
+    let gains_root = crate::services::demo::root().join("justgains");
+    a.open_shell(Some(gains_root), Place::Tab);
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(tab_key(&a, "justgains"))));
+}
+
+#[test]
+fn band_text_reads_on_bright_and_deep_project_colors() {
+    use ratatui::style::Color;
+    let light = crate::theme::get("paper");
+    assert_eq!(crate::ui::ink_on(Color::Rgb(0xdf, 0x8e, 0x1d), &light), light.deep(), "dark text on a yellow band");
+    assert_eq!(crate::ui::ink_on(Color::Rgb(30, 40, 120), &light), Color::Rgb(255, 255, 255), "white on a deep one");
+    let dark = crate::theme::get("graphite");
+    assert_eq!(crate::ui::ink_on(Color::Blue, &dark), dark.deep(), "a named color keeps the theme's ink");
+}
+
+#[test]
+fn tabs_that_dont_fit_fold_into_plus_n_around_the_one_showing() {
+    use super::project_tabs::{StripHit, StripTab};
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut a = app(true);
+    tabs_on(&mut a);
+    a.sidebar = false;
+    let last = a.project_tabs().last().unwrap().key.clone();
+    a.show_tab(StripTab::Project(last.clone()));
+    let mut term = Terminal::new(TestBackend::new(44, 20)).unwrap();
+    term.draw(|f| a.draw(f)).unwrap();
+    assert!(strip_hit(&a, &StripHit::Tab(StripTab::Project(last))).is_some(), "the showing tab stays in view");
+    let more = strip_hit(&a, &StripHit::More).expect("the rest fold into +N");
+    let strip: String = (0..44).map(|x| term.backend().buffer()[(x, a.strip.y)].symbol().to_string()).collect();
+    assert!(strip.contains("◂2●"), "two folded, one of them wants you: {strip}");
+    click_at(&mut a, more, MouseButton::Left);
+    let Overlay::Palette(p) = &a.overlay else { panic!("+N lists every tab") };
+    let m = p.matches();
+    assert_eq!(m.len(), 4, "All and each project");
+    assert!(m.iter().all(|&i| matches!(p.items[i].cmd, crate::palette::Cmd::Tiles(_))));
+}
+
+#[test]
+fn keys_switch_step_and_go_back_through_project_tabs() {
+    use super::project_tabs::StripTab;
+    let mut a = app(true);
+    tabs_on(&mut a);
+    draw(&mut a);
+    let order: Vec<String> = a.project_tabs().into_iter().map(|t| t.key).collect();
+    key(&mut a, KeyCode::Char('0'), KeyModifiers::ALT);
+    assert_eq!(a.showing_tab(), Some(StripTab::All));
+    a.follow_tab();
+    key(&mut a, KeyCode::Char('J'), KeyModifiers::ALT);
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(order[0].clone())), "in a grid, alt+J is the next tab");
+    a.follow_tab();
+    key(&mut a, KeyCode::Char('J'), KeyModifiers::ALT);
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(order[1].clone())));
+    a.follow_tab();
+    key(&mut a, KeyCode::Char('l'), KeyModifiers::ALT);
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(order[0].clone())), "alt+l: the tab before");
+    a.follow_tab();
+    key(&mut a, KeyCode::Char('K'), KeyModifiers::ALT);
+    assert_eq!(a.showing_tab(), Some(StripTab::All));
+
+    // with the sidebar hidden the strip takes alt+b: arrows pick, ⏎ shows
+    a.run_act(Act::ToggleSidebar);
+    draw(&mut a);
+    a.run_act(Act::FocusSidebar);
+    assert_eq!(a.strip_sel, Some(0), "on the tab showing");
+    assert!(!a.side_focus);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.contains("bro-cli-v2"));
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.strip_sel, None);
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(order[1].clone())));
+    a.run_act(Act::FocusSidebar);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(a.strip_sel, None);
+}
+
+#[test]
+fn attention_moves_on_to_the_next_session_and_follows_it_to_its_tab() {
+    use super::project_tabs::StripTab;
+    let mut a = app(true);
+    tabs_on(&mut a);
+    let order = crate::sidebar::live_order(&a.live_infos(), &a.past_infos(), &a.open_infos());
+    for &id in &order[..3] {
+        a.panes.get_mut(&id).unwrap().as_term().unwrap().demo_activity = Some(Activity::Blocked);
+    }
+    let blocked: Vec<PaneId> = order.iter().copied().filter(|id| a.panes[id].activity() == Some(Activity::Blocked)).collect();
+    assert!(blocked.len() >= 3);
+    a.focus_pane(blocked[0]);
+    a.run_act(Act::Attention);
+    assert_eq!(a.focused(), Some(blocked[1]));
+    a.run_act(Act::Attention);
+    assert_eq!(a.focused(), Some(blocked[2]), "again: the one after, not back to the first");
+
+    // in a project's grid, a session elsewhere brings its project's tab
+    let bro = tab_key(&a, "bro-cli-v2");
+    a.show_tab(StripTab::Project(bro));
+    let gains = tab_key(&a, "justgains");
+    let target = a.live_infos().into_iter().find(|l| l.project_key == gains).unwrap().pane;
+    a.go_session(target);
+    assert_eq!(a.tile_project.as_deref(), Some(gains.as_str()));
+    assert_eq!(a.focused(), Some(target));
+}
+
+#[test]
+fn the_mouse_wheels_through_tabs_middle_click_closes_and_the_launcher_takes_a_project() {
+    use super::project_tabs::{StripHit, StripTab};
+    let mut a = app(true);
+    tabs_on(&mut a);
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    let strip = a.strip;
+    let wheel = |a: &mut App| a.mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: strip.x + 2, row: strip.y, modifiers: KeyModifiers::NONE });
+    wheel(&mut a);
+    let first = a.showing_tab();
+    assert_ne!(first, Some(StripTab::All), "the next tab");
+    wheel(&mut a);
+    assert_eq!(a.showing_tab(), first, "one burst, one tab");
+
+    let gains = tab_key(&a, "justgains");
+    draw(&mut a);
+    let r = strip_hit(&a, &StripHit::Tab(StripTab::Project(gains.clone()))).unwrap();
+    click_at(&mut a, r, MouseButton::Middle);
+    assert!(matches!(a.overlay, Overlay::Confirm(_)), "closing a project with sessions asks first");
+    a.overlay = Overlay::None;
+
+    a.open_launcher(None, Place::Tab);
+    draw(&mut a);
+    let r = strip_hit(&a, &StripHit::Tab(StripTab::Project(gains.clone()))).unwrap();
+    click_at(&mut a, r, MouseButton::Left);
+    let Overlay::Launcher(l) = &a.overlay else { panic!("the launcher stays open") };
+    let root = a.project_tabs().into_iter().find(|t| t.key == gains).unwrap().root;
+    assert_eq!(l.dir, root, "and starts in the tab's project");
+}
+
+#[test]
+fn hovering_a_project_tab_shows_a_close_that_asks_first() {
+    use super::project_tabs::{StripHit, StripTab};
+    let mut a = app(true);
+    tabs_on(&mut a);
+    a.run_act(Act::TileAll);
+    let gains = tab_key(&a, "justgains");
+    draw(&mut a);
+    let tab = strip_hit(&a, &StripHit::Tab(StripTab::Project(gains.clone()))).unwrap();
+    let close = strip_hit(&a, &StripHit::Close(gains.clone())).expect("room for the × is kept");
+    assert!(tab.x <= close.x && close.right() <= tab.right(), "the × sits inside its tab");
+    let strip = |a: &mut App| strip_line(a).chars().skip(a.strip.x as usize).take(a.strip.width as usize).collect::<String>();
+    assert!(!strip(&mut a).contains('×'), "hidden until you hover");
+    a.hover = ratatui::layout::Position { x: tab.x + 1, y: tab.y };
+    assert_eq!(strip(&mut a).matches('×').count(), 1, "only the hovered tab shows it");
+    let before = a.project_tabs().len();
+    click_at(&mut a, close, MouseButton::Left);
+    let Overlay::Confirm(c) = &a.overlay else { panic!("closing a project with sessions asks first") };
+    assert!(c.text.contains("justgains"), "{}", c.text);
+    assert_eq!(a.project_tabs().len(), before, "nothing closes before you confirm");
+}
+
+#[test]
+fn history_steps_back_through_grids_and_held_edges_stay_with_their_grid() {
+    use super::project_tabs::StripTab;
+    let mut a = app(true);
+    tabs_on(&mut a);
+    let bro = tab_key(&a, "bro-cli-v2");
+    a.show_tab(StripTab::Project(bro.clone()));
+    a.after_events();
+    a.show_tab(StripTab::All);
+    a.after_events();
+    let pane = a.stack[0];
+    a.locks.push(crate::priority::Lock { pane, ax: 0, far: true, at: 20 });
+    a.navigate(true);
+    assert_eq!(a.tile_project.as_deref(), Some(bro.as_str()), "back: the project's grid");
+    a.after_events();
+    assert!(a.locks.is_empty(), "All's held edge isn't this grid's");
+    a.navigate(false);
+    assert!(a.tile_all && a.tile_project.is_none(), "forward: All again");
+    a.after_events();
+    assert_eq!(a.locks.len(), 1, "with its held edge");
+}
+
+#[test]
+fn the_palette_bridge_and_orchestrator_reach_project_tabs() {
+    use super::project_tabs::{StripHit, StripTab};
+    let mut a = app(true);
+    tabs_on(&mut a);
+    let gains = tab_key(&a, "justgains");
+    a.run_palette(crate::palette::Cmd::Tiles(Some(gains.clone())));
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(gains.clone())));
+    let root = crate::services::demo::root().join("bro-cli-v2");
+    a.bridge_command(bro_bridge::BridgeCommand::Tile { project: Some(root) });
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(tab_key(&a, "bro-cli-v2"))));
+    a.bridge_command(bro_bridge::BridgeCommand::Tile { project: None });
+    assert_eq!(a.showing_tab(), Some(StripTab::All));
+
+    // the phone's order and names
+    let term_key = tab_key(&a, "terminal");
+    a.svc.update(|st| st.bridge.projects = vec![crate::services::ClientProject { key: term_key.clone(), name: Some("Shells".into()), order: Some(0) }]);
+    let tabs = a.project_tabs();
+    assert_eq!((tabs[0].key.as_str(), tabs[0].name.as_str()), (term_key.as_str(), "Shells"));
+
+    // the orchestrator: its own gold tab
+    land_orchestrator(&mut a);
+    let boss = a.orchestrator_pane().unwrap();
+    let strip = strip_line(&mut a);
+    assert!(strip.contains('★'), "{strip}");
+    let r = strip_hit(&a, &StripHit::Tab(StripTab::Orchestrator)).unwrap();
+    click_at(&mut a, r, MouseButton::Left);
+    assert_eq!(a.visible(), vec![boss]);
+    assert_eq!(a.showing_tab(), Some(StripTab::Orchestrator));
+}
+
+#[test]
+fn the_strip_holds_its_row_and_the_minimized_switch() {
+    use super::project_tabs::StripHit;
+    let mut a = app(false);
+    tabs_on(&mut a);
+    a.open_view("settings");
+    draw(&mut a);
+    assert_eq!(a.strip.height, 1, "kept while anything is open, so sessions don't jump as projects come and go");
+
+    let mut a = app(true);
+    tabs_on(&mut a);
+    a.run_act(Act::TileAll);
+    draw(&mut a);
+    assert!(strip_hit(&a, &StripHit::Minimized).is_none());
+    let id = a.stack[1];
+    a.minimize_pane(id);
+    draw(&mut a);
+    let r = strip_hit(&a, &StripHit::Minimized).expect("the minimized switch moves up with the tabs");
+    click_at(&mut a, r, MouseButton::Left);
+    assert!(a.show_minimized);
+    assert!(strip_hit(&a, &StripHit::New).is_some());
 }

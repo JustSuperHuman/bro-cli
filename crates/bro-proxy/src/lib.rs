@@ -52,6 +52,8 @@ pub enum Dialect {
     Chat,
     /// OpenAI Responses
     Responses,
+    /// Gemini `generateContent` (Cloud Code Assist). Upstream only: no client speaks it to bro.
+    Gemini,
 }
 
 impl Dialect {
@@ -60,6 +62,7 @@ impl Dialect {
             Dialect::Anthropic => "anthropic",
             Dialect::Chat => "chat",
             Dialect::Responses => "responses",
+            Dialect::Gemini => "gemini",
         }
     }
 }
@@ -73,6 +76,7 @@ impl Upstream {
             Upstream::Anthropic { .. }
             | Upstream::ClaudeOAuth { .. }
             | Upstream::ClaudePool { .. } => Dialect::Anthropic,
+            Upstream::GeminiCodeAssist { .. } => Dialect::Gemini,
         }
     }
 
@@ -85,6 +89,7 @@ impl Upstream {
             Upstream::Anthropic { .. } => "anthropic",
             Upstream::ClaudeOAuth { .. } => "claude_oauth",
             Upstream::ClaudePool { .. } => "claude_pool",
+            Upstream::GeminiCodeAssist { .. } => "gemini_code_assist",
         }
     }
 }
@@ -94,6 +99,10 @@ pub type ClaudeTokenFn = Arc<dyn Fn(&Path, bool) -> anyhow::Result<String> + Sen
 /// Resolves Codex/ChatGPT credentials for a `CODEX_HOME`.
 pub type CodexAuthFn =
     Arc<dyn Fn(&Path, bool) -> anyhow::Result<bro_core::creds::CodexAuth> + Send + Sync>;
+
+/// Resolves a Gemini sign-in (`creds_file`) to an access token and Code Assist project.
+pub type GeminiAuthFn =
+    Arc<dyn Fn(&Path, bool) -> anyhow::Result<bro_core::gemini::GeminiAuth> + Send + Sync>;
 
 /// Advanced knobs (endpoints, credential sources, pool storage). `Default` is what
 /// production uses; tests point these at mock servers and temp dirs.
@@ -112,6 +121,10 @@ pub struct ProxyOptions {
     pub claude_token: Option<ClaudeTokenFn>,
     /// Default: `bro_core::creds::codex_auth`
     pub codex_auth: Option<CodexAuthFn>,
+    /// Cloud Code Assist hosts for Gemini, tried in order; empty = `bro_core::gemini::base_urls()`
+    pub gemini_base_urls: Vec<String>,
+    /// Default: `bro_core::gemini::auth`
+    pub gemini_auth: Option<GeminiAuthFn>,
     /// Idle interval after which streams get a keepalive (Anthropic `ping`)
     pub keepalive: Duration,
     /// Compress requests with llmtrim at start-up ([`ProxyHandle::set_trim`] changes it live)
@@ -128,6 +141,8 @@ impl Default for ProxyOptions {
             pool_usage_file: None,
             claude_token: None,
             codex_auth: None,
+            gemini_base_urls: Vec::new(),
+            gemini_auth: None,
             keepalive: Duration::from_secs(15),
             trim: false,
             trim_level: TrimLevel::Safe,
@@ -141,6 +156,7 @@ impl std::fmt::Debug for ProxyOptions {
             .field("anthropic_base_url", &self.anthropic_base_url)
             .field("chatgpt_base_url", &self.chatgpt_base_url)
             .field("openai_base_url", &self.openai_base_url)
+            .field("gemini_base_urls", &self.gemini_base_urls)
             .field("pool_usage_file", &self.pool_usage_file)
             .field("keepalive", &self.keepalive)
             .field("trim", &self.trim)
@@ -177,6 +193,9 @@ pub enum Upstream {
     /// Claude account pool: least-loaded account, sticky per conversation, fail over on
     /// rate limits before any bytes are sent (v1 pool semantics)
     ClaudePool { config_dirs: Vec<PathBuf> },
+    /// Gemini on Cloud Code Assist with a Google AI subscription sign-in
+    /// (bro_core::gemini::auth on `creds_file`), presenting as the Antigravity CLI
+    GeminiCodeAssist { creds_file: PathBuf },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -10,7 +10,7 @@ use crate::openai::{ChatRequest, ChatResponse, ResponsesRequest};
 use crate::pipeline::{self, Decoder, Encoder, Pipeline};
 use crate::sse::SseParser;
 use crate::state::AppState;
-use crate::translate::{self, Target, a2chat, a2responses, chat2a, responses2a};
+use crate::translate::{self, Target, a2chat, a2gemini, a2responses, chat2a, responses2a};
 use crate::upstream::{self, ByteStream, Endpoint, UpstreamCall, UpstreamResponse, chatgpt};
 use crate::util::short_hash;
 use crate::{Dialect, Route, Upstream};
@@ -124,7 +124,7 @@ async fn run(
 
 fn endpoint_for(d: Dialect) -> Endpoint {
     match d {
-        Dialect::Anthropic => Endpoint::Messages,
+        Dialect::Anthropic | Dialect::Gemini => Endpoint::Messages,
         Dialect::Chat => Endpoint::Chat,
         Dialect::Responses => Endpoint::Responses,
     }
@@ -193,7 +193,7 @@ async fn passthrough(
                 }
             }
         }
-        Dialect::Anthropic => {}
+        Dialect::Anthropic | Dialect::Gemini => {}
     }
     let session_key = session_of(inbound, &json);
     let call = UpstreamCall {
@@ -255,6 +255,7 @@ fn session_of(dialect: Dialect, v: &Value) -> Option<String> {
         Dialect::Anthropic => v.get("metadata").and_then(|m| m.get("user_id")),
         Dialect::Chat => v.get("user"),
         Dialect::Responses => v.get("prompt_cache_key").or_else(|| v.get("user")),
+        Dialect::Gemini => None,
     };
     s.and_then(Value::as_str)
         .filter(|s| !s.is_empty())
@@ -319,6 +320,7 @@ async fn translated(
             include_usage = req.include_usage();
             chat2a::request(&req, &target, &state.reasoning)
         }
+        Dialect::Gemini => return Err(ProxyError::invalid("bro-proxy doesn't accept Gemini requests")),
         Dialect::Responses => {
             let req: ResponsesRequest = serde_json::from_value(json)
                 .map_err(|e| ProxyError::invalid(format!("invalid Responses request: {e}")))?;
@@ -356,6 +358,11 @@ async fn translated(
             let r = a2responses::request(&hub, &target);
             let s = r.stream.unwrap_or(false);
             (serde_json::to_vec(&r), s)
+        }
+        // Code Assist is always asked to stream; non-streaming clients get it folded.
+        Dialect::Gemini => {
+            let (model, request) = a2gemini::request(&hub, &target);
+            (serde_json::to_vec(&json!({ "model": model, "request": request })), true)
         }
     };
     let body = body.map_err(|e| ProxyError::api(format!("serialize upstream request: {e}")))?;
@@ -422,6 +429,7 @@ async fn translated(
         }
         Dialect::Chat => chat2a::response(&m, &client_model, &state.reasoning),
         Dialect::Responses => responses2a::response(&m, &client_model, &custom),
+        Dialect::Gemini => unreachable!("Gemini is never inbound"),
     };
     let mut rec = slot.take().expect("recorder");
     rec.set_usage(&m.usage);
@@ -453,6 +461,12 @@ fn decode_json(
             a2chat::response(&r, client_model)
         }
         Dialect::Responses => a2responses::response(&v, client_model),
+        Dialect::Gemini => {
+            let mut d = crate::translate::stream_gemini2a::GeminiToAnthropic::new(client_model);
+            let mut acc = Accumulator::new();
+            d.push(&v.to_string()).iter().chain(d.finish().iter()).for_each(|e| acc.push(e));
+            acc.finish().ok_or_else(|| ProxyError::api("Gemini returned no message").with_status(502))?
+        }
     })
 }
 

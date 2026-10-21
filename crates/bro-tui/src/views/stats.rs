@@ -3,6 +3,10 @@
 //! (rolling 24h / 7d / 30d, and what the last 30 days were made of). The logs are read on a background
 //! thread (`bro_core::usage::tokens`), cached per file, so only the first open is slow.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::pane::{Cx, Pane, Waker};
 use crate::theme::{Theme, mix};
 use crate::ui::{self, fg, muted};

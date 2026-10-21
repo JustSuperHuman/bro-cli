@@ -1,4 +1,4 @@
-//! `bro install [tools…] [--force] [--wait]` — Quick Install from the command line: JustTools, JustWatch, JustImagine, Git,
+//! `bro install [tools…] [--force] [--wait]` — Quick Install from the command line: JustTools, JustPaste, JustWatch, JustImagine, Git,
 //! Node.js, Bun, Python, the .NET SDKs, the agent CLIs bro launches and a few utilities. With no
 //! tools named it lists them and asks which to install (Enter: the recommended ones that are missing).
 
@@ -30,6 +30,8 @@ usage
 
 tools
   justtools  JustTools: media, PDF, QR, port commands, JustCommit, JustReady
+  justpaste  JustPaste Smart Paste: Ctrl+V in Explorer saves copied images, downloads
+             links, clones repos; file copies stay Windows' (comes with JustTools; Windows)
   justwatch  JustWatch: keeps your dev servers running, plus its agent skill (Windows)
   justimagine  JustImagine: image, video, song and voice studio as a background service
              (needs git and node; --force pulls the newest commits and restarts it)
@@ -41,6 +43,9 @@ tools
   claude     Claude Code                codex     Codex CLI
   pi         Pi coding agent            omp       oh-my-pi (needs Bun)
   rg         ripgrep                    ffmpeg    FFmpeg
+  yt-dlp     yt-dlp (newest release)
+  tailscale  Tailscale                  powertoys PowerToys (Windows)
+  sharex     ShareX, JustSuperHuman's fork (Windows)
 
 Windows installs with WinGet, macOS with Homebrew, Linux with apt / dnf / pacman / zypper / apk;
 Bun, uv, Claude Code and .NET on macOS / Linux use their official installers.
@@ -157,6 +162,7 @@ fn install_justwatch() -> Result<(), String> {
 fn install_one(t: Tool) -> Result<(), String> {
     match t {
         Tool::JustTools => install_justtools(),
+        Tool::JustPaste => bro_core::justpaste::install(|line| println!("{line}")).map(|_| ()),
         Tool::JustWatch => install_justwatch(),
         Tool::JustImagine => bro_core::justimagine::install(|line| println!("{line}")).map(|()| {
             print_imagine_skills();
@@ -167,7 +173,7 @@ fn install_one(t: Tool) -> Result<(), String> {
     }
 }
 
-fn wait_for_enter() {
+pub(crate) fn wait_for_enter() {
     if std::io::stdin().is_terminal() {
         print!("\nPress Enter to close. ");
         std::io::stdout().flush().ok();
@@ -301,6 +307,8 @@ mod tests {
         all.sort_by_key(|t| t.install_rank());
         assert_eq!(p(&["all", "-f", "--wait"]), Ok(Some(InstallArgs { tools: all, force: true, wait: true })));
         assert_eq!(p(&["justwatch"]).unwrap().unwrap().tools, vec![Tool::JustWatch]);
+        // JustPaste comes with JustTools, so it goes right after it
+        assert_eq!(p(&["paste", "justtools"]).unwrap().unwrap().tools, vec![Tool::JustTools, Tool::JustPaste]);
         // JustImagine installs with Git and Node.js, so it goes after them
         assert_eq!(p(&["justimagine", "node", "git"]).unwrap().unwrap().tools, vec![Tool::Git, Tool::Node, Tool::JustImagine]);
         assert_eq!(p(&["agents"]).unwrap().unwrap().tools, Harness::ALL.map(Tool::Agent).to_vec());

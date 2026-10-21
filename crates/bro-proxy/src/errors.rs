@@ -250,7 +250,7 @@ impl ProxyError {
                 "type": "error",
                 "error": { "type": self.kind.anthropic_type(), "message": self.message }
             }),
-            Dialect::Chat | Dialect::Responses => {
+            Dialect::Chat | Dialect::Responses | Dialect::Gemini => {
                 let (t, code) = self.kind.openai_type_code();
                 json!({ "error": { "message": self.message, "type": t, "param": null, "code": code } })
             }

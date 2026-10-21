@@ -4,6 +4,10 @@
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
 //! part applies to sessions launched from now on.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::keymap::Act;
 use crate::alerts::Kind;
 use crate::pane::{Action, Cx, Pane, Place};
@@ -32,6 +36,7 @@ enum BroOpt {
     Rain,
     Screensaver,
     SharedBorders,
+    ProjectTabs,
     Icons,
     AutoResume,
     AutoApprove,
@@ -39,7 +44,7 @@ enum BroOpt {
     Compression,
 }
 
-const BRO_OPTS: [BroOpt; 10] = [BroOpt::Theme, BroOpt::Font, BroOpt::Rain, BroOpt::Screensaver, BroOpt::SharedBorders, BroOpt::Icons, BroOpt::AutoResume, BroOpt::AutoApprove, BroOpt::Recaps, BroOpt::Compression];
+const BRO_OPTS: [BroOpt; 11] = [BroOpt::Theme, BroOpt::Font, BroOpt::Rain, BroOpt::Screensaver, BroOpt::SharedBorders, BroOpt::ProjectTabs, BroOpt::Icons, BroOpt::AutoResume, BroOpt::AutoApprove, BroOpt::Recaps, BroOpt::Compression];
 
 /// bro's options this window can use: the font only where the terminal can switch it.
 fn bro_opts() -> Vec<BroOpt> {
@@ -59,6 +64,7 @@ impl BroOpt {
             BroOpt::Rain => "Digital rain",
             BroOpt::Screensaver => "Summary screensaver",
             BroOpt::SharedBorders => "Shared tile borders",
+            BroOpt::ProjectTabs => "Project tabs",
             BroOpt::Icons => "Nerd Font icons",
             BroOpt::AutoResume => "Auto-resume",
             BroOpt::AutoApprove => "Auto-approve prompts",
@@ -73,6 +79,7 @@ impl BroOpt {
             BroOpt::Rain => "over any theme: everywhere, or only in sessions whose agent is mid-turn",
             BroOpt::Screensaver => "step away and every session turns over to what it's working on; any touch turns them back",
             BroOpt::SharedBorders => "tiles that sit together share one line instead of two; status and × move up beside the title",
+            BroOpt::ProjectTabs => "a tab strip over your sessions: All tiles every one, a project's tab tiles just its own, in its color",
             BroOpt::Icons => "turn off if icons show as boxes",
             BroOpt::AutoResume => "types `continue` when an agent stops on an API error or a limit resets",
             BroOpt::AutoApprove => "answers Yes to Claude's \"Do you want to proceed?\" (bypass mode's rm / path safety checks)",
@@ -82,7 +89,7 @@ impl BroOpt {
     }
     /// How bro looks (Appearance) rather than what it does (Sessions).
     fn looks(self) -> bool {
-        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::Icons)
+        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::ProjectTabs | BroOpt::Icons)
     }
     /// The value as shown.
     fn value(self, cx: &Cx) -> String {
@@ -90,7 +97,7 @@ impl BroOpt {
         let on = |b: bool| if b { "on" } else { "off" }.to_string();
         match self {
             BroOpt::Theme => cx.theme.name.clone(),
-            BroOpt::Font => s.font.as_deref().and_then(crate::fonts::get).map_or("terminal's own", |f| f.label).to_string(),
+            BroOpt::Font => s.font.as_deref().and_then(crate::fonts::get).map_or(if crate::fonts::GUI.load(std::sync::atomic::Ordering::Relaxed) { crate::fonts::FONTS[0].label } else { "terminal's own" }, |f| f.label).to_string(),
             BroOpt::Rain => match s.rain {
                 RainMode::Off => "off",
                 RainMode::Everywhere => "everywhere",
@@ -103,6 +110,7 @@ impl BroOpt {
                 n => format!("after {} min", n / 60),
             },
             BroOpt::SharedBorders => on(s.shared_borders),
+            BroOpt::ProjectTabs => on(s.project_tabs),
             BroOpt::Icons => on(ui::NERD.load(Ordering::Relaxed)),
             BroOpt::AutoResume => on(s.auto_resume.enabled),
             BroOpt::AutoApprove => on(s.auto_approve),
@@ -114,10 +122,14 @@ impl BroOpt {
     fn change(self, dir: isize, cx: &mut Cx) {
         match self {
             BroOpt::Font => {
-                // the terminal's own font, then each bundled one
+                // the terminal's own font, then each bundled one (the desktop app has no font of its own: its
+                // default is the first bundled one)
                 let mut s = cx.svc.settings();
-                let ids: Vec<Option<&str>> = std::iter::once(None).chain(crate::fonts::FONTS.iter().map(|f| Some(f.id))).collect();
-                let i = ids.iter().position(|id| *id == s.font.as_deref()).unwrap_or(0) as isize;
+                let gui = crate::fonts::GUI.load(std::sync::atomic::Ordering::Relaxed);
+                let own = (!gui).then_some(None);
+                let ids: Vec<Option<&str>> = own.into_iter().chain(crate::fonts::FONTS.iter().map(|f| Some(f.id))).collect();
+                let current = if gui { s.font.as_deref().or(Some(crate::fonts::FONTS[0].id)) } else { s.font.as_deref() };
+                let i = ids.iter().position(|id| *id == current).unwrap_or(0) as isize;
                 let next = ids[(i + dir).rem_euclid(ids.len() as isize) as usize];
                 crate::fonts::apply(next, cx.tx);
                 s.font = next.map(str::to_string);
@@ -147,6 +159,11 @@ impl BroOpt {
             BroOpt::SharedBorders => {
                 let mut s = cx.svc.settings();
                 s.shared_borders = !s.shared_borders;
+                cx.svc.save_settings(s);
+            }
+            BroOpt::ProjectTabs => {
+                let mut s = cx.svc.settings();
+                s.project_tabs = !s.project_tabs;
                 cx.svc.save_settings(s);
             }
             BroOpt::Recaps => {
@@ -180,6 +197,8 @@ enum ToolOpt {
     AutoUpdate,
     /// the JustWatch skill (Windows only: JustWatch is a Windows app)
     WatchSkill,
+    /// JustPaste's Smart Paste for File Explorer (Windows only; comes with JustTools)
+    SmartPaste,
     /// JustImagine: its version, and an update when GitHub has newer commits
     Imagine,
 }
@@ -251,6 +270,7 @@ fn rows() -> Vec<Row> {
         .chain((0..KNOBS.len()).map(Row::Knob))
         .chain([Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
+        .chain(bro_core::justpaste::supported().then_some(Row::Tool(ToolOpt::SmartPaste)))
         .chain([Row::Tool(ToolOpt::Imagine), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
         .collect()
 }
@@ -491,6 +511,11 @@ impl SettingsView {
                     cx.toast(Kind::Info, "JustWatch skill off · bro took its copies back out");
                 }
             }
+            ToolOpt::SmartPaste if jt.paste_busy.is_some() => {}
+            ToolOpt::SmartPaste if jt.installed.is_none() && !cx.svc.is_demo() => cx.act(Action::Run(Act::QuickInstall)),
+            ToolOpt::SmartPaste if jt.installed.is_some() && jt.paste.is_none() && jt.update().is_some() && jt.job.is_none() => cx.svc.install_justtools(),
+            ToolOpt::SmartPaste if jt.installed.is_some() && jt.paste.is_none() => cx.toast(Kind::Info, "this JustTools has no JustPaste · update JustTools first"),
+            ToolOpt::SmartPaste => cx.svc.set_smart_paste(!jt.paste.is_some_and(|p| p.running)),
             _ if jt.job.is_some() => {}
             // a first install starts from the checklist, with JustTools ticked
             ToolOpt::Install if jt.installed.is_none() => cx.act(Action::Run(Act::QuickInstall)),
@@ -852,7 +877,7 @@ impl SettingsView {
             Row::Tool(ToolOpt::QuickInstall),
             "Quick install",
             shown("open ›", fg(t.inline)),
-            "tick what to install: JustTools, JustWatch, JustImagine, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…",
+            "tick what to install: JustTools, JustPaste, JustWatch, JustImagine, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…",
         );
         let value = match &jt.job {
             Some(job) if job.kind == JobKind::Skill => shown(format!("{} adding", spinner(job.started)), bold(t.shine)),
@@ -869,6 +894,9 @@ impl SettingsView {
                 switch(st.justwatch.skill, true, t),
                 "lets new Claude and Codex sessions check, restart and tail your dev servers through JustWatch",
             )));
+        }
+        if bro_core::justpaste::supported() {
+            out.push(Block::Item(self.smart_paste(&jt, cx)));
         }
 
         let ji = cx.svc.state().justimagine.clone();
@@ -890,6 +918,27 @@ impl SettingsView {
         }
         out.push(Block::Item(imagine));
         out
+    }
+
+    /// JustPaste's Smart Paste: on / off, what it does, and that copied files stay Windows' own paste.
+    fn smart_paste(&self, jt: &crate::services::justtools::JustToolsState, cx: &Cx) -> Item {
+        let t = cx.theme;
+        let what = "Ctrl+V in File Explorer saves a copied image as a PNG, downloads copied links and clones copied repos into that folder";
+        let (value, help) = match (jt.paste_busy, &jt.paste, &jt.installed) {
+            (Some(started), ..) => (shown(format!("{} switching", spinner(started)), fg(t.shine).add_modifier(Modifier::BOLD)), what.to_string()),
+            _ if jt.checking || !jt.checked => (shown("checking…", muted(t)), what.to_string()),
+            (_, Some(p), _) => (switch(p.running, true, t), format!("{what} · {}", bro_core::justpaste::file_note(p))),
+            (_, None, None) => (shown("needs JustTools", muted(t)), format!("{what} · enter opens Quick Install")),
+            (_, None, Some(_)) if jt.update().is_some() => (shown("update JustTools", fg(t.shine)), format!("{what} · this JustTools has no JustPaste yet · enter updates it")),
+            (_, None, Some(_)) => (shown("not in this JustTools", muted(t)), what.to_string()),
+        };
+        let mut item = Item::new(Row::Tool(ToolOpt::SmartPaste), "Smart Paste in Explorer", value, help);
+        match jt.paste {
+            Some(p) if p.running && p.paused => item = item.note(vec![Span::styled("paused from its tray icon · Ctrl+V is all Windows until you resume it there".to_string(), muted(t))]),
+            Some(p) if p.running && !p.at_sign_in => item = item.note(vec![Span::styled("won't start at sign-in · enter twice turns that back on".to_string(), muted(t))]),
+            _ => {}
+        }
+        item
     }
 
     /// What a section is at, beside its name down the left.
@@ -973,7 +1022,7 @@ impl Pane for SettingsView {
             }
         }
         // spinners keep moving whichever section is open: the left side shows them too
-        self.tools_busy = cx.svc.state().justtools.job.is_some();
+        self.tools_busy = { let jt = &cx.svc.state().justtools; jt.job.is_some() || jt.paste_busy.is_some() };
         let u = cx.svc.state().updates.clone();
         self.update_busy = u.job.is_some() || u.checking;
 
@@ -1135,7 +1184,7 @@ mod tests {
         let tools = n + 3 + WATCH_OPTS.len() + KNOBS.len();
         assert_eq!(r[tools], Row::Tool(ToolOpt::Install));
         assert_eq!(r[tools + 1], Row::Tool(ToolOpt::QuickInstall));
-        let watch = usize::from(bro_core::justwatch::supported());
+        let watch = usize::from(bro_core::justwatch::supported()) + usize::from(bro_core::justpaste::supported());
         assert_eq!(r[tools + 4 + watch], Row::Tool(ToolOpt::Imagine));
         assert_eq!(r[tools + 5 + watch], Row::Update(UpdOpt::Version));
         assert_eq!(r.len(), tools + 7 + watch);

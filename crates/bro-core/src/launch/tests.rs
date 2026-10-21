@@ -708,3 +708,54 @@ fn orchestrator_pi_and_omp_get_the_ctl_brief() {
     let body = std::fs::read_to_string(flags[0].strip_prefix("--append-system-prompt=").unwrap()).unwrap();
     assert!(body.contains("You are the bro orchestrator") && body.contains("# Caveman mode"));
 }
+
+#[test]
+fn gemini_needs_a_google_sign_in_then_routes_every_harness_through_the_proxy() {
+    let _sb = setup();
+    let cfg = crate::config::Config::load().unwrap();
+    // not signed in: launches and routes are refused with the sign-in hint
+    let err = build(&spec(Harness::Claude, None, Some("gemini"), Some("gemini-4-argon")), &ctx()).unwrap_err();
+    assert!(format!("{err:#}").contains("bro gemini login"));
+    assert!(resolve_upstream("gemini", None, &cfg).is_err());
+
+    let creds = crate::gemini::creds_path();
+    crate::util::write_json_pretty(&creds, &json!({ "access_token": "a", "refresh_token": "r", "expires_at": 0 })).unwrap();
+    assert_eq!(resolve_upstream("gemini", None, &cfg).unwrap(), UpstreamTarget::GeminiCodeAssist { creds_file: creds });
+
+    let c = build(&spec(Harness::Claude, None, Some("gemini"), Some("gemini-4-argon")), &ctx()).unwrap();
+    let route = c.route.clone().unwrap();
+    assert_eq!(route.upstream, "gemini");
+    assert_eq!(env(&c, "ANTHROPIC_BASE_URL").unwrap(), format!("{PROXY}/r/{}", route.route_id));
+    assert_eq!(env(&c, "ANTHROPIC_MODEL"), Some("gemini-4-argon"));
+    assert_eq!(env(&c, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), Some("1"));
+
+    let c = build(&spec(Harness::Codex, None, Some("gemini"), Some("gemini-4-argon")), &ctx()).unwrap();
+    assert_eq!(c.route.as_ref().unwrap().upstream, "gemini");
+    assert!(c.args.iter().any(|a| a == "model_context_window=1048576"));
+
+    let c = build(&spec(Harness::Pi, None, Some("gemini"), None), &ctx()).unwrap();
+    assert_eq!(c.route.as_ref().unwrap().model.as_deref(), Some("gemini-4-argon"));
+}
+
+#[test]
+fn provider_models_tell_claude_code_and_codex_their_real_window() {
+    let _sb = setup();
+    crate::util::write_json_pretty(&crate::gemini::creds_path(), &json!({ "refresh_token": "r" })).unwrap();
+    let c = build(&spec(Harness::Claude, None, Some("gemini"), Some("gemini-4-argon-high")), &ctx()).unwrap();
+    assert_eq!(env(&c, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("1048576"));
+    assert_eq!(env(&c, "CLAUDE_CODE_MAX_OUTPUT_TOKENS"), Some("65536"));
+    // a model the catalogue doesn't size gets nothing
+    let c = build(&spec(Harness::Claude, None, Some("zai"), Some("glm-5.3")), &ctx()).unwrap();
+    assert_eq!(env(&c, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), None);
+
+    let c = build(&spec(Harness::Codex, None, Some("gemini"), Some("gemini-4-argon-high")), &ctx()).unwrap();
+    let arg = c.args.iter().find(|a| a.starts_with("model_catalog_json=")).expect("catalog arg");
+    let path: String = toml::from_str::<toml::Table>(arg).unwrap()["model_catalog_json"].as_str().unwrap().into();
+    let cat: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let m = cat["models"].as_array().unwrap().iter().find(|m| m["slug"] == "gemini-4-argon-high").unwrap();
+    assert_eq!(m["context_window"], 1048576);
+    assert_eq!(m["display_name"], "Gemini 4 Argon (high thinking)");
+    assert!(m.get("supported_reasoning_levels").is_some() && m.get("experimental_supported_tools").is_some());
+    let prompt = m["model_messages"]["instructions_template"].as_str().unwrap();
+    assert!(prompt.contains("based on Gemini 4 Argon (high thinking)") && !prompt.contains("based on GPT-"), "{}", &prompt[..120]);
+}

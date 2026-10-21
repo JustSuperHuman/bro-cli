@@ -162,6 +162,9 @@ pub struct Settings {
     /// Tiles that sit side by side share one border line instead of each drawing its own, and each tile's status
     /// moves up into its title band. Off by default (trying it out).
     pub shared_borders: bool,
+    /// A strip of project tabs across the top of the sessions (not in the sidebar): All tiles every session,
+    /// each project's tab tiles just its own. Off by default.
+    pub project_tabs: bool,
     /// Permission mode new sessions start on: the one last picked in the launcher.
     pub permission: crate::launch::Permission,
     /// Privacy / update / behaviour env for Claude launches (preset + overrides).
@@ -176,6 +179,8 @@ pub struct Settings {
     pub updates: crate::self_update::UpdateSettings,
     /// Watchdogs: a fresh reviewer agent that hands an idle session its next task.
     pub watchdog: WatchdogSettings,
+    /// The setup guide (install an agent, add a login) was dismissed: it no longer opens by itself at startup.
+    pub setup_done: bool,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
     pub keys: BTreeMap<String, String>,
 }
@@ -333,6 +338,7 @@ impl Default for Settings {
             auto_approve: false,
             summary_screensaver_secs: 0,
             shared_borders: false,
+            project_tabs: false,
             permission: Default::default(),
             claude_env: Default::default(),
             caveman: Default::default(),
@@ -340,6 +346,7 @@ impl Default for Settings {
             justwatch: Default::default(),
             updates: Default::default(),
             watchdog: Default::default(),
+            setup_done: false,
             keys: BTreeMap::new(),
         }
     }

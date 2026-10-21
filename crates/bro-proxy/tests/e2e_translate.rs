@@ -369,3 +369,102 @@ async fn responses_client_on_claude_oauth() {
     assert_eq!(v["output"][2]["call_id"], "toolu_9");
     assert_eq!(v["usage"]["input_tokens"], 111);
 }
+
+// ------------------------------------------------------------------ Gemini (Code Assist) upstream
+
+fn gemini_sig() -> String {
+    "GSIG".repeat(20)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_client_on_gemini_code_assist() {
+    let e = env().await;
+    e.proxy.upsert_route(route(
+        "gm",
+        Upstream::GeminiCodeAssist { creds_file: "C:/x/stale/oauth.json".into() },
+        Some("gemini-4-argon"),
+        None,
+    ));
+    let mut req = anthropic_request(true);
+    req["thinking"] = json!({"type": "enabled", "budget_tokens": 31999});
+    let resp = e.post("gm", "/v1/messages", req).await;
+    assert_eq!(resp.status(), 200);
+    let (names, m) = accumulate_anthropic(&resp.text().await.unwrap());
+    assert_eq!(names.last().unwrap(), "message_stop");
+    assert_eq!(m["model"], "claude-sonnet-4-5-20250929");
+    assert_eq!(m["content"][0]["thinking"], "Need both files.");
+    assert_eq!(m["content"][1]["text"], "Reading both.");
+    assert_eq!(m["content"][2]["signature"], format!("bro.gs:{}", gemini_sig()));
+    assert_eq!(m["content"][3]["input"], json!({"path": "a.txt"}));
+    assert_eq!(m["content"][4]["input"], json!({"path": "b.txt"}));
+    assert_eq!(m["stop_reason"], "tool_use");
+    assert_eq!(m["usage"]["cache_read_input_tokens"], 200);
+
+    // 401 with the stale token, then the refreshed one; the dead host was skipped
+    let seen = e.mock.last(":streamGenerateContent");
+    assert!(seen.path.starts_with("/ca/"));
+    assert_eq!(seen.headers["authorization"], "Bearer google-at");
+    assert!(seen.headers["user-agent"].to_str().unwrap().starts_with("antigravity/cli/"));
+    assert_eq!(e.mock.count("/gone/"), 2);
+    let b = &seen.body;
+    assert_eq!(b["project"], "proj-7");
+    assert_eq!(b["model"], "gemini-4-argon-high");
+    assert_eq!(b["userAgent"], "antigravity");
+    assert_eq!(b["requestType"], "agent");
+    assert_eq!(b["request"]["systemInstruction"]["parts"][0]["text"], "You are Claude Code.");
+    assert_eq!(b["request"]["contents"][0]["parts"][1]["inlineData"]["data"], "iVBOR");
+    assert_eq!(b["request"]["tools"][0]["functionDeclarations"][0]["name"], "Read");
+    assert_eq!(b["request"]["generationConfig"]["thinkingConfig"], json!({"includeThoughts": true, "thinkingLevel": "HIGH"}));
+
+    let ev = e.events(1).await;
+    let last = ev.last().unwrap();
+    assert_eq!((last.inbound.as_str(), last.upstream.as_str(), last.status), ("anthropic", "gemini_code_assist", 200));
+    assert_eq!(last.model, "gemini-4-argon");
+    assert_eq!(last.input_tokens, Some(300));
+    assert_eq!(last.output_tokens, Some(40));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_client_on_gemini_round_trips_signatures() {
+    let e = env().await;
+    e.proxy.upsert_route(route(
+        "gm",
+        Upstream::GeminiCodeAssist { creds_file: "C:/x/oauth.json".into() },
+        Some("gemini-4-argon"),
+        None,
+    ));
+    // non-streaming Codex request: Code Assist streams, the proxy folds it
+    let req = json!({
+        "model": "gemini-4-argon",
+        "instructions": "You are Codex.",
+        "reasoning": {"effort": "low"},
+        "tools": [{"type": "function", "name": "Read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}],
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "read a"}]}]
+    });
+    let resp = e.post("gm", "/v1/responses", req.clone()).await;
+    assert_eq!(resp.status(), 200);
+    let r: Value = resp.json().await.unwrap();
+    let out = r["output"].as_array().unwrap();
+    let sig = format!("bro.at:bro.gs:{}", gemini_sig());
+    assert!(out.iter().any(|i| i["type"] == "reasoning" && i["encrypted_content"] == sig.as_str()));
+    let call = out.iter().find(|i| i["type"] == "function_call").unwrap().clone();
+    assert_eq!(e.mock.last(":streamGenerateContent").body["model"], "gemini-4-argon-low");
+
+    // Codex sends the turn back: the signature returns on the function call
+    let mut next = req.clone();
+    let input = next["input"].as_array_mut().unwrap();
+    input.extend(out.iter().cloned());
+    for c in out.iter().filter(|i| i["type"] == "function_call") {
+        input.push(json!({"type": "function_call_output", "call_id": c["call_id"], "output": "A"}));
+    }
+    let resp = e.post("gm", "/v1/responses", next).await;
+    assert_eq!(resp.status(), 200);
+    let contents = e.mock.last(":streamGenerateContent").body["request"]["contents"].clone();
+    let model_turn = contents.as_array().unwrap().iter().find(|c| c["role"] == "model").unwrap();
+    let fc = model_turn["parts"].as_array().unwrap().iter().find(|p| p.get("functionCall").is_some()).unwrap();
+    assert_eq!(fc["thoughtSignature"], gemini_sig());
+    assert_eq!(fc["functionCall"]["id"], call["call_id"]);
+    let last = contents.as_array().unwrap().last().unwrap();
+    assert_eq!(last["parts"][0]["functionResponse"]["response"]["result"], "A");
+    assert_eq!(last["parts"][1]["functionResponse"]["response"]["result"], "A");
+}

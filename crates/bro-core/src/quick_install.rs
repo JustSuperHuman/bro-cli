@@ -1,4 +1,4 @@
-//! Quick Install: the tools a coding machine wants (JustTools first, JustWatch on Windows, JustImagine, then Git, Node.js, Bun, Python,
+//! Quick Install: the tools a coding machine wants (JustTools first, JustPaste and JustWatch on Windows, JustImagine, then Git, Node.js, Bun, Python,
 //! the .NET SDKs, the agent CLIs and a few utilities), which of them are already here, and how to
 //! install the rest on this OS.
 //!
@@ -17,6 +17,8 @@ use std::process::{Command, Stdio};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
     JustTools,
+    /// JustTools' Smart Paste for File Explorer, switched on (Windows only; comes with JustTools)
+    JustPaste,
     /// Windows only
     JustWatch,
     /// runs as a service; needs Git and Node.js
@@ -33,6 +35,14 @@ pub enum Tool {
     Agent(Harness),
     Ripgrep,
     Ffmpeg,
+    /// video / audio downloader; always the newest release (sites break old ones quickly)
+    YtDlp,
+    /// private mesh VPN: reach this machine (and bro's bridge) from your phone anywhere
+    Tailscale,
+    /// Windows only
+    PowerToys,
+    /// JustSuperHuman's ShareX fork; Windows only
+    ShareX,
 }
 
 /// The heading a tool is listed under.
@@ -59,8 +69,9 @@ impl Group {
 
 impl Tool {
     /// Every tool, in list order, which is install order except for [Tool::install_rank].
-    pub const ALL: [Tool; 18] = [
+    pub const ALL: [Tool; 23] = [
         Tool::JustTools,
+        Tool::JustPaste,
         Tool::JustWatch,
         Tool::JustImagine,
         Tool::Git,
@@ -78,12 +89,17 @@ impl Tool {
         Tool::Agent(Harness::Omp),
         Tool::Ripgrep,
         Tool::Ffmpeg,
+        Tool::YtDlp,
+        Tool::Tailscale,
+        Tool::PowerToys,
+        Tool::ShareX,
     ];
 
     /// The name `bro install` takes.
     pub fn id(self) -> &'static str {
         match self {
             Tool::JustTools => "justtools",
+            Tool::JustPaste => "justpaste",
             Tool::JustWatch => "justwatch",
             Tool::JustImagine => "justimagine",
             Tool::Git => "git",
@@ -98,6 +114,10 @@ impl Tool {
             Tool::Agent(h) => h.label(),
             Tool::Ripgrep => "rg",
             Tool::Ffmpeg => "ffmpeg",
+            Tool::YtDlp => "yt-dlp",
+            Tool::Tailscale => "tailscale",
+            Tool::PowerToys => "powertoys",
+            Tool::ShareX => "sharex",
         }
     }
 
@@ -106,12 +126,16 @@ impl Tool {
         let n = name.trim().to_ascii_lowercase();
         let alias = match n.as_str() {
             "just" | "just-tools" => Some(Tool::JustTools),
+            "just-paste" | "paste" | "smart-paste" | "smartpaste" => Some(Tool::JustPaste),
             "just-watch" | "watch" => Some(Tool::JustWatch),
             "just-imagine" | "imagine" => Some(Tool::JustImagine),
             "github-cli" | "github" => Some(Tool::GitHubCli),
             "nodejs" | "node.js" | "npm" => Some(Tool::Node),
             "python3" | "py" => Some(Tool::Python),
             "ripgrep" => Some(Tool::Ripgrep),
+            "power-toys" => Some(Tool::PowerToys),
+            "ytdlp" | "yt_dlp" => Some(Tool::YtDlp),
+            "share-x" => Some(Tool::ShareX),
             "claude-code" => Some(Tool::Agent(Harness::Claude)),
             "codex-cli" => Some(Tool::Agent(Harness::Codex)),
             "oh-my-pi" => Some(Tool::Agent(Harness::Omp)),
@@ -136,6 +160,7 @@ impl Tool {
     pub fn name(self) -> &'static str {
         match self {
             Tool::JustTools => "JustTools",
+            Tool::JustPaste => "JustPaste",
             Tool::JustWatch => "JustWatch",
             Tool::JustImagine => "JustImagine",
             Tool::Git => "Git",
@@ -153,12 +178,17 @@ impl Tool {
             Tool::Agent(Harness::Omp) => "omp (oh-my-pi)",
             Tool::Ripgrep => "ripgrep",
             Tool::Ffmpeg => "FFmpeg",
+            Tool::YtDlp => "yt-dlp",
+            Tool::Tailscale => "Tailscale",
+            Tool::PowerToys => "PowerToys",
+            Tool::ShareX => "ShareX (JSH fork)",
         }
     }
 
     pub fn blurb(self) -> &'static str {
         match self {
             Tool::JustTools => "image, video, PDF, QR and port commands, JustCommit and JustReady in one binary",
+            Tool::JustPaste => "Ctrl+V in Explorer saves copied images, downloads copied links, clones repos; file copies stay Windows'",
             Tool::JustWatch => "tray app that keeps your dev servers running; agents restart them and read their logs",
             Tool::JustImagine => "your own image, video, song and voice studio, always on in the background; agents generate through its API",
             Tool::Git => "version control; agents expect it",
@@ -176,22 +206,31 @@ impl Tool {
             Tool::Agent(Harness::Omp) => "Pi with batteries included",
             Tool::Ripgrep => "fast code search (rg)",
             Tool::Ffmpeg => "audio and video conversion; JustTools' media commands use it",
+            Tool::YtDlp => "download video and audio from YouTube and 1000+ sites; pairs with FFmpeg",
+            Tool::Tailscale => "private network between your devices: reach bro's bridge from your phone anywhere",
+            Tool::PowerToys => "Microsoft's Windows utilities: FancyZones, PowerToys Run, Text Extractor, color picker",
+            Tool::ShareX => "screenshots and screen recording; JustSuperHuman's fork with smooth cursor and device frames",
         }
     }
 
     pub fn group(self) -> Group {
         match self {
-            Tool::JustTools | Tool::JustWatch | Tool::JustImagine => Group::Main,
+            Tool::JustTools | Tool::JustPaste | Tool::JustWatch | Tool::JustImagine => Group::Main,
             Tool::Git | Tool::GitHubCli => Group::Essentials,
             Tool::Node | Tool::Bun | Tool::Python | Tool::Uv | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => Group::Runtimes,
             Tool::Agent(_) => Group::Agents,
-            Tool::Ripgrep | Tool::Ffmpeg => Group::Utilities,
+            Tool::Ripgrep | Tool::Ffmpeg | Tool::YtDlp | Tool::Tailscale | Tool::PowerToys | Tool::ShareX => Group::Utilities,
         }
     }
 
-    /// It can be installed on this OS (JustWatch is Windows-only).
+    /// It can be installed on this OS (JustPaste, JustWatch, PowerToys and ShareX are Windows-only).
     pub fn supported(self) -> bool {
-        self != Tool::JustWatch || crate::justwatch::supported()
+        match self {
+            Tool::JustPaste => crate::justpaste::supported(),
+            Tool::JustWatch => crate::justwatch::supported(),
+            Tool::PowerToys | Tool::ShareX => cfg!(windows),
+            _ => true,
+        }
     }
 
     /// Every tool this OS can install, in install order.
@@ -237,7 +276,11 @@ impl Tool {
             },
             Tool::Ripgrep => &["rg"],
             Tool::Ffmpeg => &["ffmpeg"],
-            Tool::JustTools | Tool::JustWatch | Tool::JustImagine | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => &[],
+            Tool::YtDlp => &["yt-dlp"],
+            Tool::Tailscale => &["tailscale"],
+            Tool::PowerToys => &["PowerToys"],
+            Tool::ShareX => &["ShareX"],
+            Tool::JustTools | Tool::JustPaste | Tool::JustWatch | Tool::JustImagine | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => &[],
         }
     }
 }
@@ -317,10 +360,18 @@ pub fn search_dirs() -> Vec<PathBuf> {
     if cfg!(windows) {
         if let Some(pf) = std::env::var_os("ProgramFiles") {
             let pf = PathBuf::from(pf);
-            dirs.extend([pf.join("Git").join("cmd"), pf.join("nodejs"), pf.join("dotnet"), pf.join("GitHub CLI")]);
+            dirs.extend([pf.join("Git").join("cmd"), pf.join("nodejs"), pf.join("dotnet"), pf.join("GitHub CLI"), pf.join("Tailscale"), pf.join("PowerToys"), pf.join("ShareX")]);
+        }
+        // PowerToys' per-user install
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join("PowerToys"));
         }
     } else {
         dirs.push(home_dir().join(".dotnet"));
+    }
+    if cfg!(target_os = "macos") {
+        // the Tailscale app's own CLI, before (or without) "install CLI" from its menu
+        dirs.push(PathBuf::from("/Applications/Tailscale.app/Contents/MacOS"));
     }
     let mut seen: Vec<PathBuf> = vec![];
     dirs.retain(|d| !d.as_os_str().is_empty() && !seen.iter().any(|s| crate::util::same_path(s, d)) && {
@@ -403,6 +454,10 @@ pub fn detect() -> Status {
     let dirs = search_dirs();
     let mut status = Status::new();
     if let Some(found) = crate::justtools::installed() {
+        // switched on is what counts as installed
+        if let Some(paste) = crate::justpaste::supported().then(|| crate::justpaste::status(&found).ok().flatten()).flatten().filter(|p| p.running) {
+            status.insert(Tool::JustPaste, crate::justpaste::describe(&paste).into());
+        }
         status.insert(Tool::JustTools, found.version.unwrap_or_else(|| "installed".into()));
     }
     if let Some(found) = crate::justwatch::installed() {
@@ -533,6 +588,16 @@ fn winget(id: &str) -> Step {
     Step { program: "winget".into(), display: format!("winget {}", args.join(" ")), args, ok_codes: WINGET_ALREADY.to_vec(), or_else: None }
 }
 
+/// The newest setup from JustSuperHuman's ShareX fork, run elevated (it installs into Program Files) and
+/// without starting ShareX afterwards. No double quotes: they don't survive powershell.exe's -Command parsing.
+const SHAREX_INSTALL: &str = "$r = irm https://api.github.com/repos/JustSuperHuman/ShareX/releases/latest; \
+$a = $r.assets | Where-Object name -like '*-setup-x64.exe' | Select-Object -First 1; \
+if (-not $a) { throw ('no ShareX setup in ' + $r.tag_name) }; \
+Write-Host ('ShareX ' + $r.tag_name); \
+$f = Join-Path $env:TEMP $a.name; Invoke-WebRequest $a.browser_download_url -OutFile $f -UseBasicParsing; \
+$p = Start-Process $f -ArgumentList '/SILENT','/NORESTART','/NORUN' -Verb RunAs -Wait -PassThru; \
+Remove-Item $f -ErrorAction SilentlyContinue; exit $p.ExitCode";
+
 const HOMEBREW_INSTALL: &str = r#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#;
 
 fn brew(brew: &Option<PathBuf>, args: &str) -> Step {
@@ -558,14 +623,38 @@ pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
     if matches!(tool, Tool::JustTools | Tool::JustImagine | Tool::Agent(_)) {
         return Ok(vec![]);
     }
+    if tool == Tool::JustPaste {
+        // switched on with JustTools' own `justpaste` ([`crate::justpaste::set`])
+        return match os {
+            Os::Windows { .. } => Ok(vec![]),
+            _ => Err("JustPaste's Smart Paste is for Windows' File Explorer".into()),
+        };
+    }
     if tool == Tool::JustWatch {
         return match os {
             Os::Windows { .. } => Ok(vec![powershell(crate::justwatch::installer_command())]),
             _ => Err("JustWatch is a Windows app".into()),
         };
     }
+    if matches!(tool, Tool::ShareX | Tool::PowerToys) && !matches!(os, Os::Windows { .. }) {
+        return Err(format!("{} is a Windows app", tool.name()));
+    }
+    if tool == Tool::ShareX {
+        return Ok(vec![powershell(SHAREX_INSTALL)]);
+    }
     // official scripts, the same everywhere
     match (tool, os) {
+        // distro packages lag behind and sites break old yt-dlp quickly: the newest standalone build
+        (Tool::YtDlp, Os::Linux { pkg, root }) => {
+            let sudo = if *root { "" } else { "sudo " };
+            let libc = if *pkg == Some(Pkg::Apk) { "musllinux" } else { "linux" };
+            return Ok(vec![sh(format!(
+                "case $(uname -m) in aarch64|arm64) a=_aarch64;; *) a=;; esac; \
+                 {sudo}curl -fL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_{libc}$a -o /usr/local/bin/yt-dlp && {sudo}chmod a+rx /usr/local/bin/yt-dlp"
+            ))]);
+        }
+        // its script picks the repository for the distro and asks for sudo itself
+        (Tool::Tailscale, Os::Linux { .. }) => return Ok(vec![sh("curl -fsSL https://tailscale.com/install.sh | sh")]),
         (Tool::Bun, Os::Windows { .. }) => return Ok(vec![powershell("irm https://bun.sh/install.ps1 | iex")]),
         (Tool::Uv, Os::Windows { .. }) => return Ok(vec![powershell("irm https://astral.sh/uv/install.ps1 | iex")]),
         (Tool::Uv, _) => return Ok(vec![sh("curl -LsSf https://astral.sh/uv/install.sh | sh")]),
@@ -598,6 +687,9 @@ pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
                 }
                 Tool::Ripgrep => "BurntSushi.ripgrep.MSVC",
                 Tool::Ffmpeg => "Gyan.FFmpeg",
+                Tool::YtDlp => "yt-dlp.yt-dlp",
+                Tool::Tailscale => "Tailscale.Tailscale",
+                Tool::PowerToys => "Microsoft.PowerToys",
                 _ => unreachable!("planned above"),
             };
             Ok(vec![winget(id)])
@@ -613,6 +705,9 @@ pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
                 Tool::Python => "python",
                 Tool::Ripgrep => "ripgrep",
                 Tool::Ffmpeg => "ffmpeg",
+                Tool::YtDlp => "yt-dlp",
+                // the app (menu bar + system extension); the plain formula is a headless daemon
+                Tool::Tailscale => "--cask tailscale-app",
                 _ => unreachable!("planned above"),
             };
             let mut steps = vec![];
@@ -658,8 +753,11 @@ pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
 pub fn how(tool: Tool, os: &Os) -> String {
     match tool {
         Tool::JustTools => "JustTools' own installer; the download is checked against its SHA-256".into(),
+        Tool::JustPaste if !matches!(os, Os::Windows { .. }) => "JustPaste's Smart Paste is for Windows' File Explorer".into(),
+        Tool::JustPaste => "comes with JustTools: justpaste --enable && justpaste --startup on (turn it off in settings)".into(),
         Tool::JustWatch if !matches!(os, Os::Windows { .. }) => "JustWatch is a Windows app".into(),
         Tool::JustWatch => format!("{} · then its skill for new sessions", crate::justwatch::installer_command()),
+        Tool::ShareX if matches!(os, Os::Windows { .. }) => "the newest setup-x64.exe from github.com/JustSuperHuman/ShareX releases, run elevated (/SILENT)".into(),
         Tool::JustImagine => crate::justimagine::how(),
         Tool::Agent(h) => match crate::agent_install::plan(h) {
             Ok(steps) => steps.iter().map(|s| s.display.as_str()).collect::<Vec<_>>().join(" && "),
@@ -696,6 +794,9 @@ pub fn install(tool: Tool, mut say: impl FnMut(&str)) -> Result<(), String> {
 
 /// After an install: what to do before the tool can be used, if anything.
 pub fn after_install(tool: Tool) -> Option<String> {
+    if tool == Tool::Tailscale {
+        return Some(if cfg!(target_os = "linux") { "sign in: sudo tailscale up".into() } else { "sign in from the Tailscale app (tray / menu bar)".into() });
+    }
     if tool.dotnet_major().is_some() && !cfg!(windows) {
         let dir = home_dir().join(".dotnet");
         if find("dotnet", &std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default()).is_none() {
@@ -758,6 +859,21 @@ mod tests {
         assert!(plan(Tool::JustImagine, &os).unwrap().is_empty() && how(Tool::JustImagine, &os).contains("service install"));
         assert!(plan(Tool::JustWatch, &os).unwrap()[0].display.contains("JustWatch/main/install.ps1"));
         assert!(plan(Tool::JustWatch, &Os::Linux { pkg: Some(Pkg::Apt), root: false }).is_err());
+        assert_eq!(plan(Tool::Tailscale, &os).unwrap()[0].args[2], "Tailscale.Tailscale");
+        assert_eq!(plan(Tool::PowerToys, &os).unwrap()[0].args[2], "Microsoft.PowerToys");
+        assert_eq!(plan(Tool::YtDlp, &os).unwrap()[0].args[2], "yt-dlp.yt-dlp");
+        assert_eq!(Tool::from_id("ytdlp"), Some(Tool::YtDlp));
+        let sharex = &plan(Tool::ShareX, &os).unwrap()[0];
+        assert!(sharex.program == "powershell.exe" && sharex.display.contains("JustSuperHuman/ShareX/releases/latest") && sharex.display.contains("/NORUN"));
+        let apt = Os::Linux { pkg: Some(Pkg::Apt), root: false };
+        assert!(plan(Tool::ShareX, &apt).is_err() && plan(Tool::PowerToys, &apt).is_err());
+        assert!(plan(Tool::JustPaste, &os).unwrap().is_empty() && plan(Tool::JustPaste, &apt).is_err());
+        assert!(how(Tool::JustPaste, &os).contains("justpaste --enable"));
+        assert_eq!(Tool::from_id("smart-paste"), Some(Tool::JustPaste));
+        assert_eq!(Tool::here().contains(&Tool::JustPaste), cfg!(windows));
+        assert_eq!(Tool::here().contains(&Tool::ShareX), cfg!(windows));
+        assert_eq!(Tool::here().contains(&Tool::PowerToys), cfg!(windows));
+        assert_eq!(Tool::from_id("ShareX"), Some(Tool::ShareX));
         assert_eq!(Tool::here().contains(&Tool::JustWatch), cfg!(windows));
     }
 
@@ -777,6 +893,13 @@ mod tests {
         assert!(dn[0].or_else.as_ref().unwrap().display.contains("--quality preview"));
         assert!(plan(Tool::Git, &Os::Linux { pkg: None, root: false }).is_err());
         assert!(plan(Tool::Uv, &Os::Linux { pkg: None, root: false }).unwrap()[0].display.contains("astral.sh/uv/install.sh"));
+        assert_eq!(plan(Tool::Tailscale, &mac).unwrap()[0].display, "brew install --cask tailscale-app");
+        assert_eq!(plan(Tool::YtDlp, &mac).unwrap()[0].display, "brew install yt-dlp");
+        let yt = &plan(Tool::YtDlp, &apt).unwrap()[0].display;
+        assert!(yt.contains("releases/latest/download/yt-dlp_linux$a") && yt.contains("sudo curl"), "{yt}");
+        let alpine = &plan(Tool::YtDlp, &Os::Linux { pkg: Some(Pkg::Apk), root: true }).unwrap()[0].display;
+        assert!(alpine.contains("yt-dlp_musllinux$a") && !alpine.contains("sudo"), "{alpine}");
+        assert!(plan(Tool::Tailscale, &Os::Linux { pkg: None, root: false }).unwrap()[0].display.contains("tailscale.com/install.sh"));
     }
 
     #[test]

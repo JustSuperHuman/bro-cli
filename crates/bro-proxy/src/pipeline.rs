@@ -11,6 +11,7 @@ use crate::translate::reasoning_cache::ReasoningCache;
 use crate::translate::stream_a2chat::{AnthropicToChat, ChatOut};
 use crate::translate::stream_a2responses::AnthropicToResponses;
 use crate::translate::stream_chat2a::ChatToAnthropic;
+use crate::translate::stream_gemini2a::{GeminiToAnthropic, usage_from_gemini};
 use crate::translate::stream_responses2a::ResponsesToAnthropic;
 use crate::translate::{usage_from_chat, usage_from_responses};
 use crate::upstream::ByteStream;
@@ -28,6 +29,7 @@ pub(crate) enum Decoder {
     Anthropic { terminated: bool },
     Chat(ChatToAnthropic),
     Responses(ResponsesToAnthropic),
+    Gemini(GeminiToAnthropic),
 }
 
 impl Decoder {
@@ -36,6 +38,7 @@ impl Decoder {
             Dialect::Anthropic => Decoder::Anthropic { terminated: false },
             Dialect::Chat => Decoder::Chat(ChatToAnthropic::new(client_model)),
             Dialect::Responses => Decoder::Responses(ResponsesToAnthropic::new(client_model)),
+            Dialect::Gemini => Decoder::Gemini(GeminiToAnthropic::new(client_model)),
         }
     }
 
@@ -57,6 +60,7 @@ impl Decoder {
             }
             Decoder::Chat(t) => t.push(&ev.data),
             Decoder::Responses(t) => t.push(&ev.data),
+            Decoder::Gemini(t) => t.push(&ev.data),
         }
     }
 
@@ -75,6 +79,7 @@ impl Decoder {
             }
             Decoder::Chat(t) => t.finish(),
             Decoder::Responses(t) => t.finish(),
+            Decoder::Gemini(t) => t.finish(),
         }
     }
 }
@@ -95,7 +100,8 @@ impl Encoder {
         cache: Arc<ReasoningCache>,
     ) -> Self {
         match inbound {
-            Dialect::Anthropic => Encoder::Anthropic {
+            // Gemini is never an inbound dialect.
+            Dialect::Anthropic | Dialect::Gemini => Encoder::Anthropic {
                 started: false,
                 done: false,
             },
@@ -429,6 +435,15 @@ impl Tap {
                 }
                 _ => {}
             },
+            Dialect::Gemini => {
+                let r = v.get("response").unwrap_or(&v);
+                if let Some(u) = r.get("usageMetadata") {
+                    self.usage = usage_from_gemini(u);
+                }
+                if v.get("error").is_some() {
+                    self.error = Some(error_message(&v));
+                }
+            }
         }
     }
 }
@@ -444,6 +459,9 @@ fn error_message(v: &Value) -> String {
 
 /// Usage from a complete (non-streaming) JSON body of the given dialect.
 pub(crate) fn usage_from_body(dialect: Dialect, v: &Value) -> Option<Usage> {
+    if dialect == Dialect::Gemini {
+        return v.get("response").unwrap_or(v).get("usageMetadata").map(usage_from_gemini);
+    }
     let u = v.get("usage")?.clone();
     match dialect {
         Dialect::Anthropic => serde_json::from_value(u).ok(),
@@ -453,6 +471,7 @@ pub(crate) fn usage_from_body(dialect: Dialect, v: &Value) -> Option<Usage> {
         Dialect::Responses => serde_json::from_value::<ResponsesUsage>(u)
             .ok()
             .map(|u| usage_from_responses(&u)),
+        Dialect::Gemini => None, // handled above
     }
 }
 

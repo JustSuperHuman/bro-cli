@@ -106,6 +106,24 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         for var in MODEL_VARS {
             cmd.set_env(var, m.to_string());
         }
+        // Claude Code assumes 200k for a model it doesn't know (and warns): give it the real
+        // window and output limit from the catalogue. The provider's own `env` wins.
+        if let Target::Provider(p, _) = &r.target
+            && !m.to_lowercase().starts_with("claude")
+            && let Some(info) = p.models.iter().find(|x| x.id == m)
+        {
+            let limits = [
+                ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", info.context),
+                ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", info.extra.get("maxOutput").and_then(serde_json::Value::as_u64)),
+            ];
+            for (var, value) in limits {
+                if let Some(v) = value
+                    && !p.env.contains_key(var)
+                {
+                    cmd.set_env(var, v.to_string());
+                }
+            }
+        }
     }
 
     // The settings preset; what the provider's own `env` already set wins.

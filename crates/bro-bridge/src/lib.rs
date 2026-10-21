@@ -225,6 +225,11 @@ pub enum BridgeCommand {
     },
     /// For bro's orchestrator session (see [`Bridge::route_orchestrator`]).
     Orchestrator(OrchestratorCommand),
+    /// Show one project's sessions tiled together in bro's window (its project tab), or every session
+    /// (`None`, the All tab). `project` is the project's directory.
+    Tile {
+        project: Option<PathBuf>,
+    },
 }
 
 /// What bro's orchestrator session is asked to do, once [`Bridge::route_orchestrator`] hands it everything
@@ -271,6 +276,7 @@ impl std::fmt::Debug for BridgeCommand {
                 .field("column", column)
                 .finish(),
             Self::Orchestrator(c) => f.debug_tuple("Orchestrator").field(c).finish(),
+            Self::Tile { project } => f.debug_struct("Tile").field("project", project).finish(),
             Self::OpenInEditor { id, path, line, column } => f
                 .debug_struct("OpenInEditor")
                 .field("id", id)
@@ -306,6 +312,16 @@ pub fn read_endpoint(data_root: &std::path::Path) -> Option<Endpoint> {
         port: u16::try_from(info["port"].as_u64()?).ok().filter(|port| *port != 0)?,
         pid: u32::try_from(info["pid"].as_u64().unwrap_or_default()).unwrap_or_default(),
     })
+}
+
+/// A project as the remote clients (phone, web) arrange it, for bro's own project tabs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientProject {
+    pub cwd: PathBuf,
+    /// The name a client gave it; None while it goes by its folder's.
+    pub name: Option<String>,
+    /// Its place in the order a client arranged the projects in; None until one did.
+    pub order: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,6 +656,11 @@ impl Bridge {
     /// agent awaiting input) so the TUI can toast them too.
     pub fn on_notification(&self, f: Box<dyn Fn(Notification) + Send + Sync>) {
         self.state().notification_sinks.write().push(Arc::from(f));
+    }
+
+    /// The projects remote clients see, with the names and order they gave them. Cheap: one lock, no I/O.
+    pub fn client_projects(&self) -> Vec<ClientProject> {
+        self.state().client_projects()
     }
 
     /// How many remote client slots are subscribed to session `id` right now (web,

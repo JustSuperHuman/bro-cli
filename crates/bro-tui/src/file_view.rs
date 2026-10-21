@@ -3,6 +3,10 @@
 //! your editor, copy its path or mention it to the agent. Files the terminal can't display open
 //! directly in the system's default app.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::layout::PaneId;
 use crate::pane::Event;
 use crate::theme::Theme;
@@ -147,6 +151,11 @@ impl FileView {
         v
     }
 
+    /// The id of the load in flight (a [`Loaded`] with another id is stale).
+    pub(crate) fn request_id(&self) -> u64 {
+        self.req
+    }
+
     fn request(&mut self, r: PreviewRequest) {
         self.req = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         self.loading = true;
@@ -248,6 +257,17 @@ impl FileView {
             let want_end = total.min(end + DEFAULT_LIMIT);
             let new_start = if want_end + 1 - start > MAX_LIMIT { want_end + 1 - MAX_LIMIT } else { start };
             self.request(PreviewRequest { line, start: Some(new_start), limit: Some(want_end + 1 - new_start) });
+        }
+    }
+
+    /// The body shows `rows` lines (both drawings call this before they read `top`): paging and the page keys
+    /// use it, and the first time the text is laid out it brings the target line into view.
+    pub(crate) fn set_rows(&mut self, rows: usize) {
+        self.rows = rows;
+        if self.center && matches!(self.body, Body::Text(_)) {
+            self.center = false;
+            self.center_on_target();
+            self.page();
         }
     }
 
@@ -574,12 +594,7 @@ pub fn draw(f: &mut Frame, area: Rect, v: &mut FileView, hover: Position, t: &Th
     let header = Rect { height: 1, ..inner };
     let body = Rect { y: inner.y + 1, height: inner.height - 2, ..inner };
     let hint_row = Rect { y: inner.bottom() - 1, height: 1, ..inner };
-    v.rows = body.height as usize;
-    if v.center && matches!(v.body, Body::Text(_)) {
-        v.center = false;
-        v.center_on_target();
-        v.page();
-    }
+    v.set_rows(body.height as usize);
 
     // header: what it is, where you are
     let (left, right) = match &v.body {

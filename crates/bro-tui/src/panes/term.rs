@@ -211,6 +211,8 @@ pub struct Term {
     approved_at: Option<Instant>,
     /// A resume waiting its turn: shows a loader until the real session takes this pane.
     pub queued: Option<Queued>,
+    /// The desktop app's copy of the screen (see [`super::mirror`]); None in the terminal UI.
+    mirror: Option<Arc<dyn super::mirror::ScreenMirror>>,
 }
 
 /// Where a queued resume stands (the app keeps it current).
@@ -232,7 +234,10 @@ impl Term {
     pub fn new(meta: Meta, spawn: Spawn, svc: Services) -> Term {
         let agent = meta.harness.is_some();
         let files = super::file_cache::FileCache::new(bro_bridge::file_preview::ResolveRoots { cwd: meta.cwd.clone(), project: Some(meta.project.root.clone()) });
-        let parser = vt100::Parser::new_with_callbacks(24, 80, 10_000, Cb::default());
+        // the desktop app scrolls its own mirror: vt100 then only needs the visible screen
+        let mirror = super::mirror::create();
+        let scrollback = if mirror.is_some() { 0 } else { 10_000 };
+        let parser = vt100::Parser::new_with_callbacks(24, 80, scrollback, Cb::default());
         let program_state = ProgramState::of(&parser);
         Term {
             meta,
@@ -278,6 +283,7 @@ impl Term {
             enter_at: None,
             approved_at: None,
             queued: None,
+            mirror,
         }
     }
 
@@ -392,6 +398,9 @@ impl Term {
         let reader = live.master.try_clone_reader().map_err(|e| format!("pty reader: {e}"))?;
         *self.writer.lock() = Some(Box::new(super::writer::Writer::new(writer).map_err(|e| format!("pty input worker: {e}"))?));
         self.parser.lock().screen_mut().set_size(rows, cols);
+        if let Some(m) = &self.mirror {
+            m.resize(rows, cols);
+        }
         self.size = (rows, cols);
         self.base = (rows, cols);
         self.live = Some(live);
@@ -508,6 +517,7 @@ impl Term {
         let (last_output, born) = (self.last_output.clone(), self.born);
         let svc = self.svc.clone();
         let sid = self.meta.sid.clone();
+        let mirror = self.mirror.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 16384];
             loop {
@@ -530,6 +540,16 @@ impl Term {
                                 let _ = w.write_all(reply.as_bytes());
                                 let _ = w.flush();
                             }
+                        // the desktop app's screen, and the answers to what the program asked it
+                        if let Some(m) = &mirror {
+                            let answers = m.feed(data);
+                            if !answers.is_empty()
+                                && let Some(w) = writer.lock().as_mut()
+                            {
+                                let _ = w.write_all(&answers);
+                                let _ = w.flush();
+                            }
+                        }
                         svc.bridge_output(&sid, data);
                         last_output.store(born.elapsed().as_millis() as u64, Ordering::Relaxed);
                         waker.wake();
@@ -662,7 +682,68 @@ impl Term {
             let _ = l.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         }
         self.parser.lock().screen_mut().set_size(rows, cols);
+        if let Some(m) = &self.mirror {
+            m.resize(rows, cols);
+        }
         self.svc.bridge_resize(&self.meta.sid, cols, rows);
+    }
+
+    /// The desktop app's copy of the screen.
+    pub fn mirror(&self) -> Option<&Arc<dyn super::mirror::ScreenMirror>> {
+        self.mirror.as_ref()
+    }
+
+    /// (rows, cols) of the pty.
+    pub fn pty_size(&self) -> (u16, u16) {
+        self.size
+    }
+
+    /// Lines scrolled back (0 = following the output).
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll
+    }
+
+    /// Scroll back `lines` (the desktop app clamps to its own history).
+    pub fn set_scroll_offset(&mut self, lines: usize) {
+        self.scroll = lines;
+    }
+
+    /// The screen row shown on the tile's top row (above 0 while a remote viewer grew the pty past the tile).
+    pub fn view_top(&self) -> u16 {
+        self.view_top
+    }
+
+    pub fn set_view_top(&mut self, row: u16) {
+        self.view_top = row;
+    }
+
+    /// Why the program couldn't start, if it couldn't.
+    pub fn spawn_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// The program is running (spawned and not yet reaped).
+    pub fn started(&self) -> bool {
+        self.live.is_some()
+    }
+
+    /// Which path-like words are files, resolved off the UI thread (for link detection).
+    pub fn file_cache(&self) -> &super::file_cache::FileCache {
+        &self.files
+    }
+
+    /// The program's terminal modes: bracketed paste, application cursor keys, mouse reporting.
+    pub fn program_modes(&self) -> (bool, bool, vt100::MouseProtocolMode, vt100::MouseProtocolEncoding) {
+        let s = self.program_state.lock();
+        (s.bracketed_paste, s.app_cursor, s.mouse_mode, s.mouse_encoding)
+    }
+
+    /// The visible screen as text rows (the model the agent tracking reads).
+    #[allow(dead_code)]
+    pub fn screen_rows(&self) -> Vec<String> {
+        let p = self.parser.lock();
+        let (_, cols) = p.screen().size();
+        p.screen().rows(0, cols).collect()
     }
 
     /// (rows, cols) of the pty.
@@ -1224,6 +1305,11 @@ impl Pane for Term {
             if matches!(key.code, crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Esc) {
                 cx.act(crate::pane::Action::Close);
             }
+            return true;
+        }
+        // a program on the kitty keyboard protocol gets it from the desktop app's screen
+        if let Some(bytes) = self.mirror.as_ref().and_then(|m| m.encode_key(&key)) {
+            self.send(&bytes);
             return true;
         }
         let app_cursor = self.program_state.lock().app_cursor;

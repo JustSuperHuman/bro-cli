@@ -33,8 +33,16 @@ fn cmd(prog: &str) -> Command {
 }
 
 /// Put text on the clipboard. Never blocks the UI: the OS tool runs on its own thread.
+/// The desktop app's own clipboard (set once at its start): when there is one, copies go straight to it instead
+/// of through the terminal (OSC 52) and the clipboard tools.
+pub static NATIVE: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
 pub fn copy(text: &str) {
     if cfg!(test) {
+        return;
+    }
+    if let Some(native) = NATIVE.get() {
+        native(text);
         return;
     }
     let seq = format!("\x1b]52;c;{}\x07", base64(text.as_bytes()));

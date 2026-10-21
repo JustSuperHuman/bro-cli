@@ -19,6 +19,7 @@ pub use std::time::Duration;
 pub const CHAT_SSE: &str = include_str!("../fixtures/chat_stream_tools.sse");
 pub const RESPONSES_SSE: &str = include_str!("../fixtures/responses_stream_codex.sse");
 pub const ANTHROPIC_SSE: &str = include_str!("../fixtures/anthropic_stream_tools.sse");
+pub const GEMINI_SSE: &str = include_str!("../fixtures/gemini_stream_tools.sse");
 
 // ------------------------------------------------------------------ mock upstream
 
@@ -116,6 +117,15 @@ pub async fn mock_handler(
         );
     }
 
+    if path.starts_with("/ca/") && path.ends_with("/v1internal:streamGenerateContent") {
+        if auth == "Bearer stale-at" {
+            return json_resp(401, json!({"error": {"code": 401, "message": "Request had invalid authentication credentials.", "status": "UNAUTHENTICATED"}}));
+        }
+        return sse(GEMINI_SSE);
+    }
+    if path.starts_with("/ca/") && path.ends_with("/v1internal:fetchAvailableModels") {
+        return json_resp(200, json!({"models": {"gemini-4-argon-medium": {"displayName": "Gemini 4 Argon"}}}));
+    }
     if path.ends_with("/chat/completions") {
         if stream {
             return sse(CHAT_SSE);
@@ -223,6 +233,16 @@ pub async fn env_with(token: Option<&str>) -> Env {
                 access_token: "chatgpt-at".into(),
                 account_id: Some("acct-1".into()),
                 api_key: None,
+            })
+        })),
+        // the first host is gone (404), the second is Code Assist
+        gemini_base_urls: vec![format!("{mock_base}/gone"), format!("{mock_base}/ca")],
+        // "stale" sign-ins hand out a token the mock rejects until a forced refresh
+        gemini_auth: Some(Arc::new(|file: &Path, force: bool| {
+            let stale = file.to_string_lossy().contains("stale") && !force;
+            Ok(bro_core::gemini::GeminiAuth {
+                access_token: if stale { "stale-at".into() } else { "google-at".into() },
+                project: "proj-7".into(),
             })
         })),
         keepalive: Duration::from_secs(15),

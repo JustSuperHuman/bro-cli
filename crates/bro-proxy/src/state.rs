@@ -101,6 +101,21 @@ impl AppState {
         }
     }
 
+    pub async fn gemini_auth(&self, file: &Path, force: bool) -> Result<bro_core::gemini::GeminiAuth, ProxyError> {
+        let f = self.opts.gemini_auth.clone();
+        let file_owned = file.to_path_buf();
+        let res = tokio::task::spawn_blocking(move || match f {
+            Some(f) => f(&file_owned, force),
+            None => bro_core::gemini::auth(&file_owned, force),
+        })
+        .await;
+        match res {
+            Ok(Ok(a)) => Ok(a),
+            Ok(Err(e)) => Err(ProxyError::new(ErrorKind::Authentication, format!("Gemini sign-in: {e:#}"))),
+            Err(e) => Err(ProxyError::api(format!("credential task failed: {e}"))),
+        }
+    }
+
     pub async fn codex_auth(&self, home: &Path, force: bool) -> Result<CodexAuth, ProxyError> {
         let f = self.opts.codex_auth.clone();
         let home_owned = home.to_path_buf();

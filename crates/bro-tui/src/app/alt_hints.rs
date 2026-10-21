@@ -91,6 +91,39 @@ impl App {
             put(f, x, y, r.right().saturating_sub(5), spans);
         }
 
+        // the project tabs: each tab's key over its first cell, then the keys that step through them
+        if self.strip.height > 0 {
+            use super::project_tabs::{StripHit, StripTab};
+            let projects: Vec<String> = self.project_tabs().into_iter().map(|t| t.key).collect();
+            let mut last = self.strip.x;
+            for (r, hit) in &self.side_hits {
+                let SideHit::Strip(hit) = hit else { continue };
+                let act = match hit {
+                    StripHit::Tab(StripTab::All) => Some(Act::ShowTab(0)),
+                    StripHit::Tab(StripTab::Orchestrator) => Some(Act::Orchestrator),
+                    StripHit::Tab(StripTab::Project(k)) => projects.iter().position(|p| p == k).filter(|i| *i < 9).map(|i| Act::ShowTab(i as u8 + 1)),
+                    StripHit::New => Some(Act::NewSession),
+                    _ => None,
+                };
+                if matches!(hit, StripHit::Tab(_) | StripHit::More) {
+                    last = last.max(r.right());
+                }
+                if let Some(k) = act.and_then(|a| self.alt_key(a)) {
+                    put(f, r.x, r.y, r.right(), vec![Span::styled(k, key)]);
+                }
+            }
+            let tips: Vec<(String, &str)> = [(Act::PrevProject, "‹ tab"), (Act::NextProject, "tab ›"), (Act::LastTab, "last")]
+                .into_iter()
+                .filter_map(|(a, what)| self.alt_key(a).map(|k| (k, what)))
+                .collect();
+            let w = width(&tips) as u16;
+            let x = last + 1;
+            if !tips.is_empty() && blank(f.buffer_mut(), x, self.strip.y, w, self.strip.x, self.strip.right()) {
+                let spans = tips.iter().flat_map(|(k, what)| [Span::styled(format!(" {k} "), key), Span::styled(format!(" {what} "), label)]).collect();
+                put(f, x, self.strip.y, self.strip.right(), spans);
+            }
+        }
+
         // the sidebar: session numbers light up, clickable spots show their key at their right end
         if self.side_area.width == 0 {
             return;

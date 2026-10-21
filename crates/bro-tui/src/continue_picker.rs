@@ -3,6 +3,10 @@
 //! Earlier sessions live here instead of cluttering the sidebar. Shift+arrows / shift+click pick a range,
 //! ctrl+space / ctrl+click pick one more; Enter then resumes every picked session.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::fuzzy;
 use crate::theme::Theme;
 use crate::ui::{self, fg, muted};

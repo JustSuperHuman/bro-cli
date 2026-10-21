@@ -1,5 +1,5 @@
 {
-  "#note": "Hosted at https://m.justgains.com/models.json and bundled as a fallback. Any field whose key starts with '#' is ignored (handy for notes + test data). 'mode' is one of: native (run Claude with your own login), anthropic (Anthropic-compatible base URL), openai (OpenAI-compatible — routed through the auto-installed proxy).",
+  "#note": "Hosted at https://m.justgains.com/models.json and bundled as a fallback. Any field whose key starts with '#' is ignored (handy for notes + test data). 'mode' is one of: native (run Claude with your own login), anthropic (Anthropic-compatible base URL), openai (OpenAI-compatible — routed through the auto-installed proxy), antigravity (Gemini on a Google AI subscription, signed in with `bro gemini login`, routed through the proxy).",
   "#note2": "'section': \"other\" groups a provider under 'Other Providers' at the bottom of the picker. 'catalogue': \"newapi\" marks a new-api relay (OpenLux, Yunwu): bro fetches its whole live catalogue from {baseUrl}/api/pricing and offers the per-model tier (upstream route) menu. The 'models' list is then only an offline fallback.",
   "version": 1,
   "docs": "https://justgains.com",
@@ -53,6 +53,23 @@
       },
       "models": [
         { "id": "muse-wonder-1.0", "name": "Muse Wonder 1.0", "context": 1048576 }
+      ]
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini (Google AI subscription)",
+      "mode": "antigravity",
+      "keyUrl": "https://gemini.google/subscriptions/",
+      "codex": {
+        "model_reasoning_summary": "auto",
+        "model_context_window": 1048576,
+        "model_supports_reasoning_summaries": true,
+        "model_auto_compact_token_limit": 900000
+      },
+      "models": [
+        { "id": "gemini-4-argon", "name": "Gemini 4 Argon", "context": 1048576, "maxOutput": 65536 },
+        { "id": "gemini-4-argon-high", "name": "Gemini 4 Argon (high thinking)", "context": 1048576, "maxOutput": 65536 },
+        { "id": "gemini-4-argon-low", "name": "Gemini 4 Argon (low thinking)", "context": 1048576, "maxOutput": 65536 }
       ]
     },
     {

@@ -5,6 +5,7 @@ pub mod keys;
 pub mod file_cache;
 pub mod insights;
 pub mod links;
+pub mod mirror;
 pub mod remote_min;
 pub mod term;
 mod writer;

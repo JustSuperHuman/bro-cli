@@ -1,6 +1,10 @@
 //! Usage view: big 5h / weekly meters for every profile, reset countdowns, headroom (≈ when capped by the
 //! measured 5h↔week ratio), plan, and the large/small task picks.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::pane::{Action, Cx, Pane};
 use crate::services::UsageEntry;
 use crate::theme::Theme;

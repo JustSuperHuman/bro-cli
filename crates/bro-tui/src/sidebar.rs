@@ -120,6 +120,53 @@ pub fn live_order(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Ve
     pinned.chain(groups(live, past, open).iter().flat_map(|g| g.live.iter().map(|l| l.pane))).collect()
 }
 
+/// A project with running sessions, as the project tabs show it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectTab {
+    pub key: String,
+    pub name: String,
+    pub root: PathBuf,
+    /// sessions in its grid (minimized ones aside)
+    pub live: usize,
+    /// minimized sessions, kept out of its grid
+    pub hidden: usize,
+    /// agents mid-turn
+    pub working: usize,
+    /// agents waiting on you
+    pub blocked: usize,
+    /// agents that finished while you weren't looking
+    pub done: usize,
+}
+
+impl ProjectTab {
+    /// Something here wants you: a question to answer or work to look at.
+    pub fn attention(&self) -> bool {
+        self.blocked + self.done > 0
+    }
+}
+
+/// Projects with running sessions (the orchestrator isn't one), in sidebar order, ignoring the filter;
+/// `hidden` sessions (minimized) count apart.
+pub fn project_tabs(live: &[LiveInfo], open: &[OpenInfo], hidden: &[PaneId]) -> Vec<ProjectTab> {
+    groups(live, &[], open)
+        .into_iter()
+        .filter(|g| !g.live.is_empty())
+        .map(|g| {
+            let count = |want: &dyn Fn(&LiveInfo) -> bool| g.live.iter().filter(|l| want(l)).count();
+            ProjectTab {
+                live: count(&|l| !hidden.contains(&l.pane)),
+                hidden: count(&|l| hidden.contains(&l.pane)),
+                working: count(&|l| l.activity == Some(Activity::Working)),
+                blocked: count(&|l| l.activity == Some(Activity::Blocked)),
+                done: count(&|l| l.done && l.activity != Some(Activity::Blocked)),
+                key: g.key,
+                name: g.name,
+                root: g.root,
+            }
+        })
+        .collect()
+}
+
 /// Project keys in sidebar order.
 #[cfg(test)]
 pub fn project_order(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<String> {
@@ -212,6 +259,19 @@ mod tests {
         assert_eq!(live_order(&l, &p, &opened(&["a", "b"])), vec![10, 11]);
         assert_eq!(project_order(&l, &p, &opened(&["a", "b"])), vec!["b", "x", "a"]);
         assert_eq!(kinds(&build(&l, &[], &opened(&["a"]), &SideState::default())), "P:x L11#1 P:b L10#2 P:a");
+    }
+
+    #[test]
+    fn project_tabs_are_projects_with_running_sessions_in_sidebar_order() {
+        let mut l = vec![live(1, "c", 1, Some(Activity::Working)), live(2, "b", 2, Some(Activity::Blocked)), live(3, "c", 3, None), live(5, "c", 5, None)];
+        l[2].done = true;
+        let mut boss = live(4, "bro:orchestrator", 4, None);
+        boss.orchestrator = true;
+        l.push(boss);
+        let tabs = project_tabs(&l, &opened(&["a", "b", "c"]), &[5]);
+        let summary: Vec<(&str, usize, usize, usize, usize, usize)> = tabs.iter().map(|t| (t.key.as_str(), t.live, t.hidden, t.working, t.blocked, t.done)).collect();
+        assert_eq!(summary, vec![("b", 1, 0, 0, 1, 0), ("c", 2, 1, 1, 0, 1)], "no tab for a project without sessions or for the orchestrator");
+        assert!(tabs.iter().all(|t| t.attention()));
     }
 
     #[test]

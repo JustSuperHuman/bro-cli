@@ -87,6 +87,57 @@ pub fn harness_glyph(h: Option<Harness>) -> &'static str {
     })
 }
 
+/// Glyph and brand colour for an API provider id ("openrouter", "my-gemini"), so a row reads as its brand at a
+/// glance: the provider's real logo when the terminal shows images (see icons.rs), else a one-cell symbol every
+/// font has. Anthropic and OpenAI reuse the Claude / Codex marks. Unknown providers get `◇` in `fallback`.
+pub fn provider_glyph(id: &str, fallback: Color, t: &Theme) -> (&'static str, Color) {
+    let id = id.to_ascii_lowercase();
+    let has = |k: &str| id.contains(k);
+    if has("anthropic") || has("claude") {
+        return (harness_glyph(Some(Harness::Claude)), harness_color(Some(Harness::Claude), t));
+    }
+    if has("openai") || has("chatgpt") || has("codex") {
+        return (harness_glyph(Some(Harness::Codex)), harness_color(Some(Harness::Codex), t));
+    }
+    // (logo, colour of its text glyph)
+    let (logo, color) = if has("gemini") || has("google") || has("vertex") {
+        ("gemini", Color::Rgb(0x6F, 0x9B, 0xF7))
+    } else if has("openrouter") {
+        ("openrouter", Color::Rgb(0x8B, 0x8D, 0xF8))
+    } else if has("deepseek") {
+        ("deepseek", Color::Rgb(0x4D, 0x6B, 0xFE))
+    } else if has("groq") {
+        ("groq", Color::Rgb(0xF5, 0x50, 0x36))
+    } else if has("mistral") || has("codestral") {
+        ("mistral", Color::Rgb(0xFA, 0x82, 0x1F))
+    } else if has("kimi") {
+        ("kimi", t.fg)
+    } else if has("moonshot") {
+        ("moonshot", t.fg)
+    } else if has("grok") {
+        ("grok", t.fg)
+    } else if has("xai") {
+        ("xai", t.fg)
+    } else if has("zhipu") || has("glm") || has("bigmodel") {
+        ("zhipu", Color::Rgb(0x3B, 0x5B, 0xFD))
+    } else if has("zai") || has("z.ai") {
+        ("zai", t.fg)
+    } else if has("meta") || has("llama") && !has("ollama") {
+        ("meta", Color::Rgb(0x1D, 0x7C, 0xF2))
+    } else if has("ollama") {
+        ("ollama", t.fg)
+    } else if has("lmstudio") || has("lm-studio") {
+        ("lmstudio", t.fg)
+    } else if has("qwen") || has("dashscope") || has("alibaba") {
+        ("qwen", Color::Rgb(0x61, 0x5C, 0xED))
+    } else if has("sakana") {
+        ("sakana", Color::Rgb(0xE5, 0x48, 0x4D))
+    } else {
+        return ("◇", fallback);
+    };
+    (crate::icons::glyph(logo), color)
+}
+
 /// The frame: rounded hairline border, bold title set into the top edge, an optional status on the right of the
 /// top edge and an optional subtitle bottom-right. Returns the inner rect.
 pub fn frame_ex(f: &mut Frame, area: Rect, title: Line<'_>, status: Option<Line<'_>>, subtitle: Option<&str>, focused: bool, t: &Theme) -> Rect {
@@ -172,8 +223,21 @@ pub fn session_frame_as(f: &mut Frame, area: Rect, title: Line<'_>, status: Opti
 
 /// A session's title band: the project color with dark ink when focused, else the color on its tint.
 pub fn band_style(color: Color, focused: bool, t: &Theme) -> Style {
-    let ink = if t.is_light() { Color::Rgb(255, 255, 255) } else { t.deep() };
-    if focused { fg(ink).bg(color).add_modifier(Modifier::BOLD) } else { fg(color).bg(crate::theme::project_tint(color, t)) }
+    if focused { fg(ink_on(color, t)).bg(color).add_modifier(Modifier::BOLD) } else { fg(color).bg(crate::theme::project_tint(color, t)) }
+}
+
+/// Text that reads on a solid `color`: whichever of dark ink or white contrasts more (WCAG), so a yellow project
+/// in a light theme gets dark text. A named terminal colour can't be measured: dark themes' bands take the dark
+/// ink, light ones white.
+pub fn ink_on(color: Color, t: &Theme) -> Color {
+    let Color::Rgb(r, g, b) = color else { return if t.is_light() { Color::Rgb(255, 255, 255) } else { t.deep() } };
+    let lin = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+    // white and near-black contrast equally at ~0.19
+    if lum > 0.19 { t.deep() } else { Color::Rgb(255, 255, 255) }
 }
 
 /// Where tiles share a border line, turn the corners they drew over each other into joins (┬ ┴ ├ ┤ ┼). Only cells

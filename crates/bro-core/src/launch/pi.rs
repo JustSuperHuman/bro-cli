@@ -278,6 +278,16 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
                 None => (Some((**p).clone()), None, p.id.clone()),
             }
         }
+        // A Google sign-in has no endpoint of its own for Pi: bro-proxy serves it.
+        Target::Provider(p, key) if p.is_google_login() => {
+            require_key(p, key)?;
+            let model = model.or_else(|| p.model_ids().first().copied());
+            let route = proxy_route(&p.id, model, ctx)?;
+            let prov = proxy_provider(&p.id, &route.base, model);
+            let token = route.token.clone();
+            cmd.route = Some(route.request);
+            (Some(prov), Some(token), p.id.clone())
+        }
         Target::Provider(p, key) => {
             require_key(p, key)?;
             (Some((**p).clone()), key.clone(), p.id.clone())

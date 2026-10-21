@@ -292,6 +292,20 @@ impl AppState {
         self.reconcile_projects();
     }
 
+    /// The published projects with any name a client gave them and their place in a client's order.
+    pub(crate) fn client_projects(&self) -> Vec<crate::ClientProject> {
+        let inner = self.inner.lock();
+        inner
+            .published_projects
+            .iter()
+            .map(|project| crate::ClientProject {
+                cwd: project.cwd.clone().into(),
+                name: (project.name != projects::directory_display_name(&project.cwd)).then(|| project.name.clone()),
+                order: inner.projects.order.iter().position(|id| *id == project.id),
+            })
+            .collect()
+    }
+
     pub(crate) fn recent_projects(&self) -> Vec<RememberedProject> {
         self.inner.lock().projects.recents()
     }

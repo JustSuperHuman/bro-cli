@@ -1,6 +1,10 @@
 //! Editing the watchdog reviewer's standing instructions (settings → Watchdog prompt). Saved to
 //! `[watchdog] prompt` in `~/.bro/v2.toml`; the text bro ships with is `bro_bridge::watchdog::DEFAULT_PROMPT`.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::textarea::TextArea;
 use crate::theme::Theme;
 use crate::ui::{self, fg, muted};

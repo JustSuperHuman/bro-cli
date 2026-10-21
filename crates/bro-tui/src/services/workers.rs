@@ -29,6 +29,18 @@ pub(super) fn spawn_all(svc: &Services) {
     }
 }
 
+/// What a second bro runs (see `Services::start_guest`): data and usage, nothing that owns a port or a hotkey.
+pub(super) fn spawn_guest(svc: &Services) {
+    spawn_usage_loop(svc);
+    spawn_data(svc);
+    svc.check_justtools();
+    let note = "your other bro runs it";
+    svc.update(|st| {
+        st.proxy.status = Avail::Unavailable(note.into());
+        st.bridge.status = Avail::Unavailable(note.into());
+    });
+}
+
 pub(super) fn spawn_data(svc: &Services) {
     let svc = svc.clone();
     std::thread::spawn(move || {
@@ -458,7 +470,17 @@ pub(super) fn spawn_bridge(svc: &Services) {
         // poll status while this bridge is the live one
         loop {
             match guard("bridge::status", || b.status()) {
-                Ok(status) => svc.update(|st| st.bridge.status = Avail::Ready(status)),
+                Ok(status) => {
+                    let projects: Vec<super::ClientProject> = guard("bridge::client_projects", || b.client_projects())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|p| super::ClientProject { key: svc.project_for(&p.cwd).key, name: p.name, order: p.order })
+                        .collect();
+                    svc.update(|st| {
+                        st.bridge.status = Avail::Ready(status);
+                        st.bridge.projects = projects;
+                    });
+                }
                 Err(e) => {
                     svc.update(|st| st.bridge.status = Avail::Unavailable(e));
                     break;

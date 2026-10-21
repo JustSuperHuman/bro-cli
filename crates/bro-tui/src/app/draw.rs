@@ -14,7 +14,8 @@ use ratatui::{
 };
 
 impl App {
-    /// Where panes go: the whole body (sessions are switched from the sidebar, there's no tab bar).
+    /// Where panes go: the whole body (sessions are switched from the sidebar; the project tabs, when on, sit
+    /// above it).
     pub(super) fn body_panes(&self) -> Rect {
         self.body
     }
@@ -75,6 +76,17 @@ impl App {
         self.body = Rect { x: area.x + side_w, width: area.width - side_w, ..area };
         self.side_area = Rect { width: side_w, ..area };
         self.side_hits.clear();
+        self.drawn_tab = self.showing_tab();
+        // the project tabs (a setting) take the body's top row, kept while anything is open so the sessions
+        // don't resize as projects come and go
+        self.strip = Rect::default();
+        if self.strip_on() && self.body.height >= 8 && self.body.width >= 24 {
+            self.strip = Rect { height: 1, ..self.body };
+            self.body = Rect { y: self.strip.y + 1, height: self.body.height - 1, ..self.body };
+            self.draw_project_tabs(f, self.strip);
+        } else {
+            self.strip_sel = None;
+        }
         if side_w > 0 {
             self.draw_sidebar(f, self.side_area);
             let edge = Rect { x: self.body.x - 1, width: 1, ..area };
@@ -194,6 +206,7 @@ impl App {
     }
 
     /// The visible sessions whose agent is mid-turn.
+    #[allow(dead_code)]
     pub(super) fn working_rects(&self) -> Vec<Rect> {
         self.inner.iter().filter(|(id, _)| self.panes.get(id).is_some_and(|p| p.is_terminal() && p.busy())).map(|(_, r)| *r).collect()
     }

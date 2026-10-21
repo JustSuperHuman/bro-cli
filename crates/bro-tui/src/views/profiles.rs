@@ -1,6 +1,10 @@
 //! Profiles view: every Claude account / Codex profile with its login state; add (then log in inside a PTY
 //! pane), log in again, and remove with a confirmation that names the exact directory.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::alerts::Kind;
 use crate::pane::{Action, Cx, Pane, Place};
 use crate::panes::term::{Meta, Spawn, Term};
@@ -44,17 +48,33 @@ pub struct ProfilesView {
     pending: Option<Pending>,
     selected_id: Option<String>,
     error: Option<String>,
+    /// while naming a new profile: its agent CLI isn't installed (looked up once, when the prompt opened)
+    missing: Option<Harness>,
 }
 
 impl Default for ProfilesView {
     fn default() -> Self {
-        ProfilesView { sel: 0, mode: Mode::List, scroll: 0, rows: 1, hits: vec![], pending: None, selected_id: None, error: None }
+        ProfilesView { sel: 0, mode: Mode::List, scroll: 0, rows: 1, hits: vec![], pending: None, selected_id: None, error: None, missing: None }
     }
 }
 
 impl ProfilesView {
     pub fn new() -> ProfilesView {
         ProfilesView::default()
+    }
+
+    /// Open straight on the name prompt for a new profile of this kind (setup's "add a login").
+    pub fn adding(kind: ProfileKind) -> ProfilesView {
+        let mut v = ProfilesView::default();
+        v.start_add(kind, false);
+        v
+    }
+
+    fn start_add(&mut self, kind: ProfileKind, demo: bool) {
+        let harness = if kind == ProfileKind::CodexProfile { Harness::Codex } else { Harness::Claude };
+        self.missing = (!demo && bro_core::agent_install::installed(harness).is_none()).then_some(harness);
+        self.error = None;
+        self.mode = Mode::Add(kind, String::new());
     }
 
     fn selected(&self, cx: &Cx) -> Option<Profile> {
@@ -82,30 +102,47 @@ impl ProfilesView {
 
     /// Open the profile's interactive login in a new terminal tab.
     fn login(&self, p: &Profile, cx: &mut Cx) {
-        match cx.svc.login_command(p) {
-            Ok(c) => {
-                let harness = if p.is_codex() { Harness::Codex } else { Harness::Claude };
-                let meta = Meta {
-                    sid: uuid::Uuid::new_v4().to_string(),
-                    harness: Some(harness),
-                    profile: Some(p.id.clone()),
-                    store: None,
-                    model: None,
-                    label: format!("login · {}", p.id),
-                    name: None,
-                    renamed: false,
-                    project: cx.svc.project_for(&c.cwd),
-                    cwd: c.cwd.clone(),
-                    started: std::time::Instant::now(),
-                    route_id: None,
-                    cleanup: vec![],
-                    orchestrator: false,
-                };
-                let term = Term::new(meta, Spawn { program: c.program, args: c.args, env: c.env, env_remove: c.env_remove }, cx.svc.clone());
-                cx.act(Action::Open(Box::new(term), Place::Tab));
-            }
-            Err(e) => cx.toast(Kind::Error, e),
+        open_login(p, cx);
+    }
+}
+
+/// Login tabs are labelled `login · <profile id>`; closing one reads the profiles again.
+pub const LOGIN_LABEL: &str = "login · ";
+
+/// Open a profile's interactive login in a new terminal tab and watch it until it reads signed in. When its
+/// agent CLI isn't installed, open the installer instead: logging in runs that CLI.
+pub fn open_login(p: &Profile, cx: &mut Cx) {
+    let harness = if p.is_codex() { Harness::Codex } else { Harness::Claude };
+    if !cx.svc.is_demo() && bro_core::agent_install::installed(harness).is_none() {
+        let name = bro_core::agent_install::display_name(harness);
+        cx.toast(Kind::Info, format!("{name} isn't installed yet: installing it. Then log in to {} (l in profiles).", p.id));
+        let cwd = std::env::current_dir().unwrap_or_default();
+        cx.act(Action::Open(Box::new(super::quick_install::install_term(cx.svc, cwd, &[harness.label()])), Place::Tab));
+        return;
+    }
+    match cx.svc.login_command(p) {
+        Ok(c) => {
+            let meta = Meta {
+                sid: uuid::Uuid::new_v4().to_string(),
+                harness: Some(harness),
+                profile: Some(p.id.clone()),
+                store: None,
+                model: None,
+                label: format!("{LOGIN_LABEL}{}", p.id),
+                name: None,
+                renamed: false,
+                project: cx.svc.project_for(&c.cwd),
+                cwd: c.cwd.clone(),
+                started: std::time::Instant::now(),
+                route_id: None,
+                cleanup: vec![],
+                orchestrator: false,
+            };
+            let term = Term::new(meta, Spawn { program: c.program, args: c.args, env: c.env, env_remove: c.env_remove }, cx.svc.clone());
+            cx.act(Action::Open(Box::new(term), Place::Tab));
+            cx.svc.watch_login(p.id.clone());
         }
+        Err(e) => cx.toast(Kind::Error, e),
     }
 }
 
@@ -176,7 +213,8 @@ impl Pane for ProfilesView {
             Mode::Add(kind, name) => {
                 let family = if *kind == ProfileKind::ClaudeAccount { "Claude" } else { "Codex" };
                 ui::line(f, prompt, vec![Span::styled(format!(" {family} profile name: {name}▏"), ui::bold_accent(t))]);
-                let message = self.error.as_deref().unwrap_or("1–40 letters, digits, . _ - (example: work). 'local' is reserved.");
+                let missing = self.missing.map(|h| format!("{} isn't installed: Create installs it first, then log in with l.", bro_core::agent_install::display_name(h)));
+                let message = self.error.as_deref().or(missing.as_deref()).unwrap_or("1–40 letters, digits, . _ - (example: work). 'local' is reserved.");
                 ui::line(f, detail, vec![Span::styled(message, if self.error.is_some() { fg(t.danger) } else { muted(t) })]);
                 self.button(f, Rect { width: 22.min(area.width), ..buttons }, " Create + log in (↵) ", KeyCode::Enter, cx);
                 if area.width >= 37 {
@@ -242,8 +280,8 @@ impl Pane for ProfilesView {
             KeyCode::End => self.sel = n.saturating_sub(1),
             KeyCode::PageDown => self.sel = (self.sel + self.rows).min(n.saturating_sub(1)),
             KeyCode::PageUp => self.sel = self.sel.saturating_sub(self.rows),
-            KeyCode::Char('a') => { self.error = None; self.mode = Mode::Add(ProfileKind::ClaudeAccount, String::new()); }
-            KeyCode::Char('c') => { self.error = None; self.mode = Mode::Add(ProfileKind::CodexProfile, String::new()); }
+            KeyCode::Char('a') => self.start_add(ProfileKind::ClaudeAccount, cx.svc.is_demo()),
+            KeyCode::Char('c') => self.start_add(ProfileKind::CodexProfile, cx.svc.is_demo()),
             KeyCode::Char('r') => {
                 cx.svc.refresh_data();
                 cx.toast(Kind::Info, "reloading profiles…");
@@ -306,7 +344,9 @@ impl Pane for ProfilesView {
             Pending::Create(kind, name, rx) => match rx.try_recv() {
                 Ok(Ok(p)) => {
                     self.selected_id = Some(p.id.clone());
-                    cx.toast(Kind::Info, format!("Created {}. Complete sign-in in the login tab.", p.id));
+                    if self.missing.is_none() {
+                        cx.toast(Kind::Info, format!("Created {}. Complete sign-in in the login tab.", p.id));
+                    }
                     self.login(&p, cx);
                 }
                 Ok(Err(e)) => { self.error = Some(e); self.mode = Mode::Add(kind, name); }

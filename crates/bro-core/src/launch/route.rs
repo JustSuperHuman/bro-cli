@@ -30,6 +30,8 @@ pub enum UpstreamTarget {
     ClaudeOAuth { config_dir: PathBuf },
     /// The Claude account pool (signed-in pool accounts)
     ClaudePool { config_dirs: Vec<PathBuf> },
+    /// Gemini on Cloud Code Assist with a Google AI subscription sign-in (`bro gemini login`)
+    GeminiCodeAssist { creds_file: PathBuf },
 }
 
 /// Resolve an upstream string ("pool", "claude:<p>", "codex:<p>" or a provider id; an
@@ -66,5 +68,12 @@ pub fn resolve_upstream(upstream: &str, model: Option<&str>, cfg: &Config) -> an
         },
         ProviderMode::Anthropic => UpstreamTarget::Anthropic { base_url: base, api_key: key, bearer: true },
         ProviderMode::Openai => UpstreamTarget::OpenAiChat { base_url: normalize_openai_base_url(&base), api_key: key },
+        ProviderMode::Antigravity => {
+            let creds_file = crate::gemini::creds_path();
+            if !crate::gemini::signed_in(&creds_file) {
+                bail!("{}", crate::gemini::SIGN_IN_HINT);
+            }
+            UpstreamTarget::GeminiCodeAssist { creds_file }
+        }
     })
 }

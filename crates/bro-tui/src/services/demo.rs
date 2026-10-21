@@ -93,6 +93,7 @@ pub fn fill(st: &mut State) {
         provider("openrouter", "OpenRouter", ProviderMode::Anthropic, "https://openrouter.ai/api", vec![model("moonshotai/kimi-k2", "Kimi K2"), model("qwen/qwen3-coder", "Qwen3 Coder"), model("x-ai/grok-code-fast-1", "Grok Code Fast")]),
         provider("zai", "Z.ai", ProviderMode::Anthropic, "https://api.z.ai/api/anthropic", vec![model("glm-4.6", "GLM 4.6"), model("glm-4.5-air", "GLM 4.5 Air")]),
         provider("deepseek", "DeepSeek", ProviderMode::Openai, "https://api.deepseek.com/v1", vec![model("deepseek-chat", "DeepSeek V3.2")]),
+        provider("gemini", "Gemini (Google AI subscription)", ProviderMode::Antigravity, "", vec![model("gemini-4-argon", "Gemini 4 Argon"), model("gemini-4-argon-high", "Gemini 4 Argon (high thinking)")]),
     ]);
     st.models = demo_models(st.providers.ready().map(Vec::as_slice).unwrap_or(&[]));
     st.past = Avail::Ready(vec![

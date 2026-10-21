@@ -15,6 +15,12 @@ path = "src/main.rs"
 name = "bro-app"
 path = "src/bin/bro-app.rs"
 
+
+[features]
+default = ["gui"]
+# the desktop app (`bro gui`): wgpu renderer, alacritty_terminal screens, photo and video previews
+gui = ["dep:bro-gfx", "dep:bro-media", "dep:winit", "dep:alacritty_terminal", "dep:image", "dep:arboard"]
+
 [dependencies]
 bro-core.workspace = true
 bro-proxy.workspace = true
@@ -42,10 +48,17 @@ url = "2"
 # file preview highlighting: pure-Rust regex engine (no oniguruma), bat's extra grammars (TypeScript, TOML…)
 syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+# desktop app
+bro-gfx = { path = "../bro-gfx", optional = true }
+bro-media = { path = "../bro-media", optional = true }
+winit = { version = "0.30.13", optional = true }
+alacritty_terminal = { version = "0.26", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+arboard = { version = "3.7", default-features = false, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Dwm"] }
 
 [dev-dependencies]
 tempfile.workspace = true

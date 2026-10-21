@@ -28,17 +28,23 @@ pub enum Command {
     EnvHelp,
     /// `bro imagine` — open the running JustImagine gallery, signed in.
     Imagine,
+    /// `bro gemini login | status | logout` — the Google sign-in behind the `gemini` provider.
+    Gemini(crate::gemini_cmd::GeminiCmd),
+    GeminiHelp,
 }
 
 /// Usage text (`{version}` is substituted).
 pub const HELP: &str = "bro {version} — the agentic terminal workspace for Claude Code, Codex, Pi and omp
 
 usage
-  bro              open the workspace
-  bro [folder]     open the workspace with that folder (default: here) as the current project;
+  bro              open the desktop app (over SSH or with no display: the terminal UI)
+  bro [folder]     open it with that folder (default: here) as the current project;
                    if bro is already running, the folder opens there instead
+  bro-cli          the same workspace as a terminal UI (also: bro --tui); takes the same
+                   folder and flags
   bro --new        a separate bro even when one is running
   bro --demo       open with realistic fake data (screenshots; touches no accounts)
+  bro gui [folder] the desktop app, even where bro would pick the terminal UI
   bro proxy <upstream> [-m model] [--small-model m] [--port n]
                    run the translating proxy headless (upstream: pool, claude:<profile>,
                    codex:<profile> or a provider id) and print harness env vars
@@ -51,7 +57,7 @@ usage
   bro update [--check]
                    install the newest bro release over this one (--check: only look)
   bro install [tools… | recommended | agents | all] [--force]
-                   Quick Install: JustTools, JustWatch, Git, Node.js, Bun, Python, .NET 9/10/11,
+                   Quick Install: JustTools, JustPaste, JustWatch, Git, Node.js, Bun, Python, .NET 9/10/11,
                    Claude Code, Codex, Pi, omp… (no names: pick from a list)
   bro --env <file|url> [--save] [command]
                    load API keys and settings from an env file (encrypted ones ask for a
@@ -62,6 +68,9 @@ usage
   bro --export-env [file] [--plain]
                    your own environment variables as an encrypted env file (bro.env by
                    default, asks for a passphrase), to load anywhere with --env
+  bro gemini login | status | logout
+                   sign in with Google to run Claude Code, Codex and Pi on Gemini 4 Argon through
+                   your Google AI subscription (status: plan and quota left per model)
   bro imagine      open your JustImagine gallery in the browser, signed in, and refresh the
                    generate-images, -video and -voice skills for your agents
   bro --version    print the version
@@ -102,6 +111,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             None => Ok(Command::Imagine),
             Some(other) => Err(format!("bro imagine: unknown argument '{other}'")),
         };
+    }
+    if args.first().map(String::as_str) == Some("gemini") {
+        return crate::gemini_cmd::parse(&args[1..]).map(|a| a.map_or(Command::GeminiHelp, Command::Gemini));
     }
     if args.first().map(String::as_str) == Some("install") {
         return crate::install_cmd::parse(&args[1..]).map(|a| a.map_or(Command::InstallHelp, Command::Install));
@@ -148,6 +160,8 @@ mod tests {
         assert!(matches!(p(&["env", "list", "k.env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::List { .. }))));
         assert_eq!(p(&["env"]), Ok(Command::EnvHelp));
         assert_eq!(p(&["imagine"]), Ok(Command::Imagine));
+        assert_eq!(p(&["gemini", "login"]), Ok(Command::Gemini(crate::gemini_cmd::GeminiCmd::Login { wait: false })));
+        assert_eq!(p(&["gemini"]), Ok(Command::GeminiHelp));
         assert_eq!(p(&["--export-env", "me.env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::Export { out: "me.env".into(), plain: false, all: false, force: false })));
         assert!(matches!(p(&["--export-env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::Export { ref out, plain: false, .. })) if out == "bro.env"));
     }

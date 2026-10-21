@@ -114,6 +114,12 @@ pub fn definitions() -> Vec<Value> {
             &["sessionId"],
         ),
         tool(
+            "show_project",
+            "Show one project's sessions tiled together in bro's window (its project tab), or every session when project is omitted. Use when the user wants to look at a project's agents side by side.",
+            json!({ "project": { "type": "string", "description": "Project id, name or folder from list_projects; omit for every session." } }),
+            &[],
+        ),
+        tool(
             "list_chats",
             "List past and current Claude Code / Codex chats saved on disk, newest first: chatId, title (first prompt), directory, project, last activity, transcript path.",
             json!({
@@ -431,6 +437,10 @@ pub fn summarize(app: &AppState, name: &str, args: &Value) -> String {
             string_arg(args, "query").unwrap_or_default()
         ),
         "focus_session" => format!("Brought {} to the front", target()),
+        "show_project" => match string_arg(args, "project") {
+            Some(project) => format!("Showed {project}'s sessions"),
+            None => "Showed every session".into(),
+        },
         "list_chats" => "Listed chats".into(),
         "read_chat" => match string_arg(args, "chatId") {
             Some(chat) => format!("Read chat {}", chat.chars().take(8).collect::<String>()),
@@ -711,6 +721,18 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             app.send_command(BridgeCommand::Focus { id: id.clone() });
             Ok(format!("\"{}\" is in front.", session_label(app, &id)))
         }
+        "show_project" => match string_arg(args, "project") {
+            None => {
+                app.send_command(BridgeCommand::Tile { project: None });
+                Ok("Every session is tiled in bro's window.".into())
+            }
+            Some(wanted) => {
+                let id = resolve_project(app, &wanted)?;
+                let project = app.projects().into_iter().find(|project| project.id == id).ok_or("That project just closed.")?;
+                app.send_command(BridgeCommand::Tile { project: Some(project.cwd.clone().into()) });
+                Ok(format!("{}'s sessions are tiled in bro's window.", project.name))
+            }
+        },
         "list_chats" => {
             let project = string_arg(args, "project");
             let query = string_arg(args, "query");

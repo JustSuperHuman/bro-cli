@@ -78,6 +78,12 @@ else
   cp "$tmp/$name/bro" "$dir/.bro.new"
   chmod 755 "$dir/.bro.new"
   mv -f "$dir/.bro.new" "$dir/bro"
+  # bro-cli: the terminal UI (bro on its own opens the desktop app)
+  if [ -f "$tmp/$name/bro-cli" ]; then
+    cp "$tmp/$name/bro-cli" "$dir/.bro-cli.new"
+    chmod 755 "$dir/.bro-cli.new"
+    mv -f "$dir/.bro-cli.new" "$dir/bro-cli"
+  fi
   if [ -n "$update" ]; then
     echo "$("$dir/bro" --version) installed. Restart bro to use it."
   else
@@ -102,8 +108,8 @@ if "$dir/bro" --help 2>/dev/null | grep -q 'bro install'; then
 fi
 [ -n "$update" ] && exit 0
 case ":$PATH:" in
-  *":$dir:"*) echo "Run: bro" ;;
+  *":$dir:"*) echo "Run: bro (the desktop app) or bro-cli (in the terminal)" ;;
   *) echo "Add $dir to your PATH, e.g.:"
      echo "  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.profile"
-     echo "Then open a new terminal and run: bro" ;;
+     echo "Then open a new terminal and run: bro (the desktop app) or bro-cli (in the terminal)" ;;
 esac

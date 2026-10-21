@@ -69,7 +69,7 @@ impl Installed {
     }
 }
 
-fn exe(name: &str) -> String {
+pub(crate) fn exe(name: &str) -> String {
     if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
 }
 
@@ -93,7 +93,7 @@ fn find_in(dirs: &[PathBuf]) -> Option<PathBuf> {
     dirs.iter().find(|d| !d.as_os_str().is_empty() && d.join(exe("justready")).is_file() && d.join(exe("just")).is_file()).cloned()
 }
 
-fn quiet(cmd: &mut Command) -> &mut Command {
+pub(crate) fn quiet(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

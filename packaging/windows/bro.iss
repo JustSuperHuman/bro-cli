@@ -1,8 +1,9 @@
-; bro for Windows: a per-user installer (no admin prompt) that puts bro.exe and bro-app.exe in
-; %LOCALAPPDATA%\Programs\bro (where install.ps1 installs too), adds a "bro" Start menu entry that opens bro in
-; its own window, optionally a desktop shortcut, and puts bro on your PATH for terminals.
+; bro for Windows: a per-user installer (no admin prompt) that puts bro.exe, bro-app.exe and bro-cli.cmd in
+; %LOCALAPPDATA%\Programs\bro (where install.ps1 installs too), adds a "bro" Start menu entry that opens the
+; desktop app, optionally a desktop shortcut, and puts bro on your PATH for terminals (bro opens the desktop
+; app, bro-cli the terminal UI).
 ;
-; Build: ISCC /DAppVersion=2.0.22 /DBinDir=<folder with bro.exe, bro-app.exe, README.md, LICENSE> ^
+; Build: ISCC /DAppVersion=2.0.22 /DBinDir=<folder with bro.exe, bro-app.exe, bro-cli.cmd, README.md, LICENSE> ^
 ;             /DOutputName=bro-v2.0.22-x86_64-pc-windows-msvc-setup /O<out dir> packaging\windows\bro.iss
 ;
 ; Updating over a running bro works: the running executables are renamed to *.old first (Windows lets a running
@@ -51,18 +52,19 @@ CloseApplications=no
 RestartApplications=no
 
 [Tasks]
-Name: "addtopath"; Description: "Add bro to my PATH, so ""bro"" works in any terminal"
+Name: "addtopath"; Description: "Add bro to my PATH, so ""bro"" and ""bro-cli"" work in any terminal"
 Name: "desktopicon"; Description: "Put a bro shortcut on my desktop"; Flags: unchecked
 
 [Files]
 Source: "{#BinDir}\bro.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\bro-app.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\bro-cli.cmd"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\bro"; Filename: "{app}\bro-app.exe"; WorkingDir: "{%USERPROFILE}"; Comment: "Open bro, the agentic terminal workspace, in its own window"
-Name: "{autodesktop}\bro"; Filename: "{app}\bro-app.exe"; WorkingDir: "{%USERPROFILE}"; Comment: "Open bro, the agentic terminal workspace, in its own window"; Tasks: desktopicon
+Name: "{autoprograms}\bro"; Filename: "{app}\bro-app.exe"; WorkingDir: "{%USERPROFILE}"; Comment: "Open bro, the workspace for your coding agents"
+Name: "{autodesktop}\bro"; Filename: "{app}\bro-app.exe"; WorkingDir: "{%USERPROFILE}"; Comment: "Open bro, the workspace for your coding agents"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\bro-app.exe"; Description: "Open bro now"; WorkingDir: "{%USERPROFILE}"; Flags: nowait postinstall skipifsilent

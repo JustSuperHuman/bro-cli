@@ -17,6 +17,7 @@ mod clip;
 mod console_nav;
 mod editor;
 mod env_cmd;
+mod gemini_cmd;
 mod file_view;
 mod folder;
 mod fonts;
@@ -60,6 +61,11 @@ fn main() -> ExitCode {
         args.remove(i);
         fonts::APP_WINDOW.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    // `bro-cli` (`--tui`, or BRO_UI=tui): the terminal UI; so does the terminal fork hosting bro (`--app-window`)
+    let tui = take_tui_flag(&mut args) || fonts::APP_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    // `bro gui [folder] [--new] [--demo]`: the desktop app even where bro would pick the terminal UI
+    #[cfg(feature = "gui")]
+    let gui = app::gui::take_flag(&mut args);
     // `--env <file|url> [--save]`: into bro's environment before any thread starts, so everything inherits it
     let env = match env_cmd::take_flags(&mut args) {
         Ok(env) => env,
@@ -143,6 +149,17 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(cli::Command::GeminiHelp) => {
+            print!("{}", gemini_cmd::HELP);
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Command::Gemini(cmd)) => match gemini_cmd::run(cmd) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro gemini: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(cli::Command::InstallHelp) => {
             print!("{}", install_cmd::HELP);
             ExitCode::SUCCESS
@@ -162,7 +179,22 @@ fn main() -> ExitCode {
             }
         },
         // a running bro has its own environment: with --env, open a new one that has these variables
-        Ok(cli::Command::Tui { demo, new, dir }) => match run_tui(demo, new || !env.sources.is_empty(), dir) {
+        // `bro` opens the desktop app wherever there's a desktop to open it on; `bro-cli` the terminal UI
+        #[cfg(feature = "gui")]
+        Ok(cli::Command::Tui { demo, new, dir }) if gui.is_some() || (!tui && desktop()) => {
+            ensure_bro_cli();
+            match app::gui::launch(gui.unwrap_or_default(), demo, new || !env.sources.is_empty(), dir) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("bro: {e:#}\n(bro-cli opens the terminal UI)");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Ok(cli::Command::Tui { demo, new, dir }) => match {
+            ensure_bro_cli();
+            run_tui(demo, new || !env.sources.is_empty(), dir)
+        } {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("bro: {e:#}");
@@ -175,6 +207,51 @@ fn main() -> ExitCode {
         }
     }
 }
+/// `--tui` / `--cli` (what `bro-cli` passes) or BRO_UI=tui|cli: the terminal UI rather than the desktop app.
+fn take_tui_flag(args: &mut Vec<String>) -> bool {
+    let mut tui = std::env::var("BRO_UI").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "tui" | "cli" | "terminal"));
+    while let Some(i) = args.iter().position(|a| a == "--tui" || a == "--cli") {
+        args.remove(i);
+        tui = true;
+    }
+    tui
+}
+
+/// A desktop to open a window on: not over SSH, and on Linux and the BSDs an X11 or Wayland display.
+#[cfg(feature = "gui")]
+fn desktop() -> bool {
+    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    if set("SSH_CONNECTION") || set("SSH_TTY") {
+        return false;
+    }
+    if cfg!(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")) {
+        return set("DISPLAY") || set("WAYLAND_DISPLAY");
+    }
+    true
+}
+
+/// `bro-cli` beside this bro: written when it's missing (an update from a release that didn't ship it brings only
+/// bro itself). Not in a build folder.
+fn ensure_bro_cli() {
+    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(std::path::Path::to_path_buf)) else { return };
+    if dir.ends_with("debug") || dir.ends_with("release") || dir.ends_with("deps") {
+        return;
+    }
+    #[cfg(windows)]
+    let (name, body) = ("bro-cli.cmd", include_str!("../../../packaging/bro-cli.cmd"));
+    #[cfg(not(windows))]
+    let (name, body) = ("bro-cli", include_str!("../../../packaging/bro-cli"));
+    let path = dir.join(name);
+    if path.exists() || util::atomic_write(&path, body.as_bytes()).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
 /// Set up the terminal, start services, run the app, restore the terminal.
 fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     use crossterm::{event, execute, terminal};

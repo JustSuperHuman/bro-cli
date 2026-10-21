@@ -1,6 +1,8 @@
-//! `bro-app` — open bro in its own window, like an app (the Start menu / desktop entry point).
+//! `bro-app` — open bro in its own window, like an app (the Start menu / desktop entry point): the desktop app
+//! (`bro gui`), started without a console. A windows-subsystem program, so launching it never flashes one.
 //!
-//! It hosts `bro` in the JustTerminal fork's app mode (`--app`: no tab strip, no Terminal shortcuts — so
+//! `bro-app --terminal` keeps the old way: the terminal UI in its own terminal window. It hosts `bro` in the
+//! JustTerminal fork's app mode (`--app`: no tab strip, no Terminal shortcuts — so
 //! ctrl+tab and friends reach bro — and bro's icon on the window and taskbar). Without the fork it falls back
 //! to Windows Terminal in a new window, then to a plain console window. `BRO_TERMINAL=<path to wt.exe>` picks
 //! the terminal; arguments are passed on to bro (e.g. a folder to open).
@@ -26,11 +28,45 @@ const LAUNCH_CHECK: Duration = Duration::from_secs(4);
 const ICON: &[u8] = include_bytes!("../../assets/bro.ico");
 
 fn main() {
-    let args = new_instance_args(std::env::args().skip(1).collect());
-    let bro = find_bro();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    match args.iter().position(|a| a == "--terminal") {
+        Some(i) => {
+            args.remove(i);
+            terminal(args);
+        }
+        None => desktop(args),
+    }
+}
+
+/// The desktop app: `bro gui` from the newest bro, hidden from the console (a console bro.exe gets one, hidden:
+/// its sessions' programs share it instead of each opening their own).
+fn desktop(args: Vec<String>) {
+    let mut cmd = Command::new(find_bro());
+    cmd.arg("gui").arg("--gui-child").args(&args);
+    if let Ok(cwd) = std::env::current_dir() {
+        cmd.current_dir(cwd);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    if cmd.spawn().is_err() {
+        std::process::exit(1);
+    }
+}
+
+/// The terminal UI in its own terminal window (`bro-app --terminal`).
+fn terminal(args: Vec<String>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| dirs::home_dir().unwrap_or_default());
+    // a taskbar pin reopens it the same way: in a terminal
+    let pinned: Vec<String> = std::iter::once("--terminal".to_string()).chain(args.iter().cloned()).collect();
+    let relaunch = std::env::current_exe().ok().map(|launcher| relaunch_command(&launcher, &cwd, &pinned));
+    let mut args = new_instance_args(args);
+    args.insert(0, "--tui".into());
+    let bro = find_bro();
     let icon = icon_file();
-    let relaunch = std::env::current_exe().ok().map(|launcher| relaunch_command(&launcher, &cwd, &args));
     // BRO_TERMINAL first, then the fork's builds in order: each in app mode until one opens
     let chosen = std::env::var_os("BRO_TERMINAL").map(PathBuf::from).filter(|p| present(p));
     let app_mode = chosen.into_iter().chain(fork_terminals()).any(|wt| {

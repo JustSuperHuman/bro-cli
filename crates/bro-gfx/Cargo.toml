@@ -1,0 +1,20 @@
+[package]
+name = "bro-gfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "bro's GPU renderer: rounded rects, soft shadows, text (cosmic-text + swash) and images on wgpu"
+
+[dependencies]
+wgpu = "30"
+cosmic-text = "0.19"
+swash = "0.2"
+etagere = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+pollster = "1"
+
+[dev-dependencies]
+winit = "0.30.13"
+png = "0.18"

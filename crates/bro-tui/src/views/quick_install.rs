@@ -1,9 +1,14 @@
-//! Quick Install view: a checklist of the tools a coding machine wants — JustTools first, JustWatch on Windows, JustImagine, then Git,
+//! Quick Install view: a checklist of the tools a coding machine wants — JustTools first, JustPaste and JustWatch on Windows, JustImagine, then Git,
 //! Node.js, Bun, Python, the .NET SDKs, the agent CLIs and a few utilities — with what's already
 //! installed. JustTools installs in the background like in settings; the rest run in a new tab
 //! (`bro install --wait …`) so each installer's progress and its password / UAC prompts are visible.
-//! Once a JustWatch installed from here shows up, its skill is switched on for new sessions; once JustImagine does,
+//! JustPaste (it comes with JustTools) is switched on in the background once JustTools is here. Once a JustWatch
+//! installed from here shows up, its skill is switched on for new sessions; once JustImagine does,
 //! bro looks at it again so settings show its version.
+
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
 
 use super::settings::{spinner, step_label};
 use crate::alerts::Kind;
@@ -33,16 +38,22 @@ const WATCH_FOR: Duration = Duration::from_secs(15 * 60);
 
 /// A tab running `bro install --wait <ids>`: the installers' output and prompts, kept open at the end.
 pub fn install_term(svc: &Services, cwd: PathBuf, ids: &[&str]) -> Term {
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "bro".into());
     let names: Vec<&str> = ids.iter().copied().filter(|i| !i.starts_with('-')).collect();
     let label = if names.len() == 1 { format!("install {}", names[0]) } else { "quick install".into() };
+    let args: Vec<&str> = ["install", "--wait"].into_iter().chain(ids.iter().copied()).collect();
+    bro_term(svc, cwd, &label, &args)
+}
+
+/// A tab running this bro with `args` (a CLI command that shows its own progress).
+pub fn bro_term(svc: &Services, cwd: PathBuf, label: &str, args: &[&str]) -> Term {
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "bro".into());
     let meta = Meta {
         sid: uuid::Uuid::new_v4().to_string(),
         harness: None,
         profile: None,
         store: None,
         model: None,
-        label,
+        label: label.to_string(),
         name: None,
         renamed: false,
         project: svc.project_for(&cwd),
@@ -52,7 +63,7 @@ pub fn install_term(svc: &Services, cwd: PathBuf, ids: &[&str]) -> Term {
         cleanup: vec![],
         orchestrator: false,
     };
-    let args = ["install", "--wait"].into_iter().chain(ids.iter().copied()).map(String::from).collect();
+    let args = args.iter().map(|a| a.to_string()).collect();
     Term::new(meta, Spawn { program: exe, args, ..Spawn::default() }, svc.clone())
 }
 
@@ -139,7 +150,8 @@ impl QuickInstallView {
     }
 
     fn installed(&self, t: Tool, cx: &Cx) -> bool {
-        if t == Tool::JustTools && cx.svc.state().justtools.installed.is_some() {
+        let jt = &cx.svc.state().justtools;
+        if (t == Tool::JustTools && jt.installed.is_some()) || (t == Tool::JustPaste && jt.paste.is_some_and(|p| p.running)) {
             return true;
         }
         self.found.as_ref().is_some_and(|f| f.status.contains_key(&t))
@@ -153,7 +165,11 @@ impl QuickInstallView {
 
     fn toggle(&mut self, t: Tool, cx: &mut Cx) {
         if self.installed(t, cx) {
-            let how = if matches!(t, Tool::JustTools | Tool::JustImagine) { "settings update it" } else { "`bro install --force` reinstalls it" };
+            let how = match t {
+                Tool::JustTools | Tool::JustImagine => "settings update it",
+                Tool::JustPaste => "settings turn it off",
+                _ => "`bro install --force` reinstalls it",
+            };
             cx.toast(Kind::Info, format!("{} is already installed · {how}", t.name()));
             return;
         }
@@ -180,7 +196,8 @@ impl QuickInstallView {
         if tools.contains(&Tool::JustTools) && cx.svc.state().justtools.job.is_none() {
             cx.svc.install_justtools();
         }
-        let rest: Vec<&str> = tools.iter().filter(|t| **t != Tool::JustTools).map(|t| t.id()).collect();
+        // JustPaste switches on in the background too, once JustTools is here (see `poll`)
+        let rest: Vec<&str> = tools.iter().filter(|t| !matches!(t, Tool::JustTools | Tool::JustPaste)).map(|t| t.id()).collect();
         if !rest.is_empty() {
             let cwd = std::env::current_dir().unwrap_or_default();
             cx.act(Action::Open(Box::new(install_term(cx.svc, cwd, &rest)), Place::Tab));
@@ -229,6 +246,14 @@ impl Pane for QuickInstallView {
                 cx.svc.check_justimagine(true);
             }
         }
+        // JustPaste comes with JustTools: switch it on once JustTools is here and not mid-install
+        if self.started.contains(&Tool::JustPaste) {
+            let jt = cx.svc.state().justtools.clone();
+            if jt.installed.is_some() && jt.job.is_none() && jt.paste_busy.is_none() {
+                self.started.remove(&Tool::JustPaste);
+                cx.svc.set_smart_paste(true);
+            }
+        }
         if self.watching.is_some_and(|w| w.elapsed() > WATCH_FOR) {
             self.watching = None;
         }
@@ -251,7 +276,7 @@ impl Pane for QuickInstallView {
         let area = ui::hint_line(f, area, &[("j/k", "move"), ("space", "tick"), ("i", "install"), ("a/n", "all / none"), ("r", "look again")], t);
         let all = rows();
         let jt = cx.svc.state().justtools.clone();
-        self.busy = jt.job.is_some();
+        self.busy = jt.job.is_some() || jt.paste_busy.is_some();
         let checking = self.found.is_none();
         let picked = self.picked.clone().unwrap_or_default();
         let mut lines: Vec<(Option<usize>, Vec<Span<'static>>)> = vec![];
@@ -270,8 +295,10 @@ impl Pane for QuickInstallView {
             let sel = self.sel == i;
             let installed = self.installed(tool, cx);
             let jt_job = jt.job.as_ref().filter(|j| tool == Tool::JustTools && j.kind != JobKind::Skill);
+            let paste_busy = jt.paste_busy.filter(|_| tool == Tool::JustPaste);
             let (boxed, box_style) = match () {
                 _ if jt_job.is_some() => (format!("[{}]", spinner(jt_job.unwrap().started)), fg(t.shine)),
+                _ if paste_busy.is_some() => (format!("[{}]", spinner(paste_busy.unwrap())), fg(t.shine)),
                 _ if installed => ("[✓]".to_string(), fg(t.good)),
                 _ if picked.contains(&tool) => ("[x]".to_string(), fg(t.accent).add_modifier(Modifier::BOLD)),
                 _ => ("[ ]".to_string(), muted(t)),
@@ -279,6 +306,8 @@ impl Pane for QuickInstallView {
             let detail = match () {
                 _ if jt_job.is_some() => step_label(jt_job.unwrap().step).to_string(),
                 _ if tool == Tool::JustTools && jt.installed.is_some() => jt.installed.as_ref().and_then(|i| i.version.clone()).unwrap_or_else(|| "installed".into()),
+                _ if paste_busy.is_some() => "switching on".into(),
+                _ if tool == Tool::JustPaste && installed => jt.paste.as_ref().map_or("on", bro_core::justpaste::describe).into(),
                 _ if installed => match self.found.as_ref().and_then(|f| f.status.get(&tool)) {
                     // a version reads better than a path
                     Some(d) if d.starts_with(|c: char| c.is_ascii_digit()) => d.clone(),

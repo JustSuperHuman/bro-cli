@@ -153,7 +153,8 @@ fn tar() -> PathBuf {
     }
 }
 
-/// Installs release `version` over the running bro (and `bro-app` on Windows when it's there).
+/// Installs release `version` over the running bro (and `bro-app` on Windows, and the `bro-cli` launcher, when
+/// the release has them).
 /// `on_step` hears how far it has got. Blocking; needs the network. bro must be restarted to
 /// run the new version.
 pub fn install(version: &str, on_step: &dyn Fn(Step)) -> anyhow::Result<PathBuf> {
@@ -191,6 +192,12 @@ pub fn install(version: &str, on_step: &dyn Fn(Step)) -> anyhow::Result<PathBuf>
         let app = unpacked.join(exe("bro-app"));
         if app.is_file() {
             swap_in(&app, &dir.join(exe("bro-app")))?;
+        }
+        // `bro-cli` (the terminal UI): a small script that runs this bro with --tui
+        let cli = if cfg!(windows) { "bro-cli.cmd" } else { "bro-cli" };
+        let launcher = unpacked.join(cli);
+        if launcher.is_file() {
+            swap_in(&launcher, &dir.join(cli))?;
         }
         Ok(dir.clone())
     })();

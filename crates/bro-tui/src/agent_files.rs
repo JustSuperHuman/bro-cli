@@ -1,6 +1,10 @@
 //! The agent files overlay (prefix F): what the focused agent sent you (Claude's `SendUserFile`, the shelf) and
 //! the files it edited, created, deleted or read, newest first. Enter opens the file preview at the line.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::layout::PaneId;
 use crate::panes::insights::Snapshot;
 use crate::theme::Theme;
@@ -142,13 +146,26 @@ impl AgentFilesView {
             MouseEventKind::ScrollUp => self.move_by(-3),
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(&(_, i)) = self.hits.iter().find(|(r, _)| r.contains(pos)) {
-                    self.sel = i;
-                    return Outcome::Open(i);
+                    return self.activate(i);
                 }
             }
             _ => {}
         }
         Outcome::None
+    }
+
+    /// Row `i` was clicked: select it and open it at once.
+    pub(crate) fn activate(&mut self, i: usize) -> Outcome {
+        if i >= self.items.len() {
+            return Outcome::None;
+        }
+        self.sel = i;
+        Outcome::Open(i)
+    }
+
+    /// How many rows the list shows (PgUp / PgDn move by that many).
+    pub(crate) fn set_rows(&mut self, rows: usize) {
+        self.rows = rows.max(1);
     }
 }
 

@@ -54,20 +54,20 @@ fn thumb(track: u16, room: u16, total: u16, pos: u16, max: u16) -> (u16, u16) {
 }
 
 /// One line of the usage block: a glyph + label, then the 5h / week figures (% left).
-struct UsageLine {
-    harness: Option<bro_core::Harness>,
-    profile: Option<String>,
-    label: String,
-    h5: Option<f64>,
-    wk: Option<f64>,
+pub(super) struct UsageLine {
+    pub(super) harness: Option<bro_core::Harness>,
+    pub(super) profile: Option<String>,
+    pub(super) label: String,
+    pub(super) h5: Option<f64>,
+    pub(super) wk: Option<f64>,
     /// the 5h figure was capped by the week
-    approx: bool,
+    pub(super) approx: bool,
     /// still loading / couldn't be read
-    note: Option<String>,
+    pub(super) note: Option<String>,
     /// countdown to the tighter window's reset (expanded view)
-    resets_at: Option<i64>,
+    pub(super) resets_at: Option<i64>,
     /// the Claude total with a Fable line folded under it: Some(open)
-    fable: Option<bool>,
+    pub(super) fable: Option<bool>,
 }
 
 impl App {
@@ -103,7 +103,8 @@ impl App {
             0
         };
         let sessions = self.panes.values().filter(|p| p.is_terminal()).count();
-        let tile_h = u16::from(sessions >= 2 && inner.height >= foot_h + strip_h + 10);
+        // the project tabs have All and the minimized switch: no tile row then
+        let tile_h = u16::from(self.strip.height == 0 && sessions >= 2 && inner.height >= foot_h + strip_h + 10);
         let list = Rect { height: inner.height.saturating_sub(foot_h + strip_h + tile_h), ..inner };
         if foot_h > 0 {
             self.draw_footer(f, Rect { y: inner.bottom() - foot_h, height: foot_h, ..inner }, &usage, &t);
@@ -265,7 +266,7 @@ impl App {
                 let current = cur_key == Some(key.as_str());
                 let color = self.project_color(key);
                 // ▦ while the grid shows only this project
-                let mark = if self.tile_project.as_deref() == Some(key.as_str()) { "▦" } else { " " };
+                let mark = if matches!(&self.drawn_tab, Some(super::project_tabs::StripTab::Project(k)) if k == key) { "▦" } else { " " };
                 let mut right = vec![];
                 if *attention {
                     right.push(Span::styled("● ", fg(t.danger)));
@@ -416,7 +417,7 @@ impl App {
     }
 
     /// The usage block's lines: the Claude and Codex totals (v1's Usage box), or one line per profile.
-    fn usage_lines(&self) -> Vec<UsageLine> {
+    pub(super) fn usage_lines(&self) -> Vec<UsageLine> {
         let st = self.svc.state();
         let Some(profiles) = st.profiles.ready() else { return vec![] };
         let signed_in: Vec<_> = profiles.iter().filter(|p| p.authenticated).collect();

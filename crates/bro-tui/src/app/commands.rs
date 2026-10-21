@@ -19,6 +19,7 @@ impl App {
         self.sel = None;
         match a {
             Act::NewSession => self.open_launcher(None, Place::Tab),
+            Act::QuickAgent => self.quick_agent(),
             Act::Split => self.open_launcher(None, Place::Split),
             Act::NewShell => {
                 self.open_shell(None, Place::Tab);
@@ -82,6 +83,22 @@ impl App {
                 self.leave_sidebar();
             }
             Act::NextTab | Act::PrevTab => {}
+            Act::ShowTab(0) => self.show_tab(super::project_tabs::StripTab::All),
+            Act::ShowTab(n) => match self.project_tabs().get(n as usize - 1) {
+                Some(tab) => self.show_tab(super::project_tabs::StripTab::Project(tab.key.clone())),
+                None => self.toast(Kind::Info, format!("no project tab {n}")),
+            },
+            Act::LastTab => match self.tab_before.clone() {
+                Some(tab) => self.show_tab(tab),
+                None => self.toast(Kind::Info, "no earlier tab yet"),
+            },
+            Act::ToggleProjectTabs => {
+                let mut s = self.svc.settings();
+                s.project_tabs = !s.project_tabs;
+                let on = s.project_tabs;
+                self.svc.save_settings(s);
+                self.toast(Kind::Info, if on { "project tabs on: All and each project, over the sessions" } else { "project tabs off" });
+            }
             Act::Attention => match self.attention_target() {
                 Some(id) => self.go_session(id),
                 None => self.toast(Kind::Info, "nothing needs you right now"),
@@ -92,6 +109,10 @@ impl App {
                     self.leave_sidebar();
                 }
             }
+            Act::FocusSidebar if self.strip_sel.is_some() => self.strip_sel = None,
+            // no sidebar on screen (hidden, or the window's too narrow): the project tabs take the keys
+            Act::FocusSidebar if self.strip.height > 0 && (!self.sidebar || self.sidebar_squeezed()) => self.focus_strip(),
+            Act::FocusSidebar if self.sidebar_squeezed() => self.toast(Kind::Info, "the window is too narrow for the sidebar · widen it, or turn on project tabs"),
             Act::FocusSidebar => {
                 self.sidebar = true;
                 if self.side_focus {
@@ -108,6 +129,7 @@ impl App {
             Act::Stats => self.open_view("stats"),
             Act::Settings => self.open_view("settings"),
             Act::QuickInstall => self.open_view("quick-install"),
+            Act::Setup => self.open_view("setup"),
             Act::Proxy => self.open_view("proxy"),
             Act::Bridge => self.open_view("bridge"),
             Act::Help => self.overlay = Overlay::Help(Help::default()),
@@ -162,6 +184,14 @@ impl App {
             Act::AgentFiles => self.show_agent_files(),
             Act::Watchdog => self.open_watchdog(),
             Act::WatchdogPrompt => self.open_watchdog_prompt(),
+            Act::Media => {
+                if crate::panes::mirror::active() {
+                    crate::panes::mirror::request(crate::panes::mirror::Request::MediaPanel);
+                    self.svc.wake();
+                } else {
+                    self.toast(Kind::Info, "pictures and videos play beside your sessions in the desktop app: bro gui");
+                }
+            }
             Act::SwitchLogin => {
                 if let Some(id) = self.focused() {
                     self.open_switch(id);
@@ -235,6 +265,16 @@ impl App {
         if !self.tile_all {
             self.clear_stack();
         }
+        // a project's grid moves to the session's own project
+        if self.tile_all
+            && !self.stack.contains(&id)
+            && let Some(key) = self.tile_project.clone()
+            && let Some(own) = self.panes.get(&id).and_then(|p| p.as_term_ref()).filter(|t| !t.meta.orchestrator).map(|t| t.meta.project.key.clone())
+            && own != key
+        {
+            self.tile_project = Some(own);
+            self.retile(Some(id));
+        }
         if let Some(t) = self.panes.get(&id).and_then(|p| p.as_term_ref()) {
             self.cur_project = Some(t.meta.project.root.clone());
         }
@@ -256,6 +296,11 @@ impl App {
     }
 
     fn cycle_project(&mut self, d: i32) {
+        // in a grid: the next project tab (All, then each project)
+        if self.tile_all {
+            self.step_tab(d, false);
+            return;
+        }
         let live = self.live_infos();
         let order = sidebar::live_order(&live, &self.past_infos(), &self.open_infos());
         let mut projects: Vec<(String, PaneId)> = vec![];
@@ -342,6 +387,34 @@ impl App {
         }
     }
 
+    /// A new agent in your home folder on the harness and login you launched last (the launcher, there, when
+    /// that still needs a decision).
+    pub(crate) fn quick_agent(&mut self) {
+        self.follow_focus();
+        self.svc.refresh_usage();
+        let l = self.quick_agent_launcher();
+        match l.quick_spec() {
+            Some(spec) => {
+                self.launch_spec(spec, Place::Tab);
+                self.leave_sidebar();
+            }
+            None => {
+                self.leave_sidebar();
+                self.overlay = Overlay::Launcher(Box::new(l));
+            }
+        }
+    }
+
+    /// The launcher in your home folder, on the harness of your last (non-orchestrator) launch, its latest login on top.
+    pub(crate) fn quick_agent_launcher(&self) -> Launcher {
+        let l = self.session_launcher(Some(bro_core::util::home_dir()), Place::Tab);
+        // the orchestrator's own launches don't count as your last agent
+        match l.data.recents.iter().find(|r| !r.orchestrator).map(|r| r.harness) {
+            Some(h) => l.with_harness(h),
+            None => l,
+        }
+    }
+
     /// Usage totals use quick-launch defaults; account rows always use that exact login.
     pub(crate) fn launch_usage(&mut self, h: bro_core::Harness, profile: Option<String>) {
         self.follow_focus();
@@ -366,6 +439,10 @@ impl App {
 
     /// Launch from the launcher.
     pub(crate) fn launch_spec(&mut self, spec: bro_core::launch::LaunchSpec, place: Place) {
+        if spec.orchestrator && self.guest {
+            self.toast(Kind::Info, "the orchestrator runs in your other bro");
+            return;
+        }
         if spec.orchestrator {
             // one per bro: go to the running one, or wait for the one starting
             if let Some(id) = self.orchestrator_pane() {
@@ -414,7 +491,14 @@ impl App {
     pub(crate) fn open_palette(&mut self, query: &str) {
         self.leave_sidebar();
         let themes = crate::theme::names();
-        self.overlay = Overlay::Palette(Box::new(Palette::new(&self.keymap, &self.recents, &themes, &self.theme.name, query).with_presets(&self.svc.settings().claude_env.preset).with_caveman(self.svc.settings().caveman.active())));
+        let tiles: Vec<(String, String, usize)> = self.project_tabs().into_iter().map(|t| (t.key, t.name, t.live)).collect();
+        let all = self.tile_ids(None).len();
+        self.overlay = Overlay::Palette(Box::new(
+            Palette::new(&self.keymap, &self.recents, &themes, &self.theme.name, query)
+                .with_presets(&self.svc.settings().claude_env.preset)
+                .with_caveman(self.svc.settings().caveman.active())
+                .with_tiles(&tiles, all),
+        ));
     }
 
     /// Caveman mode for new sessions: a level, or None for off.
@@ -446,6 +530,8 @@ impl App {
                 self.toast(Kind::Info, format!("Claude preset: {label} (new launches)"));
             }
             Cmd::Caveman(level) => self.set_caveman(level),
+            Cmd::Tiles(None) => self.show_tab(super::project_tabs::StripTab::All),
+            Cmd::Tiles(Some(key)) => self.show_tab(super::project_tabs::StripTab::Project(key)),
             Cmd::Recent(i) => {
                 if let Some(r) = self.recents.get(i).cloned() {
                     let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: self.svc.state().settings.permission, browser: r.browser, extra_args: vec![], orchestrator: false };

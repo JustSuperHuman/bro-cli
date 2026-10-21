@@ -10,11 +10,15 @@ mod alt_hints;
 mod commands;
 mod draw;
 mod files;
+/// The desktop app (`bro gui`): this workspace drawn on the GPU.
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
 mod history;
 mod input;
 pub(crate) mod insights;
 mod mouse;
 mod overlays;
+mod project_tabs;
 mod screensaver;
 mod sessions;
 mod side_view;
@@ -100,6 +104,8 @@ pub(crate) enum SideHit {
     Continue,
     TileAll,
     Minimized,
+    /// the project tabs over the sessions
+    Strip(project_tabs::StripHit),
 }
 
 /// Startup options.
@@ -193,6 +199,11 @@ pub struct App {
     pub(crate) archive: crate::archive::Archive,
     /// write ~/.bro files (off in demo and tests)
     pub(crate) persist: bool,
+    /// a second bro beside a running one (the desktop app with `--new`): the orchestrator is that bro's, so this
+    /// one neither starts one nor touches its saved state
+    pub(crate) guest: bool,
+    /// The startup look at whether to open the setup guide has happened.
+    setup_offered: bool,
     /// the projects in the sidebar (you open them; ~/.bro/v2-projects.json)
     pub(crate) open_projects: crate::projects::OpenProjects,
     /// the project new sessions start in (last one you picked in the sidebar or worked in)
@@ -208,8 +219,22 @@ pub struct App {
     minimized: Vec<PaneId>,
     /// Show minimized sessions in the full grid without restoring their state.
     show_minimized: bool,
-    /// The grid shows only this project's sessions (click a project in the sidebar).
+    /// The grid shows only this project's sessions (click a project in the sidebar). Only set with `tile_all`.
     pub(crate) tile_project: Option<String>,
+    /// The project tabs as last drawn (height 0 when they're off).
+    pub(crate) strip: Rect,
+    /// The project tab that showed in the last draw.
+    pub(crate) drawn_tab: Option<project_tabs::StripTab>,
+    /// The project tabs have the keyboard (alt+b without a sidebar): the selected tab.
+    pub(crate) strip_sel: Option<usize>,
+    /// When the wheel last switched tabs (a trackpad's burst switches once).
+    strip_wheel: Option<Instant>,
+    /// The tab showing now and the one before it, for the last-tab key.
+    tab_now: Option<project_tabs::StripTab>,
+    pub(crate) tab_before: Option<project_tabs::StripTab>,
+    /// Held tile edges belong to the grid they were dragged in: the others' wait here.
+    saved_locks: HashMap<Option<project_tabs::StripTab>, Vec<crate::priority::Lock>>,
+    lock_scope: Option<project_tabs::StripTab>,
     stack_zoom: bool,
     /// The session ctrl+click grew to a working size (until ctrl+clicked again or focus moves on).
     pub(crate) priority: Option<PaneId>,
@@ -315,6 +340,8 @@ impl App {
             recents: if opts.load_recents { crate::recents::load() } else { vec![] },
             archive: if opts.load_recents { crate::archive::Archive::load() } else { Default::default() },
             persist: opts.load_recents,
+            guest: false,
+            setup_offered: false,
             open_projects: if opts.load_recents { crate::projects::OpenProjects::load() } else { Default::default() },
             cur_project: None,
             last_focus: None,
@@ -324,6 +351,14 @@ impl App {
             minimized: vec![],
             show_minimized: false,
             tile_project: None,
+            strip: Rect::default(),
+            drawn_tab: None,
+            strip_sel: None,
+            strip_wheel: None,
+            tab_now: None,
+            tab_before: None,
+            saved_locks: HashMap::new(),
+            lock_scope: None,
             stack_zoom: false,
             priority: None,
             grown: false,
@@ -452,9 +487,10 @@ impl App {
         if self.tile_all && self.panes.get(&id).is_some_and(|p| p.is_terminal()) {
             let mut ids = self.tile_ids(self.tile_project.as_deref());
             if !ids.contains(&id) {
-                // a session in another project: widen the grid so it shows
-                self.tile_project = None;
-                ids = self.tile_ids(None);
+                // a session in another project: its own project's tab when the tabs are on, else widen the grid
+                let key = self.panes.get(&id).and_then(|p| p.as_term_ref()).filter(|t| !t.meta.orchestrator).map(|t| t.meta.project.key.clone());
+                self.tile_project = key.filter(|_| self.svc.settings().project_tabs);
+                ids = self.tile_ids(self.tile_project.as_deref());
             }
             self.stack = ids;
             self.stack_focus = Some(id);
@@ -489,24 +525,37 @@ impl App {
 
     /// Click / ⏎ on a project: tile only its sessions; again: back to every session.
     pub(crate) fn toggle_project_tiles(&mut self, key: &str) {
-        if self.tile_project.as_deref() == Some(key) {
+        if self.showing_tab() == Some(project_tabs::StripTab::Project(key.to_string())) {
             self.toggle_tiles();
             return;
         }
+        self.show_project_tiles(key, None);
+    }
+
+    /// Show `key`'s sessions: tiled when there are two or more (or a grid already shows), else its one session
+    /// on its own. `focus` (else the focused one, if it's there) takes the focus. False when none can show.
+    pub(crate) fn show_project_tiles(&mut self, key: &str, focus: Option<PaneId>) -> bool {
         let ids = self.tile_ids(Some(key));
-        let Some(&first) = ids.first() else { return };
-        let focus = self.focused().filter(|id| ids.contains(id)).unwrap_or(first);
-        if !self.tile_all {
-            self.clear_stack();
-            self.focus_pane(focus);
-        }
+        let Some(&first) = ids.first() else {
+            let of_key = |id: &PaneId| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.project.key == key);
+            if let Some(name) = self.minimized.iter().find(|id| of_key(id)).and_then(|id| self.panes.get(id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.name.clone()) {
+                self.toast(Kind::Info, format!("every {name} session is minimized · ▸ minimized shows them"));
+            }
+            return false;
+        };
+        let focus = focus.filter(|id| ids.contains(id)).or_else(|| self.focused().filter(|id| ids.contains(id))).unwrap_or(first);
         if ids.len() >= 2 || self.tile_all {
             self.stack = ids;
             self.stack_focus = Some(focus);
+            self.stack_zoom = false;
             self.tile_all = true;
+            self.tile_project = Some(key.to_string());
+        } else {
+            self.clear_stack();
+            self.focus_pane(focus);
         }
-        self.tile_project = Some(key.to_string());
         self.leave_sidebar();
+        true
     }
 
     /// shift+click / shift+⏎ on a session: add it to the stacked view, or take it out again.
@@ -598,6 +647,11 @@ impl App {
                 self.svc.watchdog_stop(&t.meta.sid);
                 t.kill();
                 t.on_exit();
+                if t.meta.label.starts_with(crate::views::profiles::LOGIN_LABEL)
+                    && let Some(profile) = &t.meta.profile
+                {
+                    self.svc.login_closed(profile);
+                }
                 // route ids are stable per (upstream, model): keep the route while another session uses it
                 if let Some(r) = t.meta.route_id.take() {
                     let shared = self.panes.values().any(|o| o.as_term_ref().is_some_and(|o| o.meta.route_id.as_deref() == Some(r.as_str())));
@@ -643,7 +697,9 @@ impl App {
             self.orchestrator_closed();
             // you ended the orchestrator: the next bro starts without one (quitting bro keeps it)
             if !self.quitting && self.persist {
-                crate::orchestrator_state::clear();
+                if !self.guest {
+                    crate::orchestrator_state::clear();
+                }
             }
         }
     }
@@ -724,6 +780,12 @@ impl App {
         for a in actions {
             match a {
                 Action::Open(p, place) => {
+                    // one pane per view: a view opened from another (setup's "add a Claude account") replaces it
+                    if let Some(v) = p.view()
+                        && let Some(old) = self.panes.iter().find(|(_, o)| o.view() == Some(v)).map(|(id, _)| *id)
+                    {
+                        self.close(old);
+                    }
                     self.open(p, place);
                 }
                 Action::Close => self.close(from),
@@ -789,6 +851,7 @@ impl App {
         if self.priority.is_some() && self.priority != self.focused() {
             self.priority = None;
         }
+        self.follow_tab();
         if !self.locks.is_empty() {
             self.locks.retain(|l| self.panes.contains_key(&l.pane));
         }
@@ -953,6 +1016,9 @@ impl App {
                 }
             }
             Event::Services => {
+                if !self.setup_offered {
+                    self.offer_setup();
+                }
                 if let Overlay::Launcher(l) = &self.overlay {
                     let data = overlays::launcher_data_with_installed(self, l.data.installed.clone());
                     if let Overlay::Launcher(l) = &mut self.overlay {

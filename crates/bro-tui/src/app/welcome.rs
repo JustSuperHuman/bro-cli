@@ -7,6 +7,27 @@ use crate::ui::{self, fg, muted};
 use ratatui::{Frame, layout::Rect, style::Modifier, text::Span};
 
 impl App {
+    /// Once, when the profiles first load: open the setup guide on a bare start (no tabs) while nothing is signed in,
+    /// unless it was dismissed. Never for demos or tests.
+    pub(super) fn offer_setup(&mut self) {
+        if !self.persist || self.svc.is_demo() {
+            self.setup_offered = true;
+            return;
+        }
+        let open = {
+            let st = self.svc.state();
+            match st.profiles.ready() {
+                Some(ps) => !st.settings.setup_done && !ps.iter().any(|p| p.authenticated),
+                None if matches!(st.profiles, Avail::Loading) => return,
+                None => !st.settings.setup_done,
+            }
+        };
+        self.setup_offered = true;
+        if open && self.tabs.is_empty() {
+            self.open_view("setup");
+        }
+    }
+
     pub(super) fn draw_welcome(&mut self, f: &mut Frame, area: Rect) {
         let t = self.theme.clone();
         let time = self.start.elapsed().as_secs_f64();
@@ -17,6 +38,7 @@ impl App {
             (self.keymap.primary(Act::Palette), "command palette: every action"),
             (self.keymap.primary(Act::Usage), "usage meters for every account"),
             (self.keymap.primary(Act::Profiles), "profiles: add and log in"),
+            (self.keymap.primary(Act::Setup), "setup guide: install an agent, sign in"),
             (self.keymap.primary(Act::Bridge), "pair your phone"),
             (self.keymap.primary(Act::Help), "all keys"),
         ];
@@ -30,9 +52,11 @@ impl App {
         ui::line(f, Rect { x: inner.x + inner.width.saturating_sub(tw) / 2, y, width: tw.min(inner.width), height: 1 }, vec![Span::styled(tag, muted(&t))]);
         y += 2;
         // the call to action
-        let key = self.keymap.primary(Act::NewSession);
-        let cta = vec![Span::styled(format!(" {key} "), fg(t.accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)), Span::styled("  to launch your first agent", ui::bold())];
-        let cw = (ui::width(&key) + 2 + 28) as u16;
+        // nothing signed in yet: setup comes first
+        let signed_in = self.svc.state().profiles.ready().is_none_or(|ps| ps.iter().any(|p| p.authenticated));
+        let (key, what) = if signed_in { (self.keymap.primary(Act::NewSession), "  to launch your first agent") } else { (self.keymap.primary(Act::Setup), "  to set up: install an agent and sign in") };
+        let cta = vec![Span::styled(format!(" {key} "), fg(t.accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)), Span::styled(what, ui::bold())];
+        let cw = (ui::width(&key) + 2 + ui::width(what)) as u16;
         ui::line(f, Rect { x: inner.x + inner.width.saturating_sub(cw) / 2, y, width: cw.min(inner.width), height: 1 }, cta);
         y += 2;
         let kw = keys.iter().map(|k| ui::width(&k.0)).max().unwrap_or(6) as u16 + 2;

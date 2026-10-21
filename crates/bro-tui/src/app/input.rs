@@ -77,6 +77,10 @@ impl App {
             self.run_act(a);
             return;
         }
+        if self.strip_sel.is_some() {
+            self.strip_key(k);
+            return;
+        }
         if self.side_focus {
             self.sidebar_key(k);
             return;
@@ -146,6 +150,10 @@ impl App {
                 Outcome::Install(h) => {
                     self.overlay = Overlay::None;
                     self.install_agent(h);
+                }
+                Outcome::SignIn => {
+                    self.overlay = Overlay::None;
+                    self.sign_in_gemini();
                 }
             },
             Overlay::Palette(p) => {
@@ -249,6 +257,7 @@ impl App {
     pub(crate) fn leave_sidebar(&mut self) {
         self.clear_sidebar_filter();
         self.side_focus = false;
+        self.strip_sel = None;
     }
 
     /// Keys while the sidebar has focus (alt+b).

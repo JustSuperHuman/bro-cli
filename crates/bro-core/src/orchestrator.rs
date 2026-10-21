@@ -124,6 +124,7 @@ const TOOLS: &str = "## Your tools
 | `wait_for_sessions` | Wait for several sessions at once (`mode` all / any, up to 45 s); returns each one's state. Call it again while they still work. |
 | `clear_context` | Start a session's agent on a fresh conversation (`/clear`, `/new`). Follow up with a self-contained task. |
 | `rename_session` / `focus_session` | Name a session; bring it to the front of bro's window. |
+| `show_project` | Tile one project's sessions together in bro's window (its project tab), or every session without `project`. |
 | `close_session` / `close_all_sessions` | End sessions. `close_all_sessions` skips busy ones unless `includeBusy`. |
 | `find_project` / `list_projects` | Resolve a loosely named project (\"just gains\", \"bro cli\") to folders; list bro's projects. |
 | `get_usage` | Every Claude / Codex login's 5-hour and weekly headroom and bro's pick for big and small jobs. |

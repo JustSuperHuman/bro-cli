@@ -222,7 +222,7 @@ fn proxy_route(upstream: &str, model: Option<&str>, ctx: &LaunchCtx) -> anyhow::
         || (!upstream.starts_with("codex:") && {
             let cfg = crate::config::Config::load().unwrap_or_default();
             crate::providers::find(&crate::providers::load(&cfg), upstream)
-                .is_some_and(|p| p.for_model(model).mode != ProviderMode::Openai)
+                .is_some_and(|p| matches!(p.for_model(model).mode, ProviderMode::Native | ProviderMode::Anthropic))
         });
     Ok(ProxyRoute {
         request: RouteRequest { route_id: id.clone(), upstream: upstream.to_string(), model: model.map(str::to_string) },
@@ -233,6 +233,12 @@ fn proxy_route(upstream: &str, model: Option<&str>, ctx: &LaunchCtx) -> anyhow::
 }
 
 fn require_key(p: &Provider, key: &Option<String>) -> anyhow::Result<()> {
+    if p.is_google_login() {
+        if !crate::gemini::signed_in(&crate::gemini::creds_path()) {
+            bail!("{}", crate::gemini::SIGN_IN_HINT);
+        }
+        return Ok(());
+    }
     if key.is_none() && !p.no_key && p.mode != ProviderMode::Native {
         let env = p.key_env.as_deref().map(|e| format!(" or ${e}")).unwrap_or_default();
         bail!("no API key for {} (set keys.{} in ~/.bro/config.json{env})", p.display_name(), p.id);

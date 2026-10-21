@@ -23,6 +23,8 @@ pub enum Cmd {
     /// Caveman mode for new sessions: a level, or None for off.
     Caveman(Option<bro_core::caveman::Level>),
     Recent(usize),
+    /// Tile one project's sessions (its key), or every session (None).
+    Tiles(Option<String>),
 }
 
 /// One entry.
@@ -56,12 +58,13 @@ pub struct Palette {
 fn icon_for(a: Act) -> &'static str {
     use Act::*;
     match a {
-        NewSession | NewShell => "rocket",
+        NewSession | QuickAgent | NewShell => "rocket",
         Usage | RefreshUsage => "gauge",
         Profiles => "account",
         Proxy => "proxy",
         Bridge => "bridge",
         Settings | QuickInstall => "settings",
+        Setup => "rocket",
         Themes => "theme",
         Help => "help",
         Quit => "quit",
@@ -86,8 +89,8 @@ impl Palette {
             });
         }
         for a in Act::all() {
-            if matches!(a, Act::Jump(n) if n > 3) {
-                continue; // jump 1–3 is enough to show the pattern
+            if matches!(a, Act::Jump(n) if n > 3) || matches!(a, Act::ShowTab(n) if n > 0) {
+                continue; // jump 1–3 is enough to show the pattern; each project has its own tiles entry
             }
             items.push(Item { icon: icon_for(a), label: a.describe(), hint: km.primary(a), cmd: Cmd::Act(a), swatch: None });
         }
@@ -133,11 +136,25 @@ impl Palette {
         self
     }
 
+    /// One "tiles" entry per project with sessions, and All, first: (key, name, sessions).
+    pub fn with_tiles(mut self, projects: &[(String, String, usize)], all: usize) -> Palette {
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let entry = |key: Option<String>, label: String| Item { icon: "window", label, hint: String::new(), cmd: Cmd::Tiles(key), swatch: None };
+        let tiles = std::iter::once(entry(None, format!("tiles All — every session side by side · {all} session{}", plural(all))))
+            .chain(projects.iter().map(|(key, name, n)| entry(Some(key.clone()), format!("tiles {name} — just its sessions · {n} session{}", plural(*n)))));
+        self.items.splice(0..0, tiles);
+        self
+    }
+
     /// Indices of matching items, best first.
     pub fn matches(&self) -> Vec<usize> {
         // the theme picker ("theme ") lists every theme in its own order: neutral, painted, accent, yours
         if self.query.trim() == "theme" {
             return self.items.iter().enumerate().filter(|(_, i)| matches!(i.cmd, Cmd::Theme(_))).map(|(n, _)| n).collect();
+        }
+        // the project tabs' "+N" opens on every project's tiles
+        if self.query.trim() == "tiles" {
+            return self.items.iter().enumerate().filter(|(_, i)| matches!(i.cmd, Cmd::Tiles(_))).map(|(n, _)| n).collect();
         }
         fuzzy::filter(&self.query, &self.items, |i| format!("{} {}", i.label, i.hint))
     }

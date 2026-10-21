@@ -11,9 +11,14 @@
 //! 4. **Model** — only when the choice needs one (providers, cross-family logins): a second, filterable list.
 //!
 //! Sessions start in the current project. The project row lets you switch to an open project or enter a new
-//! path with the folder picker's completion. Enter on a row that needs a model moves to the model list;
+//! path with the folder picker's completion; typing on the run-on list opens that picker with what you typed
+//! (Esc there comes back to the list). Enter on a row that needs a model moves to the model list;
 //! Enter there (or on anything else) launches. This file is the model + keys (pure, testable);
 //! `view.rs` draws it.
+
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
 
 pub mod view;
 
@@ -142,6 +147,8 @@ pub enum Outcome {
     UndoArchive,
     /// Install this agent (it isn't on PATH).
     Install(Harness),
+    /// Sign in to Gemini with Google first (the selected provider has no API key).
+    SignIn,
 }
 
 /// Recent combos shown per harness.
@@ -452,7 +459,9 @@ impl Launcher {
         let n = self.data.models.get(&p.id).map(Vec::len).unwrap_or(p.models.len());
         let keyed = p.no_key || self.data.keyed.iter().any(|k| k == &p.id);
         let mut detail = format!("{n} model{}", if n == 1 { "" } else { "s" });
-        if !keyed {
+        if p.is_google_login() {
+            detail.push_str(if keyed { " · google ai subscription" } else { " · enter signs in with Google" });
+        } else if !keyed {
             detail.push_str(" · no key");
         }
         Account { kind: AccountKind::Provider(p.id.clone()), label: p.id.clone(), detail, ready: keyed, left: None }
@@ -713,11 +722,28 @@ impl Launcher {
             self.continue_picker.paste(s);
             return;
         }
+        // the run-on list is picked with the arrows; text is a project
+        if self.focus == Focus::List {
+            self.open_project_picker();
+            if let Some(p) = &mut self.project_picker {
+                p.paste(s);
+            }
+            return;
+        }
         self.filter_mut().push_str(s.trim());
         self.filter_changed();
     }
 
+    /// The selected provider needs a Google sign-in before it can run anything.
+    fn sign_in_needed(&self) -> bool {
+        let Some(Item::Account(Account { kind: AccountKind::Provider(id), ready: false, .. })) = self.current() else { return false };
+        self.data.providers.iter().any(|p| p.id == id && p.is_google_login())
+    }
+
     fn launch(&self) -> Outcome {
+        if self.sign_in_needed() {
+            return Outcome::SignIn;
+        }
         match self.spec() {
             // the orchestrator always gets its own session
             Some(s) if s.orchestrator => Outcome::Launch(s, Place::Tab),
@@ -856,6 +882,7 @@ impl Launcher {
             }
             KeyCode::Enter if !self.installed(self.harness) => return Outcome::Install(self.harness),
             KeyCode::Enter => match self.focus {
+                Focus::List if self.sign_in_needed() => return self.launch(),
                 Focus::List if self.needs_model() => {
                     self.focus = Focus::Models;
                 }
@@ -901,6 +928,13 @@ impl Launcher {
             KeyCode::Backspace => {
                 self.filter_mut().pop();
                 self.filter_changed();
+            }
+            // typing on the run-on list picks the project (esc there comes back here)
+            KeyCode::Char(_) if !ctrl && self.focus == Focus::List => {
+                self.open_project_picker();
+                if let Some(p) = &mut self.project_picker {
+                    p.key(k);
+                }
             }
             KeyCode::Char(ch) if !ctrl => {
                 self.filter_mut().push(ch);

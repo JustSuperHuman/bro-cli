@@ -2,6 +2,10 @@
 //! ran in (newest first) that aren't open yet. Typing a path ("~/code/x", "F:\x") autocompletes it: the
 //! folders inside the typed parent that start with what you've typed are listed, and Tab completes.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::fuzzy;
 use crate::theme::Theme;
 use crate::ui::{self, fg, muted};

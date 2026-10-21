@@ -73,7 +73,7 @@ impl App {
         self.watchdog_outcome(out);
     }
 
-    fn watchdog_outcome(&mut self, out: Out) {
+    pub(super) fn watchdog_outcome(&mut self, out: Out) {
         let (pane, sid) = match &self.overlay {
             Overlay::Watchdog(v) => (v.pane, v.sid.clone()),
             _ => return,
@@ -119,7 +119,13 @@ impl App {
 
     pub(super) fn watchdog_prompt_key(&mut self, k: KeyEvent) {
         let Overlay::WatchdogPrompt(e) = &mut self.overlay else { return };
-        match e.key(k) {
+        let out = e.key(k);
+        self.watchdog_prompt_outcome(out);
+    }
+
+    /// What the prompt editor asked for (a key or, in the desktop app, a click).
+    pub(super) fn watchdog_prompt_outcome(&mut self, out: prompt_editor::Out) {
+        match out {
             prompt_editor::Out::None => {}
             prompt_editor::Out::Close => self.overlay = Overlay::None,
             prompt_editor::Out::Save(prompt) => {

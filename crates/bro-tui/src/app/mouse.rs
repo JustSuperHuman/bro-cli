@@ -23,7 +23,7 @@ impl App {
         }
         // the launcher fills the body like a view, so the sidebar beside it keeps working
         let beside_launcher = matches!(&self.overlay, Overlay::Launcher(l) if l.project_picker.is_none())
-            && (self.side_drag || (self.side_area.width > 0 && self.side_area.contains(pos)));
+            && (self.side_drag || (self.side_area.width > 0 && self.side_area.contains(pos)) || self.strip.contains(pos));
         if self.overlay.is_open() && !beside_launcher {
             let left = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
             if matches!(self.overlay, super::overlays::Overlay::Confirm(_)) {
@@ -73,6 +73,10 @@ impl App {
                     self.overlay = Overlay::None;
                     self.install_agent(h);
                 }
+                        crate::launcher::Outcome::SignIn => {
+                            self.overlay = Overlay::None;
+                            self.sign_in_gemini();
+                        }
                     }
                     return;
                 }
@@ -160,6 +164,13 @@ impl App {
             }
             return;
         }
+        // the wheel over the project tabs switches them
+        if self.strip.contains(pos) && matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp) {
+            if !self.overlay.is_open() {
+                self.strip_wheel(matches!(m.kind, MouseEventKind::ScrollDown));
+            }
+            return;
+        }
         // sidebar
         if self.side_area.width > 0 && self.side_area.contains(pos)
             && matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp)
@@ -212,9 +223,15 @@ impl App {
                         SideHit::Continue => self.open_continue(),
                         SideHit::TileAll => self.run_act(crate::keymap::Act::TileAll),
                         SideHit::Minimized => self.toggle_minimized_visibility(),
+                        SideHit::Strip(hit) => self.strip_click(hit, false),
                     }
                     if self.overlay.is_open() {
                         self.leave_sidebar();
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Middle) if matches!(hit, SideHit::Strip(_)) => {
+                    if let SideHit::Strip(hit) = hit {
+                        self.strip_click(hit, true);
                     }
                 }
                 MouseEventKind::Down(MouseButton::Middle) => {
@@ -461,7 +478,14 @@ impl App {
                 }
                 true
             }
-            SideHit::Fable | SideHit::UsageToggle | SideHit::Minimized => false,
+            SideHit::Strip(super::project_tabs::StripHit::Tab(super::project_tabs::StripTab::Project(key))) => {
+                // a project tab picks the launcher's project, like its sidebar row
+                if let Some(root) = self.project_tabs().into_iter().find(|t| t.key == *key).map(|t| t.root) {
+                    self.select_launcher_project(root);
+                }
+                true
+            }
+            SideHit::Fable | SideHit::UsageToggle | SideHit::Minimized | SideHit::Strip(super::project_tabs::StripHit::Minimized) => false,
             _ => {
                 self.overlay = Overlay::None;
                 false

@@ -1,6 +1,10 @@
 //! Proxy view: where the proxy listens, the routes launches registered, and the live request log (status,
 //! tokens, latency colour-coded).
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::pane::{Cx, Pane};
 use crate::services::Avail;
 use crate::theme::Theme;
@@ -53,6 +57,7 @@ pub fn upstream_label(u: &Upstream) -> String {
         Upstream::Anthropic { base_url, .. } => format!("messages · {}", host(base_url)),
         Upstream::ClaudeOAuth { config_dir } => format!("claude oauth · {}", config_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
         Upstream::ClaudePool { config_dirs } => format!("claude pool · {} accounts", config_dirs.len()),
+        Upstream::GeminiCodeAssist { .. } => "gemini · google ai subscription".into(),
     }
 }
 

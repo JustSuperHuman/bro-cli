@@ -9,6 +9,92 @@ const SLOT: &str = "bro";
 /// Env var holding the provider key for codex (`env_key`).
 pub const CODEX_KEY_ENV: &str = "BRO_PROVIDER_API_KEY";
 
+/// A model entry in Codex's own catalogue format, used when no Codex login has a
+/// `models_cache.json` to copy one from.
+const MODEL_TEMPLATE: &str = include_str!("codex_model_template.json");
+
+/// A model entry to copy: the first one in a Codex login's `models_cache.json` (the
+/// installed Codex's own format), else the bundled one.
+fn model_template(home: &std::path::Path) -> serde_json::Value {
+    let profiles = std::fs::read_dir(paths::codex_profiles_dir()).into_iter().flatten().flatten().map(|e| e.path());
+    std::iter::once(home.to_path_buf())
+        .chain(std::iter::once(paths::codex_local_dir()))
+        .chain(profiles)
+        .find_map(|dir| {
+            let doc = crate::util::read_json(&dir.join("models_cache.json"))?;
+            doc.get("models")?.as_array()?.first().filter(|m| m.is_object()).cloned()
+        })
+        .or_else(|| serde_json::from_str(MODEL_TEMPLATE).ok())
+        .unwrap_or_default()
+}
+
+/// One catalogue entry for a provider model, so Codex knows its real context window instead
+/// of warning "Model metadata … not found" and assuming a default.
+fn model_entry(template: &serde_json::Value, m: &crate::providers::Model, context: u64, priority: usize) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let mut e = template.clone();
+    let Some(o) = e.as_object_mut() else { return e };
+    let name = m.name.clone().unwrap_or_else(|| m.id.clone());
+    for k in ["availability_nux", "upgrade", "comp_hash", "available_access_programs"] {
+        o.remove(k);
+    }
+    o.insert("slug".into(), json!(m.id));
+    o.insert("display_name".into(), json!(name));
+    o.insert("description".into(), json!(format!("{name} through bro")));
+    o.insert("context_window".into(), json!(context));
+    o.insert("max_context_window".into(), json!(context));
+    o.insert("priority".into(), json!(priority));
+    o.insert("visibility".into(), json!("list"));
+    o.insert("default_reasoning_level".into(), json!("medium"));
+    o.insert("default_reasoning_summary".into(), json!("auto"));
+    o.insert(
+        "supported_reasoning_levels".into(),
+        json!([
+            { "effort": "low", "description": "Fast responses with lighter reasoning" },
+            { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
+            { "effort": "high", "description": "Greater reasoning depth for complex problems" }
+        ]),
+    );
+    // Only OpenAI serves these.
+    o.insert("service_tiers".into(), json!([]));
+    o.insert("additional_speed_tiers".into(), json!([]));
+    o.insert("supports_search_tool".into(), json!(false));
+    o.insert("support_verbosity".into(), json!(false));
+    o.entry("experimental_supported_tools").or_insert_with(|| json!([]));
+    // Codex's prompt names the GPT model it was written for.
+    if let Some(Value::String(t)) = o.get_mut("model_messages").and_then(|mm| mm.get_mut("instructions_template")) {
+        *t = rename_model(t, &name);
+    }
+    if let Some(Value::String(t)) = o.get_mut("base_instructions") {
+        *t = rename_model(t, &name);
+    }
+    e
+}
+
+/// "an agent based on GPT-6" → "an agent based on Gemini 4 Argon".
+fn rename_model(text: &str, name: &str) -> String {
+    let Some(at) = text.find("based on GPT-") else { return text.to_string() };
+    let start = at + "based on ".len();
+    let end = text[start..].find(|c: char| c.is_whitespace() || c == ',').map(|i| start + i).unwrap_or(text.len());
+    let end = if text[..end].ends_with('.') { end - 1 } else { end };
+    format!("{}{name}{}", &text[..start], &text[end..])
+}
+
+/// `~/.bro/codex-catalog/<provider>.json` with the provider's models that have a known
+/// context window, for `-c model_catalog_json=…`. None when there are none.
+fn model_catalog(p: &crate::providers::Provider, home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let models: Vec<_> = p.models.iter().filter(|m| !m.id.is_empty()).filter_map(|m| Some((m, m.context?))).collect();
+    if models.is_empty() {
+        return None;
+    }
+    let template = model_template(home);
+    let entries: Vec<_> = models.iter().enumerate().map(|(i, (m, ctx))| model_entry(&template, m, *ctx, i + 1)).collect();
+    let safe: String = p.id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    let path = paths::bro_dir().join("codex-catalog").join(format!("{safe}.json"));
+    crate::util::write_json_compact(&path, &serde_json::json!({ "models": entries })).ok()?;
+    Some(path)
+}
+
 /// TOML-quote a value so codex parses it as a string.
 fn toml_str(v: &str) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| format!("\"{v}\""))
@@ -63,6 +149,9 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             Some(base) => {
                 require_key(p, key)?;
                 provider = provider_args(p.display_name(), &base, key.is_some());
+                if let Some(cat) = model_catalog(p, &home) {
+                    provider.extend(["-c".into(), format!("model_catalog_json={}", toml_str(&cat.to_string_lossy()))]);
+                }
                 // before your own args, so a `-c` of yours still wins
                 for setting in p.codex_overrides() {
                     provider.extend(["-c".into(), setting]);
@@ -84,6 +173,14 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
                     require_key(p, key)?;
                 }
                 provider = wire_proxy(&mut cmd, &upstream, spec, ctx)?;
+                if p.mode != ProviderMode::Native
+                    && let Some(cat) = model_catalog(p, &home)
+                {
+                    provider.extend(["-c".into(), format!("model_catalog_json={}", toml_str(&cat.to_string_lossy()))]);
+                }
+                for setting in p.codex_overrides() {
+                    provider.extend(["-c".into(), setting]);
+                }
                 p.id.clone()
             }
         },

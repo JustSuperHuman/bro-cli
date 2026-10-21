@@ -5,6 +5,7 @@
 //! in the inbound dialect.
 
 pub mod chatgpt;
+pub mod gemini;
 pub mod oauth;
 pub mod pool;
 
@@ -278,6 +279,7 @@ pub(crate) async fn send(
         Upstream::ClaudeOAuth { config_dir } => oauth::send(state, config_dir, call, None).await,
         Upstream::ClaudePool { config_dirs } => pool::send(state, config_dirs, call).await,
         Upstream::ChatGptCodex { codex_home } => chatgpt::send(state, codex_home, call).await,
+        Upstream::GeminiCodeAssist { creds_file } => gemini::send(state, creds_file, call).await,
     }
 }
 

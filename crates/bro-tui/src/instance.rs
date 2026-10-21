@@ -22,6 +22,12 @@ fn path() -> PathBuf {
     crate::util::bro_dir().join("v2-instance.json")
 }
 
+/// Another bro is running (its hand-off record names a live listener that isn't this process).
+pub fn running() -> bool {
+    let Some(rec) = std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str::<Record>(&s).ok()) else { return false };
+    rec.pid != std::process::id() && TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, rec.port)), Duration::from_millis(400)).is_ok()
+}
+
 /// Ask a running bro to open `dir`. Ok(true) = it did (this process should exit); Ok(false) = nobody's running.
 pub fn hand_off(dir: &Path) -> anyhow::Result<bool> {
     hand_off_via(&path(), dir)
@@ -104,12 +110,19 @@ fn serve_via(file: PathBuf, tx: Sender<Event>) -> Option<Guard> {
     Some(Guard { token, file })
 }
 
+/// The desktop app's window (`bro gui`): raised by a hand-off instead of a console window. 0 in the terminal UI.
+pub static APP_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
 /// The terminal window this bro runs in, and raising another bro's.
 mod window {
     /// The top-level window hosting this console (Windows Terminal owns the pseudo-console window it gives
     /// ConPTY apps; classic conhost returns its own window). 0 when there isn't a visible one.
     #[cfg(windows)]
     pub fn terminal_window() -> isize {
+        let app = super::APP_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+        if app != 0 {
+            return app;
+        }
         use windows_sys::Win32::System::Console::GetConsoleWindow;
         use windows_sys::Win32::UI::WindowsAndMessaging::{GA_ROOTOWNER, GetAncestor, IsWindowVisible};
         // SAFETY: plain Win32 queries on handles the system gives us; null / invisible handles are filtered.
@@ -126,7 +139,7 @@ mod window {
 
     #[cfg(not(windows))]
     pub fn terminal_window() -> isize {
-        0
+        super::APP_WINDOW.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Restore (if minimised) and focus a window. Windows only lets the foreground process move the focus;

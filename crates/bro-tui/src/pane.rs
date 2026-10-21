@@ -186,8 +186,24 @@ mod wake_tests {
     }
 }
 
+/// Down from a pane to its own type (the desktop app draws each view with that view's state).
+pub trait AsAny {
+    #[allow(dead_code)]
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+impl<T: 'static> AsAny for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 /// A pane inside the split tree.
-pub trait Pane {
+pub trait Pane: AsAny {
     /// Plain title (tabs, palette, toasts).
     fn title(&self) -> String;
     /// Icon name for the frame (see `ui::icon`).

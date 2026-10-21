@@ -26,6 +26,9 @@ pub enum ProviderMode {
     Anthropic,
     /// Speaks OpenAI Chat Completions (and maybe Responses)
     Openai,
+    /// Gemini through a Google AI subscription (Antigravity's Google sign-in against Cloud
+    /// Code Assist); always routed through bro-proxy, signed in with `bro gemini login`
+    Antigravity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +75,11 @@ impl Provider {
     /// Display name, falling back to the id.
     pub fn display_name(&self) -> &str {
         if self.name.is_empty() { &self.id } else { &self.name }
+    }
+
+    /// Signs in with a Google account instead of an API key (`mode: "antigravity"`).
+    pub fn is_google_login(&self) -> bool {
+        self.mode == ProviderMode::Antigravity
     }
 
     /// A new-api relay (OpenLux, Yunwu): `"catalogue": "newapi"` with a base URL.

@@ -52,7 +52,7 @@ jobs:
         run: |
           $name = "bro-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/bro.exe", "target/${{ matrix.target }}/release/bro-app.exe", README.md, LICENSE "dist/$name"
+          Copy-Item "target/${{ matrix.target }}/release/bro.exe", "target/${{ matrix.target }}/release/bro-app.exe", packaging/bro-cli.cmd, README.md, LICENSE "dist/$name"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
 
       - name: Installer (Windows)
@@ -77,7 +77,8 @@ jobs:
         run: |
           name="bro-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/bro" README.md LICENSE "dist/$name"
+          cp "target/${{ matrix.target }}/release/bro" packaging/bro-cli README.md LICENSE "dist/$name"
+          chmod 755 "dist/$name/bro" "dist/$name/bro-cli"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
 
       - uses: actions/upload-artifact@v4

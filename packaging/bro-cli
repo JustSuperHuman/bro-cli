@@ -1,0 +1,3 @@
+#!/bin/sh
+# bro-cli: bro's terminal UI (the same as `bro --tui`). `bro` on its own opens the desktop app.
+exec "$(dirname "$0")/bro" --tui "$@"

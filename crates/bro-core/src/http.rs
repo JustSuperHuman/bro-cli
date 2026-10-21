@@ -71,10 +71,25 @@ pub fn download(url: &str, to: &std::path::Path, timeout: Duration) -> anyhow::R
 
 /// `POST url` with a JSON body.
 pub fn post_json(url: &str, body: &Value, timeout: Duration) -> anyhow::Result<JsonResponse> {
+    post_json_with(url, &[], body, timeout)
+}
+
+/// `POST url` with a JSON body and extra headers.
+pub fn post_json_with(url: &str, headers: &[(&str, &str)], body: &Value, timeout: Duration) -> anyhow::Result<JsonResponse> {
+    let mut req = agent(timeout).post(url).header("accept", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = req.send_json(body).with_context(|| format!("POST {url}"))?;
+    Ok(finish(resp))
+}
+
+/// `POST url` with a form-encoded body (OAuth token endpoints).
+pub fn post_form(url: &str, form: &[(&str, &str)], timeout: Duration) -> anyhow::Result<JsonResponse> {
     let resp = agent(timeout)
         .post(url)
         .header("accept", "application/json")
-        .send_json(body)
+        .send_form(form.iter().copied())
         .with_context(|| format!("POST {url}"))?;
     Ok(finish(resp))
 }

@@ -1,6 +1,10 @@
 //! Bridge view: pairing for the Just Terminal phone app and web client — URLs, the token (masked until you
 //! reveal it), a pairing QR, connected clients, and an on/off toggle.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::alerts::Kind;
 use crate::pane::{Cx, Pane};
 use crate::services::Avail;

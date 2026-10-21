@@ -2,6 +2,10 @@
 //! and, once one runs, its live status page: milestones as the reviewer marks them, the wake-up in
 //! progress, the log, and wake now / pause / edit / stop.
 
+/// Drawn by the desktop app (`bro gui`).
+#[cfg(feature = "gui")]
+pub(crate) mod gui;
+
 use crate::layout::PaneId;
 use crate::textarea::TextArea;
 use crate::theme::Theme;

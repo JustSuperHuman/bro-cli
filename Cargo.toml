@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bro-core", "crates/bro-proxy", "crates/bro-bridge", "crates/bro-tui", "crates/bro-voice"]
+members = ["crates/bro-core", "crates/bro-proxy", "crates/bro-bridge", "crates/bro-tui", "crates/bro-voice", "crates/bro-gfx", "crates/bro-media"]
 exclude = ["vendor/vt100", "vendor/portable-pty"]
 
 # Preserve OSC 8 link targets on cells while scrolling and redrawing terminal panes.
@@ -9,7 +9,7 @@ vt100 = { path = "vendor/vt100" }
 portable-pty = { path = "vendor/portable-pty" }
 
 [workspace.package]
-version = "2.0.26"
+version = "2.1.0"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -84,6 +84,22 @@ tempfile = "3"
 opt-level = 3
 
 [profile.dev.package.blake2]
+opt-level = 3
+
+# the desktop app's picture decoding and text shaping are unusably slow unoptimised
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.swash]
+opt-level = 3
+
+[profile.dev.package.cosmic-text]
 opt-level = 3
 
 [profile.release]

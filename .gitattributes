@@ -1,0 +1,4 @@
+# the bro-cli launchers keep their platform's line endings wherever they're checked out
+*.cmd text eol=crlf
+packaging/bro-cli text eol=lf
+install.sh text eol=lf

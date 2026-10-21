@@ -110,7 +110,7 @@ pub fn detect_with(screen: &vt100::Screen, files: &mut dyn FnMut(&FileLinkMatch)
     links
 }
 
-fn web_urls(text: &str) -> Vec<(usize, usize, String)> {
+pub fn web_urls(text: &str) -> Vec<(usize, usize, String)> {
     let mut found = vec![];
     let mut after = 0;
     for (start, _) in text.char_indices() {
@@ -150,9 +150,35 @@ fn web_urls(text: &str) -> Vec<(usize, usize, String)> {
     found
 }
 
-/// Called on a worker after a deliberate click. The target is passed as data, never to a shell.
+/// A local file the system would run rather than show if it "opened" it: programs, installers, scripts and
+/// shortcuts. bro never opens these from a link, a preview or the media panel.
+pub fn runs_when_opened(path: &Path) -> bool {
+    #[cfg(feature = "gui")]
+    {
+        bro_media::is_executable(path)
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        const PROGRAMS: &[&str] = &[
+            "exe", "com", "scr", "pif", "cpl", "msc", "msi", "msp", "msix", "msixbundle", "appx", "appxbundle", "appinstaller", "application",
+            "appref-ms", "gadget", "bat", "cmd", "ps1", "psm1", "psd1", "vb", "vbe", "vbs", "js", "jse", "ws", "wsf", "wsh", "hta", "sct", "lnk",
+            "url", "website", "inf", "reg", "scf", "jar", "jnlp", "py", "pyw", "pyz", "pl", "rb", "sh", "command", "app", "pkg", "dmg",
+        ];
+        let name = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(['.', ' ']).to_ascii_lowercase()).unwrap_or_default();
+        name.rsplit_once('.').is_some_and(|(_, ext)| PROGRAMS.contains(&ext))
+    }
+}
+
+/// Called on a worker after a deliberate click. The target is passed as data, never to a shell. A local
+/// program (see [`runs_when_opened`]) is refused: opening one would run it.
 pub fn open(raw: &str) -> Result<(), String> {
     let uri = target(raw).ok_or_else(|| "unsupported link".to_string())?;
+    if let Some((path, _, _)) = parse_file_uri(&uri)
+        && runs_when_opened(&path)
+    {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+        return Err(format!("bro doesn't run programs from a link or a preview · {name}"));
+    }
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
@@ -173,6 +199,18 @@ pub fn open(raw: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn programs_never_open_from_a_link() {
+        for p in ["C:/x/setup.exe", "C:/x/run.bat", "C:/x/tool.ps1", "C:/x/go.cmd", "C:/x/a.vbs", "C:/x/x.lnk", "C:/x/x.msi"] {
+            assert!(runs_when_opened(Path::new(p)), "{p}");
+            let uri = file_uri(Path::new(p), None, None).unwrap();
+            assert!(open(&uri).unwrap_err().contains("doesn't run programs"), "{p}");
+        }
+        for p in ["C:/x/notes.md", "C:/x/photo.png", "C:/x/clip.mp4", "C:/x/report.pdf"] {
+            assert!(!runs_when_opened(Path::new(p)), "{p}");
+        }
+    }
 
     #[test]
     fn web_links_trim_prose_punctuation_but_keep_balanced_url_syntax() {

@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Act {
     NewSession,
+    /// A new agent in your home folder on your last-used harness and login: quick system tasks.
+    QuickAgent,
     NewShell,
     Split,
     SplitRight,
@@ -42,6 +44,12 @@ pub enum Act {
     PrevProject,
     NextTab,
     PrevTab,
+    /// Show a project tab: 0 is All (every session tiled), 1–9 the projects in tab order.
+    ShowTab(u8),
+    /// Back to the project tab you were on before this one.
+    LastTab,
+    /// The project tabs over the sessions, on / off.
+    ToggleProjectTabs,
     Attention,
     ToggleSidebar,
     FocusSidebar,
@@ -56,6 +64,8 @@ pub enum Act {
     Settings,
     /// Quick Install: JustTools, Git, Node.js, .NET, the agents… as a checklist.
     QuickInstall,
+    /// The setup guide: install an agent, add a login, launch.
+    Setup,
     Help,
     Rename,
     Themes,
@@ -83,6 +93,8 @@ pub enum Act {
     Watchdog,
     /// Edit the instructions every watchdog reviewer starts with.
     WatchdogPrompt,
+    /// The desktop app's media panel (the pictures and videos beside the sessions), show / hide.
+    Media,
     Quit,
 }
 
@@ -113,12 +125,13 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, NewShell, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenClipboardFolder, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, QuickAgent, NewShell, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenClipboardFolder, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
-        v.extend([NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
+        v.extend((0..=9).map(ShowTab));
+        v.extend([LastTab, NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, RefreshUsage]);
-        v.extend([Palette, Help, Themes, ToggleIcons, ToggleAutoResume, ToggleCaveman, Quit]);
+        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Setup, RefreshUsage, Media]);
+        v.extend([Palette, Help, Themes, ToggleIcons, ToggleProjectTabs, ToggleAutoResume, ToggleCaveman, Quit]);
         v
     }
 
@@ -127,7 +140,12 @@ impl Act {
         use Act::*;
         match self {
             Jump(n) => format!("jump_{n}"),
+            ShowTab(0) => "tab_all".into(),
+            ShowTab(n) => format!("tab_{n}"),
+            LastTab => "last_tab".into(),
+            ToggleProjectTabs => "toggle_project_tabs".into(),
             NewSession => "new_session".into(),
+            QuickAgent => "quick_agent".into(),
             NewShell => "new_shell".into(),
             Split => "split".into(),
             SplitRight => "split_right".into(),
@@ -164,6 +182,7 @@ impl Act {
             Stats => "stats".into(),
             Settings => "settings".into(),
             QuickInstall => "quick_install".into(),
+            Setup => "setup".into(),
             Help => "help".into(),
             Rename => "rename".into(),
             Themes => "themes".into(),
@@ -182,6 +201,7 @@ impl Act {
             AgentFiles => "agent_files".into(),
             Watchdog => "watchdog".into(),
             WatchdogPrompt => "watchdog_prompt".into(),
+            Media => "media".into(),
             Quit => "quit".into(),
         }
     }
@@ -196,7 +216,12 @@ impl Act {
         use Act::*;
         match self {
             Jump(n) => format!("jump to live session {n}"),
+            ShowTab(0) => "project tabs: All — every session tiled".into(),
+            ShowTab(n) => format!("project tabs: project {n} — its sessions tiled"),
+            LastTab => "project tabs: back to the tab you were on before".into(),
+            ToggleProjectTabs => "project tabs over the sessions on / off".into(),
             NewSession => "launch an agent session…".into(),
+            QuickAgent => "quick agent in your home folder on your last login, for system tasks".into(),
             NewShell => "open a plain shell tab".into(),
             Split => "launch into a split beside this pane…".into(),
             SplitRight => "split right with a shell".into(),
@@ -218,11 +243,11 @@ impl Act {
             ResizeDown => "move the divider down".into(),
             NextSession => "next session".into(),
             PrevSession => "previous session".into(),
-            NextProject => "next project".into(),
-            PrevProject => "previous project".into(),
-            NextTab => "next tab".into(),
-            PrevTab => "previous tab".into(),
-            Attention => "jump to the session that needs you".into(),
+            NextProject => "next project (in a grid: the next project tab)".into(),
+            PrevProject => "previous project (in a grid: the previous project tab)".into(),
+            NextTab => "next layout (a session opened in its own tab, with its splits)".into(),
+            PrevTab => "previous layout".into(),
+            Attention => "jump to the next session that needs you (again: the one after)".into(),
             ToggleSidebar => "show / hide the sidebar".into(),
             FocusSidebar => "focus the sidebar (type to filter, arrows to move, enter to open)".into(),
             Palette => "command palette".into(),
@@ -233,6 +258,7 @@ impl Act {
             Stats => "stats: tokens per login — lifetime, last 24h / 7d / 30d".into(),
             Settings => "settings: bro options and Claude Code privacy, updates and long-run presets".into(),
             QuickInstall => "quick install: JustTools, Git, Node.js, Bun, Python, .NET and the coding agents".into(),
+            Setup => "setup guide: install Claude Code / Codex, add your logins, launch".into(),
             Help => "keys and help".into(),
             Rename => "rename the focused session".into(),
             Themes => "pick a theme (live preview)".into(),
@@ -251,6 +277,7 @@ impl Act {
             AgentFiles => "agent files: what it sent you and the files it touched".into(),
             Watchdog => "watchdog: keep this session working through your milestones while you're away".into(),
             WatchdogPrompt => "watchdog prompt: edit what every reviewer is told".into(),
+            Media => "media panel: the pictures and videos your agents open, send or make (desktop app)".into(),
             Quit => "quit bro".into(),
         }
     }
@@ -258,11 +285,11 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | NewShell | Rename | Close | Attention | Continue | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
-            NextSession | PrevSession | NextProject | PrevProject | Jump(_) | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
+            NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
+            NextSession | PrevSession | NextProject | PrevProject | Jump(_) | ShowTab(_) | LastTab | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | RefreshUsage => Group::Views,
-            Palette | Help | Themes | ToggleIcons | ToggleAutoResume | ToggleCaveman | Quit => Group::App,
+            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Setup | RefreshUsage | Media => Group::Views,
+            Palette | Help | Themes | ToggleIcons | ToggleProjectTabs | ToggleAutoResume | ToggleCaveman | Quit => Group::App,
         }
     }
 
@@ -271,6 +298,7 @@ impl Act {
         use Act::*;
         match self {
             NewSession => vec!["alt+n"],
+            QuickAgent => vec!["alt+q"],
             NewShell => vec!["alt+t"],
             Split => vec!["alt+enter", "alt+\\"],
             Close => vec!["ctrl+w", "alt+w"],
@@ -295,6 +323,8 @@ impl Act {
             NextProject => vec!["alt+J"],
             PrevProject => vec!["alt+K"],
             Attention => vec!["alt+a"],
+            ShowTab(0) => vec!["alt+0"],
+            LastTab => vec!["alt+l"],
             ToggleSidebar => vec!["alt+s"],
             FocusSidebar => vec!["alt+b"],
             Palette => vec!["alt+p"],
@@ -308,6 +338,7 @@ impl Act {
             Proxy => vec!["alt+y"],
             Bridge => vec!["alt+g"],
             Settings => vec!["alt+,"],
+            Media => vec!["alt+m"],
             Help => vec!["f1"],
             _ => vec![],
         }
@@ -318,6 +349,7 @@ impl Act {
         use Act::*;
         match self {
             NewSession => vec!["c"],
+            QuickAgent => vec!["Q"],
             NewShell => vec!["!"],
             SplitRight => vec!["%", "|", "\\"],
             SplitDown => vec!["\"", "-"],
@@ -343,6 +375,8 @@ impl Act {
             PrevProject => vec!["["],
             NextTab => vec![")"],
             PrevTab => vec!["("],
+            ShowTab(0) => vec!["0"],
+            LastTab => vec!["tab"],
             Attention => vec!["a"],
             ToggleSidebar => vec!["s"],
             FocusSidebar => vec!["b"],
@@ -368,7 +402,9 @@ impl Act {
             RefreshUsage => vec!["r"],
             Quit => vec!["q"],
             QuickInstall => vec!["I"],
-            Split | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder => vec![],
+            Setup => vec!["e"],
+            Media => vec!["m"],
+            Split | ShowTab(_) | ToggleProjectTabs | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder => vec![],
         }
     }
 }
@@ -664,6 +700,9 @@ mod tests {
         assert_eq!(km.direct(&ev(KeyCode::Char('J'), KeyModifiers::ALT)), Some(Act::NextProject));
         assert_eq!(km.direct(&ev(KeyCode::Char('J'), KeyModifiers::ALT | KeyModifiers::SHIFT)), Some(Act::NextProject));
         assert_eq!(km.direct(&ev(KeyCode::Char('3'), KeyModifiers::ALT)), Some(Act::Jump(3)));
+        assert_eq!(km.direct(&ev(KeyCode::Char('0'), KeyModifiers::ALT)), Some(Act::ShowTab(0)), "alt+0: the All tab");
+        assert_eq!(km.direct(&ev(KeyCode::Char('l'), KeyModifiers::ALT)), Some(Act::LastTab));
+        assert_eq!(km.after_prefix(&ev(KeyCode::Tab, KeyModifiers::NONE)), Some(Act::LastTab));
         assert_eq!(km.direct(&ev(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT)), Some(Act::ResizeLeft));
         assert_eq!(km.direct(&ev(KeyCode::Char('c'), KeyModifiers::CONTROL)), None, "ctrl keys belong to the agent");
         assert_eq!(km.direct(&ev(KeyCode::Char('w'), KeyModifiers::CONTROL)), Some(Act::Close));

@@ -7,6 +7,7 @@
 pub mod demo;
 pub mod guard;
 pub mod justimagine;
+pub mod justpaste;
 pub mod justtools;
 pub mod justwatch;
 pub mod updates;
@@ -90,6 +91,20 @@ pub struct BridgeState {
     pub status: Avail<BridgeStatus>,
     pub qr: Option<Vec<String>>,
     pub enabled: bool,
+    /// The projects as the phone / web arrange them (by bro project key): the project tabs follow their
+    /// order and names.
+    pub projects: Vec<ClientProject>,
+}
+
+/// A project as the remote clients arrange it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientProject {
+    /// bro's project key
+    pub key: String,
+    /// the name a client gave it
+    pub name: Option<String>,
+    /// its place in a client's order
+    pub order: Option<usize>,
 }
 
 /// Everything the UI reads.
@@ -139,6 +154,8 @@ struct Inner {
     voice: Mutex<Option<bro_voice::Voice>>,
     /// Bridge id of the session in the focused pane (kept current by the UI loop).
     focused: Mutex<Option<String>>,
+    /// Profiles with a login tab open that a watcher is polling until they read signed in.
+    login_watch: Mutex<HashMap<String, Instant>>,
 }
 
 /// Words spoken with push-to-talk, on their way to the orchestrator session.
@@ -214,6 +231,7 @@ pub fn fallback_settings() -> Settings {
         auto_approve: false,
         summary_screensaver_secs: 0,
         shared_borders: false,
+        project_tabs: false,
         permission: Default::default(),
         claude_env: Default::default(),
         caveman: Default::default(),
@@ -221,6 +239,7 @@ pub fn fallback_settings() -> Settings {
         justwatch: Default::default(),
         updates: Default::default(),
         watchdog: Default::default(),
+        setup_done: false,
         keys: BTreeMap::new(),
     }
 }
@@ -255,6 +274,7 @@ impl Services {
                 projects: Mutex::new(HashMap::new()),
                 voice: Mutex::new(None),
                 focused: Mutex::new(None),
+                login_watch: Mutex::new(Default::default()),
             }),
         }
     }
@@ -262,7 +282,7 @@ impl Services {
     fn empty_state(settings: Settings) -> State {
         State {
             proxy: ProxyState { status: Avail::Loading, routes: vec![], events: VecDeque::new(), pool: vec![], enabled: settings.proxy.enabled },
-            bridge: BridgeState { status: Avail::Loading, qr: None, enabled: settings.bridge.enabled },
+            bridge: BridgeState { status: Avail::Loading, qr: None, enabled: settings.bridge.enabled, projects: vec![] },
             settings,
             justtools: Default::default(),
             justimagine: Default::default(),
@@ -285,6 +305,15 @@ impl Services {
     pub fn start(settings: Settings, tx: Sender<Event>) -> Services {
         let svc = Services::with_state(Services::empty_state(settings), tx, false);
         workers::spawn_all(&svc);
+        svc
+    }
+
+    /// A second bro beside a running one (the desktop app opened with `--new`): your real settings, profiles,
+    /// usage and past sessions, but the proxy, the phone bridge, voice and update checks stay with the bro that
+    /// already runs them (two would fight over the same ports and hotkey).
+    pub fn start_guest(settings: Settings, tx: Sender<Event>) -> Services {
+        let svc = Services::with_state(Services::empty_state(settings), tx, false);
+        workers::spawn_guest(&svc);
         svc
     }
 
@@ -391,6 +420,49 @@ impl Services {
             return Ok(demo::shell_command(None, &format!("login · {}", p.id), std::env::temp_dir()));
         }
         guard("profiles::login_command", || bro_core::profiles::login_command(p))
+    }
+
+    /// Watch a profile while its login tab is open: once it reads signed in (or as another account), publish the
+    /// profiles again so the sidebar meters, usage view, launcher and phone pick it up without a manual reload.
+    /// Claude's login keeps running after you sign in, so this can't wait for the tab to end.
+    pub fn watch_login(&self, id: String) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+        const FOR: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+        if self.is_demo() {
+            return;
+        }
+        // a fresh watch replaces one already running for this profile (each knows its own start)
+        let start = Instant::now();
+        self.inner.login_watch.lock().insert(id.clone(), start);
+        let before = self.state().profiles.ready().and_then(|ps| ps.iter().find(|p| p.id == id).map(|p| (p.authenticated, p.email.clone())));
+        let svc = self.clone();
+        std::thread::spawn(move || {
+            let mine = |svc: &Services| svc.inner.login_watch.lock().get(&id) == Some(&start);
+            while start.elapsed() < FOR && mine(&svc) {
+                std::thread::sleep(EVERY);
+                let Ok(Some(p)) = guard("profiles::get", || bro_core::profiles::get(&id)) else { break };
+                if p.authenticated && before.as_ref() != Some(&(true, p.email.clone())) {
+                    workers::load_profiles(&svc);
+                    let who = p.email.as_deref().map(|e| format!(" as {e}")).unwrap_or_default();
+                    svc.send(Event::Toast(crate::alerts::Kind::Info, format!("{} signed in{who}", p.id)));
+                    break;
+                }
+            }
+            let mut w = svc.inner.login_watch.lock();
+            if w.get(&id) == Some(&start) {
+                w.remove(&id);
+            }
+        });
+    }
+
+    /// A login tab closed: stop watching it and read the profiles again (it may have signed in, or out).
+    pub fn login_closed(&self, id: &str) {
+        self.inner.login_watch.lock().remove(id);
+        if self.is_demo() {
+            return;
+        }
+        let svc = self.clone();
+        std::thread::spawn(move || workers::load_profiles(&svc));
     }
 
     /// Create a profile off the UI thread. The pane opens login after success.

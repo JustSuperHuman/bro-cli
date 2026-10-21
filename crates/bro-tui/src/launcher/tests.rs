@@ -29,6 +29,11 @@ fn typ(l: &mut Launcher, s: &str) {
         key(l, KeyCode::Char(c));
     }
 }
+/// Narrow the run-on list (typing there goes to the project picker instead).
+fn narrow(l: &mut Launcher, s: &str) {
+    l.list_filter = s.into();
+    l.filter_changed();
+}
 fn launched(o: Outcome) -> LaunchSpec {
     match o {
         Outcome::Launch(s, _) => s,
@@ -92,7 +97,7 @@ fn openrouter_in_both_harnesses_needs_a_model() {
         while l.harness != h {
             key(&mut l, KeyCode::Right);
         }
-        typ(&mut l, "openrouter");
+        narrow(&mut l, "openrouter");
         assert!(l.needs_model(), "{h:?}");
         assert!(l.models().len() >= 5, "live catalogue rows");
         // Enter moves to the model list instead of launching
@@ -112,7 +117,7 @@ fn cross_logins_need_a_model_from_the_other_family() {
     key(&mut l, KeyCode::Right); // codex
     assert_eq!(l.harness, Harness::Codex);
     assert!(!l.needs_model(), "codex on its own login");
-    typ(&mut l, "work"); // claude:work, via proxy
+    narrow(&mut l, "work"); // claude:work, via proxy
     assert!(l.needs_model());
     assert!(l.models().iter().any(|m| m.id.starts_with("claude-")), "claude models for a claude login");
     key(&mut l, KeyCode::Tab);
@@ -142,7 +147,7 @@ fn recents_relaunch_and_remember_the_model() {
     let s = l.spec().unwrap();
     assert_eq!((s.provider_id.as_deref(), s.model.as_deref()), (Some("openrouter"), Some("z-ai/glm-5.3")));
     // picking openrouter by hand starts on the model used last time
-    typ(&mut l, "openrouter");
+    narrow(&mut l, "openrouter");
     while !matches!(l.current(), Some(Item::Account(_))) {
         key(&mut l, KeyCode::Down);
     }
@@ -158,9 +163,24 @@ fn toggles_and_esc() {
     assert_eq!(l.permission, Permission::Default);
     ctrl(&mut l, 's');
     assert_eq!(l.place, Place::Split);
-    typ(&mut l, "zz");
+    narrow(&mut l, "zz");
     assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::None), "esc clears the filter first");
     assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::Close));
+}
+
+#[test]
+fn typing_on_the_list_picks_the_project_and_esc_comes_back() {
+    let mut l = Launcher::new(data(), Some(PathBuf::from("/code/bro")), Place::Tab);
+    let account = format!("{:?}", l.current());
+    typ(&mut l, "zz");
+    assert_eq!(l.project_picker.as_ref().unwrap().filter, "zz", "the keys went to the project picker");
+    assert!(l.list_filter.is_empty(), "the logins aren't filtered");
+    assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::None), "esc clears the project filter");
+    assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::None), "then closes the picker");
+    assert!(l.project_picker.is_none());
+    assert_eq!(format!("{:?}", l.current()), account, "back on the same login");
+    l.paste("zz");
+    assert_eq!(l.project_picker.as_ref().unwrap().filter, "zz", "a paste is a project too");
 }
 
 #[test]
@@ -173,7 +193,7 @@ fn changing_project_keeps_the_session_choices_and_uses_folder_completion() {
         std::fs::create_dir(dir).unwrap();
     }
     let mut l = Launcher::new(data(), Some(first.clone()), Place::Tab).with_projects(vec![first.clone(), second.clone()]).with_harness(Harness::Codex);
-    typ(&mut l, "team");
+    narrow(&mut l, "team");
     let account = l.current();
     l.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT));
     let picker = l.project_picker.as_ref().unwrap();
@@ -292,4 +312,23 @@ fn orchestrator_harness_follows_your_last_one() {
     d.installed = vec![(Harness::Codex, false), (Harness::Claude, false)];
     let l = Launcher::new(d, None, Place::Tab).with_orchestrator();
     assert_eq!(l.harness, Harness::Pi, "an installed harness when the usual ones aren't");
+}
+
+#[test]
+fn gemini_signs_in_before_it_launches() {
+    let mut l = Launcher::new(data(), None, Place::Tab);
+    narrow(&mut l, "gemini");
+    let Some(Item::Account(a)) = l.current() else { panic!("gemini row") };
+    assert!(!a.ready && a.detail.contains("signs in with Google"), "{}", a.detail);
+    assert!(matches!(key(&mut l, KeyCode::Enter), Outcome::SignIn));
+
+    let mut d = data();
+    d.keyed.push("gemini".into());
+    let mut l = Launcher::new(d, None, Place::Tab);
+    narrow(&mut l, "gemini");
+    let Some(Item::Account(a)) = l.current() else { panic!("gemini row") };
+    assert!(a.ready && a.detail.contains("google ai subscription"));
+    key(&mut l, KeyCode::Enter);
+    let s = launched(key(&mut l, KeyCode::Enter));
+    assert_eq!((s.provider_id.as_deref(), s.model.as_deref()), (Some("gemini"), Some("gemini-4-argon")));
 }

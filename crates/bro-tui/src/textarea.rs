@@ -272,6 +272,23 @@ impl TextArea {
         self.goal = None;
     }
 
+    /// Byte offset of the cursor (the desktop app draws its caret).
+    #[cfg(feature = "gui")]
+    pub(crate) fn cursor(&self) -> usize {
+        self.cur
+    }
+
+    /// Put the cursor at byte `at` (a click in the desktop app), back to a character boundary.
+    #[cfg(feature = "gui")]
+    pub(crate) fn set_cursor(&mut self, at: usize) {
+        let mut at = at.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        self.cur = at;
+        self.goal = None;
+    }
+
     /// Draw into `area`; a focused field shows its cursor. Empty text shows `placeholder`.
     pub fn render(&mut self, f: &mut Frame, area: Rect, style: Style, focused: bool, placeholder: &str, t: &crate::theme::Theme) {
         if area.width == 0 || area.height == 0 {

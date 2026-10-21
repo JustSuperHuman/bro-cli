@@ -333,7 +333,7 @@ pub fn reasoning_item(id: &str, thinking: &str, signature: Option<&str>) -> Valu
         "id": id, "type": "reasoning",
         "summary": if thinking.is_empty() { json!([]) } else { json!([{"type": "summary_text", "text": thinking}]) },
     });
-    if let Some(sig) = signature.filter(|s| !s.is_empty() && !s.starts_with("bro.")) {
+    if let Some(sig) = signature.filter(|s| super::carries_signature(s)) {
         item["encrypted_content"] = json!(format!("{ENC_ANTHROPIC}{sig}"));
     }
     item

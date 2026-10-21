@@ -7,8 +7,11 @@
 //! - thinking.signature `bro.rs:{enc}` — Responses reasoning `encrypted_content`
 //! - reasoning.encrypted_content `bro.at:{sig}` — an Anthropic thinking signature
 //! - reasoning.encrypted_content `bro.rd:{data}` — Anthropic redacted_thinking data
+//! - thinking.signature `bro.gs:{sig}` — a Gemini thoughtSignature (travels like a real
+//!   signature through OpenAI clients, so it comes back on the next Gemini request)
 
 pub mod a2chat;
+pub mod a2gemini;
 pub mod a2responses;
 pub mod chat2a;
 pub mod reasoning_cache;
@@ -17,6 +20,7 @@ pub mod schema;
 pub mod stream_a2chat;
 pub mod stream_a2responses;
 pub mod stream_chat2a;
+pub mod stream_gemini2a;
 pub mod stream_responses2a;
 #[cfg(test)]
 mod stream_tests;
@@ -29,6 +33,13 @@ pub const SIG_CHAT: &str = "bro.chat";
 pub const SIG_RESPONSES: &str = "bro.rs:";
 pub const ENC_ANTHROPIC: &str = "bro.at:";
 pub const ENC_REDACTED: &str = "bro.rd:";
+pub const SIG_GEMINI: &str = "bro.gs:";
+
+/// A signature an OpenAI client should carry and send back: a real Anthropic one, or a
+/// Gemini one (the other `bro.` markers only mean something inside one dialect).
+pub fn carries_signature(sig: &str) -> bool {
+    !sig.is_empty() && (!sig.starts_with("bro.") || sig.starts_with(SIG_GEMINI))
+}
 
 pub const EFFORT_ORDER: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 

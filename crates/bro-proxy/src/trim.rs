@@ -172,7 +172,7 @@ impl Trimmer {
 fn kind_for(d: Dialect) -> ProviderKind {
     match d {
         Dialect::Anthropic => ProviderKind::Anthropic,
-        Dialect::Chat | Dialect::Responses => ProviderKind::OpenAi,
+        Dialect::Chat | Dialect::Responses | Dialect::Gemini => ProviderKind::OpenAi,
     }
 }
 
