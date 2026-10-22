@@ -169,10 +169,11 @@ pub fn set_clipboard(text: &str) {
     }
 }
 
-/// Leave the shell's console: when this process shares one (started from a terminal), start `args` as a copy
-/// without a visible console and return true (this one exits); when the console is our own (bro.exe opened
-/// from Explorer), hide it and return false. Child processes keep a console either way, so none of them flash
-/// one of their own.
+/// Leave the console: whenever this process has one, start `args` as a copy with a hidden console of its own and
+/// return true (this one exits). That covers a shell's console (started from a terminal) and our own (bro.exe
+/// opened from Explorer, Start or Run): on Windows 11 that console is a Windows Terminal tab, and hiding its
+/// window leaves the tab open, so closing the tab would close the app. Child processes keep a console either
+/// way, so none of them flash one of their own.
 #[cfg(windows)]
 pub fn detach_from_console(args: &[String]) -> bool {
     use std::os::windows::process::CommandExt;
@@ -184,7 +185,28 @@ pub fn detach_from_console(args: &[String]) -> bool {
     if n == 0 {
         return false;
     }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    let spawn = |flags: u32| {
+        std::process::Command::new(&exe)
+            .args(args)
+            .creation_flags(flags)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    };
+    let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    // out of the terminal's job too, when it allows that: a terminal that kills its job on close takes no app
+    // with it (a job that forbids breaking away fails the spawn, so try again inside it)
+    if spawn(flags | CREATE_BREAKAWAY_FROM_JOB) || spawn(flags) {
+        return true;
+    }
     if n == 1 {
+        // couldn't hand off: at least hide our own console window
         // SAFETY: hiding our own console window, if there is one.
         unsafe {
             let h = GetConsoleWindow();
@@ -192,19 +214,8 @@ pub fn detach_from_console(args: &[String]) -> bool {
                 ShowWindow(h, SW_HIDE);
             }
         }
-        return false;
     }
-    let Ok(exe) = std::env::current_exe() else { return false };
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    std::process::Command::new(exe)
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .is_ok()
+    false
 }
 
 /// Started from a terminal (`bro` in a shell): run the window as its own process, in its own process group so

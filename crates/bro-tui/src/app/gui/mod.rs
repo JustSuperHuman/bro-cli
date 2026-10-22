@@ -75,8 +75,9 @@ pub fn take_flag(args: &mut Vec<String>) -> Option<Flag> {
     found
 }
 
-/// `bro gui`: started from a shell, hand off to a copy without a console window so the shell gets its prompt
-/// back (like `code .`); otherwise run here.
+/// `bro gui`: started with a console (from a shell, or bro.exe opened from Explorer or Start), hand off to a
+/// copy without a console window so the shell gets its prompt back (like `code .`) and closing the console
+/// leaves the app open; otherwise run here.
 pub fn launch(flag: Flag, demo: bool, new: bool, dir: Option<PathBuf>) -> anyhow::Result<()> {
     if !flag.child {
         let mut args = vec!["gui".to_string()];
