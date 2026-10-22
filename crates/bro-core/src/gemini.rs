@@ -19,14 +19,19 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// The Google OAuth client bro signs in with: Antigravity's installed-app client. bro doesn't ship it; set
-/// `BRO_GEMINI_CLIENT_ID` and `BRO_GEMINI_CLIENT_SECRET` (in your environment, or an env file with `bro --env`).
+/// Antigravity's installed-app Google OAuth client. Installed-app clients can't keep a secret, so Google
+/// treats this "secret" as public; it ships in Antigravity itself.
+const CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const CLIENT_SECRET: &str = concat!("GOCSPX-", "K58FWR486LdLJ1mLB8sXC4z6qDAf");
+
+/// The Google OAuth client bro signs in with: Antigravity's, unless both `BRO_GEMINI_CLIENT_ID` and
+/// `BRO_GEMINI_CLIENT_SECRET` are set (in your environment, or an env file with `bro --env`).
 pub fn client() -> anyhow::Result<(String, String)> {
     let get = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    match (get("BRO_GEMINI_CLIENT_ID"), get("BRO_GEMINI_CLIENT_SECRET")) {
-        (Some(id), Some(secret)) => Ok((id, secret)),
-        _ => bail!("set BRO_GEMINI_CLIENT_ID and BRO_GEMINI_CLIENT_SECRET (Antigravity's installed-app Google client) to sign in with Google; bro doesn't ship them"),
-    }
+    Ok(match (get("BRO_GEMINI_CLIENT_ID"), get("BRO_GEMINI_CLIENT_SECRET")) {
+        (Some(id), Some(secret)) => (id, secret),
+        _ => (CLIENT_ID.to_string(), CLIENT_SECRET.to_string()),
+    })
 }
 pub const SCOPES: [&str; 5] = [
     "https://www.googleapis.com/auth/cloud-platform",
