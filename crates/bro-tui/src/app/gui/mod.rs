@@ -577,6 +577,11 @@ impl Gui {
         if self.gfx.is_none() {
             return;
         }
+        // minimised: no swapchain image comes, and each try would block the loop for wgpu's 1 s acquire timeout.
+        // Coming back resizes the window, which rebuilds the swapchain and draws.
+        if window.is_minimized() == Some(true) {
+            return;
+        }
         self.theme_changed();
         self.sync_font();
         let size = window.inner_size();
@@ -929,7 +934,8 @@ impl ApplicationHandler<UserEvent> for Gui {
         match Renderer::new(w.clone(), size.width, size.height, true) {
             Ok(renderer) => {
                 let mono = crate::fonts::get(self.app.svc.settings().font.as_deref().unwrap_or("jetbrains-mono")).or_else(|| crate::fonts::get("jetbrains-mono")).map(|f| f.data).unwrap_or(&[]);
-                let text = Text::new(mono, crate::fonts::SYMBOLS.data, true);
+                let mut text = Text::new(mono, crate::fonts::SYMBOLS.data, true);
+                text.set_antialias(window::text_antialias(renderer.subpixel_text()));
                 self.gfx = Some(Gfx { renderer, text, scene: Scene::new() });
                 self.font_id = self.app.svc.settings().font.or(Some("jetbrains-mono".into()));
             }
@@ -977,10 +983,10 @@ impl ApplicationHandler<UserEvent> for Gui {
             el.exit();
             return;
         }
-        if self.dirty || self.ticking || self.shot_pending() {
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+        if (self.dirty || self.ticking || self.shot_pending())
+            && let Some(w) = &self.window
+        {
+            w.request_redraw();
         }
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + self.next_wake()));
     }

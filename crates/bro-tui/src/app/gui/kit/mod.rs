@@ -158,8 +158,9 @@ impl Tokens {
             hairline: text.with_alpha(if light { 0.09 } else { 0.075 }),
             border: text.with_alpha(if light { 0.16 } else { 0.13 }),
             text,
-            muted: text.mix(bg, 0.42),
-            faint: text.mix(bg, 0.64),
+            // WinUI's secondary and tertiary text: dim enough to rank, bright enough to read at caption sizes
+            muted: text.mix(bg, 0.3),
+            faint: text.mix(bg, 0.5),
             accent,
             on_accent,
             shine: c(t.shine),
@@ -179,7 +180,6 @@ impl Tokens {
     }
 
     /// A project's colour (the same one the terminal UI uses).
-    #[allow(dead_code)]
     pub fn project(&self, key: &str, t: &crate::theme::Theme) -> Color {
         color(crate::theme::project_color(key, t), self.accent, &self.ansi)
     }

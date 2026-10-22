@@ -1,6 +1,6 @@
-//! Glyph atlases: a single-channel one for ordinary text and an RGBA one for colour emoji. Space is handed
-//! out with etagere's shelf allocator; pixels wait in `uploads` until the renderer copies them to the GPU.
-//! When an atlas fills up it is reset at a bigger size and the frame is drawn again.
+//! Glyph atlases: a single-channel one for ordinary text and an RGBA one for colour emoji and subpixel text.
+//! Space is handed out with etagere's shelf allocator; pixels wait in `uploads` until the renderer copies them
+//! to the GPU. When an atlas fills up it is reset at a bigger size and the frame is drawn again.
 
 use etagere::{BucketedAtlasAllocator, size2};
 
@@ -13,13 +13,15 @@ const MAX_SIZE: u32 = 8192;
 pub enum Kind {
     Mask,
     Color,
+    /// subpixel (LCD) text: a coverage per colour channel, kept in the RGBA atlas
+    Lcd,
 }
 
 impl Kind {
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             Kind::Mask => 1,
-            Kind::Color => 4,
+            Kind::Color | Kind::Lcd => 4,
         }
     }
 }

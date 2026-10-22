@@ -109,6 +109,42 @@ fn keep_alt(hwnd: isize) {
     }
 }
 
+/// How the window's text is smoothed: per colour channel the way Windows has ClearType set (on, and which way
+/// round the screen's colours run), greyscale elsewhere and when the GPU can't blend it (`subpixel` false).
+/// BRO_TEXT_AA (grayscale, rgb or bgr) overrides the system's choice.
+pub fn text_antialias(subpixel: bool) -> bro_gfx::Antialias {
+    use bro_gfx::Antialias;
+    let pick = match std::env::var("BRO_TEXT_AA").map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Ok("grayscale" | "greyscale" | "gray" | "grey" | "off") => Antialias::Grayscale,
+        Ok("rgb" | "subpixel" | "cleartype") => Antialias::Rgb,
+        Ok("bgr") => Antialias::Bgr,
+        _ => system_antialias(),
+    };
+    if subpixel { pick } else { Antialias::Grayscale }
+}
+
+#[cfg(windows)]
+fn system_antialias() -> bro_gfx::Antialias {
+    use bro_gfx::Antialias;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FE_FONTSMOOTHINGCLEARTYPE, FE_FONTSMOOTHINGORIENTATIONBGR, SPI_GETFONTSMOOTHING, SPI_GETFONTSMOOTHINGORIENTATION, SPI_GETFONTSMOOTHINGTYPE, SystemParametersInfoW};
+    let get = |what| {
+        let mut v: u32 = 0;
+        // SAFETY: each of these settings is one 32-bit value written into `v`.
+        let ok = unsafe { SystemParametersInfoW(what, 0, (&mut v as *mut u32).cast(), 0) } != 0;
+        ok.then_some(v)
+    };
+    if get(SPI_GETFONTSMOOTHING).is_none_or(|on| on == 0) || get(SPI_GETFONTSMOOTHINGTYPE) != Some(FE_FONTSMOOTHINGCLEARTYPE) {
+        return Antialias::Grayscale;
+    }
+    if get(SPI_GETFONTSMOOTHINGORIENTATION) == Some(FE_FONTSMOOTHINGORIENTATIONBGR) { Antialias::Bgr } else { Antialias::Rgb }
+}
+
+/// macOS stopped smoothing per channel, and Linux leaves it to per-screen settings bro can't see.
+#[cfg(not(windows))]
+fn system_antialias() -> bro_gfx::Antialias {
+    bro_gfx::Antialias::Grayscale
+}
+
 pub fn cursor_icon(c: Cursor) -> CursorIcon {
     match c {
         Cursor::Default => CursorIcon::Default,

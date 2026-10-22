@@ -9,12 +9,15 @@
 //!
 //! The font system starts with bro's bundled fonts only (instant), then swaps in one that also knows the
 //! system's fonts (emoji, CJK, symbols) once a background thread has scanned them.
+//!
+//! Glyph edges are smoothed in greyscale, or per colour channel on LCD screens ([`Antialias`]): outlines are
+//! sampled three times a pixel across and filtered into red, green and blue coverage, as ClearType does.
 
 use crate::atlas::{Atlas, Kind};
 use crate::builtin;
 use crate::color::Color;
 use crate::geom::{Point, Rect, Size};
-use crate::scene::Scene;
+use crate::scene::{GlyphFormat, Scene};
 use cosmic_text::{Attrs, Buffer, CacheKey, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -25,6 +28,18 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 /// Inter, the interface font (variable weight).
 pub const INTER: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
 pub const INTER_ITALIC: &[u8] = include_bytes!("../assets/fonts/InterVariable-Italic.ttf");
+
+/// How glyph edges are smoothed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Antialias {
+    /// one coverage a pixel: right on any screen
+    #[default]
+    Grayscale,
+    /// a coverage per colour channel, for LCD screens whose pixels are red, green, blue from the left (most)
+    Rgb,
+    /// the same for screens whose pixels are blue, green, red from the left
+    Bgr,
+}
 
 /// A font role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -277,6 +292,8 @@ pub struct Text {
     pending: Option<(Receiver<FontSystem>, usize)>,
     /// An atlas filled up this frame: draw the frame again.
     pub overflow: bool,
+    /// how glyph edges are smoothed
+    aa: Antialias,
 }
 
 fn load(fs: &mut FontSystem, data: &Arc<Vec<u8>>) -> Vec<String> {
@@ -324,6 +341,7 @@ impl Text {
             variable: HashMap::new(),
             pending: None,
             overflow: false,
+            aa: Antialias::Grayscale,
         };
         if system_fonts {
             t.load_system_fonts();
@@ -383,6 +401,25 @@ impl Text {
             m.clusters.clear();
             m.ascii = Default::default();
         }
+    }
+
+    /// Smooth glyph edges this way from now on (subpixel text needs [`crate::Renderer::subpixel_text`]).
+    pub fn set_antialias(&mut self, aa: Antialias) {
+        if aa == self.aa {
+            return;
+        }
+        self.aa = aa;
+        // subpixel glyphs live in the RGBA atlas: give it the room the greyscale ones had
+        if aa != Antialias::Grayscale {
+            self.color.size = self.color.size.max(self.mask.size);
+        }
+        self.glyphs.clear();
+        self.mask.reset(false);
+        self.color.reset(false);
+    }
+
+    pub fn antialias(&self) -> Antialias {
+        self.aa
     }
 
     /// Call once per frame before drawing: ages the layout cache.
@@ -584,7 +621,8 @@ impl Text {
             if color.a * alpha <= 0.0 {
                 continue;
             }
-            let (key, ix, iy) = CacheKey::new(g.font, g.glyph, g.size, (ox + g.x, oy + g.y), Weight(g.weight), g.flags);
+            // baselines on whole pixels: horizontal strokes stay one crisp row instead of smearing over two
+            let (key, ix, iy) = CacheKey::new(g.font, g.glyph, g.size, (ox + g.x, (oy + g.y).round()), Weight(g.weight), g.flags);
             self.put_glyph(scene, GlyphKey::Font(key, false), ix, iy, color.fade(alpha));
         }
     }
@@ -597,7 +635,12 @@ impl Text {
         let rect = Rect::new((ix + p.left) as f32, (iy - p.top) as f32, p.w as f32, p.h as f32);
         let atlas = if p.kind == Kind::Mask { &self.mask } else { &self.color };
         let uv = atlas.uv(p.x, p.y, p.w, p.h);
-        scene.glyph(rect, uv, color, p.kind == Kind::Color);
+        let format = match p.kind {
+            Kind::Mask => GlyphFormat::Mask,
+            Kind::Color => GlyphFormat::Color,
+            Kind::Lcd => GlyphFormat::Lcd,
+        };
+        scene.glyph_as(rect, uv, color, format);
     }
 
     /// The atlas placement of a glyph, rasterising it on first use.
@@ -647,20 +690,31 @@ impl Text {
             builder = builder.normalized_coords(swash_font.variations().normalized_coords([(swash::Tag::from_be_bytes(*b"wght"), (ck.font_weight.0 as f32).clamp(v.min_value(), v.max_value()))]));
         }
         let mut scaler = builder.build();
-        let image = Render::new(&[Source::ColorOutline(0), Source::ColorBitmap(StrikeWith::BestFit), Source::Outline])
-            .format(Format::Alpha)
-            .offset(Vector::new(ck.x_bin.as_float(), ck.y_bin.as_float()))
-            .embolden(if embolden { (size / 28.0).max(0.4) } else { 0.0 })
-            .transform(ck.flags.contains(CacheKeyFlags::FAKE_ITALIC).then(|| Transform::skew(Angle::from_degrees(14.0), Angle::from_degrees(0.0))))
-            .render(&mut scaler, ck.glyph_id)?;
-        let (w, h) = (image.placement.width, image.placement.height);
-        let (left, top) = (image.placement.left, image.placement.top);
-        match image.content {
-            Content::Mask => self.place(Kind::Mask, w, h, left, top, image.data),
-            Content::Color => self.place(Kind::Color, w, h, left, top, image.data),
-            // subpixel masks aren't requested (Format::Alpha)
-            Content::SubpixelMask => None,
+        let offset = Vector::new(ck.x_bin.as_float(), ck.y_bin.as_float());
+        let bolden = if embolden { (size / 28.0).max(0.4) } else { 0.0 };
+        let italic = ck.flags.contains(CacheKeyFlags::FAKE_ITALIC).then(|| Transform::skew(Angle::from_degrees(14.0), Angle::from_degrees(0.0)));
+        // colour glyphs come out as they are; outlines here only when smoothing in greyscale
+        let subpixel = self.aa != Antialias::Grayscale;
+        let sources: &[Source] = if subpixel { &[Source::ColorOutline(0), Source::ColorBitmap(StrikeWith::BestFit)] } else { &[Source::ColorOutline(0), Source::ColorBitmap(StrikeWith::BestFit), Source::Outline] };
+        if let Some(image) = Render::new(sources).format(Format::Alpha).offset(offset).embolden(bolden).transform(italic).render(&mut scaler, ck.glyph_id) {
+            let (w, h) = (image.placement.width, image.placement.height);
+            let (left, top) = (image.placement.left, image.placement.top);
+            return match image.content {
+                Content::Mask => self.place(Kind::Mask, w, h, left, top, image.data),
+                Content::Color => self.place(Kind::Color, w, h, left, top, image.data),
+                // subpixel masks aren't requested (Format::Alpha)
+                Content::SubpixelMask => None,
+            };
         }
+        if !subpixel {
+            return None;
+        }
+        // subpixel: the outline three samples a pixel across, filtered into a coverage per colour channel
+        let wide = italic.unwrap_or(Transform::IDENTITY).then_scale(3.0, 1.0);
+        let image = Render::new(&[Source::Outline]).format(Format::Alpha).offset(Vector::new(offset.x * 3.0, offset.y)).embolden(bolden).transform(Some(wide)).render(&mut scaler, ck.glyph_id)?;
+        let p = image.placement;
+        let (data, w, left) = lcd_filter(&image.data, p.width, p.height, p.left, self.aa == Antialias::Bgr);
+        self.place(Kind::Lcd, w, if w == 0 { 0 } else { p.height }, left, p.top, data)
     }
 
     // ------------------------------------------------------------------ terminal cells
@@ -937,6 +991,43 @@ fn sys_locale() -> String {
     "en-US".to_string()
 }
 
+/// FreeType's default LCD filter: each sample spreads over its two neighbours either side, which keeps colour
+/// fringes faint (the weights sum to 256).
+const LCD_TAPS: [u32; 5] = [8, 77, 86, 77, 8];
+
+/// A glyph's coverage sampled three times a pixel across (`w3` samples a row, the first at subpixel `left3`)
+/// filtered into RGBA pixels: a coverage per colour channel (red on the left, blue when `bgr`) and the largest
+/// as alpha. Returns the pixels, their width and the first one's x.
+fn lcd_filter(data: &[u8], w3: u32, h: u32, left3: i32, bgr: bool) -> (Vec<u8>, u32, i32) {
+    if w3 == 0 || h == 0 {
+        return (vec![], 0, 0);
+    }
+    // the filter reaches two samples past either end
+    let first = (left3 - 2).div_euclid(3);
+    let end = (left3 + w3 as i32 + 1).div_euclid(3) + 1;
+    let w = (end - first) as u32;
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    for (y, row) in data.chunks_exact(w3 as usize).take(h as usize).enumerate() {
+        let sample = |s: i32| usize::try_from(s - left3).ok().and_then(|i| row.get(i)).map_or(0, |&v| v as u32);
+        for x in 0..w as usize {
+            let s0 = 3 * (first + x as i32);
+            let mut c = [0u8; 3];
+            for (ch, v) in c.iter_mut().enumerate() {
+                let s = s0 + ch as i32;
+                let sum: u32 = LCD_TAPS.iter().enumerate().map(|(k, t)| t * sample(s + k as i32 - 2)).sum();
+                *v = ((sum + 128) >> 8).min(255) as u8;
+            }
+            if bgr {
+                c.swap(0, 2);
+            }
+            let o = (y * w as usize + x) * 4;
+            out[o..o + 3].copy_from_slice(&c);
+            out[o + 3] = c[0].max(c[1]).max(c[2]);
+        }
+    }
+    (out, w, first)
+}
+
 /// An SVG path filled into a `w`×`h` alpha mask (its `view`-sized box fitted and centred).
 pub fn raster_path(path: &str, view: f32, w: u32, h: u32) -> Vec<u8> {
     use swash::zeno::{Mask, Transform};
@@ -998,6 +1089,37 @@ mod tests {
         t.draw(&mut s, &l, Point::new(10.0, 10.0), None, 1.0);
         assert_eq!(s.used_layers()[0].glyphs.len(), 2);
         assert!(!t.mask.uploads.is_empty(), "rasterised into the atlas");
+    }
+
+    #[test]
+    fn subpixel_text_filters_into_colour_channels() {
+        // a solid run of samples well inside the glyph: every channel fully covered
+        let (px, w, left) = lcd_filter(&[255; 30], 30, 1, 0, false);
+        assert_eq!(left, -1, "the filter reaches two samples before the first");
+        assert_eq!(w, 12);
+        assert_eq!(&px[4 * 5..4 * 5 + 4], &[255, 255, 255, 255]);
+        // a stem one pixel wide: its pixel stays strong, its neighbours keep a faint fringe, nothing is lost
+        let (px, w, left) = lcd_filter(&[255, 255, 255], 3, 1, 3, false);
+        assert_eq!((w, left), (3, 0));
+        let at = |x: usize| &px[x * 4..x * 4 + 4];
+        assert_eq!(&at(1)[..3], &[170, 239, 170]);
+        assert_eq!((0..3).flat_map(|x| at(x)[..3].to_vec()).map(u32::from).sum::<u32>(), 3 * 255);
+        assert!(at(0)[2] > 0 && at(0)[2] < 120 && at(0)[0] == 0, "red side of the left neighbour is clear: {:?}", at(0));
+        assert_eq!(at(0)[3], at(0)[2], "alpha is the largest channel");
+        // blue-first screens get the channels the other way round
+        let (bgr, ..) = lcd_filter(&[255, 255, 255], 3, 1, 3, true);
+        assert_eq!(bgr[0], px[2]);
+        assert_eq!(bgr[2], px[0]);
+
+        let mut t = Text::new(&[], &[], false);
+        t.set_antialias(Antialias::Rgb);
+        let mut s = Scene::new();
+        let l = t.line("Hi", Face::Ui, 16.0, 400, Color::WHITE, None);
+        t.draw(&mut s, &l, Point::new(10.0, 10.0), None, 1.0);
+        let glyphs = &s.used_layers()[0].glyphs;
+        assert_eq!(glyphs.len(), 2);
+        assert!(glyphs.iter().all(|g| g.params[0] == 2.0), "drawn as subpixel glyphs");
+        assert!(!t.color.uploads.is_empty() && t.mask.uploads.is_empty(), "rasterised into the RGBA atlas");
     }
 
     #[test]

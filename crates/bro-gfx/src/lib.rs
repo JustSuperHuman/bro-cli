@@ -20,8 +20,8 @@ pub mod text;
 pub use color::Color;
 pub use geom::{Corners, Edges, Point, Rect, Size};
 pub use renderer::{Effects, FrameError, Renderer};
-pub use scene::{Fill, ImageId, Quad, Scene};
-pub use text::{Align, Face, Layout, MonoMetrics, Span, Text, TextOpts, raster_path};
+pub use scene::{Fill, GlyphFormat, ImageId, Quad, Scene};
+pub use text::{Align, Antialias, Face, Layout, MonoMetrics, Span, Text, TextOpts, raster_path};
 
 /// Re-exported so the app can name surface targets and adapter info without its own wgpu dependency.
 pub use wgpu;

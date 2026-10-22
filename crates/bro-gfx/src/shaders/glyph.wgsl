@@ -11,7 +11,7 @@ struct GlyphIn {
     @location(1) uv: vec4<f32>,
     @location(2) color: vec4<f32>,
     @location(3) clip: vec4<f32>,
-    // kind (0 mask, 1 colour), clip radius
+    // kind (0 mask, 1 colour, 2 subpixel), clip radius
     @location(4) params: vec4<f32>,
 };
 
@@ -42,20 +42,28 @@ fn luma(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// The exponent coverage is raised to: brighter text gets a boost (below 1), darker text a trim (above 1).
+fn text_exponent(c: vec3<f32>) -> f32 {
+    return mix(globals.text.y, globals.text.x, smoothstep(0.25, 0.75, luma(c)));
+}
+
 @fragment
 fn fs_glyph(o: GlyphOut) -> @location(0) vec4<f32> {
     let clip = clip_alpha(o.p, o.clip, o.params.y);
     if (clip <= 0.0) {
         discard;
     }
+    if (o.params.x > 1.5) {
+        // subpixel coverage without dual-source blending: its average
+        let m = textureSampleLevel(color_tex, atlas_sampler, o.uv, 0.0).rgb;
+        let a = pow(dot(m, vec3<f32>(1.0 / 3.0)), text_exponent(o.color.rgb));
+        return vec4<f32>(o.color.rgb, a * o.color.a * clip);
+    }
     if (o.params.x > 0.5) {
         let c = textureSampleLevel(color_tex, atlas_sampler, o.uv, 0.0);
         return vec4<f32>(c.rgb, c.a * o.color.a * clip);
     }
     let coverage = textureSampleLevel(mask_tex, atlas_sampler, o.uv, 0.0).r;
-    // brighter text gets a boost (exponent < 1), darker text a trim (exponent > 1)
-    let l = luma(o.color.rgb);
-    let k = mix(globals.text.y, globals.text.x, smoothstep(0.25, 0.75, l));
-    let a = pow(coverage, k);
+    let a = pow(coverage, text_exponent(o.color.rgb));
     return vec4<f32>(o.color.rgb, a * o.color.a * clip);
 }

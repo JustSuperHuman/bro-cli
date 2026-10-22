@@ -43,8 +43,19 @@ pub struct GlyphInstance {
     pub uv: [f32; 4],
     pub color: [f32; 4],
     pub clip: [f32; 4],
-    /// kind (0 mask, 1 colour), clip corner radius, -, -
+    /// kind (0 mask, 1 colour, 2 subpixel), clip corner radius, -, -
     pub params: [f32; 4],
+}
+
+/// How a glyph's atlas pixels read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlyphFormat {
+    /// one coverage, drawn in the glyph's colour
+    Mask,
+    /// colour pixels (emoji)
+    Color,
+    /// a coverage per colour channel (subpixel text), drawn in the glyph's colour
+    Lcd,
 }
 
 /// An image quad (see `image.wgsl`).
@@ -313,6 +324,11 @@ impl Scene {
 
     /// A glyph already in an atlas.
     pub fn glyph(&mut self, rect: Rect, uv: [f32; 4], color: Color, colored: bool) {
+        self.glyph_as(rect, uv, color, if colored { GlyphFormat::Color } else { GlyphFormat::Mask });
+    }
+
+    /// A glyph already in an atlas, its pixels read as `format`.
+    pub fn glyph_as(&mut self, rect: Rect, uv: [f32; 4], color: Color, format: GlyphFormat) {
         if self.clipped_out(&rect) {
             return;
         }
@@ -322,7 +338,16 @@ impl Scene {
             uv,
             color: color.to_array(),
             clip: clip.rect.to_array(),
-            params: [if colored { 1.0 } else { 0.0 }, clip.radius, 0.0, 0.0],
+            params: [
+                match format {
+                    GlyphFormat::Mask => 0.0,
+                    GlyphFormat::Color => 1.0,
+                    GlyphFormat::Lcd => 2.0,
+                },
+                clip.radius,
+                0.0,
+                0.0,
+            ],
         });
     }
 

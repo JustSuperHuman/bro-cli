@@ -15,9 +15,10 @@ look is drawn, not borrowed from the OS.
    (`t.stroke` on controls, `t.hairline`/`t.border` elsewhere); shadows only on floating things.
 3. **No accent bars, ever.** No coloured stripe on any edge of a card, row, tab, callout or panel, and no
    selection pill beside a list item. Selection is a fill (`t.selected`); keyboard focus is a full 1px outline.
-4. **No dots, no badges for identity or counts in lists.** Projects are a folder icon, not a colour dot;
-   sessions show their agent's real logo; a project row doesn't carry "N live". Status is an icon (spinner while
-   working, alert when it needs you, check when done), never a coloured dot or a text badge like "working".
+4. **No dots, no badges for identity or counts in lists.** A project is its name in its own colour (the
+   terminal UI's `project_color`), with no colour dot and no folder icon; sessions show their agent's real logo; a
+   project row doesn't carry "N live". Status is an icon (spinner while working, alert when it needs you, check
+   when done), never a coloured dot or a text badge like "working".
 5. **Real marks.** Claude, Codex (OpenAI), Gemini, OpenRouter, PowerShell, Bash and the other brands draw their
    actual logos (`kit::brand`: `ui.mark(brand::harness(h), r, size, None)`, `brand::shell(program)`,
    `brand::provider(id)`), in their own colour or the text colour. Pi and omp have no logo: a glyph.
@@ -26,7 +27,9 @@ look is drawn, not borrowed from the OS.
    neutral control fill only when it *is* a control (an icon button on hover).
 7. **One accent.** The theme's accent marks focus, selection and the primary action. Status colours mean status
    only: `good` done/healthy, `danger` needs you/errors, `inline` warnings, `warn` "running low" (amber, darker on
-   light themes), `shine` secondary highlights, `gold` the orchestrator.
+   light themes), `shine` secondary highlights, `gold` the orchestrator. A project's colour (`t.project(key,
+   theme)`) is identity, as in the terminal UI: its name in the sidebar and the tabs, and the name, number and a
+   faint wash of the session you're in.
 8. **Quiet until touched.** Secondary controls (close ×, minimize) appear on hover or focus; hover fades over
    ~110 ms. Nothing jumps.
 9. **Self-explanatory.** No paragraphs explaining the UI. Labels say what a thing is; a short help line only where
@@ -45,7 +48,14 @@ Inter for everything except terminals, code and file paths (the terminal font, `
 | Captions, counts | `CAPTION` 11 | `MEDIUM` | `faint` |
 | Big numbers (stats) | 22–40 | `SEMIBOLD` | `text` |
 
-No ALL-CAPS labels: group headings are sentence case, semibold (WinUI's "Body Strong").
+No ALL-CAPS labels: group headings are sentence case, semibold (WinUI's "Body Strong"). `muted` and `faint` sit
+where WinUI's secondary and tertiary text do (about 70% and 50% of the way from the background to `text`), so
+captions stay readable.
+
+Glyphs are smoothed per colour channel where Windows has ClearType on (bro-gfx `Antialias::Rgb`/`Bgr`, drawn
+with dual-source blending), in greyscale elsewhere, with baselines on whole pixels. `BRO_TEXT_AA=grayscale`,
+`rgb` or `bgr` overrides the system's choice; `BRO_TEXT_GAMMA=light,dark` tunes stem weight (default
+`0.82,1.12`).
 
 ## Spacing and sizes
 
@@ -87,9 +97,11 @@ search `F0349`, check `F012C`, chevrons `F0142`/`F0140`, alert `F0026`, bell `F0
   it meets the sidebar and the tab row, as WinUI's navigation frame.
 - **Tabs (project tab row).** WinUI's TabView: tabs on the window colour; the selected tab is filled with the
   content layer's colour, its top corners 8px, joined to the content below; others are text with a hover fill
-  and hairline separators between them; × on hover and on the selected tab.
+  and hairline separators between them; × on hover and on the selected tab. A project's tab is its name in its
+  colour and its session count, which spins while one of its agents works.
 - **Sidebar.** WinUI's navigation pane: rows 32–36 high, 4px corners, hover and selection fills; projects are
-  folder icons and names; sessions are logo, name, quiet metadata; usage as segments.
+  their names in their colours over the path and branch; sessions are logo, name, quiet metadata; usage as
+  segments.
 - **Key tips.** Holding alt shows WinUI key tips: small raised boxes (4px corners, stroke, soft shadow) with the
   keys, placed at the bottom centre of what they reach.
 - **Address bar.** The launcher's project is an address bar across the top: folder icon, the path as segments,

@@ -1,15 +1,17 @@
-//! The wgpu side: device and surface, the four pipelines (shadows, quads, images, glyphs), the glyph
-//! atlases' textures and the image textures. [`Renderer::render`] draws a [`Scene`] and presents it.
+//! The wgpu side: device and surface, the pipelines (shadows, quads, images, glyphs, and subpixel glyphs where
+//! the GPU blends two sources), the glyph atlases' textures and the image textures. [`Renderer::render`] draws a
+//! [`Scene`] and presents it.
 
 use crate::atlas::{Atlas, Kind};
 use crate::scene::{GlyphInstance, ImageId, ImageInstance, QuadInstance, Scene, ShadowInstance};
-use crate::text::Text;
+use crate::text::{Antialias, Text};
 use std::collections::HashMap;
 
 const COMMON: &str = include_str!("shaders/common.wgsl");
 const QUAD: &str = include_str!("shaders/quad.wgsl");
 const SHADOW: &str = include_str!("shaders/shadow.wgsl");
 const GLYPH: &str = include_str!("shaders/glyph.wgsl");
+const GLYPH_LCD: &str = include_str!("shaders/glyph_lcd.wgsl");
 const IMAGE: &str = include_str!("shaders/image.wgsl");
 const POST: &str = include_str!("shaders/post.wgsl");
 
@@ -115,6 +117,8 @@ pub struct Renderer {
     quad_pipe: wgpu::RenderPipeline,
     shadow_pipe: wgpu::RenderPipeline,
     glyph_pipe: wgpu::RenderPipeline,
+    /// glyphs with subpixel text among them (dual-source blending), when the GPU has it
+    lcd_pipe: Option<wgpu::RenderPipeline>,
     image_pipe: wgpu::RenderPipeline,
     atlas_layout: wgpu::BindGroupLayout,
     image_layout: wgpu::BindGroupLayout,
@@ -138,6 +142,10 @@ pub struct Renderer {
     /// Glyph coverage exponents: (light text, dark text). Below 1 thickens, above 1 thins.
     pub text_gamma: [f32; 2],
     pub adapter_info: wgpu::AdapterInfo,
+    /// The window was minimised (a zero size): its swapchain is rebuilt when it comes back, even at the old size.
+    hidden: bool,
+    /// Frames in a row whose swapchain image never came (each waits wgpu's 1 s acquire timeout).
+    stalls: u32,
 }
 
 impl Renderer {
@@ -153,9 +161,11 @@ impl Renderer {
         }))
         .map_err(|e| format!("no graphics adapter: {e}"))?;
         let adapter_info = adapter.get_info();
+        // subpixel text blends each colour channel by its own coverage: two outputs into one target
+        let dual_source = adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("bro"),
-            required_features: wgpu::Features::empty(),
+            required_features: dual_source,
             required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
@@ -239,7 +249,12 @@ impl Renderer {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
         };
-        let pipeline = |name: &str, pl: &wgpu::PipelineLayout, m: &wgpu::ShaderModule, vs: &str, fs: &str, stride: usize, attrs: &[wgpu::VertexAttribute]| {
+        // premultiplied colour, each channel over the destination by its own coverage (the second output)
+        let lcd_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrc1, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrc1Alpha, operation: wgpu::BlendOperation::Add },
+        };
+        let blended = |name: &str, pl: &wgpu::PipelineLayout, m: &wgpu::ShaderModule, vs: &str, fs: &str, stride: usize, attrs: &[wgpu::VertexAttribute], blend: wgpu::BlendState| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(name),
                 layout: Some(pl),
@@ -262,6 +277,7 @@ impl Renderer {
                 cache: None,
             })
         };
+        let pipeline = |name: &str, pl: &wgpu::PipelineLayout, m: &wgpu::ShaderModule, vs: &str, fs: &str, stride: usize, attrs: &[wgpu::VertexAttribute]| blended(name, pl, m, vs, fs, stride, attrs, blend);
         let quad_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4];
         let shadow_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4];
         let glyph_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4];
@@ -269,6 +285,11 @@ impl Renderer {
         let quad_pipe = pipeline("quads", &plain_layout, &quad_mod, "vs_quad", "fs_quad", std::mem::size_of::<QuadInstance>(), &quad_attrs);
         let shadow_pipe = pipeline("shadows", &plain_layout, &shadow_mod, "vs_shadow", "fs_shadow", std::mem::size_of::<ShadowInstance>(), &shadow_attrs);
         let glyph_pipe = pipeline("glyphs", &atlas_pipe_layout, &glyph_mod, "vs_glyph", "fs_glyph", std::mem::size_of::<GlyphInstance>(), &glyph_attrs);
+        let lcd_pipe = (!dual_source.is_empty()).then(|| {
+            let src = format!("enable dual_source_blending;\n{COMMON}\n{GLYPH}\n{GLYPH_LCD}");
+            let m = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("glyph-lcd"), source: wgpu::ShaderSource::Wgsl(src.into()) });
+            blended("glyphs-lcd", &atlas_pipe_layout, &m, "vs_glyph", "fs_glyph_lcd", std::mem::size_of::<GlyphInstance>(), &glyph_attrs, lcd_blend)
+        });
         let image_pipe = pipeline("images", &image_pipe_layout, &image_mod, "vs_image", "fs_image", std::mem::size_of::<ImageInstance>(), &image_attrs);
 
         // the effects pass: the drawn frame in, the swapchain out
@@ -323,6 +344,7 @@ impl Renderer {
             quad_pipe,
             shadow_pipe,
             glyph_pipe,
+            lcd_pipe,
             image_pipe,
             atlas_layout,
             image_layout,
@@ -338,15 +360,29 @@ impl Renderer {
             post_uniform,
             offscreen: None,
             effects: Effects::default(),
-            text_gamma: [0.82, 1.12],
+            text_gamma: std::env::var("BRO_TEXT_GAMMA")
+                .ok()
+                .and_then(|v| {
+                    let (a, b) = v.split_once(',')?;
+                    Some([a.trim().parse().ok()?, b.trim().parse().ok()?])
+                })
+                .unwrap_or([0.82, 1.12]),
             adapter_info,
+            hidden: false,
+            stalls: 0,
         })
+    }
+
+    /// Whether this GPU draws subpixel text ([`Antialias::Rgb`] / [`Antialias::Bgr`]); without it such glyphs
+    /// draw greyscale.
+    pub fn subpixel_text(&self) -> bool {
+        self.lcd_pipe.is_some()
     }
 
     fn atlas_texture(device: &wgpu::Device, kind: Kind, size: u32, generation: u64) -> AtlasTexture {
         let format = match kind {
             Kind::Mask => wgpu::TextureFormat::R8Unorm,
-            Kind::Color => wgpu::TextureFormat::Rgba8Unorm,
+            Kind::Color | Kind::Lcd => wgpu::TextureFormat::Rgba8Unorm,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas"),
@@ -376,7 +412,13 @@ impl Renderer {
 
     /// The drawing area changed size (physical pixels).
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 || (width == self.config.width && height == self.config.height) {
+        if width == 0 || height == 0 {
+            self.hidden = true;
+            return;
+        }
+        // restored from the taskbar at the same size: a fresh swapchain anyway (Intel's Vulkan driver can keep
+        // the old one starved of images for good, and the window looks hung)
+        if width == self.config.width && height == self.config.height && !std::mem::take(&mut self.hidden) {
             return;
         }
         self.config.width = width;
@@ -490,28 +532,39 @@ impl Renderer {
     /// Draw `scene` and present it.
     pub fn render(&mut self, scene: &Scene, text: &mut Text) -> Result<(), FrameError> {
         self.sync_atlas(text);
+        let lcd = text.antialias() != Antialias::Grayscale;
         let (frame, stale) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => (f, false),
             // draw this one; reconfigure once it's presented (never while a frame is held)
             wgpu::CurrentSurfaceTexture::Suboptimal(f) => (f, true),
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Err(FrameError::Skipped),
+            wgpu::CurrentSurfaceTexture::Occluded => return Err(FrameError::Skipped),
+            // no image for a whole second: the swapchain is wedged (seen on Intel Vulkan after the window was
+            // minimised or a display changed) and waiting on it again would freeze the window for good, so
+            // build a new one, which is what a resize does and what brings such a window back
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                self.stalls += 1;
+                log::warn!("gpu: no swapchain image within 1 s ({} in a row), rebuilding the swapchain", self.stalls);
+                self.surface.configure(&self.device, &self.config);
+                return Err(FrameError::Reconfigured);
+            }
             _ => {
                 self.surface.configure(&self.device, &self.config);
                 return Err(FrameError::Reconfigured);
             }
         };
+        self.stalls = 0;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(self.view_format), ..Default::default() });
         if self.effects.active() {
             self.ensure_offscreen();
             let off = self.offscreen.as_ref().map(|o| o.view.clone());
             if let Some(off) = off {
-                self.draw_into(&off, scene);
+                self.draw_into(&off, scene, lcd);
                 self.post_pass(&view);
             } else {
-                self.draw_into(&view, scene);
+                self.draw_into(&view, scene, lcd);
             }
         } else {
-            self.draw_into(&view, scene);
+            self.draw_into(&view, scene, lcd);
         }
         self.queue.present(frame);
         if stale {
@@ -585,6 +638,7 @@ impl Renderer {
     /// Draw `scene` into an offscreen texture and read it back as RGBA rows (screenshots and tests).
     pub fn capture(&mut self, scene: &Scene, text: &mut Text) -> Option<(u32, u32, Vec<u8>)> {
         self.sync_atlas(text);
+        let lcd = text.antialias() != Antialias::Grayscale;
         let (w, h) = (self.config.width, self.config.height);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("capture"),
@@ -602,13 +656,13 @@ impl Renderer {
             let off = self.offscreen.as_ref().map(|o| o.view.clone());
             match off {
                 Some(off) => {
-                    self.draw_into(&off, scene);
+                    self.draw_into(&off, scene, lcd);
                     self.post_pass(&view);
                 }
-                None => self.draw_into(&view, scene),
+                None => self.draw_into(&view, scene, lcd),
             }
         } else {
-            self.draw_into(&view, scene);
+            self.draw_into(&view, scene, lcd);
         }
         let row = (w * 4).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size: (row * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
@@ -646,8 +700,13 @@ impl Renderer {
     }
 
     /// Draw the scene's layers into `view`: per layer shadows, quads, images, quads over the images, glyphs,
-    /// then top quads.
-    fn draw_into(&mut self, view: &wgpu::TextureView, scene: &Scene) {
+    /// then top quads. `lcd`: the glyphs include subpixel text (drawn by the dual-source pipeline when there is
+    /// one).
+    fn draw_into(&mut self, view: &wgpu::TextureView, scene: &Scene, lcd: bool) {
+        let glyph_pipe = match &self.lcd_pipe {
+            Some(p) if lcd => p,
+            _ => &self.glyph_pipe,
+        };
         let g = Globals { viewport: [self.config.width as f32, self.config.height as f32], text: self.text_gamma };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
         let bg = scene.background;
@@ -726,7 +785,7 @@ impl Renderer {
                     pass.draw(0..4, m);
                 }
                 if !gl.is_empty() {
-                    pass.set_pipeline(&self.glyph_pipe);
+                    pass.set_pipeline(glyph_pipe);
                     pass.set_bind_group(1, &self.atlas_bind, &[]);
                     pass.set_vertex_buffer(0, self.glyphs.buf.slice(..));
                     pass.draw(0..4, gl);

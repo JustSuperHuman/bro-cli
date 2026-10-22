@@ -56,6 +56,9 @@ The window keeps its size, place, panel widths and font size in `~/.bro/v2-gui.j
 theme to the terminal font (Settings → Appearance → Font), is shared with the terminal UI in `~/.bro/v2.toml`, so
 both look and behave the same. Custom themes in `~/.bro/themes/` restyle the window too, live.
 
+Text follows your system: on Windows with ClearType on it's smoothed for LCD screens, as other Windows apps are.
+Set `BRO_TEXT_AA=grayscale` (or `rgb`, `bgr`) to choose yourself.
+
 ## For contributors
 
 How it's built: [gui/ARCHITECTURE.md](gui/ARCHITECTURE.md). The design system: [gui/DESIGN.md](gui/DESIGN.md).

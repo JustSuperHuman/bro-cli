@@ -263,10 +263,7 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
                 ui.round(r, radius::CONTROL, t.hover.fade(hot));
             }
             ui.hit(r, Action::Side(SideHit::Row(i)));
-            let l1 = Rect::new(r.x + 10.0, r.y + 6.0, r.w - 20.0, 18.0);
-            // a folder (open on the project you're in)
-            let ink = if current || selected { t.text } else { t.muted };
-            ui.icon(Rect::new(l1.x - 1.0, l1.y, 18.0, 18.0), if current { "\u{F0770}" } else { "\u{F0256}" }, size::TITLE, ink);
+            let l1 = Rect::new(r.x + 12.0, r.y + 6.0, r.w - 22.0, 18.0);
             // right side
             let mut right = l1.right();
             let close = Rect::new(right - 20.0, l1.y - 1.0, 20.0, 20.0);
@@ -288,19 +285,20 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
                 ui.icon(Rect::new(right - 16.0, l1.y, 16.0, 18.0), "\u{F0028}", size::SMALL, t.danger.fade(k));
                 right -= 20.0;
             }
-            let name_x = l1.x + 24.0;
+            // the name in the project's own colour, as the terminal UI shows it
+            let name_x = l1.x;
             let name_w = (right - name_x - if tiled { 22.0 } else { 4.0 }).max(10.0);
-            let nb = ui.line(name, Style::new(size::BODY, weight::SEMIBOLD, if current || selected { t.text } else { t.text.mix(t.muted, 0.15) }), Some(name_w));
+            let nb = ui.line(name, Style::new(size::BODY, weight::SEMIBOLD, t.project(key, &app.theme)), Some(name_w));
             ui.draw(&nb, Point::new(name_x, l1.y + (18.0 - nb.h) / 2.0));
             if tiled {
                 ui.icon(Rect::new(name_x + nb.w + 4.0, l1.y, 16.0, 18.0), "\u{F05AF}", size::SMALL, t.muted);
             }
-            // second line: path and branch
+            // second line: path and branch (the branch tinted like the terminal UI's)
             let l2 = Rect::new(name_x, r.y + 26.0, r.right() - 12.0 - name_x, 16.0);
             let branch = bro_core::projects::git_branch(root);
             let mut path_w = l2.w;
             if let Some(b) = &branch {
-                let st = Style::new(size::CAPTION, weight::MEDIUM, t.muted);
+                let st = Style::new(size::CAPTION, weight::MEDIUM, t.shine.mix(t.muted, 0.45));
                 let text = crate::ui::fit(b, 18);
                 let bw = ui.measure(&text, st);
                 let bx = l2.right() - bw;
@@ -309,18 +307,21 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
                 path_w = (bx - 22.0 - l2.x).max(20.0);
             }
             let chars = (path_w / 6.2).max(8.0) as usize;
-            ui.label_in(Rect { w: path_w, ..l2 }, &crate::util::short_path(root, chars), Style::new(size::CAPTION, weight::REGULAR, t.faint), Align::Left);
+            ui.label_in(Rect { w: path_w, ..l2 }, &crate::util::short_path(root, chars), Style::new(size::CAPTION, weight::REGULAR, t.muted), Align::Left);
         }
         Row::Live { info, n } => {
             let is_focus = focus_pane == Some(info.pane);
             let stacked = app.stack.contains(&info.pane);
             let renaming = app.renaming.as_ref().filter(|(id, _)| *id == info.pane).map(|(_, s)| s.clone());
+            // its project's colour (the orchestrator's is gold)
+            let color = t.project(&info.project_key, &app.theme);
             if selected {
                 ui.round(r, radius::CONTROL, t.selected);
                 ui.outline(r, radius::CONTROL, 1.0, t.accent.with_alpha(0.5));
             } else if is_focus && !app.side_focus {
-                // the session you're in; while the sidebar has the keyboard only its selection shows
-                ui.round(r, radius::CONTROL, t.text.with_alpha(if t.light { 0.07 } else { 0.075 }));
+                // the session you're in, washed in its project's colour; while the sidebar has the keyboard only
+                // its selection shows
+                ui.round(r, radius::CONTROL, color.with_alpha(if t.light { 0.1 } else { 0.11 }));
             } else if stacked {
                 ui.round(r, radius::CONTROL, t.text.with_alpha(0.035));
             } else if hot > 0.0 {
@@ -333,7 +334,7 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
             let indent = if info.orchestrator { 0.0 } else { 10.0 };
             let x0 = line.x + indent;
             if let Some(n) = n {
-                let st = Style::new(size::CAPTION, weight::SEMIBOLD, if is_focus { t.text } else { t.faint });
+                let st = Style::new(size::CAPTION, weight::SEMIBOLD, if is_focus { color } else { t.faint });
                 ui.label_in(Rect::new(x0, line.y, 10.0, 20.0), &n.to_string(), st, Align::Center);
             }
             let mark = Rect::new(x0 + 14.0, mid - 9.0, 18.0, 18.0);
@@ -381,8 +382,9 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
                 (None, Some(h)) => (h.label().to_string(), String::new()),
                 (None, None) => ("shell".to_string(), String::new()),
             };
+            // the session you're in (or picked) reads in its project's colour, as in the terminal UI
             let strong = is_focus || selected || info.orchestrator;
-            let pc = if info.orchestrator { t.gold } else if strong { t.text } else { t.text.mix(t.muted, 0.2) };
+            let pc = if info.orchestrator { t.gold } else if strong { color } else { t.text.mix(t.muted, 0.2) };
             let mut spans = vec![(primary, Style::new(size::BODY, if strong { weight::SEMIBOLD } else { weight::MEDIUM }, pc))];
             if !secondary.is_empty() {
                 spans.push((format!("  {secondary}"), Style::new(size::SMALL, weight::REGULAR, t.faint)));
@@ -645,7 +647,7 @@ pub fn left_color(left: f64, t: &super::kit::Tokens) -> Color {
     }
 }
 
-/// ------------------------------------------------------------------ project tabs
+// ------------------------------------------------------------------ project tabs
 
 /// A project's name never shrinks below this to make room for the others, nor takes more than this (logical px;
 /// the terminal UI's 6 and 24 columns).
@@ -677,9 +679,10 @@ impl StripEntry {
     fn spins_after(&self) -> bool {
         matches!(self.tab, StripTab::Orchestrator) && self.working
     }
-    /// Room the tab takes besides its name: padding, its icon, the count, the attention badges and the ×.
+    /// Room the tab takes besides its name: padding, the icon All and the orchestrator lead with (a project's
+    /// tab has none: its name is in its colour), the count, the attention badges and the ×.
     fn chrome(&self) -> f32 {
-        let mut w = 12.0 + 16.0 + 8.0 + 12.0;
+        let mut w = 12.0 + 12.0 + if self.closable() { 0.0 } else { 16.0 + 8.0 };
         if self.count.is_some() || self.spins_after() {
             w += 22.0;
         }
@@ -813,9 +816,9 @@ pub fn draw_strip(app: &mut App, ui: &mut Ui, r: Rect) {
         folds.push((Rect::new(x + 4.0, mid - 14.0, FOLD_W - 8.0, 28.0), true, &entries[fixed..fixed + lo]));
         x += FOLD_W;
     }
-    for j in lo..hi {
-        placed.push((fixed + j, Rect::new(x, top, widths[j], h), cap));
-        x += widths[j];
+    for (j, &w) in widths.iter().enumerate().take(hi).skip(lo) {
+        placed.push((fixed + j, Rect::new(x, top, w, h), cap));
+        x += w;
     }
     if hi < widths.len() {
         folds.push((Rect::new(x + 4.0, mid - 14.0, FOLD_W - 8.0, 28.0), false, &entries[fixed + hi..]));
@@ -862,14 +865,21 @@ pub fn draw_strip(app: &mut App, ui: &mut Ui, r: Rect) {
         ui.hit(tr, Action::Side(SideHit::Strip(StripHit::Tab(e.tab.clone()))));
         let mut cx = tr.x + 12.0;
         let icon_r = Rect::new(cx, mid - 8.0, 16.0, 16.0);
-        let ink = if on || kb { t.text } else { t.text.mix(t.muted, 0.3) };
-        match &e.tab {
-            StripTab::All => ui.icon(icon_r, "\u{F05AF}", size::BODY, ink),
-            StripTab::Orchestrator => ui.icon(icon_r, "\u{F04CE}", size::BODY, t.gold),
-            StripTab::Project(_) if e.working => ui.spinner(icon_r.center(), 4.6, 1.6, t.accent),
-            StripTab::Project(_) => ui.icon(icon_r, if on { "\u{F0770}" } else { "\u{F0256}" }, size::BODY, ink),
-        }
-        cx += 16.0 + 8.0;
+        let quiet = if on || kb { t.text } else { t.text.mix(t.muted, 0.3) };
+        // All and the orchestrator lead with an icon; a project's name is in its colour, as in the sidebar
+        let ink = match &e.tab {
+            StripTab::All => {
+                ui.icon(icon_r, "\u{F05AF}", size::BODY, quiet);
+                cx += 16.0 + 8.0;
+                quiet
+            }
+            StripTab::Orchestrator => {
+                ui.icon(icon_r, "\u{F04CE}", size::BODY, t.gold);
+                cx += 16.0 + 8.0;
+                quiet
+            }
+            StripTab::Project(key) => t.project(key, &app.theme),
+        };
         let bold = on || matches!(&e.tab, StripTab::Project(key) if focus_key.as_deref() == Some(key.as_str()));
         let st = Style::new(size::SMALL, if bold { weight::SEMIBOLD } else { weight::MEDIUM }, ink);
         let lb = ui.line(&e.label, st, Some(cap));
@@ -877,7 +887,12 @@ pub fn draw_strip(app: &mut App, ui: &mut Ui, r: Rect) {
         cx += lb.w + 8.0;
         let cs = Style::new(size::CAPTION, weight::MEDIUM, t.faint);
         if let Some(n) = e.count {
-            ui.label_in(Rect::new(cx, tr.y, 14.0, tr.h), &n.to_string(), cs, Align::Left);
+            // while one of its agents works, the count's place spins
+            if e.working && e.closable() {
+                ui.spinner(Point::new(cx + 5.0, mid), 4.0, 1.4, t.accent);
+            } else {
+                ui.label_in(Rect::new(cx, tr.y, 14.0, tr.h), &n.to_string(), cs, Align::Left);
+            }
             cx += 18.0;
         } else if e.spins_after() {
             ui.spinner(Point::new(cx + 6.0, mid), 4.0, 1.4, t.gold);
