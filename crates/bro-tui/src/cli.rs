@@ -37,9 +37,10 @@ pub enum Command {
 pub const HELP: &str = "bro {version} — the agentic terminal workspace for Claude Code, Codex, Pi and omp
 
 usage
-  bro              open the desktop app (over SSH or with no display: the terminal UI)
+  bro              open the desktop app (over SSH, in tmux or with no display: the terminal UI)
   bro [folder]     open it with that folder (default: here) as the current project;
-                   if bro is already running, the folder opens there instead
+                   if bro is already running, the folder opens there instead, and if it
+                   runs in tmux you're attached to it (SSH in and pick up where you were)
   bro-cli          the same workspace as a terminal UI (also: bro --tui); takes the same
                    folder and flags
   bro --new        a separate bro even when one is running

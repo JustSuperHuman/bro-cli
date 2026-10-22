@@ -30,7 +30,7 @@ What gets installed:
 
 | | |
 |---|---|
-| `bro` | opens the desktop app (over SSH or with no display, the terminal UI); every subcommand (`bro install`, `bro update`, `bro ctl`, `bro open`…) |
+| `bro` | opens the desktop app (over SSH, in tmux or with no display, the terminal UI; a bro already running in tmux is attached to, so `ssh box -t bro` picks up your sessions); every subcommand (`bro install`, `bro update`, `bro ctl`, `bro open`…) |
 | `bro-cli` | the terminal UI (`bro --tui`) |
 | `bro-app` (Windows) | the Start menu entry: the desktop app without a console window |
 

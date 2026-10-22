@@ -217,11 +217,18 @@ fn take_tui_flag(args: &mut Vec<String>) -> bool {
     tui
 }
 
-/// A desktop to open a window on: not over SSH, and on Linux and the BSDs an X11 or Wayland display.
+/// Logged in over SSH.
+fn over_ssh() -> bool {
+    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    set("SSH_CONNECTION") || set("SSH_TTY")
+}
+
+/// A desktop to open a window on: not over SSH, not inside tmux (that's asking for the terminal UI), and on Linux
+/// and the BSDs an X11 or Wayland display.
 #[cfg(feature = "gui")]
 fn desktop() -> bool {
     let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
-    if set("SSH_CONNECTION") || set("SSH_TTY") {
+    if over_ssh() || set("TMUX") {
         return false;
     }
     if cfg!(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")) {
@@ -256,11 +263,33 @@ fn ensure_bro_cli() {
 fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     use crossterm::{event, execute, terminal};
     enable_vt_output();
+    let named_folder = dir.is_some();
     // the folder bro was opened in (or `bro <folder>`) becomes the current project
     let dir = match dir {
         Some(d) => util::strip_verbatim(std::fs::canonicalize(&d).map_err(|_| anyhow::anyhow!("{} isn't a folder", d.display()))?),
         None => std::env::current_dir()?,
     };
+    // running inside tmux? show that bro here (an SSH login reaches the same sessions)
+    if !demo && !new {
+        match instance::running_in_tmux() {
+            Some(Some(pane)) => {
+                if named_folder {
+                    let _ = instance::hand_off(&dir);
+                }
+                return pane.attach();
+            }
+            // a desktop bro: opening the folder there would show nothing to someone over SSH
+            Some(None) if over_ssh() => {
+                eprintln!(
+                    "bro is already running on this machine's desktop, outside tmux, so it can't be shown over SSH.
+                     Start it inside tmux to reach it from anywhere: tmux new -A -s bro bro
+                     (bro --new opens a separate one here)"
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     // already running? hand the folder over and get out of the way
     if !demo && !new && instance::hand_off(&dir).unwrap_or(false) {
         println!("bro is already running — opened {} there (bro --new for a second one)", dir.display());

@@ -1,7 +1,8 @@
 //! One bro at a time: the running bro listens on loopback and records `{pid, port, token}` in
 //! `~/.bro/v2-instance.json`. Starting `bro` again in another folder hands that folder to the running bro (it
 //! opens it as a project) and exits — like opening a folder in an editor that's already open. `bro --new`
-//! skips the handoff.
+//! skips the handoff. A bro running inside tmux also records its pane, so `bro` from another terminal (an SSH
+//! login, say) attaches to that tmux session instead: the same bro, not a folder opened on a screen you can't see.
 
 use crate::pane::Event;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,55 @@ struct Record {
     pid: u32,
     port: u16,
     token: String,
+    /// The tmux pane the running bro lives in (absent: not in tmux, or a bro that predates this).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tmux: Option<TmuxPane>,
+}
+
+/// Where a bro runs inside tmux: the server's socket and the pane id (`%3`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TmuxPane {
+    pub socket: String,
+    pub pane: String,
+}
+
+impl TmuxPane {
+    /// This process's pane, from `$TMUX` (`socket,pid,session`) and `$TMUX_PANE`.
+    fn current() -> Option<TmuxPane> {
+        let tmux = std::env::var("TMUX").ok()?;
+        let socket = tmux.split(',').next().filter(|s| !s.is_empty())?.to_string();
+        let pane = std::env::var("TMUX_PANE").ok().filter(|p| p.starts_with('%'))?;
+        Some(TmuxPane { socket, pane })
+    }
+
+    /// Show this pane in the current terminal: switch to it when already inside the same tmux server,
+    /// otherwise attach to its session. Blocks until the attach ends (detach, or bro exits).
+    pub fn attach(&self) -> anyhow::Result<()> {
+        use std::process::Command;
+        let tmux = || {
+            let mut c = Command::new("tmux");
+            c.arg("-S").arg(&self.socket);
+            c
+        };
+        let out = tmux().args(["display-message", "-p", "-t", &self.pane, "#{session_id}"]).output()?;
+        let session = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !out.status.success() || session.is_empty() {
+            anyhow::bail!("bro's tmux pane {} is gone", self.pane);
+        }
+        // bring bro's window and pane forward inside its session
+        let _ = tmux().args(["select-window", "-t", &self.pane]).status();
+        let _ = tmux().args(["select-pane", "-t", &self.pane]).status();
+        let same_server = std::env::var("TMUX").is_ok_and(|t| t.split(',').next() == Some(self.socket.as_str()));
+        let status = if same_server {
+            tmux().args(["switch-client", "-t", &session]).status()?
+        } else {
+            tmux().env_remove("TMUX").args(["attach-session", "-t", &session]).status()?
+        };
+        if !status.success() {
+            anyhow::bail!("tmux couldn't attach to bro's session {session}");
+        }
+        Ok(())
+    }
 }
 
 fn path() -> PathBuf {
@@ -24,8 +74,18 @@ fn path() -> PathBuf {
 
 /// Another bro is running (its hand-off record names a live listener that isn't this process).
 pub fn running() -> bool {
-    let Some(rec) = std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str::<Record>(&s).ok()) else { return false };
-    rec.pid != std::process::id() && TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, rec.port)), Duration::from_millis(400)).is_ok()
+    live_via(&path()).is_some()
+}
+
+/// The running bro's tmux pane: `Some(None)` = a bro is running outside tmux, `None` = nobody's running.
+pub fn running_in_tmux() -> Option<Option<TmuxPane>> {
+    live_via(&path()).map(|rec| rec.tmux)
+}
+
+fn live_via(file: &Path) -> Option<Record> {
+    let rec = std::fs::read_to_string(file).ok().and_then(|s| serde_json::from_str::<Record>(&s).ok())?;
+    (rec.pid != std::process::id() && TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, rec.port)), Duration::from_millis(400)).is_ok())
+        .then_some(rec)
 }
 
 /// Ask a running bro to open `dir`. Ok(true) = it did (this process should exit); Ok(false) = nobody's running.
@@ -81,7 +141,7 @@ fn serve_via(file: PathBuf, tx: Sender<Event>) -> Option<Guard> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).ok()?;
     let port = listener.local_addr().ok()?.port();
     let token = uuid::Uuid::new_v4().simple().to_string();
-    let rec = Record { pid: std::process::id(), port, token: token.clone() };
+    let rec = Record { pid: std::process::id(), port, token: token.clone(), tmux: TmuxPane::current() };
     crate::util::atomic_write(&file, serde_json::to_string_pretty(&rec).ok()?.as_bytes()).ok()?;
     let want = token.clone();
     std::thread::spawn(move || {
@@ -197,5 +257,18 @@ mod tests {
         std::fs::write(&file, serde_json::to_string(&rec).unwrap()).unwrap();
         drop(guard);
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn the_tmux_pane_is_optional_in_the_record() {
+        // a record from a bro that predates the field still reads
+        let old: Record = serde_json::from_str(r#"{"pid":1,"port":2,"token":"t"}"#).unwrap();
+        assert!(old.tmux.is_none());
+        let rec = Record { pid: 1, port: 2, token: "t".into(), tmux: Some(TmuxPane { socket: "/tmp/tmux-1000/default".into(), pane: "%3".into() }) };
+        let back: Record = serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+        assert_eq!(back.tmux, rec.tmux);
+        // and the field stays out of records written outside tmux
+        let plain = Record { tmux: None, ..rec };
+        assert!(!serde_json::to_string(&plain).unwrap().contains("tmux"));
     }
 }
