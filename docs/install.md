@@ -14,7 +14,15 @@ your user only (no admin prompt), adds **bro** to the Start menu (it opens the d
 `PATH` and a shortcut on your desktop, and is listed in Settings → Apps for uninstalling. Run a newer one to
 update, even while bro is open.
 
-**macOS / Linux**:
+**macOS**: download the `.dmg` for your Mac from the
+[latest release](https://github.com/JustSuperHuman/bro-cli/releases/latest):
+`aarch64-apple-darwin` for Apple Silicon, or `x86_64-apple-darwin` for Intel.
+Open it, drag **Bro.app** to **Applications**, then open Bro from Applications.
+The app is ad-hoc signed but is not Apple-notarized. If macOS blocks it, open
+System Settings > Privacy & Security and choose **Open Anyway** after trying to open Bro.
+Install a newer DMG by replacing Bro.app in Applications.
+
+**macOS / Linux, from a terminal**:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/JustSuperHuman/bro-cli/main/install.sh | sh

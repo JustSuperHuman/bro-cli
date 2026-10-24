@@ -24,9 +24,9 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +38,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Release file name
+        shell: bash
+        env:
+          BRO_RELEASE_REF: ${{ github.ref_name }}
+        run: |
+          ref=$(printf '%s' "$BRO_RELEASE_REF" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')
+          printf 'BRO_RELEASE_NAME=%s\n' "$ref" >> "$GITHUB_ENV"
 
       - name: Linux build dependencies
         if: runner.os == 'Linux'
@@ -50,7 +59,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "bro-${{ github.ref_name }}-${{ matrix.target }}"
+          $name = "bro-$env:BRO_RELEASE_NAME-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/bro.exe", "target/${{ matrix.target }}/release/bro-app.exe", packaging/bro-cli.cmd, README.md, LICENSE "dist/$name"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
@@ -65,7 +74,7 @@ jobs:
             choco install innosetup -y --no-progress | Out-Null
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:BRO_RELEASE_NAME
           # a manual run builds from a branch: the version comes from Cargo.toml
           $version = if ($tag -match '^v\d') { $tag.Substring(1) } else { (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value }
           $name = "bro-$tag-${{ matrix.target }}"
@@ -75,11 +84,18 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          name="bro-${{ github.ref_name }}-${{ matrix.target }}"
+          name="bro-$BRO_RELEASE_NAME-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/bro" packaging/bro-cli README.md LICENSE "dist/$name"
           chmod 755 "dist/$name/bro" "dist/$name/bro-cli"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
+
+      - name: Disk image (macOS)
+        if: runner.os == 'macOS'
+        env:
+          BRO_RELEASE_REF: ${{ github.ref_name }}
+          BRO_RELEASE_TARGET: ${{ matrix.target }}
+        run: bash packaging/macos/package.sh "$BRO_RELEASE_TARGET" "$BRO_RELEASE_REF"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -87,20 +103,29 @@ jobs:
           path: |
             dist/*.zip
             dist/*.tar.gz
+            dist/*.dmg
             dist/*-setup.exe
           if-no-files-found: error
 
   release:
     name: publish
     needs: build
-    # a platform that fails to build must not hold back the others
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') }}
+    # a platform that fails to build must not hold back the others from finishing; publishing requires every platform to succeed
+    if: ${{ !cancelled() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: Require both macOS disk images
+        env:
+          BRO_RELEASE_REF: ${{ github.ref_name }}
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            test -s "dist/bro-$BRO_RELEASE_REF-$target.dmg"
+          done
 
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
