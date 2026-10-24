@@ -4,7 +4,8 @@
 //!
 //! Each [`Knob`] has options; the first is the default and is usually "Claude's default",
 //! which sets nothing. The `standard` preset leaves Claude Code as it ships apart from
-//! [`ALWAYS`] (the fullscreen renderer), focus view, and tool search behind the proxy.
+//! [`ALWAYS`] (the fullscreen renderer), focus view, tool search behind the proxy, and messages
+//! between sessions kept to their project ([`crate::peers`]).
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -163,6 +164,19 @@ pub const KNOBS: &[Knob] = &[
         help: "Hides your email, org name and working directory from Claude's header and /status.",
         when: When::Always,
         options: &[DEFAULT, Opt { id: "on", label: "on", vars: &[("IS_DEMO", "1"), ("CLAUDE_CODE_HIDE_CWD", "1")], settings: &[] }],
+    },
+    Knob {
+        id: crate::peers::KNOB,
+        label: "Messages between sessions",
+        group: Group::Privacy,
+        help: "This project: Claude only finds and messages sessions in the same repo or its worktrees. Off: none. Claude default: any.",
+        when: When::Always,
+        // the hooks behind "this project" and "off" are bro's own (see `crate::peers`), added per launch
+        options: &[
+            Opt { id: "project", label: "this project", vars: &[], settings: &[] },
+            Opt { id: "off", label: "off", vars: &[], settings: &[("crossSessionInbound", "\"refuse\""), ("isolatePeerMachines", "true")] },
+            Opt { id: "default", label: "Claude default", vars: &[], settings: &[] },
+        ],
     },
     Knob {
         id: "updates",

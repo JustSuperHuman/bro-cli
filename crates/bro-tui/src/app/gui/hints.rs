@@ -71,7 +71,7 @@ fn tips(ui: &mut Ui, center: Point, tips: &[(String, &str)], max_w: f32) {
 }
 
 /// The key tips while alt is held, then the notifications over them (see [`super::toasts`]).
-pub fn draw(app: &App, ui: &mut Ui, layout: &Layout) {
+pub fn draw(app: &mut App, ui: &mut Ui, layout: &Layout) {
     if app.alt_hints() {
         draw_tips(app, ui, layout);
     }

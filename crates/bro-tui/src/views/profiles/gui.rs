@@ -28,6 +28,9 @@ const RELOAD: usize = 5;
 const CREATE: usize = 6;
 const CANCEL: usize = 7;
 const YES: usize = 8;
+const ADD_GEMINI: usize = 9;
+const EDIT_KEY: usize = 10;
+const GOOGLE: usize = 11;
 const ROW: usize = 100;
 
 /// A login row (two lines), and the list's inner padding.
@@ -52,6 +55,7 @@ pub(crate) const TITLE: f32 = 20.0;
 /// The name prompt or the remove confirmation, while either is open or saving.
 enum Card {
     Add { kind: ProfileKind, name: String, saving: bool },
+    Key { name: String, masked: String, saving: bool },
     Remove { id: String, dir: Option<PathBuf>, saving: bool },
 }
 
@@ -86,13 +90,15 @@ pub(crate) fn draw(v: &mut ProfilesView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
     if key_button(ui, rr, Some(REFRESH), reload, Some("r"), Kind::Ghost, live(RELOAD)) > 0.5 && reload.is_empty() {
         widgets::tooltip(ui, rr, "Reload");
     }
-    let head_h = page_title(ui, Point::new(col.x, col.y), "Profiles", Some("Claude and Codex logins"), col.w - rw - 12.0);
+    let head_h = page_title(ui, Point::new(col.x, col.y), "Profiles", Some("Claude, Codex and Gemini"), col.w - rw - 12.0);
 
     // ---- geometry: toolbar (add on the left, the selection's actions on the right; flowing onto more lines
     // when narrow), list, footer (the folder and its note), hints at the bottom
     let buttons = [
         (PLUS, "Claude", "a", ADD_CLAUDE),
         (PLUS, "Codex", "c", ADD_CODEX),
+        (PLUS, "API key", "g", ADD_GEMINI),
+        (PLUS, "Google", "s", GOOGLE),
         (LOGIN_ICON, "Log in", "l", LOGIN),
         (TRASH, "Remove", "d", REMOVE),
     ];
@@ -102,13 +108,13 @@ pub(crate) fn draw(v: &mut ProfilesView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
     let mut spots: Vec<Rect> = vec![];
     if one_line {
         let mut x = col.x;
-        for w in &widths[..2] {
+        for w in &widths[..4] {
             spots.push(Rect::new(x, bar_y, *w, BUTTON_H));
             x += w + 8.0;
         }
         // placed again below once the selection is known (Remove hides for machine logins)
-        spots.push(Rect::new(col.right() - widths[3] - 8.0 - widths[2], bar_y, widths[2], BUTTON_H));
-        spots.push(Rect::new(col.right() - widths[3], bar_y, widths[3], BUTTON_H));
+        spots.push(Rect::new(col.right() - widths[5] - 8.0 - widths[4], bar_y, widths[4], BUTTON_H));
+        spots.push(Rect::new(col.right() - widths[5], bar_y, widths[5], BUTTON_H));
     } else {
         let (mut x, mut y) = (col.x, bar_y);
         for w in &widths {
@@ -123,7 +129,7 @@ pub(crate) fn draw(v: &mut ProfilesView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
     let bar_bottom = spots.iter().map(|r| r.bottom()).fold(bar_y + BUTTON_H, f32::max);
     let list_y = bar_bottom + 12.0;
     let hints_y = col.bottom() - 18.0;
-    let footer_h = 62.0;
+    let footer_h = if v.selected(cx).is_some_and(|p| p.is_gemini() && !p.is_local()) { 94.0 } else { 62.0 };
     let room = (hints_y - 18.0 - footer_h - 16.0 - list_y).max(ROW_H + 2.0 * PAD);
     let fit = (((room - 2.0 * PAD) / ROW_H).floor() as usize).max(1);
     if let Some(ps) = &profiles {
@@ -135,16 +141,16 @@ pub(crate) fn draw(v: &mut ProfilesView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
     // ---- toolbar
     let removable = selected.as_ref().is_some_and(|p| !p.is_local());
     if one_line && !removable {
-        spots[2].x = col.right() - widths[2];
+        spots[4].x = col.right() - widths[4];
     }
     let login_kind = if selected.as_ref().is_some_and(|p| !p.authenticated) { Kind::Primary } else { Kind::Secondary };
     for (k, ((icon, label, key, n), r)) in buttons.iter().zip(&spots).enumerate() {
         match k {
-            0 | 1 => {
+            0 | 1 | 2 | 3 => {
                 key_button(ui, *r, Some(*icon), label, Some(*key), Kind::Secondary, live(*n));
             }
-            2 => {
-                key_button(ui, *r, Some(*icon), label, Some(*key), login_kind, live(*n));
+            4 => {
+                key_button(ui, *r, Some(*icon), if selected.as_ref().is_some_and(|p| p.is_gemini()) { "Launch" } else { label }, Some(*key), login_kind, live(*n));
             }
             _ if removable => {
                 key_button_ink(ui, *r, Some(*icon), label, Some(*key), Kind::Secondary, Some(t.danger.mix(t.text, 0.25)), live(*n));
@@ -199,8 +205,12 @@ pub(crate) fn draw(v: &mut ProfilesView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
         let chars = ((col.w - 24.0) / 7.0).max(12.0) as usize;
         let pb = ui.line(&crate::util::short_path(&p.dir, chars), path_st, Some(col.w - 24.0));
         ui.draw(&pb, Point::new(col.x + 24.0, fy + (18.0 - pb.h) / 2.0));
-        let note = if p.is_local() { "Machine login: can be used here; cannot be removed by Bro." } else { "Remove deletes this profile's login, settings and saved sessions." };
+        let note = super::profile_note(p);
         ui.label_in(Rect::new(col.x + 24.0, fy + 22.0, col.w - 24.0, 18.0), note, Style::new(size::SMALL, weight::REGULAR, t.faint), Align::Left);
+        if p.is_gemini() && !p.is_local() {
+            let w = key_button_width(ui, None, "Update API key", Some("e"));
+            key_button(ui, Rect::new(col.x + 24.0, fy + 44.0, w, BUTTON_H), None, "Update API key", Some("e"), Kind::Secondary, live(EDIT_KEY));
+        }
     }
 
     // ---- the keys, quietly
@@ -208,6 +218,7 @@ pub(crate) fn draw(v: &mut ProfilesView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
 
     // ---- the name prompt or the remove confirmation, over the list
     let card = match (&v.pending, &v.mode) {
+        (Some(Pending::Create(ProfileKind::GeminiApi, name, _)), _) => Some(Card::Key { name: name.clone(), masked: String::new(), saving: true }),
         (Some(Pending::Create(kind, name, _)), _) => Some(Card::Add { kind: *kind, name: name.clone(), saving: true }),
         (Some(Pending::Remove(pid, _)), _) => {
             let dir = profiles.as_ref().and_then(|ps| ps.iter().find(|p| &p.id == pid)).map(|p| p.dir.clone());
@@ -215,6 +226,7 @@ pub(crate) fn draw(v: &mut ProfilesView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
         }
         (None, Mode::Add(kind, name)) => Some(Card::Add { kind: *kind, name: name.clone(), saving: false }),
         (None, Mode::Confirm(p)) => Some(Card::Remove { id: p.id.clone(), dir: Some(p.dir.clone()), saving: false }),
+        (None, Mode::Key(name, key)) => Some(Card::Key { name: name.clone(), masked: "•".repeat(key.chars().count().min(48)), saving: false }),
         (None, Mode::List) => None,
     };
     let k = ui.ease(("profiles-card", id), if card.is_some() { 1.0 } else { 0.0 }, 140.0);
@@ -227,6 +239,7 @@ pub(crate) fn draw(v: &mut ProfilesView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
         let over = if col.w >= 520.0 { Rect::new(col.x, area.y, col.w, area.h) } else { area };
         match card {
             Card::Add { kind, name, saving } => add_card(v, ui, over, id, kind, &name, saving, cx.focused, k),
+            Card::Key { name, masked, saving } => key_card(v, ui, over, id, &name, &masked, saving, cx.focused),
             Card::Remove { id: pid, dir, saving } => remove_card(ui, over, id, &pid, dir.as_ref(), saving, k),
         }
         ui.set_layer(prev);
@@ -240,7 +253,7 @@ fn profile_row(ui: &mut Ui, r: Rect, p: &Profile, on: bool) {
     let t = ui.t;
     let h = if p.is_codex() { Harness::Codex } else { Harness::Claude };
     let logo = Rect::new(r.x + 12.0, r.y + (r.h - 20.0) / 2.0, 20.0, 20.0);
-    ui.mark(brand::harness(h), logo, 20.0, None);
+    ui.mark(if p.is_gemini() { brand::provider("gemini").unwrap() } else { brand::harness(h) }, logo, 20.0, None);
     let x = logo.right() + 14.0;
     let id_st = Style::new(size::BODY, weight::SEMIBOLD, if on { t.text } else { t.text.mix(t.muted, 0.12) });
     let room = r.right() - 12.0 - x;
@@ -255,7 +268,7 @@ fn profile_row(ui: &mut Ui, r: Rect, p: &Profile, on: bool) {
         widgets::pill(ui, Point::new(x + idb.w + 8.0, top + (idb.h - 16.0) / 2.0), 16.0, "machine login", t.muted, tag_fill(t));
     }
     let y2 = top + idb.h + 2.0;
-    let status = if p.authenticated { p.email.as_deref().unwrap_or("Logged in") } else { "Not logged in" };
+    let status = if p.authenticated { p.email.as_deref().unwrap_or(if p.is_gemini() { "API key configured · choose a tool when launching" } else { "Logged in" }) } else { "Not logged in" };
     let status = if p.is_local() && !tag_beside { format!("{status} · machine login") } else { status.to_string() };
     let (glyph, gc) = if p.authenticated { (CHECK, t.good) } else { (LOGGED_OUT, t.muted) };
     ui.icon(Rect::new(x - 1.0, y2, 14.0, 16.0), glyph, size::SMALL, gc);
@@ -274,7 +287,7 @@ fn add_card(v: &ProfilesView, ui: &mut Ui, area: Rect, id: u64, kind: ProfileKin
     let t = ui.t;
     let w = 460.0f32.min(area.w - 24.0);
     let inner = w - 48.0;
-    let family = if kind == ProfileKind::ClaudeAccount { "Claude" } else { "Codex" };
+    let family = if kind == ProfileKind::GeminiApi { "Gemini" } else if kind == ProfileKind::ClaudeAccount { "Claude" } else { "Codex" };
     let harness = if kind == ProfileKind::CodexProfile { Harness::Codex } else { Harness::Claude };
     let missing = v.missing.map(|h| format!("{} isn't installed: Create installs it first, then log in with l.", bro_core::agent_install::display_name(h)));
     let (message, mc) = match (&v.error, &missing) {
@@ -283,7 +296,7 @@ fn add_card(v: &ProfilesView, ui: &mut Ui, area: Rect, id: u64, kind: ProfileKin
         (None, None) => ("1–40 letters, digits, . _ - (example: work). 'local' is reserved.".to_string(), t.muted),
     };
     let msg = ui.para(&message, Style::new(size::SMALL, weight::REGULAR, mc), inner, Some(3));
-    let buttons = [Btn { icon: None, label: "Create + log in", key: "enter", kind: Kind::Primary, n: CREATE }, Btn { icon: None, label: "Cancel", key: "esc", kind: Kind::Secondary, n: CANCEL }];
+    let buttons = [Btn { icon: None, label: if kind == ProfileKind::GeminiApi { "Next: API key" } else { "Create + log in" }, key: "enter", kind: Kind::Primary, n: CREATE }, Btn { icon: None, label: "Cancel", key: "esc", kind: Kind::Secondary, n: CANCEL }];
     let fit = fit_buttons(ui, inner, &buttons);
     let foot_h = 24.0 + fit.height() + 24.0;
     let h = 24.0 + 28.0 + 16.0 + BUTTON_H + 8.0 + msg.h + 24.0 + foot_h;
@@ -294,7 +307,7 @@ fn add_card(v: &ProfilesView, ui: &mut Ui, area: Rect, id: u64, kind: ProfileKin
     let mut y = r.y + 24.0;
     // the agent's logo before the title, when there's room for both
     let tx = if inner >= 280.0 {
-        ui.mark(brand::harness(harness), Rect::new(x, y + 4.0, 20.0, 20.0), 20.0, None);
+        ui.mark(if kind == ProfileKind::GeminiApi { brand::provider("gemini").unwrap() } else { brand::harness(harness) }, Rect::new(x, y + 4.0, 20.0, 20.0), 20.0, None);
         x + 30.0
     } else {
         x
@@ -312,6 +325,33 @@ fn add_card(v: &ProfilesView, ui: &mut Ui, area: Rect, id: u64, kind: ProfileKin
     draw_buttons(ui, actions, &buttons, fit, id);
 }
 
+/// A secret field with a non-billable credential check before anything is saved.
+#[allow(clippy::too_many_arguments)]
+fn key_card(v: &ProfilesView, ui: &mut Ui, area: Rect, id: u64, name: &str, masked: &str, saving: bool, focused: bool) {
+    let t = ui.t;
+    let w = 480.0f32.min(area.w - 24.0);
+    let inner = w - 48.0;
+    let message = v.error.as_deref().unwrap_or("Paste a Gemini API key. Leave blank to use the detected key. Checking the key does not generate content.");
+    let msg = ui.para(message, Style::new(size::SMALL, weight::REGULAR, if v.error.is_some() { t.danger } else { t.muted }), inner, None);
+    let buttons = [Btn { icon: None, label: "Check + save", key: "enter", kind: Kind::Primary, n: CREATE }, Btn { icon: None, label: "Back", key: "esc", kind: Kind::Secondary, n: CANCEL }];
+    let fit = fit_buttons(ui, inner, &buttons);
+    let foot_h = 48.0 + fit.height();
+    let h = 130.0 + msg.h + foot_h;
+    let r = Rect::new(area.x + (area.w - w) / 2.0, area.y + ((area.h - h) / 2.0).max(12.0), w, h);
+    dialog(ui, r, foot_h);
+    ui.hit_with(r, Action::View(id, BG), Cursor::Default);
+    let x = r.x + 24.0;
+    ui.label_in(Rect::new(x, r.y + 24.0, inner, 28.0), &format!("Gemini API key · {name}"), Style::new(TITLE, weight::SEMIBOLD, t.text), Align::Left);
+    widgets::field(ui, Rect::new(x, r.y + 68.0, inner, BUTTON_H), masked, (!saving).then_some(masked.len()), "Paste API key", focused && !saving, Action::View(id, BG));
+    ui.draw(&msg, Point::new(x, r.y + 110.0));
+    let actions = Rect::new(x, r.bottom() - 24.0 - fit.height(), inner, fit.height());
+    if saving {
+        ui.spinner(Point::new(actions.x + 7.0, actions.y + 16.0), 4.6, 1.6, t.accent);
+        ui.label_in(Rect::new(actions.x + 22.0, actions.y, inner - 22.0, BUTTON_H), "Checking key…", Style::new(size::BODY, weight::MEDIUM, t.muted), Align::Left);
+    }
+    else { draw_buttons(ui, actions, &buttons, fit, id); }
+}
+
 /// The dialog that names exactly what removing a profile deletes.
 fn remove_card(ui: &mut Ui, area: Rect, id: u64, pid: &str, dir: Option<&PathBuf>, saving: bool, k: f32) {
     let t = ui.t;
@@ -320,7 +360,7 @@ fn remove_card(ui: &mut Ui, area: Rect, id: u64, pid: &str, dir: Option<&PathBuf
     // the alert, then the words beside it
     let text_x = 30.0;
     let title = ui.para(&format!("Remove {pid}?"), Style::new(TITLE, weight::SEMIBOLD, t.text), inner - text_x, Some(2));
-    let detail = ui.para("Deletes login, settings and saved sessions.", Style::new(size::BODY, weight::REGULAR, t.muted), inner - text_x, Some(2));
+    let detail = ui.para(if pid.starts_with("gemini:") { "Deletes this profile and its saved key. Usage history stays on this computer." } else { "Deletes login, settings and saved sessions." }, Style::new(size::BODY, weight::REGULAR, t.muted), inner - text_x, Some(2));
     let path = dir.map(|d| ui.para(&d.display().to_string(), Style::mono(size::SMALL, t.muted), inner - 44.0, Some(3)));
     let well_h = path.as_ref().map_or(0.0, |p| p.h + 16.0);
     let buttons = [Btn { icon: Some(TRASH), label: "Remove", key: "y", kind: Kind::Danger, n: YES }, Btn { icon: None, label: "Cancel", key: "esc", kind: Kind::Secondary, n: CANCEL }];
@@ -439,10 +479,13 @@ pub(crate) fn click(v: &mut ProfilesView, n: usize, _p: Point, _mods: KeyModifie
     let (code, ok) = match n {
         ADD_CLAUDE => (KeyCode::Char('a'), matches!(v.mode, Mode::List)),
         ADD_CODEX => (KeyCode::Char('c'), matches!(v.mode, Mode::List)),
+        ADD_GEMINI => (KeyCode::Char('g'), matches!(v.mode, Mode::List)),
+        EDIT_KEY => (KeyCode::Char('e'), matches!(v.mode, Mode::List)),
+        GOOGLE => (KeyCode::Char('s'), matches!(v.mode, Mode::List)),
         LOGIN => (KeyCode::Char('l'), matches!(v.mode, Mode::List)),
         REMOVE => (KeyCode::Char('d'), matches!(v.mode, Mode::List)),
         RELOAD => (KeyCode::Char('r'), matches!(v.mode, Mode::List)),
-        CREATE => (KeyCode::Enter, matches!(v.mode, Mode::Add(..))),
+        CREATE => (KeyCode::Enter, matches!(v.mode, Mode::Add(..) | Mode::Key(..))),
         YES => (KeyCode::Char('y'), matches!(v.mode, Mode::Confirm(_))),
         CANCEL => (KeyCode::Esc, !matches!(v.mode, Mode::List)),
         _ => return,
@@ -493,7 +536,7 @@ pub(crate) fn page_title(ui: &mut Ui, at: Point, title: &str, sub: Option<&str>,
 pub(crate) fn page_card(ui: &mut Ui, r: Rect) {
     let t = ui.t;
     let fill = if t.light { Color::WHITE.mix(t.surface, 0.25) } else { t.surface.mix(t.text, 0.03) };
-    ui.panel(r, radius::OVERLAY, fill, t.hairline);
+    ui.glass_panel(r, radius::OVERLAY, fill, t.hairline);
 }
 
 /// The terminal UI's key hints for a view, quietly: each key as keycaps and what it does, as many as fit in

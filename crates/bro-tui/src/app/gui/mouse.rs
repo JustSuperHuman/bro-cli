@@ -44,6 +44,7 @@ fn cell_event(kind: MouseEventKind, col: u16, row: u16, m: KeyModifiers) -> Mous
 pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
     // back / forward buttons walk the history of what you looked at
     match button {
+        MouseButton::Back | MouseButton::Forward if g.media.expanded => return,
         MouseButton::Back => return g.app_event(Event::Navigate(true)),
         MouseButton::Forward => return g.app_event(Event::Navigate(false)),
         _ => {}
@@ -61,6 +62,47 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
     g.link_press = None;
     let hit = hit_at(g, p);
     let m = mods(g);
+    if let Some(menu) = g.clipboard_menu.take() {
+        if cb == CButton::Left {
+            if let Some(Action::Clipboard(copy)) = hit {
+                focus(&mut g.app, menu.pane);
+                if copy {
+                    if let Some(text) = menu.selection {
+                        super::window::set_clipboard(&text);
+                    }
+                } else {
+                    g.key(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('v'), KeyModifiers::CONTROL));
+                }
+            }
+            return;
+        }
+    }
+    if g.app.prefix_armed && cb == CButton::Right {
+        g.app.prefix_armed = false;
+        return;
+    }
+    if g.app.prefix_armed && cb != CButton::Right {
+        if cb == CButton::Left {
+            g.app.prefix_armed = false;
+            if let Some(Action::Menu(index)) = hit {
+                if let Some((_, act)) = g.app.keymap.prefix_actions().get(index) {
+                    g.app.run_act(*act);
+                }
+            }
+        }
+        return;
+    }
+    if cb == CButton::Right && !g.app.overlay.is_open() && g.app.renaming.is_none()
+        && let Some(Action::Pane(id, _)) = &hit
+        && g.layout.panes.iter().any(|pane| pane.id == *id && pane.header.contains(p))
+    {
+        focus(&mut g.app, *id);
+        g.drag = None;
+        g.media.focus = false;
+        clear_selections(g, None);
+        g.app.open_menu(Some((p.x, p.y)));
+        return;
+    }
     // clicks (and double clicks) are counted per spot
     let count = match g.last_press {
         Some((at, q, n)) if button == MouseButton::Left && at.elapsed() < DOUBLE && (q.x - p.x).abs() <= 4.0 && (q.y - p.y).abs() <= 4.0 => n + 1,
@@ -68,6 +110,14 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
     };
     if button == MouseButton::Left {
         g.last_press = Some((Instant::now(), p, count));
+    }
+    if g.media.expanded && !g.app.overlay.is_open() {
+        if cb == CButton::Left && let Some(Action::Media(n)) = hit {
+            let focus = g.focused_owner();
+            let ask = g.media.click(n, p, count, focus.as_ref());
+            g.media_ask(ask);
+        }
+        return;
     }
     // anywhere on the sidebar (its blank spots too) is the sidebar; the project tabs aren't
     let on_side = on_sidebar(g, p);
@@ -81,7 +131,9 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
         g.app.leave_sidebar();
     }
     // a click anywhere else ends a selection
-    clear_selections(g, None);
+    if cb == CButton::Left {
+        clear_selections(g, None);
+    }
     // the launcher fills the body: the sidebar and the tabs beside it keep working (not while its project
     // picker is open)
     if g.app.overlay.is_open() && !(beside_launcher(g) && (on_side || side_hit)) {
@@ -352,6 +404,13 @@ fn body_press(g: &mut Gui, id: PaneId, p: Point, cb: CButton, m: KeyModifiers, c
     let shift = m.contains(KeyModifiers::SHIFT);
     let ctrl = m.contains(KeyModifiers::CONTROL);
     let wants = !flipped && pane.wants_mouse();
+    if cb == CButton::Right && !alt && (!wants || shift) {
+        let selection = with_screen(g, id, |s| s.term.selection_to_string()).flatten().map(|text| tidy_copy(&text)).filter(|text| !text.is_empty());
+        focus(&mut g.app, id);
+        g.drag = None;
+        g.clipboard_menu = Some(super::menu::ClipboardMenu { pane: id, anchor: p, selection });
+        return;
+    }
     // links on the back of a turned card open on press
     if flipped {
         if cb == CButton::Left && !alt && let Some((_, _, uri)) = g.painted.card_links.iter().find(|(r, ..)| r.contains(p)).cloned() {
@@ -583,6 +642,15 @@ pub fn moved(g: &mut Gui, p: Point) {
     let m = mods(g);
     // a move counts as you being here (the summary screensaver turns back), and is still handled
     g.app.touched();
+    if g.clipboard_menu.is_some() {
+        return;
+    }
+    if g.app.prefix_armed {
+        if let Some(Action::Menu(index)) = hit_at(g, p) {
+            g.app.menu.sel = index;
+        }
+        return;
+    }
     if g.pressing && g.media.dragged(p) {
         return;
     }
@@ -687,9 +755,19 @@ pub fn wheel(g: &mut Gui, p: Point, _dx: f32, dy: f32) {
         return;
     }
     let down = dy < 0.0;
+    if g.app.prefix_armed {
+        g.app.menu_move(if down { 3 } else { -3 });
+        return;
+    }
     let m = mods(g);
     let hit = hit_at(g, p);
     let overlay = g.app.overlay.is_open();
+    if g.media.expanded && !overlay {
+        if let Some(Action::Media(n)) = hit {
+            g.media.wheel(n, p, dy);
+        }
+        return;
+    }
     // nothing drawn over this spot but the sidebar and the tabs themselves (a dialog's scrim is)
     let bare = matches!(hit, None | Some(Action::None | Action::Side(_) | Action::SideList | Action::SideFilter | Action::SideScroll | Action::SideResize | Action::MediaToggle));
     // anywhere over the project tabs steps them, once per burst (not while something is open over them)

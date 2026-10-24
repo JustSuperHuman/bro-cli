@@ -16,6 +16,7 @@ pub(crate) mod gui;
 mod history;
 mod input;
 pub(crate) mod insights;
+mod menu;
 mod mouse;
 mod overlays;
 mod project_tabs;
@@ -133,6 +134,7 @@ pub struct App {
     tx: Sender<Event>,
     pub(crate) toasts: Toasts,
     pub(crate) prefix_armed: bool,
+    pub(crate) menu: menu::Menu,
     pub(crate) overlay: Overlay,
     quit: bool,
     start: Instant,
@@ -294,6 +296,7 @@ impl App {
             tx: tx.clone(),
             toasts: Toasts::default(),
             prefix_armed: false,
+            menu: menu::Menu::default(),
             overlay: Overlay::None,
             quit: false,
             start: Instant::now(),
@@ -382,6 +385,8 @@ impl App {
             saver: vec![],
         };
         app.seed_projects();
+        // Claude Code wears the theme bro opens with (sessions still running from before recolour too)
+        app.svc.claude_theme(theme::claude_palette(&app.theme));
         let t2 = tx.clone();
         app._theme_watcher = theme::watch(move || {
             let _ = t2.send(Event::ThemeFilesChanged);
@@ -652,6 +657,7 @@ impl App {
                 {
                     self.svc.login_closed(profile);
                 }
+                if t.meta.label == "sign in · gemini" { self.svc.login_closed("gemini-sub:local"); }
                 // route ids are stable per (upstream, model): keep the route while another session uses it
                 if let Some(r) = t.meta.route_id.take() {
                     let shared = self.panes.values().any(|o| o.as_term_ref().is_some_and(|o| o.meta.route_id.as_deref() == Some(r.as_str())));
@@ -756,6 +762,8 @@ impl App {
     pub(crate) fn set_theme(&mut self, name: &str, save: bool) {
         self.theme = theme::get(name);
         crate::icons::retint(self.theme.is_light());
+        // Claude sessions recolour with it, previews included
+        self.svc.claude_theme(theme::claude_palette(&self.theme));
         if save {
             let mut s = self.svc.settings();
             s.theme = name.to_string();
@@ -791,6 +799,7 @@ impl App {
                 Action::Close => self.close(from),
                 Action::Toast(k, s) => self.toast(k, s),
                 Action::LaunchUsage(h, profile) => self.launch_usage(h, profile),
+                Action::GeminiSignIn => { self.sign_in_gemini(); }
                 Action::Run(a) => self.run_act(a),
             }
         }

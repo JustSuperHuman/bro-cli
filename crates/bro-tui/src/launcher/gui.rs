@@ -227,9 +227,8 @@ pub(crate) fn click(l: &mut Launcher, n: usize, _p: Point, mods: KeyModifiers, _
         n if (HARNESS..HARNESS + Harness::ALL.len()).contains(&n) => {
             let h = Harness::ALL[n - HARNESS];
             if l.orchestrator || l.harness != h {
-                l.orchestrator = false;
-                l.harness = h;
-                l.set_harness(0);
+                let current = if l.orchestrator { Harness::ALL.len() } else { Harness::ALL.iter().position(|candidate| *candidate == l.harness).unwrap_or(0) };
+                l.set_harness((n - HARNESS) as i32 - current as i32);
             }
         }
         n if (BRAIN..BRAIN + Harness::ALL.len()).contains(&n) => {
@@ -287,8 +286,9 @@ pub(crate) fn wheel(l: &mut Launcher, n: Option<usize>, down: bool) {
 /// Draw the launcher over `area` (the body, right of the sidebar and below the project tabs).
 pub(crate) fn draw(l: &mut Launcher, ui: &mut Ui, area: Rect, cx: &Cx) -> bool {
     let t = ui.t;
-    // a page on the content layer: the card colour, 8px corners, a hairline edge
-    ui.panel(area, radius::OVERLAY, t.surface, t.hairline);
+    // A page on the content layer: the card colour, 8px corners, and a hairline edge. Its nearly opaque fill
+    // keeps the launcher readable over session output and the desktop, including on a glass window.
+    ui.panel(area, radius::OVERLAY, t.surface.with_alpha(0.97), t.hairline);
     ui.block(area);
     let inner = area.inset(PAD);
     let (bar, close, tabs) = head(inner);
@@ -833,6 +833,7 @@ pub(crate) fn scroll(ui: &mut Ui, key: &'static str, sel: Option<(f32, f32)>, co
 /// UI's symbol for them), the pool Claude's (it's Claude accounts), a harness's own login its own.
 fn account_mark(kind: &AccountKind, harness: Harness, ui: &Ui) -> Mark {
     match kind {
+        AccountKind::Profile(p) if bro_core::profiles::is_gemini_id(&p) => brand::provider("gemini").unwrap(),
         AccountKind::Profile(p) if p.starts_with("codex:") => brand::harness(Harness::Codex),
         AccountKind::Profile(_) | AccountKind::Pool => brand::harness(Harness::Claude),
         AccountKind::Provider(id) => provider_mark(id, ui),
@@ -1565,6 +1566,18 @@ mod tests {
         assert!(matches!(tap(&mut l, CLOSE), Outcome::Close));
         assert!(matches!(tap(&mut l, PROFILES), Outcome::Profiles));
         assert!(matches!(tap(&mut l, INSTALL), Outcome::Install(Harness::Claude)));
+    }
+
+    #[test]
+    fn gemini_survives_clicking_each_tool_tile() {
+        let mut l = launcher().with_profile("gemini:work").unwrap();
+        for (i, harness) in Harness::ALL.iter().enumerate() {
+            tap(&mut l, HARNESS + i);
+            let spec = l.spec().unwrap();
+            assert_eq!(spec.harness, *harness);
+            assert_eq!(spec.profile_id.as_deref(), Some("gemini:work"));
+            assert_eq!(spec.model.as_deref(), Some("gemini-3.8-flash"));
+        }
     }
 
     #[test]

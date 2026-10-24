@@ -468,3 +468,35 @@ async fn responses_client_on_gemini_round_trips_signatures() {
     assert_eq!(last["parts"][0]["functionResponse"]["response"]["result"], "A");
     assert_eq!(last["parts"][1]["functionResponse"]["response"]["result"], "A");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_stream_on_gemini_uses_responses_events_and_round_trips_tool_results() {
+    let e = env().await;
+    e.proxy.upsert_route(route("gm-codex", Upstream::GeminiCodeAssist { creds_file: "C:/x/oauth.json".into() }, Some("gemini-4-argon"), None));
+    let mut request = json!({
+        "model":"gemini-4-argon", "stream":true, "reasoning":{"effort":"low"},
+        "tools":[{"type":"function","name":"Read","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}],
+        "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"read a and b"}]}]
+    });
+    let response = e.post("gm-codex", "/v1/responses", request.clone()).await;
+    assert_eq!(response.status(), 200);
+    assert!(response.headers()["content-type"].to_str().unwrap().contains("text/event-stream"));
+    let events = sse_events(&response.text().await.unwrap());
+    assert!(events.iter().all(|(name, _)| name.as_deref().is_some_and(|name| name.starts_with("response."))));
+    let completed: Value = serde_json::from_str(&events.last().unwrap().1).unwrap();
+    assert_eq!(completed["type"], "response.completed");
+    let output = completed["response"]["output"].as_array().unwrap();
+    assert!(output.iter().any(|item| item["type"] == "function_call"));
+    let input = request["input"].as_array_mut().unwrap();
+    input.extend(output.iter().cloned());
+    for call in output.iter().filter(|item| item["type"] == "function_call") {
+        input.push(json!({"type":"function_call_output","call_id":call["call_id"],"output":"file contents"}));
+    }
+    let followup = e.post("gm-codex", "/v1/responses", request).await;
+    assert_eq!(followup.status(), 200);
+    let events = sse_events(&followup.text().await.unwrap());
+    assert_eq!(events.last().unwrap().0.as_deref(), Some("response.completed"));
+    let seen = e.mock.last(":streamGenerateContent");
+    let contents = seen.body["request"]["contents"].as_array().unwrap();
+    assert!(contents.iter().any(|turn| turn["parts"].as_array().is_some_and(|parts| parts.iter().any(|part| part.get("functionResponse").is_some()))));
+}

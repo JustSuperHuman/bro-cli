@@ -24,6 +24,10 @@ pub struct Tokens {
     pub bg: Color,
     /// session cards and panels
     pub surface: Color,
+    /// what the window is filled with: `bg`, see-through when the window's material lets the desktop show. The
+    /// window's surfaces (its content area, the session cards, the panels on them) are glass fills (`Ui::glass`)
+    /// so they all stay exactly as see-through as this
+    pub window: Color,
     /// menus, dialogs, popovers
     pub raised: Color,
     /// inputs and wells inside a surface
@@ -125,10 +129,14 @@ impl Tokens {
                 ansi[i] = color(*c, ansi[i], &default_ansi.map(Color::hex));
             }
         }
-        let bg = match t.bg {
+        let editor = match t.bg {
             TuiColor::Reset => Color::hex(if light { 0xf4f5f7 } else { 0x0e1015 }),
             c => color(c, Color::BLACK, &ansi),
         };
+        // a theme with its own side bar colour (VS Code's) is the window around the sessions, which sit on the
+        // theme's background as its editor does
+        let panel = t.panel.filter(|_| t.painted()).map(|c| color(c, editor, &ansi));
+        let bg = panel.unwrap_or(editor);
         let text = match t.fg {
             TuiColor::Reset => Color::hex(if light { 0x1f2328 } else { 0xe4e6eb }),
             c => color(c, Color::WHITE, &ansi),
@@ -136,14 +144,21 @@ impl Tokens {
         let c = |x: TuiColor| color(x, text, &ansi);
         // surfaces step toward the text colour (lighter on dark themes, darker on light ones)
         let step = |amount: f32| bg.mix(text, amount);
-        let surface = if light { Color::WHITE.mix(bg, 0.15) } else { step(0.035) };
+        let surface = match panel {
+            Some(_) => editor,
+            None if light => Color::WHITE.mix(bg, 0.15),
+            None => step(0.035),
+        };
         let raised = if light { Color::WHITE } else { step(0.075) };
         let accent = c(t.accent);
-        let on_accent = if accent.luminance() > 0.45 { Color::hex(0x0c0d10) } else { Color::WHITE };
+        // white on an accent it reads on (3:1, a bold label), else a dark ink: pastel accents (Dracula's purple,
+        // Catppuccin's mauve, SynthWave's pink) get dark labels
+        let on_accent = if accent.contrast(Color::WHITE) >= 3.0 || accent.contrast(Color::WHITE) >= accent.contrast(Color::hex(0x0c0d10)) { Color::WHITE } else { Color::hex(0x0c0d10) };
         Tokens {
             light,
             bg,
             surface,
+            window: bg,
             raised,
             sunken: if light { bg.mix(text, 0.04) } else { bg.mix(Color::BLACK, 0.25) },
             hover: text.with_alpha(if light { 0.055 } else { 0.06 }),
@@ -174,9 +189,16 @@ impl Tokens {
             term_fg: text,
             term_bg: surface,
             ansi,
-            cursor: accent.mix(text, 0.35),
+            cursor: t.cursor.map(c).unwrap_or(accent.mix(text, 0.35)),
             selection: accent.with_alpha(if light { 0.28 } else { 0.34 }),
         }
+    }
+
+    /// Over a see-through window: the window at `alpha`, and with it every glass surface. Everything else, text,
+    /// controls, menus and dialogs, stays solid so it reads over anything.
+    pub fn with_material(mut self, alpha: f32) -> Tokens {
+        self.window = self.bg.with_alpha(alpha.clamp(0.0, 1.0));
+        self
     }
 
     /// A project's colour (the same one the terminal UI uses).
@@ -411,6 +433,23 @@ impl<'a> Ui<'a> {
         let p = self.px(r);
         self.scene.quad(Quad::new(p, c).corners(corners.scale(self.scale)));
     }
+    /// A surface of the window itself (its content area, a session card, a panel on one): its colour painted into
+    /// the window without making it any less see-through, so every surface over a see-through window stays as
+    /// see-through as the window. Over a solid window it's an ordinary fill. Drawn before the rest of the layer.
+    pub fn glass(&mut self, r: Rect, corners: Corners, c: Color) {
+        let p = self.px(r);
+        self.scene.glass_quad(Quad::new(p, c).corners(corners.scale(self.scale)));
+    }
+    pub fn glass_round(&mut self, r: Rect, radius: f32, c: Color) {
+        self.glass(r, Corners::all(radius), c);
+    }
+    /// [`Ui::panel`] as a surface of the window: a glass fill, an ordinary hairline border.
+    pub fn glass_panel(&mut self, r: Rect, radius: f32, fill: Color, border: Color) {
+        self.glass_round(r, radius, fill);
+        // the same whole-pixel edge as `panel`
+        self.outline(r, radius, self.scale.round().max(1.0) / self.scale, border);
+    }
+
     /// A rounded rectangle with a hairline border.
     pub fn panel(&mut self, r: Rect, radius: f32, fill: Color, border: Color) {
         let p = self.px(r);
@@ -582,6 +621,12 @@ mod tests {
         // whatever the theme, the pick is never the worse of the two
         for name in crate::theme::builtin_names() {
             let t = Tokens::from_theme(&crate::theme::get(&name));
+            // a button's label reads on the accent: white from 3:1, else whichever reads better
+            let (white, dark) = (t.accent.contrast(Color::WHITE), t.accent.contrast(Color::hex(0x0c0d10)));
+            assert!(t.on_accent.contrast(t.accent) >= 3.0 || t.on_accent.contrast(t.accent) >= white.min(dark), "{name}: label on the accent");
+            if white < 3.0 && dark > white {
+                assert_ne!(t.on_accent, Color::WHITE, "{name}: a pastel accent gets a dark label");
+            }
             for fill in [t.danger, t.good, t.gold, t.accent, t.inline, t.shine] {
                 let ink = t.ink_on(fill);
                 let other = if ink == Color::WHITE { if t.light { Color::hex(0x121216) } else { t.bg } } else { Color::WHITE };

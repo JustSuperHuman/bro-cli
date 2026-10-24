@@ -8,7 +8,7 @@ terminal UI's, and the desktop app adds the window, pixel layout, drawing and th
 
 | Crate | What it does |
 |---|---|
-| `crates/bro-gfx` | The renderer. wgpu pipelines for soft shadows, rounded rects (borders, gradients), images and glyphs; text with cosmic-text (shaping, fallback) and swash (rasterising) into glyph atlases; box drawing, blocks, braille and powerline drawn to the cell; runs of punctuation shaped together so font ligatures join up on the cell grid. No knowledge of bro. |
+| `crates/bro-gfx` | The renderer. wgpu pipelines for soft shadows, rounded rects (borders, gradients), images and glyphs; text with cosmic-text (shaping, fallback) and swash (rasterising) into glyph atlases; box drawing, blocks, braille and powerline drawn to the cell; runs of punctuation shaped together so font ligatures join up on the cell grid; a theme's effects pass (neon glow from a half-size bloom, CRT phosphor, scanlines, vignette); a see-through swap chain on request (`Options::transparent`: DX12 DirectComposition on Windows, the frame premultiplied). No knowledge of bro. |
 | `crates/bro-media` | Decoding for the media sidebar: images (png, jpeg, gif, webp, svg…), video and audio playback (Media Foundation on Windows, ffmpeg elsewhere). |
 | `crates/bro-tui` with the `gui` feature (default) | The desktop app itself, in `src/app/gui/`, plus a `gui` child module next to each overlay and view it draws natively. |
 

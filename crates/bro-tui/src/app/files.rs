@@ -69,6 +69,11 @@ impl App {
         let (pane, line, column, mention) = (v.pane, v.line, v.column, v.mention().map(str::to_string));
         match o {
             Outcome::None => {}
+            Outcome::ToggleRendered => {
+                if let Overlay::File(v) = &mut self.overlay {
+                    v.toggle_rendered();
+                }
+            }
             Outcome::Close => self.overlay = Overlay::None,
             Outcome::Fallback(uri) => {
                 self.overlay = Overlay::None;

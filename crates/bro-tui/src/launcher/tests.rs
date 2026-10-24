@@ -1,6 +1,38 @@
 use super::*;
 use crate::services::{Services, fallback_settings};
 
+#[test]
+fn gemini_profile_stays_selected_when_switching_harnesses() {
+    let mut d = data();
+    let mut second = d.models["gemini:work"][0].clone();
+    second.id = "gemini-picked-model".into();
+    d.models.get_mut("gemini:work").unwrap().push(second);
+    let mut l = Launcher::new(d, Some(PathBuf::from("/code/bro")), Place::Tab)
+        .with_profile("gemini:work").unwrap();
+    l.model_sel = 1;
+    for harness in Harness::ALL {
+        assert_eq!(l.harness, harness);
+        assert!(l.needs_model());
+        let spec = l.spec().unwrap();
+        assert_eq!(spec.profile_id.as_deref(), Some("gemini:work"));
+        assert!(spec.provider_id.is_none());
+        assert_eq!(spec.model.as_deref(), Some("gemini-picked-model"));
+        key(&mut l, KeyCode::Right);
+    }
+}
+
+#[test]
+fn gemini_subscription_stays_selected_when_switching_harnesses() {
+    let mut l = Launcher::new(data(), None, Place::Tab).with_profile("gemini-sub:local").unwrap();
+    for harness in Harness::ALL {
+        let spec = l.spec().unwrap();
+        assert_eq!(spec.harness, harness);
+        assert_eq!(spec.profile_id.as_deref(), Some("gemini-sub:local"));
+        assert_eq!(spec.model.as_deref(), Some("gemini-4-argon-high"));
+        key(&mut l, KeyCode::Right);
+    }
+}
+
 fn data() -> Data {
     let (tx, _rx) = std::sync::mpsc::channel();
     let svc = Services::offline(fallback_settings(), tx);
@@ -131,7 +163,7 @@ fn headers_group_the_list_and_are_skipped() {
     let l = Launcher::new(data(), None, Place::Tab);
     let items = l.items();
     let headers: Vec<&str> = items.iter().filter_map(|i| if let Item::Header(h) = i { Some(*h) } else { None }).collect();
-    assert_eq!(headers, ["your logins", "other logins · via proxy", "providers"], "no recents yet");
+    assert_eq!(headers, ["your logins", "other logins · via proxy", "Gemini profiles", "providers"], "no recents yet");
     assert!(!matches!(items[l.cursor_row(&items).unwrap()], Item::Header(_)));
 }
 
@@ -316,16 +348,17 @@ fn orchestrator_harness_follows_your_last_one() {
 
 #[test]
 fn gemini_signs_in_before_it_launches() {
-    let mut l = Launcher::new(data(), None, Place::Tab);
-    narrow(&mut l, "gemini");
+    let mut l = Launcher::new({ let mut d = data(); d.profiles.retain(|p| !p.is_gemini()); d }, None, Place::Tab);
+    narrow(&mut l, "google");
     let Some(Item::Account(a)) = l.current() else { panic!("gemini row") };
     assert!(!a.ready && a.detail.contains("signs in with Google"), "{}", a.detail);
     assert!(matches!(key(&mut l, KeyCode::Enter), Outcome::SignIn));
 
     let mut d = data();
+    d.profiles.retain(|p| !p.is_gemini());
     d.keyed.push("gemini".into());
     let mut l = Launcher::new(d, None, Place::Tab);
-    narrow(&mut l, "gemini");
+    narrow(&mut l, "google");
     let Some(Item::Account(a)) = l.current() else { panic!("gemini row") };
     assert!(a.ready && a.detail.contains("google ai subscription"));
     key(&mut l, KeyCode::Enter);

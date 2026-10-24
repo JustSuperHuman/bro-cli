@@ -420,7 +420,19 @@ impl App {
     pub(super) fn usage_lines(&self) -> Vec<UsageLine> {
         let st = self.svc.state();
         let Some(profiles) = st.profiles.ready() else { return vec![] };
-        let signed_in: Vec<_> = profiles.iter().filter(|p| p.authenticated).collect();
+        let gemini: Vec<_> = profiles.iter().filter(|p| p.authenticated && p.is_gemini()).map(|p| {
+            let usage = st.usage.get(&p.id).and_then(|e| e.usage.as_ref());
+            let (label, note) = if p.is_gemini_subscription() {
+                let left = usage.and_then(|u| u.subscription.as_ref()).into_iter().flatten().filter_map(|m| m.remaining).reduce(f64::min);
+                let label = if p.plan.as_deref().is_some_and(|s| s.to_lowercase().contains("ultra")) { "Gemini Ultra" } else { "Gemini plan" };
+                (label.into(), left.map(|left| format!("{:.0}% left", left * 100.0)).unwrap_or_else(|| "checking…".into()))
+            } else {
+                let api = usage.and_then(|u| u.api.as_ref());
+                (if p.name == "local" { "Gemini API".into() } else { format!("Gemini/{}", p.name) }, api.map(|u| format!("{} req", u.today.requests)).unwrap_or_else(|| "API key".into()))
+            };
+            UsageLine { harness: Some(bro_core::Harness::Claude), profile: Some(p.id.clone()), label, h5: None, wk: None, approx: false, note: Some(note), resets_at: None, fable: None }
+        }).collect();
+        let signed_in: Vec<_> = profiles.iter().filter(|p| p.authenticated && !p.is_gemini()).collect();
         let state_of = |id: &str| match st.usage.get(id) {
             Some(e) => match (&e.usage, &e.error) {
                 (Some(u), _) => LoginUsage::Ready(u),
@@ -461,6 +473,7 @@ impl App {
                     v.insert(1, UsageLine { harness: None, profile: None, label: "fable".into(), h5: s.fable_5h, wk: s.fable_wk, approx: false, note: None, resets_at: None, fable: None });
                 }
             }
+            v.extend(gemini);
             return v;
         }
         signed_in
@@ -478,6 +491,7 @@ impl App {
                 };
                 UsageLine { harness: Some(h), profile: Some(p.id.clone()), label: p.name.clone(), h5, wk, approx, note, resets_at, fable: None }
             })
+            .chain(gemini)
             .collect()
     }
 
@@ -514,8 +528,9 @@ impl App {
                 if hot {
                     f.buffer_mut().set_style(r, Style::default().bg(current_tint(t)));
                 }
-                let brand = u.harness.map(|h| ui::harness_color(Some(h), t)).unwrap_or(t.muted);
-                let glyph = u.harness.map(|h| ui::harness_glyph(Some(h))).unwrap_or(" ");
+                let is_gemini = u.profile.as_deref().is_some_and(|p| bro_core::profiles::is_gemini_id(&p));
+                let brand = if is_gemini { ui::provider_glyph("gemini", t.shine, t).1 } else { u.harness.map(|h| ui::harness_color(Some(h), t)).unwrap_or(t.muted) };
+                let glyph = if is_gemini { ui::provider_glyph("gemini", t.shine, t).0 } else { u.harness.map(|h| ui::harness_glyph(Some(h))).unwrap_or(" ") };
                 let name_style = if u.harness.is_some() { ui::bold() } else { muted(t) };
                 let label = match u.fable {
                     Some(open) => format!("{} {}", u.label, if open { "▾" } else { "▸" }),

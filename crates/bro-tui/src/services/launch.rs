@@ -30,7 +30,7 @@ pub struct LaunchRequest {
     /// Moving a running session to another login: find its transcript first, then resume it in
     /// `spec.profile_id` (staged as a fork when that's a different login).
     pub find_live: Option<FindLive>,
-    /// A queued resume's placeholder pane: the session takes its place.
+    /// A queued resume's placeholder or a reloaded session: the new session takes its place.
     pub into: Option<PaneId>,
 }
 
@@ -38,9 +38,11 @@ pub struct LaunchRequest {
 pub struct FindLive {
     pub harness: bro_core::Harness,
     /// login whose folder holds it ("claude:work")
-    pub store: String,
+    pub store: Option<String>,
     pub cwd: std::path::PathBuf,
     pub since: std::time::SystemTime,
+    /// The pane's bound transcript, when known; avoids choosing another session in the same folder.
+    pub session_id: Option<String>,
 }
 
 impl LaunchRequest {
@@ -76,15 +78,7 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
             return Ok(super::demo::shell_command(Some(spec.harness), &label, spec.cwd.clone()));
         }
         if let Some(f) = find_live {
-            let found = guard("sessions::latest_for", || bro_core::sessions::latest_for(f.harness, Some(&f.store), &f.cwd, f.since))
-                .ok()
-                .flatten()
-                .ok_or("couldn't find this session's transcript — it moves once the agent has answered at least once")?;
-            let same = spec.profile_id.as_deref() == Some(f.store.as_str());
-            spec.resume = Some(bro_core::launch::Resume { session_id: found.id.clone(), fork: !same });
-            if !same {
-                stage = Some(found);
-            }
+            stage = prepare_live_resume(&mut spec, f)?;
         }
         let mut staged = vec![];
         if let Some(s) = &stage {
@@ -93,12 +87,17 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
         }
         // the orchestrator drives bro through the bridge: start it when it's off and wait for it
         let bridge_url = if spec.orchestrator { Some(orchestrator_bridge(svc)?) } else { svc.bridge_local_url() };
-        let ctx = {
+        let palette = svc.claude_palette();
+        let mut ctx = {
             let st = svc.state();
             let claude_env = st.settings.claude_env.clone();
             let caveman = st.settings.caveman.clone();
             let justtools_skill = st.settings.justtools.skill;
             let justwatch_skill = st.settings.justwatch.skill;
+            let claude_mod = Some(st.settings.claude_mod.clone());
+            // Claude sessions run bro as their peer hooks (see `bro_core::peers`)
+            let bro_bin = std::env::current_exe().ok();
+            let peon = st.settings.peon.clone();
             match st.proxy.status.ready() {
                 Some(p) => LaunchCtx {
                     proxy_base: Some(p.base.clone()),
@@ -109,11 +108,15 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
                     justtools_skill,
                     justwatch_skill,
                     bridge_url,
+                    claude_mod,
+                    palette,
+                    bro_bin,
+                    peon,
                 },
-                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, bridge_url, ..LaunchCtx::default() },
+                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, bridge_url, claude_mod, palette, bro_bin, peon, ..LaunchCtx::default() },
             }
         };
-        let mut cmd = match guard("launch::build", || bro_core::launch::build(&spec, &ctx)) {
+        let mut cmd = match guard("launch::build", || with_proxy_retry(svc, &mut ctx, |ctx| bro_core::launch::build(&spec, ctx))) {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => return Err(format!("{e:#}")),
             Err(panic) => {
@@ -133,6 +136,47 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
         Ok(cmd)
     })();
     svc.send(Event::Launched(Box::new(Launched { spec, place, reply, name, remember, result, route_id, note, into })));
+}
+
+/// Resolve the pane's conversation before changing its process or staging a copy for another profile.
+fn prepare_live_resume(spec: &mut LaunchSpec, f: FindLive) -> Result<Option<SessionInfo>, String> {
+    let found = guard("sessions::find_live", || match f.session_id.as_deref() {
+        Some(id) => bro_core::sessions::find_in_profile(f.harness, id, f.store.as_deref()),
+        None => bro_core::sessions::latest_for(f.harness, f.store.as_deref(), &f.cwd, f.since),
+    })
+    .ok()
+    .flatten()
+    .ok_or("couldn't find this session's transcript — the agent needs to answer at least once")?;
+    let same = transcript_store(spec) == f.store;
+    spec.resume = Some(bro_core::launch::Resume { session_id: found.id.clone(), fork: !same });
+    Ok((!same).then_some(found))
+}
+
+/// Where a launch writes its transcript, including agents routed through another provider.
+pub fn transcript_store(spec: &LaunchSpec) -> Option<String> {
+    let own = |family: &str| match &spec.profile_id {
+        Some(p) if p.starts_with(family) => p.clone(),
+        _ => format!("{family}local"),
+    };
+    match spec.harness {
+        Harness::Claude => Some(own("claude:")),
+        Harness::Codex => Some(own("codex:")),
+        Harness::Pi | Harness::Omp => None,
+    }
+}
+
+/// A secondary window can build native commands immediately. Start translation only when the launch needs it,
+/// and wait for the listener before retrying, including when startup is already in flight.
+fn with_proxy_retry<T>(svc: &Services, ctx: &mut LaunchCtx, mut build: impl FnMut(&LaunchCtx) -> anyhow::Result<T>) -> anyhow::Result<T> {
+    match build(ctx) {
+        Err(error) if error.is::<bro_core::launch::ProxyRequired>() => {
+            let proxy = svc.ensure_proxy().map_err(anyhow::Error::msg)?;
+            ctx.proxy_base = Some(proxy.base);
+            ctx.proxy_token = Some(proxy.token);
+            build(ctx)
+        }
+        result => result,
+    }
 }
 
 /// How long an orchestrator launch waits for a bridge it just turned on.
@@ -164,7 +208,7 @@ pub fn label_for(spec: &LaunchSpec) -> String {
         parts.insert(0, "orchestrator".into());
     }
     if let Some(p) = spec.provider_id.as_deref().or(spec.profile_id.as_deref()) {
-        parts.push(p.split(':').next_back().unwrap_or(p).to_string());
+        parts.push(if p.starts_with("gemini-sub:") { "Gemini subscription".into() } else if let Some(name) = p.strip_prefix("gemini:") { format!("Gemini/{name}") } else { p.split(':').next_back().unwrap_or(p).to_string() });
     }
     if let Some(m) = &spec.model {
         parts.push(short_model(m));
@@ -256,6 +300,9 @@ fn guess_profile_dir(id: &str) -> Option<PathBuf> {
 
 /// The built-in launcher: native backends only (no providers, no proxy).
 pub fn fallback_command(spec: &LaunchSpec, st: &State) -> Result<CommandSpec, String> {
+    if spec.profile_id.as_deref().is_some_and(|p| bro_core::profiles::is_gemini_id(&p)) {
+        return Err("Gemini launches need the translating proxy. Try again after it starts.".into());
+    }
     if spec.provider_id.is_some() {
         return Err("provider and pool launches need bro-core's launcher, which isn't available yet".into());
     }
@@ -298,6 +345,102 @@ mod tests {
     use super::*;
     use bro_core::browser::BrowserMode;
     use bro_core::launch::Resume;
+
+    #[test]
+    fn reload_uses_the_bound_conversation_and_only_stages_for_a_different_store() {
+        crate::testkit::isolate();
+        let source = format!("reload-{}", uuid::Uuid::new_v4());
+        let profile = format!("claude:{source}");
+        let root = bro_core::profiles::dir_for(ProfileKind::ClaudeAccount, &source).join("projects").join("F--reload");
+        std::fs::create_dir_all(&root).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        for session in [&id, &other] {
+            let line = serde_json::json!({"type": "user", "sessionId": session, "cwd": "F:\\reload", "message": {"content": "keep my conversation"}});
+            std::fs::write(root.join(format!("{session}.jsonl")), format!("{line}\n")).unwrap();
+        }
+        let find = || FindLive { harness: Harness::Claude, store: Some(profile.clone()), cwd: "F:\\reload".into(), since: std::time::SystemTime::now() + std::time::Duration::from_secs(120), session_id: Some(id.clone()) };
+        let mut launch = spec(Harness::Claude);
+        launch.profile_id = Some(profile.clone());
+        assert!(prepare_live_resume(&mut launch, find()).unwrap().is_none());
+        assert_eq!(launch.resume.as_ref().unwrap().session_id, id);
+        assert!(!launch.resume.as_ref().unwrap().fork, "same profile resumes the existing conversation");
+        launch.profile_id = Some("claude:another".into());
+        assert_eq!(prepare_live_resume(&mut launch, find()).unwrap().unwrap().id, id);
+        assert!(launch.resume.as_ref().unwrap().fork, "a different profile gets a copy");
+        let mut missing = find();
+        missing.session_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(prepare_live_resume(&mut launch, missing).is_err(), "never substitute the other session in the folder");
+        launch.profile_id = Some("codex:team".into());
+        launch.provider_id = Some("openrouter".into());
+        let mut local = spec(Harness::Claude);
+        local.profile_id = None;
+        local.provider_id = Some("openrouter".into());
+        assert_eq!(transcript_store(&local).as_deref(), Some("claude:local"));
+        assert_eq!(transcript_store(&launch).as_deref(), Some("claude:local"));
+        for harness in [Harness::Pi, Harness::Omp] {
+            launch.harness = harness;
+            assert_eq!(transcript_store(&launch), None, "Pi and omp keep transcripts outside login profiles");
+        }
+    }
+
+    #[test]
+    fn guest_launch_starts_a_ready_proxy_and_retries_the_command() {
+        crate::testkit::isolate();
+        let mut settings = super::super::fallback_settings();
+        settings.proxy.enabled = false;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = Services::with_state(Services::empty_state(settings), tx, false, true);
+        svc.update(|st| st.proxy.status = super::super::Avail::Unavailable("your other bro runs it".into()));
+        let mut ctx = LaunchCtx::default();
+        let mut attempts = 0;
+        let result = with_proxy_retry(&svc, &mut ctx, |ctx| {
+            attempts += 1;
+            let Some(base) = &ctx.proxy_base else {
+                return Err(bro_core::launch::ProxyRequired("gemini-sub:local".into()).into());
+            };
+            let token = ctx.proxy_token.as_deref().unwrap();
+            let response = bro_core::http::get_json(&format!("{base}/health"), &[("x-api-key", token)], std::time::Duration::from_secs(2))?;
+            anyhow::ensure!(response.ok() && response.body["ok"] == true, "proxy must listen before retry");
+            Ok(base.clone())
+        }).unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(ctx.proxy_base.as_deref(), Some(result.as_str()));
+        assert!(!svc.settings().proxy.enabled, "an explicit launch must not change saved proxy preferences");
+        assert!(svc.inner.bridge.read().is_none(), "the original window keeps the phone bridge");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn native_launches_and_validation_errors_do_not_start_a_proxy() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = Services::with_state(Services::empty_state(super::super::fallback_settings()), tx, false, true);
+        let mut ctx = LaunchCtx::default();
+        assert_eq!(with_proxy_retry(&svc, &mut ctx, |_| Ok(7)).unwrap(), 7);
+        let error = with_proxy_retry::<()>(&svc, &mut ctx, |_| anyhow::bail!("unknown profile")).unwrap_err();
+        assert_eq!(error.to_string(), "unknown profile");
+        assert!(svc.inner.proxy.lock().is_none());
+    }
+
+    #[test]
+    fn concurrent_guest_launches_share_one_proxy_and_leave_the_original_running() {
+        crate::testkit::isolate();
+        let original = bro_proxy::ProxyHandle::start(bro_proxy::ProxyConfig { bind: "127.0.0.1".into(), port: 0, token: None }).unwrap();
+        let mut settings = super::super::fallback_settings();
+        settings.proxy.port = original.port();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = Services::with_state(Services::empty_state(settings), tx, false, true);
+        let ports = std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..8).map(|_| scope.spawn(|| svc.ensure_proxy().unwrap().port)).collect();
+            jobs.into_iter().map(|job| job.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert!(ports.iter().all(|port| *port == ports[0]));
+        assert_ne!(ports[0], original.port());
+        let health = bro_core::http::get_json(&format!("{}/health", original.base_url()), &[], std::time::Duration::from_secs(2)).unwrap();
+        assert!(health.ok(), "starting the guest must preserve the existing window's proxy");
+        svc.shutdown();
+        original.shutdown();
+    }
 
     fn spec(h: Harness) -> LaunchSpec {
         LaunchSpec { harness: h, profile_id: Some("claude:work".into()), provider_id: None, model: Some("claude-opus-5".into()), cwd: PathBuf::from("."), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false }

@@ -23,6 +23,8 @@ enum Mode {
     List,
     /// typing a name for a new profile of this kind
     Add(ProfileKind, String),
+    /// A masked Gemini key. Empty input uses the detected key.
+    Key(String, String),
     /// confirm removing this profile
     Confirm(Profile),
 }
@@ -50,11 +52,12 @@ pub struct ProfilesView {
     error: Option<String>,
     /// while naming a new profile: its agent CLI isn't installed (looked up once, when the prompt opened)
     missing: Option<Harness>,
+    key_existing: bool,
 }
 
 impl Default for ProfilesView {
     fn default() -> Self {
-        ProfilesView { sel: 0, mode: Mode::List, scroll: 0, rows: 1, hits: vec![], pending: None, selected_id: None, error: None, missing: None }
+        ProfilesView { sel: 0, mode: Mode::List, scroll: 0, rows: 1, hits: vec![], pending: None, selected_id: None, error: None, missing: None, key_existing: false }
     }
 }
 
@@ -70,10 +73,15 @@ impl ProfilesView {
         v
     }
 
+    pub(crate) fn editing_key(profile: &Profile) -> Self {
+        Self { selected_id: Some(profile.id.clone()), key_existing: true, mode: Mode::Key(profile.name.clone(), String::new()), ..Self::default() }
+    }
+
     fn start_add(&mut self, kind: ProfileKind, demo: bool) {
         let harness = if kind == ProfileKind::CodexProfile { Harness::Codex } else { Harness::Claude };
-        self.missing = (!demo && bro_core::agent_install::installed(harness).is_none()).then_some(harness);
+        self.missing = (kind != ProfileKind::GeminiApi && !demo && bro_core::agent_install::installed(harness).is_none()).then_some(harness);
         self.error = None;
+        self.key_existing = false;
         self.mode = Mode::Add(kind, String::new());
     }
 
@@ -102,6 +110,10 @@ impl ProfilesView {
 
     /// Open the profile's interactive login in a new terminal tab.
     fn login(&self, p: &Profile, cx: &mut Cx) {
+        if p.is_gemini() {
+            cx.act(Action::LaunchUsage(Harness::Claude, Some(p.id.clone())));
+            return;
+        }
         open_login(p, cx);
     }
 }
@@ -112,6 +124,10 @@ pub const LOGIN_LABEL: &str = "login · ";
 /// Open a profile's interactive login in a new terminal tab and watch it until it reads signed in. When its
 /// agent CLI isn't installed, open the installer instead: logging in runs that CLI.
 pub fn open_login(p: &Profile, cx: &mut Cx) {
+    if p.is_gemini() {
+        cx.act(Action::LaunchUsage(Harness::Claude, Some(p.id.clone())));
+        return;
+    }
     let harness = if p.is_codex() { Harness::Codex } else { Harness::Claude };
     if !cx.svc.is_demo() && bro_core::agent_install::installed(harness).is_none() {
         let name = bro_core::agent_install::display_name(harness);
@@ -146,6 +162,13 @@ pub fn open_login(p: &Profile, cx: &mut Cx) {
     }
 }
 
+fn profile_note(p: &Profile) -> &'static str {
+    if p.is_gemini_subscription() { "Connected Google AI subscription. Use Google sign-in to switch accounts." }
+    else if p.is_gemini_api() {
+        if p.is_local() { "Uses the detected Gemini key. Manage this key at its source." } else { "Remove deletes this profile and its saved key. Usage history stays on this computer." }
+    } else if p.is_local() { "Machine login: can be used here; cannot be removed by Bro." } else { "Remove deletes this profile's login, settings and saved sessions." }
+}
+
 fn valid_name(s: &str) -> bool {
     bro_core::profiles::valid_name(s)
 }
@@ -168,10 +191,10 @@ impl Pane for ProfilesView {
             return;
         }
         let area = ui::hint_line(f, area, &[("↑↓", "select"), ("enter", "log in"), ("del", "remove"), ("r", "reload")], t);
-        ui::line(f, Rect { height: 1, ..area }, vec![Span::styled(" Profiles", ui::bold_accent(t)), Span::styled(" · Claude and Codex logins", muted(t))]);
+        ui::line(f, Rect { height: 1, ..area }, vec![Span::styled(" Profiles", ui::bold_accent(t)), Span::styled(" · Claude, Codex and Gemini", muted(t))]);
         let modal = !matches!(self.mode, Mode::List) || self.pending.is_some();
         if !modal {
-            for (i, (text, key)) in [(" + Claude (a) ", 'a'), (" + Codex (c) ", 'c')].iter().enumerate() {
+            for (i, (text, key)) in [(" + Claude (a) ", 'a'), (" + Codex (c) ", 'c'), (" + API key (g) ", 'g'), (" + Google (s) ", 's')].iter().enumerate() {
                 self.button(f, Rect { x: area.x + i as u16 * 15, y: area.y + 1, width: 14, height: 1 }, text, KeyCode::Char(*key), cx);
             }
             self.button(f, Rect { y: area.y + 2, width: 14, height: 1, ..area }, " Log in (l) ", KeyCode::Char('l'), cx);
@@ -189,7 +212,7 @@ impl Pane for ProfilesView {
         for (row, (i, p)) in profiles.iter().enumerate().skip(self.scroll).take(self.rows).enumerate() {
             let r = Rect { y: area.y + 3 + row as u16, height: 1, ..area };
             let brand = ui::harness_color(Some(if p.is_codex() { Harness::Codex } else { Harness::Claude }), t);
-            let status = if p.authenticated { p.email.as_deref().unwrap_or("Logged in") } else { "Not logged in" };
+            let status = if p.authenticated { p.email.as_deref().unwrap_or(if p.is_gemini() { "API key configured" } else { "Logged in" }) } else { "Not logged in" };
             let local = if p.is_local() { " · machine login" } else { "" };
             let text = format!("{} {} · {}{}", if i == self.sel { "▌" } else { " " }, p.id, status, local);
             ui::line(f, r, vec![Span::styled(ui::fit(&text, r.width as usize), if i == self.sel { fg(brand).add_modifier(Modifier::BOLD).bg(t.frame) } else { Style::default() })]);
@@ -206,23 +229,28 @@ impl Pane for ProfilesView {
             Mode::List => {
                 if let Some(p) = profiles.get(self.sel) {
                     ui::line(f, prompt, vec![Span::styled(crate::util::short_path(&p.dir, area.width as usize), muted(t))]);
-                    let note = if p.is_local() { "Machine login: can be used here; cannot be removed by Bro." } else { "Remove deletes this profile's login, settings and saved sessions." };
+                    let note = profile_note(p);
                     ui::line(f, detail, vec![Span::styled(note, muted(t))]);
                 }
             }
+            Mode::Key(name, key) => {
+                ui::line(f, prompt, vec![Span::styled(format!(" Gemini API key for {name}: {}▏", "•".repeat(key.chars().count().min(48))), ui::bold_accent(t))]);
+                ui::line(f, detail, vec![Span::styled(self.error.as_deref().unwrap_or("Paste a key, or leave blank to use the detected key. The key check does not generate content."), muted(t))]);
+                self.button(f, Rect { width: 26.min(area.width), ..buttons }, " Check + save (enter) ", KeyCode::Enter, cx);
+            }
             Mode::Add(kind, name) => {
-                let family = if *kind == ProfileKind::ClaudeAccount { "Claude" } else { "Codex" };
+                let family = if *kind == ProfileKind::GeminiApi { "Gemini" } else if *kind == ProfileKind::ClaudeAccount { "Claude" } else { "Codex" };
                 ui::line(f, prompt, vec![Span::styled(format!(" {family} profile name: {name}▏"), ui::bold_accent(t))]);
                 let missing = self.missing.map(|h| format!("{} isn't installed: Create installs it first, then log in with l.", bro_core::agent_install::display_name(h)));
                 let message = self.error.as_deref().or(missing.as_deref()).unwrap_or("1–40 letters, digits, . _ - (example: work). 'local' is reserved.");
                 ui::line(f, detail, vec![Span::styled(message, if self.error.is_some() { fg(t.danger) } else { muted(t) })]);
-                self.button(f, Rect { width: 22.min(area.width), ..buttons }, " Create + log in (↵) ", KeyCode::Enter, cx);
+                self.button(f, Rect { width: 22.min(area.width), ..buttons }, if *kind == ProfileKind::GeminiApi { " Next: API key (↵) " } else { " Create + log in (↵) " }, KeyCode::Enter, cx);
                 if area.width >= 37 {
                     self.button(f, Rect { x: buttons.x + 23, width: 14, ..buttons }, " Cancel (esc) ", KeyCode::Esc, cx);
                 }
             }
             Mode::Confirm(p) => {
-                ui::line(f, prompt, vec![Span::styled(format!(" Remove {}? Deletes login, settings and saved sessions.", p.id), fg(t.danger))]);
+                ui::line(f, prompt, vec![Span::styled(format!(" Remove {}? {}", p.id, profile_note(p)), fg(t.danger))]);
                 ui::line(f, detail, vec![Span::styled(p.dir.display().to_string(), muted(t))]);
                 self.button(f, Rect { width: 14, ..buttons }, " Remove (y) ", KeyCode::Char('y'), cx);
                 self.button(f, Rect { x: buttons.x + 15, width: 14, ..buttons }, " Cancel (esc) ", KeyCode::Esc, cx);
@@ -233,8 +261,26 @@ impl Pane for ProfilesView {
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         if self.pending.is_some() { return true; }
         match std::mem::replace(&mut self.mode, Mode::List) {
+            Mode::Key(name, mut secret) => {
+                match key.code {
+                    KeyCode::Enter => {
+                        let rx = cx.svc.save_gemini_profile(name.clone(), secret, self.key_existing);
+                        self.pending = Some(Pending::Create(ProfileKind::GeminiApi, name, rx));
+                        self.error = None;
+                    }
+                    KeyCode::Esc => { if !self.key_existing { self.mode = Mode::Add(ProfileKind::GeminiApi, name); } }
+                    KeyCode::Backspace => { secret.pop(); self.mode = Mode::Key(name, secret); self.error = None; }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !c.is_control() && secret.len() < 512 => { secret.push(c); self.mode = Mode::Key(name, secret); self.error = None; }
+                    _ => self.mode = Mode::Key(name, secret),
+                }
+                return true;
+            }
             Mode::Add(kind, mut name) => {
                 match key.code {
+                    KeyCode::Enter if valid_name(&name) && kind == ProfileKind::GeminiApi => {
+                        self.mode = Mode::Key(name, String::new());
+                        self.error = None;
+                    }
                     KeyCode::Enter if valid_name(&name) => {
                         let rx = cx.svc.create_profile(kind, name.clone());
                         self.pending = Some(Pending::Create(kind, name, rx));
@@ -282,6 +328,13 @@ impl Pane for ProfilesView {
             KeyCode::PageUp => self.sel = self.sel.saturating_sub(self.rows),
             KeyCode::Char('a') => self.start_add(ProfileKind::ClaudeAccount, cx.svc.is_demo()),
             KeyCode::Char('c') => self.start_add(ProfileKind::CodexProfile, cx.svc.is_demo()),
+            KeyCode::Char('g') => self.start_add(ProfileKind::GeminiApi, cx.svc.is_demo()),
+            KeyCode::Char('s') => cx.act(Action::GeminiSignIn),
+            KeyCode::Char('e') => {
+                if let Some(p) = self.selected(cx).filter(|p| p.is_gemini() && !p.is_local()) {
+                    self.key_existing = true; self.error = None; self.mode = Mode::Key(p.name, String::new());
+                }
+            }
             KeyCode::Char('r') => {
                 cx.svc.refresh_data();
                 cx.toast(Kind::Info, "reloading profiles…");
@@ -292,7 +345,7 @@ impl Pane for ProfilesView {
                 }
             }
             KeyCode::Char('d') | KeyCode::Delete => match self.selected(cx) {
-                Some(p) if matches!(p.kind, ProfileKind::ClaudeLocal | ProfileKind::CodexLocal) => cx.toast(Kind::Info, "the local logins (~/.claude, ~/.codex) aren't removed by bro"),
+                Some(p) if p.is_local() => cx.toast(Kind::Info, "the local logins (~/.claude, ~/.codex) aren't removed by bro"),
                 Some(p) => self.mode = Mode::Confirm(p),
                 None => {}
             },
@@ -303,6 +356,14 @@ impl Pane for ProfilesView {
     }
 
     fn paste(&mut self, text: &str, _cx: &mut Cx) {
+        if let Mode::Key(_, secret) = &mut self.mode {
+            for c in text.trim().chars().filter(|c| !c.is_control()) {
+                if secret.len() + c.len_utf8() > 512 { break; }
+                secret.push(c);
+            }
+            self.error = None;
+            return;
+        }
         if let Mode::Add(_, name) = &mut self.mode {
             for c in text.trim().chars().filter(|c| !c.is_control()) {
                 if name.len() + c.len_utf8() > 40 { break; }
@@ -344,12 +405,14 @@ impl Pane for ProfilesView {
             Pending::Create(kind, name, rx) => match rx.try_recv() {
                 Ok(Ok(p)) => {
                     self.selected_id = Some(p.id.clone());
-                    if self.missing.is_none() {
+                    if p.is_gemini() {
+                        cx.toast(Kind::Info, format!("Saved {}. Choose a tool and model to start a session.", p.id));
+                    } else if self.missing.is_none() {
                         cx.toast(Kind::Info, format!("Created {}. Complete sign-in in the login tab.", p.id));
                     }
                     self.login(&p, cx);
                 }
-                Ok(Err(e)) => { self.error = Some(e); self.mode = Mode::Add(kind, name); }
+                Ok(Err(e)) => { self.error = Some(e); self.mode = if kind == ProfileKind::GeminiApi { Mode::Key(name, String::new()) } else { Mode::Add(kind, name) }; }
                 Err(TryRecvError::Empty) => self.pending = Some(Pending::Create(kind, name, rx)),
                 Err(TryRecvError::Disconnected) => {
                     self.error = Some("Could not create the profile. Try again.".into());

@@ -43,6 +43,8 @@ pub enum ResumeFrom {
     Past(SessionInfo),
     /// a running session being moved to another login (closed, then resumed there)
     Live { pane: PaneId, harness: bro_core::Harness, store: String, cwd: std::path::PathBuf, since: std::time::SystemTime, title: String },
+    /// Reload in place, including when the current profile is selected.
+    Reload { pane: PaneId, spec: bro_core::launch::LaunchSpec, store: Option<String>, since: std::time::SystemTime, title: String },
 }
 
 impl ResumeFrom {
@@ -50,12 +52,14 @@ impl ResumeFrom {
         match self {
             ResumeFrom::Past(s) => s.harness,
             ResumeFrom::Live { harness, .. } => *harness,
+            ResumeFrom::Reload { spec, .. } => spec.harness,
         }
     }
     pub fn title(&self) -> &str {
         match self {
             ResumeFrom::Past(s) => &s.title,
             ResumeFrom::Live { title, .. } => title,
+            ResumeFrom::Reload { title, .. } => title,
         }
     }
 }
@@ -161,21 +165,26 @@ fn draw_resume(f: &mut Frame, area: Rect, p: &mut ResumePicker, t: &Theme) {
     let title = match p.from {
         ResumeFrom::Past(_) => format!("{}resume in", ui::lead("history")),
         ResumeFrom::Live { .. } => format!("{}move to another login", ui::lead("history")),
+        ResumeFrom::Reload { .. } => format!("{}reload with profile", ui::lead("history")),
     };
     let inner = ui::popup(f, area, 72, h, &title, t);
     let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     let brand = ui::harness_color(Some(p.from.harness()), t);
     ui::line(f, Rect { height: 1, ..inner }, vec![
         Span::styled(format!("{} ", ui::harness_glyph(Some(p.from.harness()))), fg(brand)),
-        Span::styled(ui::fit(p.from.title(), inner.width as usize - 4), ui::bold()),
+        Span::styled(ui::fit(p.from.title(), (inner.width as usize).saturating_sub(4)), ui::bold()),
     ]);
     let note = match p.from {
         ResumeFrom::Past(_) => "another login continues from a copy of the conversation",
         ResumeFrom::Live { .. } => "the running session closes and continues in the login you pick",
+        ResumeFrom::Reload { .. } => "reload the conversation with the selected profile's current settings",
     };
     ui::line(f, Rect { y: inner.y + 1, height: 1, ..inner }, vec![Span::styled(format!("  {note}"), muted(t))]);
-    for (i, tg) in p.targets.iter().enumerate() {
-        let y = inner.y + 3 + i as u16;
+    let rows = inner.height.saturating_sub(4) as usize;
+    let top = p.sel.saturating_sub(rows.saturating_sub(1));
+    p.hits.resize(p.targets.len(), Rect::default());
+    for (row, (i, tg)) in p.targets.iter().enumerate().skip(top).enumerate() {
+        let y = inner.y + 3 + row as u16;
         if y >= inner.bottom().saturating_sub(1) {
             break;
         }
@@ -194,9 +203,10 @@ fn draw_resume(f: &mut Frame, area: Rect, p: &mut ResumePicker, t: &Theme) {
             None => vec![],
         };
         ui::line_lr(f, Rect { y, height: 1, ..inner }, left, right);
-        p.hits.push(Rect { y, height: 1, ..inner });
+        p.hits[i] = Rect { y, height: 1, ..inner };
     }
-    ui::hint_line(f, inner, &[("⏎", "resume"), ("1-9", "pick + go"), ("↑↓", "move"), ("esc", "cancel")], t);
+    let verb = if matches!(p.from, ResumeFrom::Reload { .. }) { "reload" } else { "resume" };
+    ui::hint_line(f, inner, &[("⏎", verb), ("1-9", "pick + go"), ("↑↓", "move"), ("esc", "cancel")], t);
 }
 
 /// The question, then clickable Yes / No buttons (keys still work: y or enter, anything else is no). Returns

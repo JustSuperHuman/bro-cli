@@ -48,6 +48,9 @@ impl App {
                 return;
             }
         if self.prefix_armed {
+            if !self.keymap.is_prefix(&k) && self.menu_key(k) {
+                return;
+            }
             self.prefix_armed = false;
             if self.keymap.is_prefix(&k) {
                 // prefix twice: send it through to the program
@@ -64,10 +67,10 @@ impl App {
             return;
         }
         if self.keymap.is_prefix(&k) {
-            self.prefix_armed = true;
+            self.open_menu(None);
             return;
         }
-        // Codex uses Alt+Up to edit queued input. Keep prefix+Up for pane navigation.
+        // Codex uses Alt+Up to edit queued input. Keep prefix+k for pane navigation.
         if !self.side_focus && k.code == KeyCode::Up && k.modifiers == KeyModifiers::ALT
             && let Some(id) = self.focused().filter(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.harness == Some(bro_core::Harness::Codex))) {
                 self.with_pane(id, |p, cx| p.key(k, cx));

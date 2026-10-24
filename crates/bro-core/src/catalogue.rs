@@ -77,6 +77,9 @@ pub fn map_openrouter(data: &Value) -> Vec<Value> {
             if let Some(c) = m.get("context_length").and_then(Value::as_u64) {
                 row["context"] = json!(c);
             }
+            if let Some(o) = m.pointer("/top_provider/max_completion_tokens").and_then(Value::as_u64) {
+                row["maxOutput"] = json!(o);
+            }
             let per_million = |v: Option<&Value>| -> Option<f64> {
                 let n = match v? {
                     Value::String(s) => s.parse::<f64>().ok()?,
@@ -111,6 +114,67 @@ pub fn refresh_openrouter() -> anyhow::Result<usize> {
     }
     write_json_pretty(&openrouter_cache_path(), &Value::Array(rows.clone()))?;
     Ok(rows.len())
+}
+
+/// How big a model is, in tokens, for a harness that has to be told (Claude Code and Codex
+/// assume a default window for a model they don't know, and warn).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Limits {
+    pub context: Option<u64>,
+    pub max_output: Option<u64>,
+}
+
+impl From<&crate::providers::Model> for Limits {
+    fn from(m: &crate::providers::Model) -> Limits {
+        Limits { context: m.context, max_output: m.extra.get("maxOutput").and_then(Value::as_u64) }
+    }
+}
+
+/// Model sizes bro knows without asking anyone: the cached OpenRouter catalogue
+/// (refreshed in the background, see [`refresh_openrouter`]).
+pub struct KnownLimits(Vec<(String, Limits)>);
+
+impl KnownLimits {
+    /// Reads the cache; none (or a broken one) knows nothing.
+    pub fn load() -> KnownLimits {
+        let Some(Value::Array(rows)) = read_json(&openrouter_cache_path()) else { return KnownLimits(vec![]) };
+        KnownLimits(
+            rows.iter()
+                .filter_map(|r| {
+                    let limits = Limits { context: r.get("context").and_then(Value::as_u64), max_output: r.get("maxOutput").and_then(Value::as_u64) };
+                    Some((r.get("id")?.as_str()?.to_lowercase(), limits))
+                })
+                .collect(),
+        )
+    }
+
+    /// Limits for `model`: what `listed` (the provider's own catalogue, the login's model list) says,
+    /// each gap filled from OpenRouter. OpenRouter matches the exact id (`z-ai/glm-5.3`), else the
+    /// id without vendor, variant or thinking level (`glm-5.3`, `gemini-4-argon-medium`); when that
+    /// matches several models the smallest wins, since too small a window only compacts early
+    /// and too big a one overflows the backend. Implausible numbers are dropped, so the harness
+    /// keeps its own default.
+    pub fn get(&self, model: &str, listed: Option<Limits>) -> Limits {
+        let want = model.to_lowercase();
+        let mut hits: Vec<Limits> = self.0.iter().filter(|(id, _)| *id == want).map(|(_, l)| *l).collect();
+        if hits.is_empty() {
+            let short = bare_model_id(&want);
+            hits = self.0.iter().filter(|(id, _)| bare_model_id(id) == short).map(|(_, l)| *l).collect();
+        }
+        let smallest = |f: fn(&Limits) -> Option<u64>| hits.iter().filter_map(f).min();
+        let listed = listed.unwrap_or_default();
+        const MAX: u64 = 20_000_000;
+        let context = listed.context.or_else(|| smallest(|l| l.context)).filter(|c| (4_096..=MAX).contains(c));
+        let max_output = listed.max_output.or_else(|| smallest(|l| l.max_output)).filter(|o| (256..=context.unwrap_or(MAX)).contains(o));
+        Limits { context, max_output }
+    }
+}
+
+/// `google/gemini-4-argon-high:free` → `gemini-4-argon`: what's left to match across catalogues.
+fn bare_model_id(id: &str) -> &str {
+    let id = id.rsplit('/').next().unwrap_or(id);
+    let id = id.split(':').next().unwrap_or(id);
+    ["-high", "-medium", "-low"].into_iter().find_map(|s| id.strip_suffix(s)).unwrap_or(id)
 }
 
 /// Models a Codex login can pick: Codex's own `models_cache.json` (listed ones), else a
@@ -181,6 +245,28 @@ mod tests {
         let (models, age) = openrouter_cached().unwrap();
         assert_eq!(models[1], ModelRow { id: "old/one".into(), name: "Old".into(), context: Some(8000), pricing: Some((1.0, 2.0)), reasoning: false, created: Some(10) });
         assert!(age < 60);
+    }
+
+    #[test]
+    fn limits_come_from_the_provider_then_openrouter_smallest_first() {
+        let _sb = sandbox();
+        assert_eq!(KnownLimits::load().get("glm-5.3", None), Limits::default());
+        let data = json!([
+            { "id": "z-ai/glm-5.3", "context_length": 202752, "top_provider": { "max_completion_tokens": 131072 } },
+            { "id": "acme/glm-5.3:free", "context_length": 131072 },
+            { "id": "google/gemini-4-argon", "context_length": 1048576, "top_provider": { "max_completion_tokens": 65536 } },
+            { "id": "acme/huge", "context_length": 999999999, "top_provider": { "max_completion_tokens": 999999999 } },
+        ]);
+        write_json_pretty(&openrouter_cache_path(), &Value::Array(map_openrouter(&data))).unwrap();
+        let known = KnownLimits::load();
+        assert_eq!(known.get("z-ai/glm-5.3", None), Limits { context: Some(202752), max_output: Some(131072) });
+        assert_eq!(known.get("glm-5.3", None), Limits { context: Some(131072), max_output: Some(131072) });
+        assert_eq!(known.get("gemini-4-argon-medium", None), Limits { context: Some(1048576), max_output: Some(65536) });
+        assert_eq!(known.get("acme/huge", None), Limits::default());
+        assert_eq!(known.get("never-heard-of-it", None), Limits::default());
+        // the provider's own numbers win; OpenRouter only fills gaps
+        let listed = Limits { context: Some(500000), max_output: None };
+        assert_eq!(known.get("gemini-4-argon", Some(listed)), Limits { context: Some(500000), max_output: Some(65536) });
     }
 
     #[test]

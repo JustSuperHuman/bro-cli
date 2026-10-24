@@ -9,12 +9,15 @@
 
 pub(crate) mod actions;
 mod backdrop;
+mod caption;
 mod chrome;
 mod hints;
 mod input;
 pub(crate) mod kit;
 mod layout;
+mod material;
 mod media;
+mod menu;
 mod mouse;
 mod overlays;
 mod prefs;
@@ -122,8 +125,8 @@ pub fn run(demo: bool, new: bool, dir: Option<PathBuf>) -> anyhow::Result<()> {
     // every terminal pane gets an alacritty screen next to its vt100 model
     let env = term::shared_env();
     crate::panes::mirror::install(move || Arc::new(term::mirror::Mirror::new(env.clone())));
-    // `--new` beside a bro that's already running: your real data, but the orchestrator, proxy, bridge, voice and
-    // hand-offs stay with that bro (a second orchestrator would resume the same session twice)
+    // `--new` beside a bro that's already running: your real data, with a translating proxy started on demand.
+    // The orchestrator, bridge, voice and hand-offs stay with that bro (a second orchestrator would resume the same session twice).
     let guest = !demo && new && crate::instance::running();
     let svc = if demo {
         Services::demo(settings, tx.clone())
@@ -138,7 +141,7 @@ pub fn run(demo: bool, new: bool, dir: Option<PathBuf>) -> anyhow::Result<()> {
     if !demo {
         app.start_in(dir);
         if guest {
-            app.toast(crate::alerts::Kind::Info, "another bro is running: it keeps the orchestrator, the proxy and the phone bridge");
+            app.toast(crate::alerts::Kind::Info, "another bro is running: it keeps the orchestrator and phone bridge; this window starts its own proxy when needed");
         } else {
             app.restore_orchestrator();
         }
@@ -220,6 +223,7 @@ pub struct Gui {
     last_press: Option<(Instant, Point, u32)>,
     /// a link pressed: it opens on release at the same cell
     link_press: Option<(PaneId, Arc<str>, (usize, usize))>,
+    clipboard_menu: Option<menu::ClipboardMenu>,
     started: Instant,
     /// the workspace's last Tick (its timers: pane polls, toasts, resumes)
     last_tick: Instant,
@@ -252,6 +256,20 @@ pub struct Gui {
     font_id: Option<String>,
     font_px: f32,
     media: media::Media,
+    /// the window material and tint last put on the window (see [`material`])
+    material: Option<(bro_core::config::Material, u8)>,
+    /// the window is see-through right now (asked for, and the system and GPU could)
+    see_through: bool,
+    /// a swap chain with alpha was asked for once already (it stays, or it couldn't be had)
+    see_through_tried: bool,
+    /// the material the window last couldn't show (told once)
+    material_warned: Option<bro_core::config::Material>,
+    /// the window was made see-through (see `window::create`)
+    window_see_through: bool,
+    /// swap the window for a see-through one when the loop is next idle (see [`material`])
+    swap_window: bool,
+    /// the window swapped out, until its successor is on screen
+    old_window: Option<Arc<Window>>,
 }
 
 impl Gui {
@@ -287,6 +305,7 @@ impl Gui {
             drag: None,
             last_press: None,
             link_press: None,
+            clipboard_menu: None,
             started: Instant::now(),
             last_tick: Instant::now(),
             minute: 0,
@@ -308,6 +327,13 @@ impl Gui {
             font_id: None,
             font_px: 0.0,
             media,
+            material: None,
+            see_through: false,
+            see_through_tried: false,
+            material_warned: None,
+            window_see_through: false,
+            swap_window: false,
+            old_window: None,
         }
     }
 
@@ -427,6 +453,7 @@ impl Gui {
             media::Ask::Close => {
                 self.prefs.media_open = false;
                 self.media.focus = false;
+                self.media.expanded = false;
                 self.prefs.save(self.app.persist);
             }
             media::Ask::Open(path) => {
@@ -468,6 +495,16 @@ impl Gui {
     /// A key the window doesn't keep for itself: the media panel's while it has the keyboard, else the
     /// workspace's.
     fn key(&mut self, k: crossterm::event::KeyEvent) {
+        if self.media.expanded && !self.app.overlay.is_open() {
+            let focus = self.focused_owner();
+            if let Some(ask) = self.media.key(&k, focus.as_ref()) {
+                self.media_ask(ask);
+            }
+            return;
+        }
+        if self.clipboard_menu.take().is_some() && k.code == crossterm::event::KeyCode::Esc {
+            return;
+        }
         // any key ends a text selection and a link press, as in the terminal UI (ctrl+c copies first: `gui_key`)
         self.link_press = None;
         mouse::clear_selections(self, None);
@@ -479,7 +516,7 @@ impl Gui {
         if paste {
             self.app.touched();
         }
-        if self.prefs.media_open && self.media.focus && !self.app.overlay.is_open() {
+        if self.prefs.media_open && self.media.focus && !self.app.overlay.is_open() && !self.app.prefix_armed && !self.app.keymap.is_prefix(&k) {
             let focus = self.focused_owner();
             if let Some(ask) = self.media.key(&k, focus.as_ref()) {
                 self.media_ask(ask);
@@ -532,10 +569,14 @@ impl Gui {
             return false;
         }
         self.theme_key = key;
-        self.tokens = Tokens::from_theme(&self.app.theme);
+        self.tokens = self.make_tokens();
         term::update_env(&self.tokens, self.font_cell());
         if let Some(w) = &self.window {
-            window::style_title_bar(w, self.tokens.bg, self.tokens.light);
+            let shown = match self.material {
+                Some((m, _)) if self.see_through => m,
+                _ => bro_core::config::Material::Solid,
+            };
+            window::style(w, self.tokens.bg, self.tokens.light, shown);
         }
         true
     }
@@ -584,6 +625,10 @@ impl Gui {
             return;
         }
         self.theme_changed();
+        self.sync_material();
+        if self.gfx.is_none() {
+            return;
+        }
         self.sync_font();
         let size = window.inner_size();
         let (w, h) = (size.width as f32 / self.scale, size.height as f32 / self.scale);
@@ -597,10 +642,12 @@ impl Gui {
             self.sync_font_with(&mut gfx);
         }
         let mut attempts = 0;
+        let band = caption::on() && window.fullscreen().is_none();
         let (hits, overlay_grid, painted) = loop {
             attempts += 1;
             gfx.scene.clear();
-            gfx.scene.background = self.tokens.bg;
+            // a skin's gradient is the window's fill: nothing under it, so a see-through window stays as see-through
+            gfx.scene.background = if theme.skin.fx.gradient.is_some() { self.tokens.window.with_alpha(0.0) } else { self.tokens.window };
             gfx.text.begin_frame();
             self.anim.moving = false;
             let mut hits = Vec::with_capacity(self.hits.len().max(64));
@@ -620,8 +667,17 @@ impl Gui {
                 ticking: false,
                 screen: Rect::new(0.0, 0.0, w, h),
             };
-            let window_rect = Rect::new(0.0, 0.0, w, h);
-            let (grid, painted) = draw_all(&mut self.app, &mut ui, window_rect, &mut self.layout, &mut self.panes, &mut self.tui, &mut self.sidebar, &self.prefs, self.focused_window, self.drag.as_ref(), self.alt_alone, &mut self.media);
+            // a see-through window wears bro's own title bar across the top (see `caption`): the rest sits under it
+            let top = if band { caption::HEIGHT } else { 0.0 };
+            let window_rect = Rect::new(0.0, top, w, (h - top).max(0.0));
+            let title_bar = band.then(|| (Rect::new(0.0, 0.0, w, top), window.is_maximized()));
+            let (grid, painted) = draw_all(&mut self.app, &mut ui, window_rect, title_bar, &mut self.layout, &mut self.panes, &mut self.tui, &mut self.sidebar, &self.prefs, self.focused_window, self.drag.as_ref(), self.alt_alone, &mut self.media);
+            if self.app.overlay.is_open() || self.app.prefix_armed {
+                self.clipboard_menu = None;
+            }
+            if let Some(menu) = &self.clipboard_menu {
+                menu::draw_clipboard(menu, &mut ui, window_rect);
+            }
             self.ticking = ui.ticking || ui.anim.moving;
             if !ui.text.overflow || attempts > 2 {
                 break (hits, grid, painted);
@@ -667,6 +723,8 @@ impl Gui {
             vignette: if fx.vignette { 0.4 } else { 0.0 },
             scanlines: if fx.scanlines { 0.12 } else { 0.0 },
             scanline_px: (2.0 * self.scale).round(),
+            glow: fx.glow,
+            glow_px: 7.0 * self.scale,
         };
         match gfx.renderer.render(&gfx.scene, &mut gfx.text) {
             Ok(()) => {}
@@ -678,6 +736,10 @@ impl Gui {
         if !self.first_frame_done {
             self.first_frame_done = true;
             window.set_visible(true);
+            // a window swapped for a see-through one goes once its successor shows, which takes the keyboard on
+            if self.old_window.take().is_some() {
+                window.focus_window();
+            }
         }
         // input methods open their window at the focused terminal's cursor
         if let Some(id) = self.app.focused()
@@ -813,17 +875,19 @@ fn reveal(path: &std::path::Path) {
 fn theme_key(t: &crate::theme::Theme) -> String {
     // every colour a theme file can set, so editing any of them restyles the window
     format!(
-        "{}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{}",
-        t.name, t.bg, t.fg, t.accent, t.shine, t.frame, t.muted, t.user, t.inline, t.danger, t.good, t.ansi, t.animated
+        "{}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{}{:?}{:?}",
+        t.name, t.bg, t.fg, t.accent, t.shine, t.frame, t.muted, t.user, t.inline, t.danger, t.good, t.ansi, t.animated, t.panel, t.cursor
     )
 }
 
-/// Draw one frame of everything.
+/// Draw one frame of everything: in `window`, under bro's own title bar when there is one (`title_bar`: its band,
+/// and whether the window is maximised).
 #[allow(clippy::too_many_arguments)]
 fn draw_all(
     app: &mut App,
     ui: &mut Ui,
     window: Rect,
+    title_bar: Option<(Rect, bool)>,
     layout: &mut layout::Layout,
     panes: &mut HashMap<PaneId, PaneState>,
     tui: &mut tui::TuiCanvas,
@@ -855,16 +919,27 @@ fn draw_all(
     *layout = layout::Layout { window, sidebar: side_r, strip: strip_r, media: media_r, body, cell: (body.w / vcols, body.h / vrows), panes: boxes, groups, zoomed, grown, all_minimized };
     let _ = (drag, alt_alone);
 
-    // the theme's backdrop (or the rain setting's) behind everything; a skin's gradient on the window
+    // the theme's backdrop (or the rain setting's) behind everything, title bar included; a skin's gradient on the
+    // window
+    let whole = title_bar.map_or(window, |(band, _)| Rect::new(window.x, band.y, window.w, window.bottom() - band.y));
     if let Some((top, bottom)) = app.theme.skin.fx.gradient {
-        let c = |c| kit::color(c, ui.t.bg, &ui.t.ansi);
-        let p = ui.px(window);
+        // as see-through as the window it paints
+        let c = |c| kit::color(c, ui.t.bg, &ui.t.ansi).with_alpha(ui.t.window.a);
+        let p = ui.px(whole);
         ui.scene.quad(bro_gfx::Quad::new(p, bro_gfx::Fill::Vertical(c(top), c(bottom))));
     }
     let (bd, _) = backdrop::choice(app);
-    backdrop::draw(ui, window, bd, ui.t.bg);
+    backdrop::draw(ui, whole, bd, ui.t.bg);
     // everything else above the backdrop (its glyphs would otherwise draw over this layer's panels)
     ui.layer();
+    // bro's own title bar, on the window's glass like everything under it
+    if let Some((band, maximized)) = title_bar {
+        let title = match app.focused().and_then(|id| app.panes.get(&id)) {
+            Some(p) => format!("{} — bro", p.title()),
+            None => "bro".to_string(),
+        };
+        caption::draw(ui, band, &title, focused_window, maximized);
+    }
 
     // the content layer the sessions sit on (WinUI's frame): a step up from the window, its top-left corner
     // rounded where it meets the sidebar and the tab row
@@ -874,7 +949,7 @@ fn draw_all(
         let lr = Rect::new(x, y, (window.right() - x).max(0.0), (window.bottom() - y).max(0.0));
         let corner = if side_r.w > 0.0 || strip_r.h > 0.0 { kit::radius::OVERLAY } else { 0.0 };
         let corners = bro_gfx::Corners { tl: corner, tr: 0.0, br: 0.0, bl: 0.0 };
-        ui.round_corners(lr, corners, ui.t.layer);
+        ui.glass(lr, corners, ui.t.layer);
         if side_r.w > 0.0 {
             ui.vline(lr.x, lr.y + corner, lr.h - corner, ui.t.stroke);
         }
@@ -901,17 +976,25 @@ fn draw_all(
         chrome::draw_edges(app, ui, layout);
     }
     // pictures and videos beside the sessions (video and animations only run while you can see them)
-    media.set_active(media_r.w > 0.0 && focused_window);
-    if media_r.w > 0.0 {
+    media.set_active((media_r.w > 0.0 || media.expanded) && focused_window);
+    if media_r.w > 0.0 && !media.expanded {
         let focus = app.focused().and_then(|id| media::owner(app, id));
         let key = app.keymap.primary(crate::keymap::Act::Media);
         media.draw(ui, media_r, focus.as_ref(), &key);
+    }
+    if media.expanded {
+        let focus = app.focused().and_then(|id| media::owner(app, id));
+        media.draw_expanded(ui, window, focus.as_ref());
     }
     // toasts go under a dialog (as in the terminal UI) but over everything else, the launcher included: `draw`
     // paints them here when a dialog is open, `hints::draw` (via `toasts::draw_late`) otherwise
     toasts::draw(app, ui, window);
     let grid = overlays::draw(app, ui, tui, window, body, focused_window);
-    hints::draw(app, ui, layout);
+    if media.expanded {
+        toasts::draw_late(app, ui, window);
+    } else {
+        hints::draw(app, ui, layout);
+    }
     (grid, painted)
 }
 
@@ -920,7 +1003,10 @@ impl ApplicationHandler<UserEvent> for Gui {
         if self.window.is_some() {
             return;
         }
-        let w = match window::create(el, &self.prefs, self.tokens.bg) {
+        // a see-through material asks for a window and a swap chain with alpha up front (the first frame puts the
+        // rest on: the backdrop, the fills, the text)
+        let see_through = self.app.svc.settings().material.see_through();
+        let w = match window::create(el, &self.prefs, see_through) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("bro: couldn't open a window: {e}");
@@ -929,14 +1015,16 @@ impl ApplicationHandler<UserEvent> for Gui {
             }
         };
         self.scale = w.scale_factor() as f32;
-        window::style_title_bar(&w, self.tokens.bg, self.tokens.light);
+        window::style(&w, self.tokens.bg, self.tokens.light, bro_core::config::Material::Solid);
         window::remember_handle(&w);
         let size = w.inner_size();
-        match Renderer::new(w.clone(), size.width, size.height, true) {
+        self.see_through_tried = see_through;
+        self.window_see_through = see_through;
+        match Renderer::with_options(w.clone(), size.width, size.height, bro_gfx::Options { vsync: true, transparent: see_through }) {
             Ok(renderer) => {
                 let mono = crate::fonts::get(self.app.svc.settings().font.as_deref().unwrap_or("jetbrains-mono")).or_else(|| crate::fonts::get("jetbrains-mono")).map(|f| f.data).unwrap_or(&[]);
                 let mut text = Text::new(mono, crate::fonts::SYMBOLS.data, true);
-                text.set_antialias(window::text_antialias(renderer.subpixel_text()));
+                text.set_antialias(window::text_antialias(renderer.subpixel_text() && !renderer.see_through()));
                 self.gfx = Some(Gfx { renderer, text, scene: Scene::new() });
                 self.font_id = self.app.svc.settings().font.or(Some("jetbrains-mono".into()));
             }
@@ -966,6 +1054,9 @@ impl ApplicationHandler<UserEvent> for Gui {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if self.swap_window {
+            self.swap_window(el);
+        }
         if self.gfx.is_some() && self.first_frame_done {
             script::step(self);
         }
@@ -992,7 +1083,11 @@ impl ApplicationHandler<UserEvent> for Gui {
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + self.next_wake()));
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // a window swapped out still reports (losing focus, going away): only the current one counts
+        if self.window.as_ref().is_some_and(|w| w.id() != id) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 // like quit: confirm when sessions are running
@@ -1137,6 +1232,9 @@ impl Gui {
     /// them on Windows).
     fn gui_key(&mut self, ev: &winit::event::KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
+        if self.media.expanded && !self.app.overlay.is_open() && ev.logical_key != Key::Named(NamedKey::F11) {
+            return false;
+        }
         let ctrl = self.mods.control_key();
         let shift = self.mods.shift_key();
         let alt = self.mods.alt_key();

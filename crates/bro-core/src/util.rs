@@ -246,6 +246,9 @@ pub(crate) mod test_env {
 
     /// Every override bro-core reads; cleared or pointed into the sandbox.
     const VARS: &[&str] = &[
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "BRO_GEMINI_BASE_URL",
         "BRO_DIR",
         "CLAUDE_POOL_DIR",
         "BRO_CODEX_PROFILES_DIR",
@@ -261,6 +264,9 @@ pub(crate) mod test_env {
         "PATH",
         "APPDATA",
         "BUN_INSTALL",
+        "CLAUDE_PEON_DIR",
+        "BRO_PEON_REGISTRY",
+        "BRO_PEON_RAW",
     ];
 
     /// Holds the global env lock and a tempdir acting as `$HOME`; restores the

@@ -141,6 +141,7 @@ pub enum Ask {
 #[derive(Clone, Debug)]
 enum Target {
     Close,
+    Collapse,
     Scope(bool),
     Thumb(PathBuf),
     Viewer(Rect),
@@ -173,6 +174,8 @@ pub struct Media {
     pub whole_project: bool,
     /// keys go to the panel (it was clicked last)
     pub focus: bool,
+    /// The selected media fills the workspace until Escape or another double-click.
+    pub expanded: bool,
     /// new items since the panel was last looked at
     pub unseen: usize,
     thumbs: HashMap<PathBuf, (Thumb, Option<SystemTime>)>,
@@ -198,6 +201,8 @@ pub struct Media {
     revs: HashMap<PaneId, u64>,
     free: Vec<ImageId>,
     drag: Option<DragKind>,
+    /// The first viewer click's playback state, restored when it becomes a double-click.
+    viewer_was_playing: Option<bool>,
     viewer: Rect,
     /// logical → physical pixels, as of the last draw
     scale: f32,
@@ -255,6 +260,7 @@ impl Media {
             sel: None,
             whole_project: false,
             focus: false,
+            expanded: false,
             unseen: 0,
             thumbs: HashMap::new(),
             view: View::None,
@@ -274,6 +280,7 @@ impl Media {
             revs: HashMap::new(),
             free: vec![],
             drag: None,
+            viewer_was_playing: None,
             viewer: Rect::ZERO,
             scale: 1.0,
             wake,
@@ -401,6 +408,7 @@ impl Media {
     }
 
     fn drop_view(&mut self) {
+        self.viewer_was_playing = None;
         match std::mem::replace(&mut self.view, View::None) {
             View::Image { tex: Some(t), .. } => self.free.push(t),
             View::Media { path, player, tex, .. } => {
@@ -443,6 +451,21 @@ impl Media {
             } else if std::mem::take(&mut self.resume) {
                 player.play();
             }
+        }
+    }
+
+    /// The window has a new renderer (its material changed) and every texture went with the old one: thumbnails
+    /// load again as they're drawn, the picture or video frame on view uploads again.
+    pub fn gpu_lost(&mut self) {
+        self.free.clear();
+        self.thumbs.retain(|_, (t, _)| !matches!(t, Thumb::Ready(..)));
+        match &mut self.view {
+            View::Image { tex, dirty, .. } => {
+                *tex = None;
+                *dirty = true;
+            }
+            View::Media { tex, .. } => *tex = None,
+            _ => {}
         }
     }
 
@@ -672,6 +695,31 @@ impl Media {
         self.draw_gallery(ui, gallery, &shown);
     }
 
+    /// Draw the selected media over the workspace, keeping the same image or player loaded.
+    pub fn draw_expanded(&mut self, ui: &mut Ui, r: Rect, focus: Option<&Owner>) {
+        let prev = ui.layer();
+        self.targets.clear();
+        self.scale = ui.scale;
+        self.viewer = r;
+        ui.fill(r, ui.t.bg);
+        self.draw_viewer(ui, r, self.shown(focus).len());
+        let hint = Rect::new(r.x + 12.0, r.y + 12.0, 256.0_f32.min((r.w - 64.0).max(0.0)), 28.0);
+        ui.round_over(hint, super::kit::radius::CONTROL, Color::rgba(0.0, 0.0, 0.0, 0.65));
+        ui.label_in(hint, "Esc or double-click to close", Style::new(size::SMALL, weight::MEDIUM, Color::WHITE), Align::Center);
+        let close = Rect::new(r.right() - 40.0, r.y + 12.0, 28.0, 28.0);
+        let n = self.target(Target::Collapse);
+        widgets::icon_button(ui, close, "\u{F0156}", ui.t.text, Action::Media(n));
+        ui.set_layer(prev);
+    }
+
+    fn toggle_expanded(&mut self) {
+        self.expanded = !self.expanded;
+        self.zoom = 1.0;
+        self.pan = Point::default();
+        self.drag = None;
+        self.viewer_was_playing = None;
+    }
+
     fn target(&mut self, t: Target) -> usize {
         self.targets.push(t);
         self.targets.len() - 1
@@ -713,7 +761,7 @@ impl Media {
 
     fn draw_viewer(&mut self, ui: &mut Ui, r: Rect, count: usize) {
         let t = ui.t;
-        ui.round(r, super::kit::radius::OVERLAY, if t.light { t.sunken } else { Color::rgba(0.0, 0.0, 0.0, 0.35) });
+        ui.glass_round(r, super::kit::radius::OVERLAY, if t.light { t.sunken } else { Color::rgba(0.0, 0.0, 0.0, 0.35) });
         let n = self.target(Target::Viewer(r));
         let zoomed = self.zoom > 1.01;
         ui.hit_with(r, Action::Media(n), if zoomed { Cursor::Grab } else { Cursor::Default });
@@ -888,7 +936,8 @@ impl Media {
     fn fit_scale(&self) -> f32 {
         let Some((w, h)) = self.picture_size() else { return 1.0 };
         let r = self.viewer;
-        ((r.w / w.max(1) as f32).min(r.h / h.max(1) as f32)).min(2.0)
+        let scale = (r.w / w.max(1) as f32).min(r.h / h.max(1) as f32);
+        if self.expanded { scale } else { scale.min(2.0) }
     }
 
     /// The zoom at which one of the picture's own pixels (not the decoded copy's) is one screen pixel.
@@ -900,8 +949,12 @@ impl Media {
     fn fit(&self, r: Rect, w: u32, h: u32) -> Rect {
         let (w, h) = (w.max(1) as f32, h.max(1) as f32);
         let s = (r.w / w).min(r.h / h);
-        // small pictures aren't blown up past 2x their pixels
-        let s = s.min(2.0) * self.zoom;
+        let s = if self.expanded {
+            s
+        } else {
+            // small pictures aren't blown up past 2x their pixels
+            s.min(2.0)
+        } * self.zoom;
         let (dw, dh) = (w * s, h * s);
         let c = r.center();
         Rect::new(c.x - dw / 2.0 + self.pan.x, c.y - dh / 2.0 + self.pan.y, dw, dh)
@@ -1077,21 +1130,31 @@ impl Media {
         let sel = self.sel.clone();
         match target {
             Target::Close => return Ask::Close,
+            Target::Collapse => {
+                if self.expanded {
+                    self.toggle_expanded();
+                }
+            }
             Target::Scope(whole) => self.whole_project = whole,
-            Target::Thumb(path) => self.select(&path),
-            Target::Viewer(r) => {
-                if count >= 2 && matches!(self.view, View::Image { .. }) {
-                    // double-click: fit ⇄ the picture's own pixels, around the pointer
-                    if self.zoom > 1.01 {
-                        self.zoom = 1.0;
-                        self.pan = Point::default();
-                    } else {
-                        let actual = self.actual_zoom();
-                        self.zoom_at(r, p, if actual > 1.05 { actual } else { 2.0 });
+            Target::Thumb(path) => {
+                self.select(&path);
+                if count > 0 && count % 2 == 0 {
+                    self.toggle_expanded();
+                }
+            }
+            Target::Viewer(_) => {
+                if count > 0 && count % 2 == 0 {
+                    // Double-click opens or closes the workspace viewer; the wheel still zooms.
+                    if let Some(playing) = self.viewer_was_playing.take()
+                        && let View::Media { player, .. } = &mut self.view
+                    {
+                        if playing { player.play() } else { player.pause() }
                     }
+                    self.toggle_expanded();
                 } else if let View::Media { player, .. } = &mut self.view
                     && player.info().has_video
                 {
+                    self.viewer_was_playing = Some(player.is_playing());
                     toggle(player);
                 } else if self.zoom > 1.01 {
                     self.drag = Some(DragKind::Pan(p, self.pan));
@@ -1186,6 +1249,8 @@ impl Media {
         let shown: Vec<PathBuf> = self.shown(focus).iter().map(|it| it.path.clone()).collect();
         if let Some(next) = shown.get(at.min(shown.len().saturating_sub(1))).cloned() {
             self.select(&next);
+        } else {
+            self.expanded = false;
         }
     }
 
@@ -1362,7 +1427,11 @@ impl Media {
                 Ask::None
             }
             KeyCode::Esc => {
-                self.focus = false;
+                if self.expanded {
+                    self.toggle_expanded();
+                } else {
+                    self.focus = false;
+                }
                 Ask::None
             }
             _ => return None,
@@ -1515,6 +1584,70 @@ mod tests {
 
     fn owner(sid: &str, project: &str) -> Option<Owner> {
         Some(Owner { sid: sid.into(), project: project.into(), who: sid.into(), ..Default::default() })
+    }
+
+    #[test]
+    fn double_clicking_recent_media_selects_and_expands_every_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        for ext in ["png", "gif", "mp4", "mp3"] {
+            let path = dir.path().join(format!("recent.{ext}"));
+            std::fs::write(&path, b"fixture").unwrap();
+            let mut m = Media::new(Arc::new(|| {}));
+            assert!(m.add(path.clone(), Source::Opened, None, None));
+            let thumb = m.target(Target::Thumb(path.clone()));
+            m.click(thumb, Point::default(), 1, None);
+            assert!(!m.expanded, "single-click only selects {ext}");
+            let req = m.req;
+            m.click(thumb, Point::default(), 2, None);
+            assert!(m.expanded, "double-click expands {ext}");
+            assert_eq!(m.sel.as_ref(), Some(&path));
+            assert_eq!(m.req, req, "expanding must keep the existing decoder or player");
+            let viewer = m.target(Target::Viewer(Rect::new(0.0, 0.0, 1440.0, 900.0)));
+            m.click(viewer, Point::default(), 3, None);
+            assert!(m.expanded, "the first click of another double-click keeps the viewer open");
+            m.click(viewer, Point::default(), 4, None);
+            assert!(!m.expanded, "another double-click closes {ext}");
+            assert_eq!(m.req, req);
+            assert_eq!(m.sel.as_ref(), Some(&path));
+        }
+    }
+
+    #[test]
+    fn preview_double_click_and_escape_keep_the_selected_media_loaded() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut m = Media::new(Arc::new(|| {}));
+        let path = PathBuf::from("preview.png");
+        m.select(&path);
+        let req = m.req;
+        let viewer = m.target(Target::Viewer(Rect::new(20.0, 30.0, 360.0, 280.0)));
+        m.zoom = 3.0;
+        m.pan = Point::new(20.0, 10.0);
+        m.click(viewer, Point::default(), 2, None);
+        assert!(m.expanded);
+        assert_eq!(m.zoom, 1.0, "the whole image fits the expanded viewer");
+        assert_eq!((m.pan.x, m.pan.y), (0.0, 0.0));
+        m.zoom = 2.0;
+        assert!(matches!(m.key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), None), Some(Ask::None)));
+        assert!(!m.expanded);
+        assert!(m.focus, "Escape returns to the media panel");
+        assert_eq!(m.zoom, 1.0);
+        assert_eq!(m.sel.as_ref(), Some(&path));
+        assert_eq!(m.view.path(), Some(path.as_path()));
+        assert_eq!(m.req, req, "Escape does not reload the media");
+        m.key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), None);
+        assert!(!m.focus, "another Escape leaves the panel as before");
+    }
+
+    #[test]
+    fn expanded_media_fits_small_images_without_stretching_or_cropping() {
+        let mut m = Media::new(Arc::new(|| {}));
+        let window = Rect::new(0.0, 0.0, 1440.0, 900.0);
+        assert_eq!(m.fit(window, 320, 200).w, 640.0, "the panel keeps its existing upscale limit");
+        m.expanded = true;
+        let fitted = m.fit(window, 320, 200);
+        assert_eq!((fitted.x, fitted.y, fitted.w, fitted.h), (0.0, 0.0, 1440.0, 900.0));
+        let video = m.fit(window, 160, 90);
+        assert_eq!((video.x, video.y, video.w, video.h), (0.0, 45.0, 1440.0, 810.0));
     }
 
     #[test]

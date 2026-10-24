@@ -41,18 +41,18 @@ fn vs_quad(@builtin(vertex_index) vi: u32, q: QuadIn) -> QuadOut {
     return o;
 }
 
-@fragment
-fn fs_quad(o: QuadOut) -> @location(0) vec4<f32> {
+// The quad's colour at this pixel (straight alpha, coverage included); alpha 0 outside it.
+fn quad_color(o: QuadOut) -> vec4<f32> {
     let clip = clip_alpha(o.p, o.clip, o.params.z);
     if (clip <= 0.0) {
-        discard;
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     let half = o.rect.zw * 0.5;
     let local = o.p - (o.rect.xy + half);
     let d = sd_rounded_box(local, half, o.radii);
     let outer = clamp(0.5 - d, 0.0, 1.0);
     if (outer <= 0.0) {
-        discard;
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     var fill = o.fill;
     if (o.params.y > 0.5) {
@@ -82,4 +82,24 @@ fn fs_quad(o: QuadOut) -> @location(0) vec4<f32> {
         color = vec4<f32>(rgb, a);
     }
     return vec4<f32>(color.rgb, color.a * outer * clip);
+}
+
+@fragment
+fn fs_quad(o: QuadOut) -> @location(0) vec4<f32> {
+    let c = quad_color(o);
+    if (c.a <= 0.0) {
+        discard;
+    }
+    return c;
+}
+
+// Glass: the colour painted into what's there without changing how see-through it is (premultiplied out; the
+// blend scales it by the destination's alpha and keeps that alpha). Over an opaque frame it's an ordinary fill.
+@fragment
+fn fs_quad_glass(o: QuadOut) -> @location(0) vec4<f32> {
+    let c = quad_color(o);
+    if (c.a <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(c.rgb * c.a, c.a);
 }

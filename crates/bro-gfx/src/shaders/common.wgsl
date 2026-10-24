@@ -43,3 +43,15 @@ fn clip_alpha(p: vec2<f32>, clip: vec4<f32>, radius: f32) -> f32 {
     let d = sd_rounded_box(p - (clip.xy + half), half, vec4<f32>(radius, radius, radius, radius));
     return clamp(0.5 - d, 0.0, 1.0);
 }
+
+// How much of a pixel glows: bright, saturated colours (neon) do; white text and dark grounds don't. The colour
+// it gives off, and how lit the pixel is (alpha). The frame is premultiplied (a see-through window), so its colour
+// is taken back out of the alpha first.
+fn neon(c: vec4<f32>) -> vec4<f32> {
+    let rgb = c.rgb / max(c.a, 0.0001);
+    let hi = max(rgb.r, max(rgb.g, rgb.b));
+    let lo = min(rgb.r, min(rgb.g, rgb.b));
+    let sat = (hi - lo) / max(hi, 0.0001);
+    let w = smoothstep(0.42, 0.9, hi) * smoothstep(0.18, 0.55, sat) * c.a;
+    return vec4<f32>(rgb * w, w);
+}

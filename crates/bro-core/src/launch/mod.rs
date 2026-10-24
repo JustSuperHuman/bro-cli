@@ -86,6 +86,16 @@ pub struct LaunchCtx {
     /// Loopback URL of the running bridge (`http://127.0.0.1:<port>`): an orchestrator launch
     /// points its tools here.
     pub bridge_url: Option<String>,
+    /// bro's Claude Code mod and theme (`Settings::claude_mod`). None: Claude as it ships.
+    pub claude_mod: Option<crate::claude_mod::ClaudeModSettings>,
+    /// bro's theme on screen, written as the launch's Claude Code theme (see
+    /// [`crate::claude_theme`]). None leaves Claude's theme alone.
+    pub palette: Option<crate::claude_theme::Palette>,
+    /// The bro executable: Claude launches run it as the hooks that keep messages between sessions to their
+    /// project (see [`crate::peers`]). None: no such hooks, Claude Code's own reach.
+    pub bro_bin: Option<PathBuf>,
+    /// PeonPing sounds (`Settings::peon`): which harnesses run `bro hook peon` (needs `bro_bin`).
+    pub peon: crate::peon::PeonSettings,
 }
 
 impl LaunchCtx {
@@ -210,12 +220,24 @@ pub(crate) struct ProxyRoute {
     pub anthropic_upstream: bool,
 }
 
+/// A launch needs a translating proxy before its command can be built. Callers may start one and retry.
+#[derive(Debug)]
+pub struct ProxyRequired(pub String);
+
+impl std::fmt::Display for ProxyRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "this launch goes through bro-proxy ({}), but the proxy isn't running", self.0)
+    }
+}
+
+impl std::error::Error for ProxyRequired {}
+
 fn proxy_route(upstream: &str, model: Option<&str>, ctx: &LaunchCtx) -> anyhow::Result<ProxyRoute> {
     let base = ctx
         .proxy_base
         .as_deref()
         .filter(|b| !b.is_empty())
-        .ok_or_else(|| anyhow!("this launch goes through bro-proxy ({upstream}), but the proxy isn't running"))?;
+        .ok_or_else(|| ProxyRequired(upstream.to_string()))?;
     let id = route_id(upstream, model);
     let anthropic_upstream = upstream == "pool"
         || upstream.starts_with("claude:")

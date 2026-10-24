@@ -93,6 +93,34 @@ fn main() -> ExitCode {
             println!("bro {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        // Claude Code runs this as one of bro's hooks: the event on stdin, bro's answer (if any) on stdout. Whatever
+        // goes wrong, the call goes ahead as it is: nothing printed, exit 0.
+        Ok(cli::Command::Hook(args)) => {
+            // `bro hook peon play <file> <volume>`: the player a sound hook started (no stdin)
+            if args.get(1).map(String::as_str) == Some("play") && args.first().map(String::as_str) == Some("peon") {
+                if let Some((file, volume)) = bro_core::peon::parse_play(&args[2..]) {
+                    let _ = bro_voice::sound::play_file(&file, volume);
+                }
+                return ExitCode::SUCCESS;
+            }
+            let mut input = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+            let answer = match args.first().map(String::as_str) {
+                Some("peers") => bro_core::peers::run_hook(&args[1..], &input),
+                Some("peon") => {
+                    // decide here, play from a process of its own: the agent doesn't wait on the sound
+                    if let (Some(play), Ok(exe)) = (bro_core::peon::run_hook(&args[1..], &input), std::env::current_exe()) {
+                        let _ = bro_core::peon::spawn_player(&exe, &play);
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(answer) = answer {
+                println!("{answer}");
+            }
+            ExitCode::SUCCESS
+        }
         Ok(cli::Command::Proxy(args)) => match proxy_cmd::run(args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

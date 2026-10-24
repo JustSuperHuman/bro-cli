@@ -143,6 +143,9 @@ impl Drop for Live {
 /// The terminal pane.
 pub struct Term {
     pub meta: Meta,
+    /// Original launch choices, reused when reloading with current profile settings.
+    pub launch_spec: Option<bro_core::launch::LaunchSpec>,
+    pub reloading: bool,
     spawn: Option<Spawn>,
     live: Option<Live>,
     parser: Arc<Mutex<Parser>>,
@@ -241,6 +244,8 @@ impl Term {
         let program_state = ProgramState::of(&parser);
         Term {
             meta,
+            launch_spec: None,
+            reloading: false,
             spawn: Some(spawn),
             live: None,
             parser: Arc::new(Mutex::new(parser)),

@@ -1,23 +1,33 @@
 //! The window itself: creating it where it was last time, bro's icon, a title bar that matches the theme
-//! (Windows 11 lets apps colour it), pointer shapes, the clipboard, and telling the single-instance hand-off
-//! which window to raise.
+//! (Windows 11 lets apps colour it), the material behind a see-through window (Acrylic, Mica), pointer shapes,
+//! the clipboard, and telling the single-instance hand-off which window to raise.
 
 use super::kit::Cursor;
 use super::prefs::Prefs;
+use bro_core::config::Material;
 use bro_gfx::Color;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{CursorIcon, Window};
 
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/bro.png");
 
-pub fn create(el: &ActiveEventLoop, prefs: &Prefs, _bg: Color) -> Result<Window, String> {
+/// The window, where it was last time; `see_through` when its material lets the desktop show. That's settled
+/// when the window is made: on Windows it has no redirection bitmap then, so all it shows is the DirectComposition
+/// swap chain, with the system's backdrop wherever that is see-through (elsewhere the window asks for alpha).
+pub fn create(el: &ActiveEventLoop, prefs: &Prefs, see_through: bool) -> Result<Window, String> {
     let (w, h) = prefs.window.unwrap_or((1440.0, 900.0));
     let mut attrs = Window::default_attributes()
         .with_title("bro")
         .with_inner_size(winit::dpi::LogicalSize::new(w.max(640.0), h.max(420.0)))
         .with_min_inner_size(winit::dpi::LogicalSize::new(560.0, 360.0))
         .with_visible(false)
+        .with_transparent(see_through)
         .with_window_icon(icon());
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attrs = attrs.with_no_redirection_bitmap(see_through);
+    }
     if let Some((x, y)) = prefs.position {
         attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
     }
@@ -45,30 +55,100 @@ fn icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(rgba, info.width, info.height).ok()
 }
 
-/// Paint the native title bar in the theme's background (Windows 11), dark or light to match.
-pub fn style_title_bar(window: &Window, bg: Color, light: bool) {
+/// Dress the window for the theme and its material: the native title bar in the theme's background (Windows 11),
+/// dark or light to match, and what the system draws behind a see-through window (Acrylic, Mica, a blur, or
+/// nothing for clear glass). False when the system can't do the material asked for (Acrylic and Mica before
+/// Windows 11): the window is drawn solid then.
+pub fn style(window: &Window, bg: Color, light: bool, material: Material) -> bool {
     #[cfg(windows)]
     {
+        use windows_sys::Win32::Graphics::Dwm::{
+            DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_COLOR_DEFAULT,
+            DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmEnableBlurBehindWindow, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+        };
+        use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject};
+        use windows_sys::Win32::UI::Controls::MARGINS;
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
-        let Ok(handle) = window.window_handle() else { return };
-        let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+        let Ok(handle) = window.window_handle() else { return false };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else { return false };
         let hwnd = h.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-        let [r, g, b, _] = bg.to_rgba8();
-        let colorref: u32 = r as u32 | (g as u32) << 8 | (b as u32) << 16;
+        let see_through = material.see_through();
+        let backdrop = match material {
+            Material::Acrylic => DWMSBT_TRANSIENTWINDOW,
+            Material::Mica => DWMSBT_MAINWINDOW,
+            Material::Solid | Material::Glass => DWMSBT_NONE,
+        };
+        let [r, g, b, _] = bg.with_alpha(1.0).to_rgba8();
+        let theme_colour: u32 = r as u32 | (g as u32) << 8 | (b as u32) << 16;
         let dark: i32 = (!light) as i32;
-        // DWMWA_USE_IMMERSIVE_DARK_MODE = 20, DWMWA_CAPTION_COLOR = 35, DWMWA_BORDER_COLOR = 34
-        // SAFETY: attributes on our own window with correctly sized values; failures (older Windows) are ignored.
-        unsafe {
-            DwmSetWindowAttribute(hwnd, 20, &dark as *const i32 as *const _, 4);
-            DwmSetWindowAttribute(hwnd, 35, &colorref as *const u32 as *const _, 4);
-            DwmSetWindowAttribute(hwnd, 34, &colorref as *const u32 as *const _, 4);
+        let set = |attr: i32, v: &u32| {
+            // SAFETY: an attribute of our own window with a correctly sized value.
+            unsafe { DwmSetWindowAttribute(hwnd, attr as u32, v as *const u32 as *const _, 4) >= 0 }
+        };
+        // dark or light chrome, and the dark or light flavour of Acrylic and Mica
+        set(DWMWA_USE_IMMERSIVE_DARK_MODE, &(dark as u32));
+        // Windows 11 22H2 and later draw a backdrop; earlier ones turn the attribute down
+        let drawn = set(DWMWA_SYSTEMBACKDROP_TYPE, &(backdrop as u32));
+        if backdrop != DWMSBT_NONE && !drawn {
+            keep_acrylic_active(hwnd, false);
+            set(DWMWA_SYSTEMBACKDROP_TYPE, &(DWMSBT_NONE as u32));
+            set(DWMWA_CAPTION_COLOR, &theme_colour);
+            set(DWMWA_BORDER_COLOR, &theme_colour);
+            return false;
         }
+        keep_acrylic_active(hwnd, material == Material::Acrylic);
+        // SAFETY: our own window; the region is ours to free once DWM has copied it.
+        unsafe {
+            // the frame reaches across the whole window, so the backdrop is drawn behind all of it
+            let m = if backdrop != DWMSBT_NONE { -1 } else { 0 };
+            DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: m, cxRightWidth: m, cyTopHeight: m, cyBottomHeight: m });
+            // clear glass: the window's alpha counts with nothing behind it but the desktop (an empty blur region:
+            // no blur of its own)
+            let region = CreateRectRgn(0, 0, -1, -1);
+            let bb = DWM_BLURBEHIND { dwFlags: DWM_BB_ENABLE | DWM_BB_BLURREGION, fEnable: (see_through && backdrop == DWMSBT_NONE) as _, hRgnBlur: region, fTransitionOnMaximized: 0 };
+            DwmEnableBlurBehindWindow(hwnd, &bb);
+            DeleteObject(region as _);
+        }
+        // the title bar in the theme's colour, or the material running up through it
+        let caption = if backdrop != DWMSBT_NONE { DWMWA_COLOR_DEFAULT } else { theme_colour };
+        set(DWMWA_CAPTION_COLOR, &caption);
+        set(DWMWA_BORDER_COLOR, &caption);
+        true
     }
     #[cfg(not(windows))]
     {
-        let _ = (window, bg);
+        let _ = bg;
         window.set_theme(Some(if light { winit::window::Theme::Light } else { winit::window::Theme::Dark }));
+        window.set_transparent(material.see_through());
+        // macOS and KDE blur what's behind; elsewhere it's clear
+        window.set_blur(matches!(material, Material::Acrylic | Material::Mica));
+        true
+    }
+}
+
+/// Keep Acrylic's frame rendering active when keyboard focus moves to another window. Only the
+/// nonclient appearance changes; Windows and winit still receive the real activation and focus events.
+#[cfg(windows)]
+fn keep_acrylic_active(hwnd: windows_sys::Win32::Foundation::HWND, enabled: bool) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SendMessageW, WM_NCACTIVATE};
+
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
+        let appearance = if msg == WM_NCACTIVATE { 1 } else { wparam };
+        // SAFETY: our own window's subclass chain; only the nonclient appearance is overridden.
+        unsafe { DefSubclassProc(hwnd, msg, appearance, lparam) }
+    }
+
+    // SAFETY: called on our window's event-loop thread. The subclass has no allocated state and is
+    // removed with the window; switching materials removes it explicitly and restores real appearance.
+    unsafe {
+        if enabled {
+            SetWindowSubclass(hwnd, Some(proc), 3, 0);
+        } else {
+            RemoveWindowSubclass(hwnd, Some(proc), 3);
+        }
+        SendMessageW(hwnd, WM_NCACTIVATE, (GetForegroundWindow() == hwnd) as WPARAM, 0);
     }
 }
 
@@ -81,7 +161,10 @@ pub fn remember_handle(window: &Window) {
         RawWindowHandle::Win32(h) => {
             crate::instance::APP_WINDOW.store(h.hwnd.get(), std::sync::atomic::Ordering::Relaxed);
             #[cfg(windows)]
-            keep_alt(h.hwnd.get());
+            {
+                keep_alt(h.hwnd.get());
+                super::caption::install(h.hwnd.get());
+            }
         }
         _ => {}
     }

@@ -427,7 +427,7 @@ impl Launcher {
     // ------------------------------------------------------------------ the run-on list
 
     fn profile_account(&self, p: &Profile, via_proxy: bool) -> Account {
-        let family = if p.is_claude() { "claude" } else { "chatgpt" };
+        let family = if p.is_gemini_subscription() { "Google AI subscription" } else if p.is_gemini_api() { "Gemini API" } else if p.is_claude() { "claude" } else { "chatgpt" };
         let mut detail = vec![];
         if via_proxy {
             detail.push(family.to_string());
@@ -443,7 +443,7 @@ impl Launcher {
         }
         Account {
             kind: AccountKind::Profile(p.id.clone()),
-            label: p.name.clone(),
+            label: if p.is_gemini_subscription() { p.plan.clone().unwrap_or_else(|| "Google subscription".into()) } else if p.is_gemini_api() && p.is_local() { "API key (detected)".into() } else { p.name.clone() },
             detail: detail.join(" · "),
             ready: p.authenticated,
             left: self.data.usage.get(&p.id).map(|u| (100.0 - *u as f64).clamp(0.0, 100.0)),
@@ -493,7 +493,9 @@ impl Launcher {
         };
         groups.push(("your logins", own.into_iter().map(Item::Account).collect()));
         groups.push(("other logins · via proxy", via.into_iter().map(Item::Account).collect()));
-        let providers = self.data.providers.iter().filter(|p| p.mode != ProviderMode::Native).map(|p| Item::Account(self.provider_account(p))).collect();
+        let providers = self.data.providers.iter().filter(|p| p.mode != ProviderMode::Native && !(p.is_google_login() && self.data.profiles.iter().any(|profile| profile.is_gemini_subscription()))).map(|p| Item::Account(self.provider_account(p))).collect();
+        let gemini = self.data.profiles.iter().filter(|p| p.is_gemini()).map(|p| Item::Account(self.profile_account(p, true))).collect();
+        groups.push(("Gemini profiles", gemini));
         groups.push(("providers", providers));
 
         let q = self.list_filter.trim();
@@ -567,7 +569,7 @@ impl Launcher {
         match self.current() {
             Some(Item::Account(a)) => match &a.kind {
                 AccountKind::Provider(_) => true,
-                AccountKind::Profile(p) => !matches!((self.harness, p.starts_with("claude:")), (Harness::Claude, true) | (Harness::Codex, false)),
+                AccountKind::Profile(p) => !((self.harness == Harness::Claude && p.starts_with("claude:")) || (self.harness == Harness::Codex && p.starts_with("codex:"))),
                 AccountKind::Pool => self.harness != Harness::Claude,
                 AccountKind::Native => false,
             },
@@ -583,6 +585,7 @@ impl Launcher {
         let key = match self.current() {
             Some(Item::Account(a)) => match a.kind {
                 AccountKind::Provider(p) => p,
+                AccountKind::Profile(p) if bro_core::profiles::is_gemini_id(&p) => p,
                 AccountKind::Profile(p) if p.starts_with("codex:") => "codex".into(),
                 _ => "claude".into(),
             },
@@ -645,11 +648,24 @@ impl Launcher {
             self.enter_orchestrator();
             return;
         }
+        let pinned = match self.current() {
+            Some(Item::Account(Account { kind: AccountKind::Profile(p), .. })) if bro_core::profiles::is_gemini_id(&p) => Some((p, self.model().map(|m| m.id))),
+            _ => None,
+        };
         self.orchestrator = false;
         self.harness = all[next];
         self.list_filter.clear();
         self.list_sel = 0;
+        let mut chosen_model = None;
+        if let Some((p, model)) = pinned {
+            chosen_model = model;
+            let items = self.items();
+            if let Some(i) = Self::selectable(&items).iter().position(|&i| matches!(&items[i], Item::Account(Account { kind: AccountKind::Profile(id), .. }) if id == &p)) { self.list_sel = i; }
+        }
         self.reset_models();
+        if let Some(model) = chosen_model {
+            if let Some(index) = self.models_view().iter().position(|&i| self.models()[i].id == model) { self.model_sel = index; }
+        }
         if self.focus == Focus::Models {
             self.focus = Focus::List;
         }

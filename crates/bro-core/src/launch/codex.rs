@@ -80,10 +80,24 @@ fn rename_model(text: &str, name: &str) -> String {
     format!("{}{name}{}", &text[..start], &text[end..])
 }
 
-/// `~/.bro/codex-catalog/<provider>.json` with the provider's models that have a known
-/// context window, for `-c model_catalog_json=…`. None when there are none.
-fn model_catalog(p: &crate::providers::Provider, home: &std::path::Path) -> Option<std::path::PathBuf> {
-    let models: Vec<_> = p.models.iter().filter(|m| !m.id.is_empty()).filter_map(|m| Some((m, m.context?))).collect();
+/// `~/.bro/codex-catalog/<provider>.json` with the provider's models (and the one launched) that
+/// have a known context window (see [`crate::catalogue::KnownLimits`]), for `-c model_catalog_json=…`.
+/// None when there are none.
+fn model_catalog(p: &crate::providers::Provider, launched: Option<&str>, home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut ids = p.model_ids();
+    if let Some(m) = launched.filter(|m| !m.is_empty() && !ids.contains(m)) {
+        ids.push(m);
+    }
+    let known = crate::catalogue::KnownLimits::load();
+    let models: Vec<_> = ids
+        .into_iter()
+        .filter_map(|id| {
+            let listed = p.models.iter().find(|m| m.id == id);
+            let context = known.get(id, p.model(id).map(Into::into)).context?;
+            let model = listed.cloned().unwrap_or_else(|| crate::providers::Model { id: id.into(), name: None, context: None, extra: Default::default() });
+            Some((model, context))
+        })
+        .collect();
     if models.is_empty() {
         return None;
     }
@@ -149,7 +163,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             Some(base) => {
                 require_key(p, key)?;
                 provider = provider_args(p.display_name(), &base, key.is_some());
-                if let Some(cat) = model_catalog(p, &home) {
+                if let Some(cat) = model_catalog(p, spec.model.as_deref(), &home) {
                     provider.extend(["-c".into(), format!("model_catalog_json={}", toml_str(&cat.to_string_lossy()))]);
                 }
                 // before your own args, so a `-c` of yours still wins
@@ -174,7 +188,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
                 }
                 provider = wire_proxy(&mut cmd, &upstream, spec, ctx)?;
                 if p.mode != ProviderMode::Native
-                    && let Some(cat) = model_catalog(p, &home)
+                    && let Some(cat) = model_catalog(p, spec.model.as_deref(), &home)
                 {
                     provider.extend(["-c".into(), format!("model_catalog_json={}", toml_str(&cat.to_string_lossy()))]);
                 }
@@ -207,6 +221,12 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         args.extend(["--model".into(), m.to_string()]);
     }
     args.extend(provider);
+    // PeonPing sounds, unless this home's own config already plays them
+    if let Some(bin) = ctx.bro_bin.as_ref().filter(|_| ctx.peon.wires(Harness::Codex))
+        && !crate::peon::wire::codex_own(&home).covered()
+    {
+        args.extend(crate::peon::wire::codex_args(bin));
+    }
     if spec.orchestrator {
         args.extend(crate::orchestrator::codex_mcp_args(super::orchestrator_bridge(ctx).unwrap_or_default()));
     }

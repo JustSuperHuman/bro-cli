@@ -390,6 +390,11 @@ impl Text {
         }
     }
 
+    /// A new [`crate::Renderer`] took over, its atlases empty: every glyph is drawn and uploaded again.
+    pub fn reset_atlases(&mut self) {
+        self.reset_caches();
+    }
+
     /// Forget every shaped layout and glyph (fonts or atlases changed).
     fn reset_caches(&mut self) {
         self.layouts.clear();

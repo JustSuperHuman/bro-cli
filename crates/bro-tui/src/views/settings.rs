@@ -1,4 +1,5 @@
-//! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), watchdog
+//! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), push-to-talk
+//! voice (its key, set by pressing it), watchdog
 //! defaults and the reviewer's prompt, caveman
 //! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install, the JustWatch skill and JustImagine), bro's own updates and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
@@ -16,7 +17,7 @@ use crate::services::justtools::JobKind;
 use crate::ui::{self, fg, muted};
 use bro_core::caveman::Level;
 use bro_core::claude_env::{self, ClaudeEnvSettings, KNOBS, PRESETS, Source};
-use bro_core::config::RainMode;
+use bro_core::config::{MATERIAL_TINTS, Material, RainMode};
 use bro_core::justtools::Step;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -33,6 +34,10 @@ use std::time::{Duration, Instant};
 enum BroOpt {
     Theme,
     Font,
+    /// the desktop app's window: solid, acrylic, mica, glass
+    Material,
+    /// how much of the theme covers a see-through window
+    Tint,
     Rain,
     Screensaver,
     SharedBorders,
@@ -44,11 +49,41 @@ enum BroOpt {
     Compression,
 }
 
-const BRO_OPTS: [BroOpt; 11] = [BroOpt::Theme, BroOpt::Font, BroOpt::Rain, BroOpt::Screensaver, BroOpt::SharedBorders, BroOpt::ProjectTabs, BroOpt::Icons, BroOpt::AutoResume, BroOpt::AutoApprove, BroOpt::Recaps, BroOpt::Compression];
+const BRO_OPTS: [BroOpt; 13] = [
+    BroOpt::Theme,
+    BroOpt::Font,
+    BroOpt::Material,
+    BroOpt::Tint,
+    BroOpt::Rain,
+    BroOpt::Screensaver,
+    BroOpt::SharedBorders,
+    BroOpt::ProjectTabs,
+    BroOpt::Icons,
+    BroOpt::AutoResume,
+    BroOpt::AutoApprove,
+    BroOpt::Recaps,
+    BroOpt::Compression,
+];
 
-/// bro's options this window can use: the font only where the terminal can switch it.
+/// bro's options this window can use: the font only where the terminal can switch it, the window's material only
+/// in the desktop app (a terminal draws its own window).
 fn bro_opts() -> Vec<BroOpt> {
-    BRO_OPTS.into_iter().filter(|o| *o != BroOpt::Font || crate::fonts::available()).collect()
+    BRO_OPTS
+        .into_iter()
+        .filter(|o| match o {
+            BroOpt::Font => crate::fonts::available(),
+            BroOpt::Material | BroOpt::Tint => desktop_app(),
+            _ => true,
+        })
+        .collect()
+}
+
+/// Drawn by the desktop app, which has a window of its own to dress.
+fn desktop_app() -> bool {
+    #[cfg(test)]
+    return crate::fonts::TEST_APP_WINDOW.with(|w| w.get());
+    #[cfg(not(test))]
+    return crate::fonts::GUI.load(Ordering::Relaxed);
 }
 
 const RAIN: [RainMode; 3] = [RainMode::Off, RainMode::Everywhere, RainMode::Working];
@@ -61,6 +96,8 @@ impl BroOpt {
         match self {
             BroOpt::Theme => "Theme",
             BroOpt::Font => "Font",
+            BroOpt::Material => "Window",
+            BroOpt::Tint => "Window tint",
             BroOpt::Rain => "Digital rain",
             BroOpt::Screensaver => "Summary screensaver",
             BroOpt::SharedBorders => "Shared tile borders",
@@ -76,6 +113,8 @@ impl BroOpt {
         match self {
             BroOpt::Theme => "enter opens the picker with a live preview",
             BroOpt::Font => "this window only, switches as you go: ←/→ to try them",
+            BroOpt::Material => "let your desktop show through: acrylic frosts it, mica washes in your wallpaper's colours, glass leaves it clear",
+            BroOpt::Tint => "how much theme covers a see-through window, evenly from title bar to sessions · text stays solid",
             BroOpt::Rain => "over any theme: everywhere, or only in sessions whose agent is mid-turn",
             BroOpt::Screensaver => "step away and every session turns over to what it's working on; any touch turns them back",
             BroOpt::SharedBorders => "tiles that sit together share one line instead of two; status and × move up beside the title",
@@ -89,7 +128,7 @@ impl BroOpt {
     }
     /// How bro looks (Appearance) rather than what it does (Sessions).
     fn looks(self) -> bool {
-        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::ProjectTabs | BroOpt::Icons)
+        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Material | BroOpt::Tint | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::ProjectTabs | BroOpt::Icons)
     }
     /// The value as shown.
     fn value(self, cx: &Cx) -> String {
@@ -98,6 +137,8 @@ impl BroOpt {
         match self {
             BroOpt::Theme => cx.theme.name.clone(),
             BroOpt::Font => s.font.as_deref().and_then(crate::fonts::get).map_or(if crate::fonts::GUI.load(std::sync::atomic::Ordering::Relaxed) { crate::fonts::FONTS[0].label } else { "terminal's own" }, |f| f.label).to_string(),
+            BroOpt::Material => s.material.id().to_string(),
+            BroOpt::Tint => format!("{}%", s.material_tint),
             BroOpt::Rain => match s.rain {
                 RainMode::Off => "off",
                 RainMode::Everywhere => "everywhere",
@@ -141,6 +182,19 @@ impl BroOpt {
                 s.rain = RAIN[(i + dir).rem_euclid(RAIN.len() as isize) as usize];
                 cx.svc.save_settings(s);
             }
+            BroOpt::Material => {
+                let mut s = cx.svc.settings();
+                let i = Material::ALL.iter().position(|m| *m == s.material).unwrap_or(0) as isize;
+                s.material = Material::ALL[(i + dir).rem_euclid(Material::ALL.len() as isize) as usize];
+                cx.svc.save_settings(s);
+            }
+            BroOpt::Tint => {
+                // steps stop at the ends (a tint isn't a loop)
+                let mut s = cx.svc.settings();
+                let i = MATERIAL_TINTS.iter().position(|t| *t >= s.material_tint).unwrap_or(MATERIAL_TINTS.len() - 1) as isize;
+                s.material_tint = MATERIAL_TINTS[(i + dir).clamp(0, MATERIAL_TINTS.len() as isize - 1) as usize];
+                cx.svc.save_settings(s);
+            }
             BroOpt::Screensaver => {
                 let mut s = cx.svc.settings();
                 let i = SCREENSAVER.iter().position(|n| *n >= s.summary_screensaver_secs).unwrap_or(0) as isize;
@@ -176,6 +230,41 @@ impl BroOpt {
 }
 
 /// Caveman mode's rows.
+/// Push-to-talk's rows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum VoiceOpt {
+    On,
+    /// enter, then press the key (where the platform lets bro listen for it)
+    Key,
+    /// GPT-Live answering out loud, or speech to text
+    Mode,
+    /// GPT-Live's voice
+    Speaker,
+    /// whether the OpenAI key is there
+    ApiKey,
+}
+
+const VOICE_OPTS: [VoiceOpt; 5] = [VoiceOpt::On, VoiceOpt::Key, VoiceOpt::Mode, VoiceOpt::Speaker, VoiceOpt::ApiKey];
+
+/// GPT-Live's voices.
+const LIVE_VOICES: [&str; 10] = ["cedar", "marin", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"];
+
+/// Keys ←/→ step through where pressing one to set it doesn't work.
+fn key_choices() -> Vec<&'static str> {
+    let mut all = vec![bro_voice::default_hotkey()];
+    all.extend(["ralt", "rctrl", "rshift", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "scrolllock", "pause"].into_iter().filter(|k| *k != bro_voice::default_hotkey()));
+    all
+}
+
+/// The push-to-talk key's name, the platform's default when none is set.
+fn voice_key(v: &bro_core::config::VoiceSettings) -> String {
+    v.hotkey.clone().unwrap_or_else(|| bro_voice::default_hotkey().to_string())
+}
+
+fn live_mode(v: &bro_core::config::VoiceSettings) -> bool {
+    v.mode != "transcribe"
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum CaveOpt {
     Mode,
@@ -201,7 +290,16 @@ enum ToolOpt {
     SmartPaste,
     /// JustImagine: its version, and an update when GitHub has newer commits
     Imagine,
+    /// Sounds on / off: bro's hooks in new sessions and peon-ping's own `enabled`
+    SoundsOn,
+    /// opens Sounds (PeonPing)
+    Sounds,
+    /// PeonPing's site, where the sounds come from
+    PeonPing,
 }
+
+/// Where the sound packs come from.
+const PEONPING_URL: &str = "https://peonping.com";
 
 /// How often to look at JustImagine while an update started here runs in its tab.
 const IMAGINE_RECHECK: Duration = Duration::from_secs(3);
@@ -247,15 +345,78 @@ enum WatchOpt {
 
 const WATCH_OPTS: [WatchOpt; 5] = [WatchOpt::Prompt, WatchOpt::Wake, WatchOpt::Reviewer, WatchOpt::Model, WatchOpt::Budget];
 
+/// bro's Claude Code mod and theme (`[claude_mod]`, see [`bro_core::claude_mod`]).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ModOpt {
+    Theme,
+    On,
+    Flair,
+    Hud,
+    Radar,
+    Tools,
+}
+
+const MOD_OPTS: [ModOpt; 6] = [ModOpt::Theme, ModOpt::On, ModOpt::Flair, ModOpt::Hud, ModOpt::Radar, ModOpt::Tools];
+
+impl ModOpt {
+    fn label(self) -> &'static str {
+        match self {
+            ModOpt::Theme => "bro theme in Claude",
+            ModOpt::On => "bro mod",
+            ModOpt::Flair => "Theme voice",
+            ModOpt::Hud => "Limits in the hint line",
+            ModOpt::Radar => "Session radar",
+            ModOpt::Tools => "Tools for Claude",
+        }
+    }
+    fn help(self) -> &'static str {
+        match self {
+            ModOpt::Theme => "Claude Code wears your bro theme, every colour, and follows along live as you switch or preview themes",
+            ModOpt::On => "Claude knows it runs in bro: /bro opens your sessions and limits in a pane, a press away from each one",
+            ModOpt::Flair => "the spinner and the turn line speak your theme: Forging… on Ember, Decrypting… on Matrix",
+            ModOpt::Hud => "your login, its 5-hour and weekly use and the context fill, at the end of Claude's hint line",
+            ModOpt::Radar => "a status line in Claude the moment another session waits on you or finishes",
+            ModOpt::Tools => "Claude can put a file in bro's preview, ping your phone and check your other sessions",
+        }
+    }
+    fn get(self, m: &bro_core::claude_mod::ClaudeModSettings) -> bool {
+        match self {
+            ModOpt::Theme => m.theme,
+            ModOpt::On => m.on,
+            ModOpt::Flair => m.flair,
+            ModOpt::Hud => m.hud,
+            ModOpt::Radar => m.radar,
+            ModOpt::Tools => m.tools,
+        }
+    }
+    fn flip(self, m: &mut bro_core::claude_mod::ClaudeModSettings) {
+        let v = match self {
+            ModOpt::Theme => &mut m.theme,
+            ModOpt::On => &mut m.on,
+            ModOpt::Flair => &mut m.flair,
+            ModOpt::Hud => &mut m.hud,
+            ModOpt::Radar => &mut m.radar,
+            ModOpt::Tools => &mut m.tools,
+        };
+        *v = !*v;
+    }
+    /// Takes effect: the theme on its own, the mod's parts only while the mod loads.
+    fn live(self, m: &bro_core::claude_mod::ClaudeModSettings) -> bool {
+        matches!(self, ModOpt::Theme | ModOpt::On) || m.on
+    }
+}
+
 /// A selectable row, in the order the sections run: bro's own options (Appearance, then Sessions), caveman mode,
-/// watchdogs, the Claude preset and each [`KNOBS`] switch, the integrations, then bro's updates.
+/// watchdogs, bro's Claude mod, the Claude preset and each [`KNOBS`] switch, the integrations, then bro's updates.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
     Bro(BroOpt),
+    Voice(VoiceOpt),
     Cave(CaveOpt),
     Tool(ToolOpt),
     Update(UpdOpt),
     Watch(WatchOpt),
+    Mod(ModOpt),
     Preset,
     Knob(usize),
 }
@@ -264,14 +425,16 @@ fn rows() -> Vec<Row> {
     bro_opts()
         .into_iter()
         .map(Row::Bro)
+        .chain(VOICE_OPTS.map(Row::Voice))
         .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents)])
         .chain(WATCH_OPTS.map(Row::Watch))
+        .chain(MOD_OPTS.map(Row::Mod))
         .chain([Row::Preset])
         .chain((0..KNOBS.len()).map(Row::Knob))
         .chain([Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
         .chain(bro_core::justpaste::supported().then_some(Row::Tool(ToolOpt::SmartPaste)))
-        .chain([Row::Tool(ToolOpt::Imagine), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
+        .chain([Row::Tool(ToolOpt::Imagine), Row::Tool(ToolOpt::SoundsOn), Row::Tool(ToolOpt::Sounds), Row::Tool(ToolOpt::PeonPing), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
         .collect()
 }
 
@@ -280,23 +443,27 @@ fn rows() -> Vec<Row> {
 enum Section {
     Appearance,
     Sessions,
+    Voice,
     Caveman,
     Watchdog,
     Claude,
     Integrations,
+    Sounds,
     Updates,
 }
 
-const SECTIONS: [Section; 7] = [Section::Appearance, Section::Sessions, Section::Caveman, Section::Watchdog, Section::Claude, Section::Integrations, Section::Updates];
+const SECTIONS: [Section; 9] = [Section::Appearance, Section::Sessions, Section::Voice, Section::Caveman, Section::Watchdog, Section::Claude, Section::Integrations, Section::Sounds, Section::Updates];
 
 impl Section {
     fn of(r: Row) -> Section {
         match r {
             Row::Bro(o) if o.looks() => Section::Appearance,
             Row::Bro(_) => Section::Sessions,
+            Row::Voice(_) => Section::Voice,
             Row::Cave(_) => Section::Caveman,
             Row::Watch(_) => Section::Watchdog,
-            Row::Preset | Row::Knob(_) => Section::Claude,
+            Row::Mod(_) | Row::Preset | Row::Knob(_) => Section::Claude,
+            Row::Tool(ToolOpt::SoundsOn | ToolOpt::Sounds | ToolOpt::PeonPing) => Section::Sounds,
             Row::Tool(_) => Section::Integrations,
             Row::Update(_) => Section::Updates,
         }
@@ -305,10 +472,12 @@ impl Section {
         match self {
             Section::Appearance => "Appearance",
             Section::Sessions => "Sessions",
+            Section::Voice => "Voice",
             Section::Caveman => "Caveman",
             Section::Watchdog => "Watchdog",
             Section::Claude => "Claude Code",
             Section::Integrations => "Integrations",
+            Section::Sounds => "Sounds",
             Section::Updates => "Updates",
         }
     }
@@ -317,10 +486,12 @@ impl Section {
         match self {
             Section::Appearance => "theme",
             Section::Sessions => "term",
+            Section::Voice => "mic",
             Section::Caveman => "caveman",
             Section::Watchdog => "watchdog",
             Section::Claude => "claude",
             Section::Integrations => "rocket",
+            Section::Sounds => "sound",
             Section::Updates => "history",
         }
     }
@@ -329,10 +500,12 @@ impl Section {
         match self {
             Section::Appearance => "How bro looks. Every change shows up as you make it.",
             Section::Sessions => "What bro does on its own while your agents work.",
+            Section::Voice => "Hold the key in any app, speak, let go: Hugh hears you and gets it done. bro keeps that key to itself while it runs.",
             Section::Caveman => "Terse replies with every fact kept, in new Claude, Codex and Pi sessions.",
             Section::Watchdog => "A fresh reviewer reads a session that went quiet and hands it its next task. Prefix w on a session starts one.",
-            Section::Claude => "The environment bro sets on every Claude launch. Sessions launched from now on pick it up.",
+            Section::Claude => "How Claude Code looks and talks to bro, and the environment bro sets on every launch. New sessions pick it up.",
             Section::Integrations => "Tools your agents can call. bro installs them and tells you when GitHub has something newer.",
+            Section::Sounds => "Voice lines when a session starts, finishes, fails or needs you, in Claude, Codex, Pi and omp. The sounds and packs are provided by PeonPing.",
             Section::Updates => "New bro releases from GitHub. Nothing installs until you say so.",
         }
     }
@@ -468,6 +641,8 @@ pub struct SettingsView {
     tools_busy: bool,
     /// bro is updating itself or looking for a release: keep the spinner moving
     update_busy: bool,
+    /// waiting for the voice key to be pressed: keep the spinner moving
+    voice_busy: bool,
     /// a JustImagine update started here: (when, the commit it started from), until the checkout moves
     imagine_update: Option<(Instant, Option<String>)>,
     /// when the last look at JustImagine during that update was asked for
@@ -504,6 +679,25 @@ impl SettingsView {
                 cx.svc.save_settings(s);
             }
             ToolOpt::QuickInstall => cx.act(Action::Run(Act::QuickInstall)),
+            ToolOpt::SoundsOn => {
+                let on = !s.peon.on;
+                s.peon.on = on;
+                cx.svc.save_settings(s);
+                if !cx.svc.is_demo() {
+                    let mut cfg = bro_core::peon::PeonConfig::load();
+                    cfg.set_enabled(on);
+                    if let Err(e) = cfg.save() {
+                        cx.toast(Kind::Error, format!("couldn't save the sound settings: {e}"));
+                    }
+                }
+                cx.toast(Kind::Info, if on { "sounds enabled · new sessions play them · pick packs under Sound packs" } else { "sounds disabled" });
+            }
+            ToolOpt::Sounds => cx.act(Action::Run(Act::Sounds)),
+            ToolOpt::PeonPing => {
+                if let Err(e) = crate::panes::links::open(PEONPING_URL) {
+                    cx.toast(Kind::Error, format!("couldn't open {PEONPING_URL}: {e}"));
+                }
+            }
             ToolOpt::Imagine => self.imagine(cx),
             ToolOpt::WatchSkill => {
                 cx.svc.set_justwatch_skill_on(!s.justwatch.skill);
@@ -559,12 +753,44 @@ impl SettingsView {
         }
     }
 
+    /// Enter (or ←/→) on a voice row. Every change restarts the listener with it.
+    fn voice(&mut self, o: VoiceOpt, dir: isize, cx: &mut Cx) {
+        let mut s = cx.svc.settings();
+        let v = &mut s.voice;
+        match o {
+            VoiceOpt::Key if bro_voice::Voice::can_capture_hotkey() => return cx.svc.capture_voice_hotkey(),
+            VoiceOpt::Key => {
+                let all = key_choices();
+                let i = all.iter().position(|k| *k == voice_key(v)).map_or(0, |i| i as isize + dir);
+                v.hotkey = Some(all[i.rem_euclid(all.len() as isize) as usize].to_string());
+            }
+            VoiceOpt::On => v.enabled = !v.enabled,
+            VoiceOpt::Mode => v.mode = if live_mode(v) { "transcribe" } else { "live" }.into(),
+            VoiceOpt::Speaker => {
+                let current = v.live_voice.clone().unwrap_or_else(|| bro_voice::DEFAULT_LIVE_VOICE.into());
+                let i = LIVE_VOICES.iter().position(|x| *x == current).map_or(0, |i| i as isize + dir);
+                v.live_voice = Some(LIVE_VOICES[i.rem_euclid(LIVE_VOICES.len() as isize) as usize].into());
+            }
+            // look for the key again
+            VoiceOpt::ApiKey => {}
+        }
+        if o != VoiceOpt::ApiKey {
+            cx.svc.save_settings(s);
+        }
+        if cx.svc.runs_voice() {
+            cx.svc.restart_voice();
+        } else if o == VoiceOpt::On || o == VoiceOpt::ApiKey {
+            cx.toast(Kind::Info, voice_elsewhere(cx));
+        }
+    }
+
     /// Step the selected row's value by `dir` (+1 / -1).
     fn step(&mut self, dir: isize, cx: &mut Cx) {
         let mut s = cx.svc.settings();
         let env = &mut s.claude_env;
         match self.row() {
             Row::Bro(o) => return o.change(dir, cx),
+            Row::Voice(o) => return self.voice(o, dir, cx),
             Row::Tool(o) => return self.tool(o, cx),
             Row::Update(UpdOpt::Version) => {
                 let u = cx.svc.state().updates.clone();
@@ -593,6 +819,16 @@ impl SettingsView {
                 }
             }
             Row::Cave(CaveOpt::Subagents) => s.caveman.subagents = !s.caveman.subagents,
+            Row::Mod(o) => {
+                o.flip(&mut s.claude_mod);
+                let theme_on = o == ModOpt::Theme && s.claude_mod.theme;
+                cx.svc.save_settings(s);
+                // on again: running sessions catch up with the theme now, not at the next switch
+                if theme_on {
+                    cx.svc.claude_theme(crate::theme::claude_palette(cx.theme));
+                }
+                return;
+            }
             Row::Watch(WatchOpt::Prompt) => return cx.act(Action::Run(Act::WatchdogPrompt)),
             Row::Watch(WatchOpt::Wake) => s.watchdog.idle_secs = crate::watchdog::step_choice(&crate::watchdog::IDLE_CHOICES, s.watchdog.idle_secs, dir),
             Row::Watch(WatchOpt::Budget) => s.watchdog.max_wakes = crate::watchdog::step_choice(&crate::watchdog::BUDGET_CHOICES, s.watchdog.max_wakes, dir),
@@ -622,7 +858,17 @@ impl SettingsView {
     fn reset(&self, cx: &mut Cx) {
         let mut s = cx.svc.settings();
         match self.row() {
-            Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Update(_) => return,
+            Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Update(_) | Row::Mod(_) | Row::Voice(VoiceOpt::On | VoiceOpt::ApiKey) => return,
+            Row::Voice(o) => {
+                match o {
+                    VoiceOpt::Key => s.voice.hotkey = None,
+                    VoiceOpt::Speaker => s.voice.live_voice = None,
+                    _ => s.voice.mode = bro_core::config::VoiceSettings::default().mode,
+                }
+                cx.svc.save_settings(s);
+                cx.svc.restart_voice();
+                return;
+            }
             Row::Watch(o) => {
                 let d = bro_core::config::WatchdogSettings::default();
                 match o {
@@ -639,6 +885,15 @@ impl SettingsView {
             }
         }
         cx.svc.save_settings(s);
+    }
+}
+
+/// Why this bro isn't the one listening.
+fn voice_elsewhere(cx: &Cx) -> &'static str {
+    match () {
+        _ if cx.svc.is_demo() => "the demo doesn't listen for voice",
+        _ if !cx.svc.settings().bridge.enabled => "voice talks to Hugh through the phone bridge, which is off ([bridge] enabled in ~/.bro/v2.toml)",
+        _ => "your other bro runs voice: change it there, or restart it to pick this up",
     }
 }
 
@@ -662,6 +917,10 @@ fn env_parts(env: &ClaudeEnvSettings) -> Vec<String> {
     let settings = env.settings();
     if !settings.is_empty() {
         parts.push(format!("--settings {}", serde_json::Value::Object(settings)));
+    }
+    // bro's own hooks, which each launch gets with its folder
+    if let Some(scope) = bro_core::peers::Scope::of(env) {
+        parts.push(format!("hooks on SendMessage and ListAgents: bro hook peers {}", scope.id()));
     }
     parts
 }
@@ -726,10 +985,12 @@ impl SettingsView {
                     let v = o.value(cx);
                     let value = match o {
                         BroOpt::Theme => shown(format!("{v} ›"), fg(t.inline)),
-                        BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver => {
-                            let style = if v == "off" { muted(t) } else { fg(t.inline) };
+                        BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver | BroOpt::Material => {
+                            let style = if v == "off" || v == "solid" { muted(t) } else { fg(t.inline) };
                             choice(v, style, t)
                         }
+                        // only counts while something shows through
+                        BroOpt::Tint => choice(v, if st.material.see_through() { fg(t.inline) } else { muted(t) }, t),
                         _ => switch(v == "on", true, t),
                     };
                     // the font row says what the current pick is like
@@ -740,6 +1001,7 @@ impl SettingsView {
                     Block::Item(Item::new(Row::Bro(o), o.label(), value, help))
                 })
                 .collect(),
+            Section::Voice => self.voice_blocks(cx),
             Section::Caveman => {
                 let cave = &st.caveman;
                 let (value, help) = match cave.active() {
@@ -774,6 +1036,10 @@ impl SettingsView {
                     .collect()
             }
             Section::Claude => {
+                let m = &st.claude_mod;
+                let mut out = vec![Block::Sub("bro mod".into())];
+                out.extend(MOD_OPTS.iter().map(|&o| Block::Item(Item::new(Row::Mod(o), o.label(), switch(o.get(m), o.live(m), t), o.help()))));
+                out.push(Block::Sub("environment".into()));
                 let env = &st.claude_env;
                 let p = claude_env::preset(&env.preset);
                 let mut preset = Item::new(Row::Preset, "Preset", choice(p.label, bold(t.shine), t), p.help);
@@ -781,7 +1047,7 @@ impl SettingsView {
                     0 => None,
                     n => Some(Span::styled(format!("  + {n} change{}", if n == 1 { "" } else { "s" }), fg(t.inline))),
                 };
-                let mut out = vec![Block::Item(preset)];
+                out.push(Block::Item(preset));
                 let mut group = None;
                 for (k_i, k) in KNOBS.iter().enumerate() {
                     if group != Some(k.group) {
@@ -808,6 +1074,7 @@ impl SettingsView {
                 out
             }
             Section::Integrations => self.integrations(cx),
+            Section::Sounds => self.sounds(cx),
             Section::Updates => {
                 let u = cx.svc.state().updates.clone();
                 let current = bro_core::self_update::CURRENT;
@@ -838,6 +1105,67 @@ impl SettingsView {
                 vec![Block::Item(version), Block::Item(check)]
             }
         }
+    }
+
+    /// Push-to-talk: on, its key, how Hugh answers, his voice, the OpenAI key.
+    fn voice_blocks(&self, cx: &Cx) -> Vec<Block> {
+        let t = cx.theme;
+        let bold = |c| fg(c).add_modifier(Modifier::BOLD);
+        let st = cx.svc.settings();
+        let v = &st.voice;
+        let vs = cx.svc.state().voice.clone();
+        let here = cx.svc.runs_voice();
+        let label = bro_voice::Voice::hotkey_label(&voice_key(v));
+
+        let help = match () {
+            _ if !v.enabled => "nothing listens and the key stays an ordinary key".to_string(),
+            _ if !here => voice_elsewhere(cx).to_string(),
+            _ if vs.running.is_some() => format!("listening on {label} in every app"),
+            _ if vs.key_found == Some(false) => "waiting for an OpenAI key (below)".into(),
+            _ => "starting…".into(),
+        };
+        let mut on = Item::new(Row::Voice(VoiceOpt::On), "Push-to-talk", switch(v.enabled, vs.running.is_some(), t), help);
+        if let Some(e) = vs.error.as_ref().filter(|_| v.enabled) {
+            on = on.note(vec![Span::styled(format!("✗ {e}"), fg(t.danger))]);
+        }
+
+        let (value, help) = match vs.capturing {
+            Some(started) => (shown(format!("{} press a key…", spinner(started)), bold(t.shine)), format!("press it now, in any app · esc keeps {label}")),
+            None if bro_voice::Voice::can_capture_hotkey() => (
+                shown(label.clone(), fg(t.inline)),
+                "enter, then press the key you want · a G-key or macro key set to F13–F24 in its own software works best, as nothing else uses those".to_string(),
+            ),
+            None => (choice(label.clone(), fg(t.inline), t), "the key you hold to talk · ←/→ for another".to_string()),
+        };
+        let mut key = Item::new(Row::Voice(VoiceOpt::Key), "Voice key", value, help);
+        if v.hotkey.is_some() {
+            key.tag = Some(Span::styled("  changed", fg(t.shine)));
+        }
+
+        let live = live_mode(v);
+        let mode = Item::new(
+            Row::Voice(VoiceOpt::Mode),
+            "Hugh answers",
+            choice(if live { "out loud" } else { "as text" }, fg(t.inline), t),
+            if live { "talk with Hugh through GPT-Live: he answers out loud and hands the work to your orchestrator" } else { "your words go to the orchestrator as text; its answers come back as toasts" },
+        );
+        let speaker_name = v.live_voice.clone().unwrap_or_else(|| bro_voice::DEFAULT_LIVE_VOICE.into());
+        let speaker = Item::new(
+            Row::Voice(VoiceOpt::Speaker),
+            "Hugh's voice",
+            choice(speaker_name, if live { fg(t.inline) } else { muted(t) }, t),
+            if live { "the voice GPT-Live speaks with" } else { "only when Hugh answers out loud" },
+        );
+
+        let env = &v.api_key_env;
+        let (value, help) = match vs.key_found {
+            Some(true) => (shown("found", fg(t.good)), format!("read from {env} · enter looks again")),
+            Some(false) => (shown("not set", fg(t.danger)), format!("set {env} to an OpenAI API key (your environment, or Windows' user variables), then enter looks again")),
+            None if here && v.enabled => (shown("checking…", muted(t)), format!("looking for {env}")),
+            None => (shown("not checked", muted(t)), format!("voice reads its OpenAI key from {env}")),
+        };
+        let api = Item::new(Row::Voice(VoiceOpt::ApiKey), "OpenAI key", value, help);
+        vec![Block::Item(on), Block::Item(key), Block::Item(mode), Block::Item(speaker), Block::Item(api)]
     }
 
     /// JustTools, Quick Install, the skills and JustImagine.
@@ -920,6 +1248,17 @@ impl SettingsView {
         out
     }
 
+    /// Sounds: enabled or disabled, the packs, and PeonPing, who provides them.
+    fn sounds(&self, cx: &Cx) -> Vec<Block> {
+        let t = cx.theme;
+        let on = cx.svc.settings().peon.on;
+        let value = if on { vec![Span::styled("● enabled", fg(t.good).add_modifier(Modifier::BOLD))] } else { vec![Span::styled("○ disabled", muted(t))] };
+        let enabled = Item::new(Row::Tool(ToolOpt::SoundsOn), "Sounds", value, "plays a voice line when a session starts, finishes, fails or needs you · new sessions pick it up");
+        let packs = Item::new(Row::Tool(ToolOpt::Sounds), "Sound packs", shown("browse ›", fg(t.inline)), "volume, which moments speak, and 370+ packs to search, preview and install");
+        let site = Item::new(Row::Tool(ToolOpt::PeonPing), "Provided by PeonPing", shown("peonping.com ›", fg(t.inline)), format!("the voice lines and packs come from PeonPing · enter opens {PEONPING_URL}"));
+        vec![Block::Item(enabled), Block::Item(packs), Block::Item(site)]
+    }
+
     /// JustPaste's Smart Paste: on / off, what it does, and that copied files stay Windows' own paste.
     fn smart_paste(&self, jt: &crate::services::justtools::JustToolsState, cx: &Cx) -> Item {
         let t = cx.theme;
@@ -952,6 +1291,15 @@ impl SettingsView {
                 let on = opts.iter().filter(|o| o.value(cx) == "on").count();
                 Span::styled(format!("{on} of {} on", opts.len()), muted(t))
             }
+            Section::Voice => {
+                let vs = cx.svc.state().voice.clone();
+                match (&vs.capturing, &vs.running) {
+                    (Some(started), _) => Span::styled(spinner(*started), fg(t.shine)),
+                    (None, Some(key)) => Span::styled(bro_voice::Voice::hotkey_label(key), fg(t.inline)),
+                    (None, None) if st.voice.enabled => Span::styled(bro_voice::Voice::hotkey_label(&voice_key(&st.voice)), muted(t)),
+                    (None, None) => Span::styled("off", muted(t)),
+                }
+            }
             Section::Caveman => match st.caveman.active() {
                 Some(l) => Span::styled(l.id(), fg(t.shine)),
                 None => Span::styled("off", muted(t)),
@@ -973,6 +1321,10 @@ impl SettingsView {
                     None => Span::raw(""),
                 }
             }
+            Section::Sounds => match st.peon.on {
+                true => Span::styled("on", fg(t.good)),
+                false => Span::styled("off", muted(t)),
+            },
             Section::Updates => {
                 let u = cx.svc.state().updates.clone();
                 match (&u.job, u.available()) {
@@ -1025,12 +1377,13 @@ impl Pane for SettingsView {
         self.tools_busy = { let jt = &cx.svc.state().justtools; jt.job.is_some() || jt.paste_busy.is_some() };
         let u = cx.svc.state().updates.clone();
         self.update_busy = u.job.is_some() || u.checking;
+        self.voice_busy = cx.svc.state().voice.capturing.is_some();
 
         let row = self.row();
         let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
         match row {
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
-            Row::Watch(_) => hints.push(("r", "bro's default")),
+            Row::Watch(_) | Row::Voice(VoiceOpt::Key | VoiceOpt::Mode | VoiceOpt::Speaker) => hints.push(("r", "bro's default")),
             _ => {}
         }
         let area = ui::hint_line(f, area, &hints, t);
@@ -1114,7 +1467,7 @@ impl Pane for SettingsView {
         }
     }
     fn tick_every(&self) -> Option<Duration> {
-        if self.tools_busy || self.update_busy {
+        if self.tools_busy || self.update_busy || self.voice_busy {
             return Some(Duration::from_millis(100));
         }
         self.imagine_update.as_ref().map(|_| IMAGINE_RECHECK)
@@ -1167,10 +1520,16 @@ mod tests {
     #[test]
     fn preview_lists_vars_and_settings() {
         let mut env = ClaudeEnvSettings::default();
-        assert_eq!(env_parts(&env), ["CLAUDE_CODE_NO_FLICKER=1", r#"--settings {"viewMode":"focus","spinnerTipsEnabled":false}"#]);
+        assert_eq!(
+            env_parts(&env),
+            ["CLAUDE_CODE_NO_FLICKER=1", r#"--settings {"viewMode":"focus","spinnerTipsEnabled":false}"#, "hooks on SendMessage and ListAgents: bro hook peers project"]
+        );
         env.use_preset("presenter");
         let p = env_parts(&env);
         assert!(p.iter().any(|v| v == "IS_DEMO=1") && p.iter().any(|v| v == "CLAUDE_CODE_HIDE_CWD=1"), "{p:?}");
+        let peers = claude_env::knob(bro_core::peers::KNOB).unwrap();
+        env.set_choice(peers, peers.options.iter().position(|o| o.id == "default").unwrap());
+        assert!(!env_parts(&env).iter().any(|v| v.starts_with("hooks")), "Claude's own reach: no hooks");
     }
 
     #[test]
@@ -1178,16 +1537,22 @@ mod tests {
         let r = rows();
         assert_eq!(r[0], Row::Bro(BroOpt::Theme));
         let n = bro_opts().len();
+        assert_eq!(r[n], Row::Voice(VoiceOpt::On));
+        let n = n + VOICE_OPTS.len();
         assert_eq!(r[n], Row::Cave(CaveOpt::Mode));
         assert_eq!(r[n + 2], Row::Watch(WatchOpt::Prompt));
-        assert_eq!(r[n + 2 + WATCH_OPTS.len()], Row::Preset);
-        let tools = n + 3 + WATCH_OPTS.len() + KNOBS.len();
+        assert_eq!(r[n + 2 + WATCH_OPTS.len()], Row::Mod(ModOpt::Theme));
+        assert_eq!(r[n + 2 + WATCH_OPTS.len() + MOD_OPTS.len()], Row::Preset);
+        let tools = n + 3 + WATCH_OPTS.len() + MOD_OPTS.len() + KNOBS.len();
         assert_eq!(r[tools], Row::Tool(ToolOpt::Install));
         assert_eq!(r[tools + 1], Row::Tool(ToolOpt::QuickInstall));
         let watch = usize::from(bro_core::justwatch::supported()) + usize::from(bro_core::justpaste::supported());
         assert_eq!(r[tools + 4 + watch], Row::Tool(ToolOpt::Imagine));
-        assert_eq!(r[tools + 5 + watch], Row::Update(UpdOpt::Version));
-        assert_eq!(r.len(), tools + 7 + watch);
+        assert_eq!(r[tools + 5 + watch], Row::Tool(ToolOpt::SoundsOn));
+        assert_eq!(r[tools + 6 + watch], Row::Tool(ToolOpt::Sounds));
+        assert_eq!(r[tools + 7 + watch], Row::Tool(ToolOpt::PeonPing));
+        assert_eq!(r[tools + 8 + watch], Row::Update(UpdOpt::Version));
+        assert_eq!(r.len(), tools + 10 + watch);
         // each section's rows sit together, in the order the sections are listed
         let order: Vec<usize> = r.iter().map(|row| SECTIONS.iter().position(|s| *s == Section::of(*row)).unwrap()).collect();
         assert!(order.is_sorted(), "{order:?}");

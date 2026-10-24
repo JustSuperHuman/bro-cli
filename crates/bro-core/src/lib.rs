@@ -16,6 +16,7 @@ pub mod providers;
 pub mod profiles;
 pub mod creds;
 pub mod gemini;
+pub mod gemini_api;
 pub mod sessions;
 pub mod recap;
 pub mod projects;
@@ -27,6 +28,9 @@ pub mod justtools;
 pub mod claude_shared;
 pub mod catalogue;
 pub mod claude_env;
+pub mod claude_mod;
+pub mod claude_theme;
+pub mod peers;
 pub mod caveman;
 pub mod agent_install;
 pub mod quick_install;
@@ -38,6 +42,7 @@ pub mod managed_skill;
 pub mod self_update;
 pub mod proc_tree;
 pub mod orchestrator;
+pub mod peon;
 
 use serde::{Deserialize, Serialize};
 

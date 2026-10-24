@@ -15,6 +15,35 @@ impl App {
         }
         let pos = Position { x: m.column, y: m.row };
         self.hover = pos;
+        if self.prefix_armed {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let act = self.menu.hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, act)| *act);
+                    self.prefix_armed = false;
+                    if let Some(act) = act {
+                        self.run_act(act);
+                    }
+                }
+                MouseEventKind::ScrollDown => self.menu_move(1),
+                MouseEventKind::ScrollUp => self.menu_move(-1),
+                MouseEventKind::Moved => {
+                    if let Some((_, act)) = self.menu.hits.iter().find(|(r, _)| r.contains(pos)) {
+                        self.menu.sel = self.keymap.prefix_actions().iter().position(|(_, a)| a == act).unwrap_or(0);
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Right) => self.prefix_armed = false,
+                _ => {}
+            }
+            return;
+        }
+        if matches!(m.kind, MouseEventKind::Down(MouseButton::Right)) && !self.overlay.is_open() && self.renaming.is_none()
+            && let Some((id, _)) = self.outer.iter().find(|(_, r)| r.contains(pos) && pos.y == r.y)
+        {
+            self.focus_pane(*id);
+            self.leave_sidebar();
+            self.open_menu(Some((pos.x as f32, pos.y as f32)));
+            return;
+        }
         if matches!(m.kind, MouseEventKind::Down(_)) && !self.side_area.contains(pos) {
             self.leave_sidebar();
         }

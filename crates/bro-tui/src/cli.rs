@@ -31,6 +31,9 @@ pub enum Command {
     /// `bro gemini login | status | logout` — the Google sign-in behind the `gemini` provider.
     Gemini(crate::gemini_cmd::GeminiCmd),
     GeminiHelp,
+    /// `bro hook <kind> …` — Claude Code runs this as a hook bro gave the session (`peers`: see
+    /// [`bro_core::peers`]); the event comes in on stdin. Not for typing, so not in [`HELP`].
+    Hook(Vec<String>),
 }
 
 /// Usage text (`{version}` is substituted).
@@ -83,6 +86,9 @@ inside
 
 /// Parse arguments (without the program name).
 pub fn parse(args: &[String]) -> Result<Command, String> {
+    if args.first().map(String::as_str) == Some("hook") {
+        return Ok(Command::Hook(args[1..].to_vec()));
+    }
     if args.first().map(String::as_str) == Some("proxy") {
         return crate::proxy_cmd::parse(&args[1..]).map(Command::Proxy);
     }
@@ -165,5 +171,6 @@ mod tests {
         assert_eq!(p(&["gemini"]), Ok(Command::GeminiHelp));
         assert_eq!(p(&["--export-env", "me.env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::Export { out: "me.env".into(), plain: false, all: false, force: false })));
         assert!(matches!(p(&["--export-env"]), Ok(Command::Env(crate::env_cmd::EnvCmd::Export { ref out, plain: false, .. })) if out == "bro.env"));
+        assert_eq!(p(&["hook", "peers", "project", "F:/app"]), Ok(Command::Hook(vec!["peers".into(), "project".into(), "F:/app".into()])));
     }
 }

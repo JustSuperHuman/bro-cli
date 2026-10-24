@@ -169,7 +169,7 @@ pub fn report() -> Value {
             let u = e.usage.as_ref();
             json!({
                 "id": p.id,
-                "app": if p.is_claude() { "claude" } else { "codex" },
+                "app": if p.is_gemini() { "gemini" } else if p.is_claude() { "claude" } else { "codex" },
                 "name": p.name,
                 "email": p.email,
                 "plan": u.and_then(|u| u.plan.clone()).or_else(|| p.plan.clone()),
@@ -180,6 +180,8 @@ pub fn report() -> Value {
                     v["name"] = json!(n);
                     v
                 }).collect::<Vec<_>>()).unwrap_or_default(),
+                "apiUsage": u.and_then(|u| u.api.as_ref()),
+                "subscriptionQuota": u.and_then(|u| u.subscription.as_ref()),
                 "credits": u.and_then(|u| u.credits),
                 "headroom": u.map(|u| super::headroom_detail(p, u)),
                 "exhausted": u.is_some_and(exhausted),
@@ -191,7 +193,7 @@ pub fn report() -> Value {
         })
         .collect();
     let summary = |claude: bool| -> AppSummary {
-        super::app_summary(entries.iter().filter(|e| e.profile.is_claude() == claude).map(|e| {
+        super::app_summary(entries.iter().filter(|e| !e.profile.is_gemini() && e.profile.is_claude() == claude).map(|e| {
             let state = match (&e.usage, &e.error) {
                 (Some(u), _) => LoginUsage::Ready(u),
                 (None, Some(_)) => LoginUsage::Unavailable,

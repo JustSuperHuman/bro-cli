@@ -1,11 +1,11 @@
-//! View panes (settings, stats, usage, profiles, proxy, bridge, quick install, setup): each is drawn natively by
+//! View panes (settings, stats, usage, profiles, proxy, bridge, quick install, setup, sounds): each is drawn natively by
 //! its own `gui` module next to its terminal-UI drawing, with that view's own state, when the module does; else
 //! the terminal UI's drawing is painted into the card (see [`super::surface`]).
 
 use super::kit::Ui;
 use crate::app::App;
 use crate::pane::{Cx, PaneId};
-use crate::views::{bridge::BridgeView, profiles::ProfilesView, proxy::ProxyView, quick_install::QuickInstallView, settings::SettingsView, setup::SetupView, stats::StatsView, usage::UsageView};
+use crate::views::{bridge::BridgeView, profiles::ProfilesView, proxy::ProxyView, quick_install::QuickInstallView, settings::SettingsView, setup::SetupView, sounds::SoundsView, stats::StatsView, usage::UsageView};
 use bro_gfx::{Point, Rect};
 use crossterm::event::KeyModifiers;
 
@@ -47,6 +47,8 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, focused: bool) -
             crate::views::quick_install::gui::draw(v, ui, area, cx)
         } else if let Some(v) = any.downcast_mut::<SetupView>() {
             crate::views::setup::gui::draw(v, ui, area, cx)
+        } else if let Some(v) = any.downcast_mut::<SoundsView>() {
+            crate::views::sounds::gui::draw(v, ui, area, cx)
         } else {
             false
         }
@@ -73,6 +75,8 @@ pub fn click(app: &mut App, id: PaneId, n: usize, p: Point, m: KeyModifiers, cou
             crate::views::quick_install::gui::click(v, n, p, m, count, cx)
         } else if let Some(v) = any.downcast_mut::<SetupView>() {
             crate::views::setup::gui::click(v, n, p, m, count, cx)
+        } else if let Some(v) = any.downcast_mut::<SoundsView>() {
+            crate::views::sounds::gui::click(v, n, p, m, count, cx)
         }
     });
 }
@@ -96,6 +100,8 @@ pub fn wheel(app: &mut App, id: PaneId, n: Option<usize>, down: bool) {
             crate::views::quick_install::gui::wheel(v, n, down, cx)
         } else if let Some(v) = any.downcast_mut::<SetupView>() {
             crate::views::setup::gui::wheel(v, n, down, cx)
+        } else if let Some(v) = any.downcast_mut::<SoundsView>() {
+            crate::views::sounds::gui::wheel(v, n, down, cx)
         }
     });
 }

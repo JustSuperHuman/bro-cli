@@ -61,7 +61,9 @@ impl Prefs {
         }
         let scale = w.scale_factor();
         let s = w.inner_size();
-        self.window = Some((s.width as f64 / scale, s.height as f64 / scale));
+        // bro's own title bar is client area: the size kept is the one under a system title bar
+        let band = if super::caption::on() && w.fullscreen().is_none() { super::caption::HEIGHT as f64 } else { 0.0 };
+        self.window = Some((s.width as f64 / scale, (s.height as f64 / scale - band).max(1.0)));
         if let Ok(p) = w.outer_position() {
             self.position = Some((p.x, p.y));
         }

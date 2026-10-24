@@ -148,6 +148,10 @@ pub struct Settings {
     pub rain: RainMode,
     /// A font bro bundles, by id ("departure-mono"), for bro's own window; None = the terminal's font
     pub font: Option<String>,
+    /// The desktop app's window: solid, or the desktop showing through it (frosted, wallpaper-tinted or clear)
+    pub material: Material,
+    /// How much of the theme's colour covers a see-through window, in percent (the sessions keep a little more)
+    pub material_tint: u8,
     pub bridge: BridgeSettings,
     pub proxy: ProxySettings,
     pub voice: VoiceSettings,
@@ -171,6 +175,10 @@ pub struct Settings {
     pub claude_env: crate::claude_env::ClaudeEnvSettings,
     /// Caveman mode: terse replies for new Claude / Codex / Pi sessions.
     pub caveman: crate::caveman::CavemanSettings,
+    /// bro's Claude Code mod and theme: Claude in bro's colours, linked to bro.
+    pub claude_mod: crate::claude_mod::ClaudeModSettings,
+    /// PeonPing sound packs in the sessions bro starts.
+    pub peon: crate::peon::PeonSettings,
     /// JustTools integration: its skill in new Claude / Codex sessions.
     pub justtools: crate::justtools::JustToolsSettings,
     /// JustWatch integration: its skill in new Claude / Codex sessions.
@@ -282,6 +290,44 @@ pub struct VoiceSettings {
     pub live_model: Option<String>,
 }
 
+/// What the desktop app's window is made of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Material {
+    /// the theme's colours, edge to edge
+    #[default]
+    Solid,
+    /// the desktop behind the window, frosted (Windows 11's Acrylic; a blur elsewhere)
+    Acrylic,
+    /// a soft wash of the wallpaper's colours (Windows 11's Mica)
+    Mica,
+    /// see-through, no frost
+    Glass,
+}
+
+impl Material {
+    pub const ALL: [Material; 4] = [Material::Solid, Material::Acrylic, Material::Mica, Material::Glass];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Material::Solid => "solid",
+            Material::Acrylic => "acrylic",
+            Material::Mica => "mica",
+            Material::Glass => "glass",
+        }
+    }
+
+    /// Something shows through the window.
+    pub fn see_through(self) -> bool {
+        self != Material::Solid
+    }
+}
+
+/// The tints a see-through window steps through, in percent.
+pub const MATERIAL_TINTS: [u8; 7] = [30, 45, 60, 70, 80, 88, 95];
+/// The tint until you pick one.
+pub const MATERIAL_TINT: u8 = 60;
+
 /// Where digital rain falls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -330,6 +376,8 @@ impl Default for Settings {
             icons: "auto".into(),
             rain: RainMode::Off,
             font: None,
+            material: Material::Solid,
+            material_tint: MATERIAL_TINT,
             bridge: BridgeSettings::default(),
             proxy: ProxySettings::default(),
             voice: VoiceSettings::default(),
@@ -342,6 +390,8 @@ impl Default for Settings {
             permission: Default::default(),
             claude_env: Default::default(),
             caveman: Default::default(),
+            claude_mod: Default::default(),
+            peon: Default::default(),
             justtools: Default::default(),
             justwatch: Default::default(),
             updates: Default::default(),
@@ -542,6 +592,12 @@ mod tests {
         assert_eq!(back.rain, RainMode::Off);
         let w: Settings = toml::from_str("rain = \"working\"").unwrap();
         assert_eq!(w.rain, RainMode::Working);
+        // the window's material: solid until picked, and kept by name
+        assert_eq!((back.material, back.material_tint), (Material::Solid, MATERIAL_TINT));
+        let m: Settings = toml::from_str("material = \"acrylic\"\nmaterial_tint = 45").unwrap();
+        assert_eq!((m.material, m.material_tint), (Material::Acrylic, 45));
+        assert!(toml::to_string(&m).unwrap().contains("material = \"acrylic\""));
+        assert!(Material::ALL.iter().all(|x| x.see_through() == (*x != Material::Solid)));
         assert_eq!(back.theme, "dark");
         assert_eq!(back.sidebar_width, Some(58));
         assert_eq!(back.permission, crate::launch::Permission::Auto);

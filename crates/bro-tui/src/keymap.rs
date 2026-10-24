@@ -64,6 +64,8 @@ pub enum Act {
     Settings,
     /// Quick Install: JustTools, Git, Node.js, .NET, the agents… as a checklist.
     QuickInstall,
+    /// Sounds: PeonPing voice lines when sessions start, finish or need you, and the pack browser.
+    Sounds,
     /// The setup guide: install an agent, add a login, launch.
     Setup,
     Help,
@@ -79,6 +81,7 @@ pub enum Act {
     RefreshUsage,
     UsageDetails,
     Continue,
+    Reload,
     /// Go to bro's orchestrator, or start one (the launcher on its tab).
     Orchestrator,
     SwitchLogin,
@@ -125,12 +128,12 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, QuickAgent, NewShell, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenClipboardFolder, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, QuickAgent, NewShell, Reload, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenClipboardFolder, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend((0..=9).map(ShowTab));
         v.extend([LastTab, NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Setup, RefreshUsage, Media]);
+        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Sounds, Setup, RefreshUsage, Media]);
         v.extend([Palette, Help, Themes, ToggleIcons, ToggleProjectTabs, ToggleAutoResume, ToggleCaveman, Quit]);
         v
     }
@@ -182,6 +185,7 @@ impl Act {
             Stats => "stats".into(),
             Settings => "settings".into(),
             QuickInstall => "quick_install".into(),
+            Sounds => "sounds".into(),
             Setup => "setup".into(),
             Help => "help".into(),
             Rename => "rename".into(),
@@ -193,6 +197,7 @@ impl Act {
             RefreshUsage => "refresh_usage".into(),
             UsageDetails => "usage_details".into(),
             Continue => "continue".into(),
+            Reload => "reload".into(),
             Orchestrator => "orchestrator".into(),
             SwitchLogin => "switch_login".into(),
             CloseProject => "close_project".into(),
@@ -258,6 +263,7 @@ impl Act {
             Stats => "stats: tokens per login — lifetime, last 24h / 7d / 30d".into(),
             Settings => "settings: bro options and Claude Code privacy, updates and long-run presets".into(),
             QuickInstall => "quick install: JustTools, Git, Node.js, Bun, Python, .NET and the coding agents".into(),
+            Sounds => "sounds: PeonPing voice lines when a session starts, finishes or needs you · browse sound packs".into(),
             Setup => "setup guide: install Claude Code / Codex, add your logins, launch".into(),
             Help => "keys and help".into(),
             Rename => "rename the focused session".into(),
@@ -269,6 +275,7 @@ impl Act {
             RefreshUsage => "refresh usage now".into(),
             UsageDetails => "sidebar usage: totals / every profile".into(),
             Continue => "continue an earlier session (search, resume in any login)".into(),
+            Reload => "reload session with a profile…".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
             Orchestrator => "the orchestrator: go to it, or start the one session that runs all the others".into(),
             CloseProject => "close the current project (and its sessions)".into(),
@@ -285,10 +292,10 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
+            NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Reload | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | ShowTab(_) | LastTab | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Setup | RefreshUsage | Media => Group::Views,
+            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Sounds | Setup | RefreshUsage | Media => Group::Views,
             Palette | Help | Themes | ToggleIcons | ToggleProjectTabs | ToggleAutoResume | ToggleCaveman | Quit => Group::App,
         }
     }
@@ -362,8 +369,8 @@ impl Act {
             FlipAll => vec!["D"],
             FocusLeft => vec!["h", "left"],
             FocusRight => vec!["l", "right"],
-            FocusUp => vec!["k", "up"],
-            FocusDown => vec!["j", "down"],
+            FocusUp => vec!["k"],
+            FocusDown => vec!["j"],
             ResizeLeft => vec!["H"],
             ResizeRight => vec!["L"],
             ResizeUp => vec!["K"],
@@ -385,7 +392,8 @@ impl Act {
             UsageDetails => vec!["U"],
             Stats => vec!["S"],
             Settings => vec!["A"],
-            Continue => vec!["R"],
+            Continue => vec!["C"],
+            Reload => vec!["R"],
             Orchestrator => vec!["O"],
             SwitchLogin => vec!["P"],
             CloseProject => vec!["X"],
@@ -404,7 +412,7 @@ impl Act {
             QuickInstall => vec!["I"],
             Setup => vec!["e"],
             Media => vec!["m"],
-            Split | ShowTab(_) | ToggleProjectTabs | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder => vec![],
+            Split | ShowTab(_) | ToggleProjectTabs | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder | Sounds => vec![],
         }
     }
 }
@@ -644,28 +652,11 @@ impl Keymap {
         self.chords_for(act).into_iter().next().unwrap_or_default()
     }
 
-    /// A short "key action · key action" line of the prefix table, for the armed-prefix hint.
-    pub fn prefix_hint(&self) -> String {
-        let want = [Act::Watchdog, Act::SplitRight, Act::SplitDown, Act::Close, Act::Zoom, Act::NewSession, Act::FocusSidebar, Act::Palette, Act::Help];
-        want.iter()
-            .filter_map(|a| self.prefixed.iter().find(|(_, x)| x == a).map(|(c, _)| format!("{} {}", c.display(), short_label(*a))))
-            .collect::<Vec<_>>()
-            .join(" · ")
-    }
-}
-
-fn short_label(a: Act) -> &'static str {
-    match a {
-        Act::SplitRight => "split",
-        Act::SplitDown => "split↓",
-        Act::Close => "close",
-        Act::Zoom => "zoom",
-        Act::NewSession => "launch",
-        Act::FocusSidebar => "sidebar",
-        Act::Palette => "palette",
-        Act::Help => "help",
-        Act::Watchdog => "watchdog",
-        _ => "",
+    /// One menu entry per action, with its current prefix binding.
+    pub fn prefix_actions(&self) -> Vec<(String, Act)> {
+        Act::all().into_iter().filter_map(|a| {
+            self.prefixed.iter().find(|(_, bound)| *bound == a).map(|(chord, _)| (chord.display(), a))
+        }).collect()
     }
 }
 

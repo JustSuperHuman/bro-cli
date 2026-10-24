@@ -3,6 +3,7 @@
 Rust workspace; see PLAN.md for the product plan.
 
 - `crates/bro-core`   blocking data layer (config/profiles/providers/sessions/usage/creds/launch/browser). v1-compatible storage in `~/.bro`, `~/.claude-max-pool`, `~/.bro/codex-profiles`.
+  `crates/bro-core/claude-mod` is bro's Claude Code mod (TypeScript, built in by `claude_mod.rs`; see docs/claude-mod.md). Check it with `claude plugin validate crates/bro-core/claude-mod`.
 - `crates/bro-proxy`  axum proxy, Anthropic <-> OpenAI translation + Claude pool. Own tokio runtime thread.
 - `crates/bro-bridge` axum bridge host compatible with Just Terminal mobile/web clients. Own tokio runtime thread.
 - `crates/bro-tui`    the `bro` binary (ratatui + vt100 + portable-pty, derived from z4-oriel).

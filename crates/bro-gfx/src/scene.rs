@@ -1,8 +1,12 @@
 //! A frame's worth of drawing, in physical pixels: layers of shadows, rounded rects, images and glyphs.
 //!
-//! Inside a layer the passes draw in a fixed order — shadows, quads, images, glyphs, then `top` quads
-//! (cursor beams, underlines, scrollbars) — so a panel's background always sits under its text. Anything
-//! that must cover text (a menu, a dialog, a toast) goes in a later layer.
+//! Inside a layer the passes draw in a fixed order — glass, shadows, quads, images, glyphs, then `top` quads
+//! (cursor beams, underlines, scrollbars) and `top_glass` — so a panel's background always sits under its text.
+//! Anything that must cover text (a menu, a dialog, a toast) goes in a later layer.
+//!
+//! Glass quads paint their colour into what's already there without changing how see-through it is: over a
+//! see-through window (its clear colour's alpha below 1) the surfaces drawn that way all stay exactly as
+//! see-through as the window, however many are stacked; over an opaque one they're ordinary fills.
 
 use crate::color::Color;
 use crate::geom::{Corners, Rect};
@@ -153,6 +157,8 @@ impl Clip {
 /// One layer.
 #[derive(Default, Debug)]
 pub struct Layer {
+    /// surfaces of the window itself (its content area, cards, panels on them), first, in the order given
+    pub glass: Vec<QuadInstance>,
     pub shadows: Vec<ShadowInstance>,
     pub quads: Vec<QuadInstance>,
     pub images: Vec<(ImageId, ImageInstance)>,
@@ -160,10 +166,14 @@ pub struct Layer {
     pub mid: Vec<QuadInstance>,
     pub glyphs: Vec<GlyphInstance>,
     pub top: Vec<QuadInstance>,
+    /// glass over this layer's text, last (a scrolled page fading out under its edge)
+    pub top_glass: Vec<QuadInstance>,
 }
 
 impl Layer {
     fn clear(&mut self) {
+        self.glass.clear();
+        self.top_glass.clear();
         self.shadows.clear();
         self.quads.clear();
         self.images.clear();
@@ -172,7 +182,7 @@ impl Layer {
         self.top.clear();
     }
     pub fn is_empty(&self) -> bool {
-        self.shadows.is_empty() && self.quads.is_empty() && self.images.is_empty() && self.mid.is_empty() && self.glyphs.is_empty() && self.top.is_empty()
+        self.glass.is_empty() && self.shadows.is_empty() && self.quads.is_empty() && self.images.is_empty() && self.mid.is_empty() && self.glyphs.is_empty() && self.top.is_empty() && self.top_glass.is_empty()
     }
 }
 
@@ -297,6 +307,20 @@ impl Scene {
         }
     }
 
+    /// A surface of the window (see [`Layer::glass`]): drawn before everything else in this layer, in call order.
+    pub fn glass_quad(&mut self, q: Quad) {
+        if let Some(i) = self.quad_instance(&q) {
+            self.layers[self.current].glass.push(i);
+        }
+    }
+
+    /// Glass over this layer's text (a page fading out under its edge): drawn last in this layer.
+    pub fn top_glass_quad(&mut self, q: Quad) {
+        if let Some(i) = self.quad_instance(&q) {
+            self.layers[self.current].top_glass.push(i);
+        }
+    }
+
     /// A plain filled rectangle (no rounding): cell backgrounds, rules.
     pub fn rect(&mut self, rect: Rect, color: Color) {
         self.quad(Quad::new(rect, color));
@@ -393,5 +417,12 @@ mod tests {
         // invisible quads aren't drawn
         s.rect(Rect::new(0.0, 0.0, 1.0, 1.0), Color::TRANSPARENT);
         assert!(s.used_layers()[0].quads.is_empty());
+        // glass keeps its own lists, cleared with the rest
+        s.glass_quad(Quad::new(Rect::new(0.0, 0.0, 4.0, 4.0), Color::WHITE));
+        s.top_glass_quad(Quad::new(Rect::new(0.0, 0.0, 4.0, 4.0), Color::WHITE));
+        assert_eq!((s.used_layers()[0].glass.len(), s.used_layers()[0].top_glass.len()), (1, 1));
+        assert!(!s.used_layers()[0].is_empty());
+        s.clear();
+        assert!(s.used_layers()[0].is_empty());
     }
 }

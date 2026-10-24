@@ -29,7 +29,8 @@ pub(super) fn spawn_all(svc: &Services) {
     }
 }
 
-/// What a second bro runs (see `Services::start_guest`): data and usage, nothing that owns a port or a hotkey.
+/// What a second bro runs (see `Services::start_guest`): data and usage, with its proxy started on demand.
+/// The existing bro retains the phone bridge and hotkey.
 pub(super) fn spawn_guest(svc: &Services) {
     spawn_usage_loop(svc);
     spawn_data(svc);
@@ -95,12 +96,19 @@ pub(super) fn load_past(svc: &Services) {
 /// older than six hours and publish again.
 pub(super) fn load_models(svc: &Services) {
     let publish = |svc: &Services| {
-        let providers = svc.state().providers.ready().cloned().unwrap_or_default();
+        let (providers, profiles, previous) = {
+            let st = svc.state();
+            (st.providers.ready().cloned().unwrap_or_default(), st.profiles.ready().cloned().unwrap_or_default(), st.models.clone())
+        };
         let models = guard("catalogue", || {
             use bro_core::catalogue;
             let mut m = std::collections::BTreeMap::new();
             for p in &providers {
                 m.insert(p.id.clone(), catalogue::provider_models(p));
+            }
+            for p in profiles.iter().filter(|p| p.is_gemini()) {
+                let fallback = ["gemini-3.8-flash"].iter().map(|id| catalogue::ModelRow { id: (*id).into(), name: "Gemini Flash (offline fallback)".into(), context: None, pricing: None, reasoning: true, created: None }).collect();
+                m.insert(p.id.clone(), previous.get(&p.id).cloned().unwrap_or(fallback));
             }
             m.insert("codex".to_string(), catalogue::codex_models(&bro_core::paths::codex_local_dir()));
             let claude = providers.iter().find(|p| p.id == "anthropic").map(catalogue::provider_models).unwrap_or_default();
@@ -112,6 +120,18 @@ pub(super) fn load_models(svc: &Services) {
         }
     };
     publish(svc);
+    let gemini = svc.clone();
+    std::thread::spawn(move || {
+        let profiles = gemini.state().profiles.ready().cloned().unwrap_or_default();
+        for p in profiles.iter().filter(|p| p.is_gemini_api() && p.authenticated) {
+            if let Some(key) = bro_core::gemini_api::key(p) {
+                match bro_core::gemini_api::models(&key) {
+                    Ok(models) => gemini.update(|st| { st.models.insert(p.id.clone(), models); }),
+                    Err(e) => gemini.update(|st| { st.usage.entry(p.id.clone()).or_default().error = Some(e.to_string()); }),
+                }
+            }
+        }
+    });
     let stale = guard("catalogue::openrouter_cached", || bro_core::catalogue::openrouter_cached().is_none_or(|(_, age)| age > 6 * 3600)).unwrap_or(false);
     if stale {
         let svc = svc.clone();
@@ -199,6 +219,7 @@ fn fetch_usage_with(
                     }
                 };
                 svc.update(|st| {
+                    if let Some(quotas) = entry.usage.as_ref().and_then(|u| u.subscription.as_ref()) { st.models.insert(p.id.clone(), bro_core::gemini::model_rows(quotas)); }
                     st.usage.insert(p.id.clone(), entry);
                 });
             });
@@ -230,6 +251,25 @@ mod usage_tests {
     use super::*;
     use bro_core::profiles::{Profile, ProfileKind};
     use bro_core::usage::{Usage, Window};
+
+    #[test]
+    fn gemini_proxy_events_resolve_to_the_exact_profile_and_model() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = Services::offline(super::super::fallback_settings(), tx);
+        let model = "gemini-text";
+        let route_id = bro_core::launch::route_id("gemini:work", Some(model));
+        svc.update(|st| st.proxy.routes.push(bro_proxy::Route {
+            id: route_id.clone(),
+            upstream: bro_proxy::Upstream::OpenAiChat { base_url: bro_core::gemini_api::BASE.into(), api_key: None },
+            default_model: Some(model.into()), small_model: None, model_map: vec![], label: "Gemini".into(),
+        }));
+        let st = svc.state();
+        let mut event = st.proxy.events.front().unwrap().clone();
+        event.route_id = route_id;
+        assert_eq!(gemini_profile_for_event(&st, &event).as_deref(), Some("gemini:work"));
+        event.route_id = bro_core::launch::route_id("gemini:work", Some("another-model"));
+        assert!(gemini_profile_for_event(&st, &event).is_none());
+    }
 
     #[test]
     fn slow_account_does_not_delay_other_readings_and_failed_refresh_recovers() {
@@ -293,13 +333,26 @@ mod usage_tests {
     }
 }
 
+/// Attribute translated requests to a Gemini profile without putting its key in an event.
+fn gemini_profile_for_event(st: &super::State, event: &bro_proxy::ProxyEvent) -> Option<String> {
+    let route = st.proxy.routes.iter().find(|r| r.id == event.route_id)?;
+    st.profiles.ready()?.iter().find(|p| p.is_gemini_api() && bro_core::launch::route_id(&p.id, route.default_model.as_deref()) == event.route_id).map(|p| p.id.clone())
+}
+
 /// Start the translating proxy on its own runtime thread.
 pub(super) fn spawn_proxy(svc: &Services) {
+    use std::sync::atomic::Ordering;
+    if svc.is_demo() || svc.inner.proxy.lock().is_some()
+        || svc.inner.proxy_starting.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err()
+    { return; }
+    svc.update(|st| { st.proxy.status = Avail::Loading; st.proxy.enabled = true; });
     let svc = svc.clone();
-    std::thread::spawn(move || {
+    let worker = svc.clone();
+    if let Err(error) = std::thread::Builder::new().name("bro-proxy-start".into()).spawn(move || {
+        let svc = worker;
         let s = svc.settings().proxy;
         let token = uuid::Uuid::new_v4().simple().to_string();
-        let cfg = bro_proxy::ProxyConfig { bind: "127.0.0.1".into(), port: s.port, token: Some(token.clone()) };
+        let cfg = bro_proxy::ProxyConfig { bind: "127.0.0.1".into(), port: if svc.inner.guest { 0 } else { s.port }, token: Some(token.clone()) };
         let opts = bro_proxy::ProxyOptions { trim: s.trim, trim_level: bro_proxy::TrimLevel::parse(&s.trim_level), ..Default::default() };
         match guard_res("proxy::start", || bro_proxy::ProxyHandle::start_with(cfg, opts)) {
             Ok(h) => {
@@ -308,6 +361,19 @@ pub(super) fn spawn_proxy(svc: &Services) {
                 let ev_svc = svc.clone();
                 let _ = guard("proxy::on_event", || {
                     h.on_event(Box::new(move |e| {
+                        let profile = gemini_profile_for_event(&ev_svc.state(), &e);
+                        if let Some(id) = profile {
+                            if let Err(err) = bro_core::gemini_api::record(&id, e.at_ms, e.status, e.input_tokens, e.output_tokens, e.cache_read_tokens) {
+                                ev_svc.update(|st| { st.usage.entry(id.clone()).or_default().error = Some(err.to_string()); });
+                            } else if let Ok(api) = bro_core::gemini_api::usage(&id) {
+                                ev_svc.update(|st| {
+                                    let entry = st.usage.entry(id).or_default();
+                                    let usage = entry.usage.get_or_insert_with(Default::default);
+                                    usage.api = Some(api);
+                                    usage.fetched_at = crate::util::now_secs();
+                                });
+                            }
+                        }
                         ev_svc.update(|st| {
                             st.proxy.events.push_back(e);
                             while st.proxy.events.len() > super::EVENT_CAP {
@@ -322,6 +388,7 @@ pub(super) fn spawn_proxy(svc: &Services) {
                     st.proxy.status = Avail::Ready(ProxyInfo { port, base, token });
                     st.proxy.events = recent.into_iter().collect();
                 });
+                svc.inner.proxy_starting.store(false, Ordering::Release);
                 // pool account status, every 5 s while the proxy runs
                 loop {
                     let dirs: Vec<std::path::PathBuf> = svc
@@ -339,12 +406,16 @@ pub(super) fn spawn_proxy(svc: &Services) {
             }
             Err(e) => {
                 svc.update(|st| st.proxy.status = Avail::Unavailable(e.clone()));
+                svc.inner.proxy_starting.store(false, Ordering::Release);
                 if !super::guard::is_unimplemented(&e) {
                     svc.send(Event::Toast(Kind::Error, format!("proxy didn't start: {e}")));
                 }
             }
         }
-    });
+    }) {
+        svc.inner.proxy_starting.store(false, Ordering::Release);
+        svc.update(|st| st.proxy.status = Avail::Unavailable(format!("Could not start the translating proxy: {error}")));
+    }
 }
 
 /// Push-to-talk to the orchestrator: hold the hotkey anywhere, speak, release; the transcript goes to Hugh.
@@ -352,11 +423,15 @@ pub(super) fn spawn_proxy(svc: &Services) {
 pub(super) fn spawn_voice(svc: &Services) {
     let svc = svc.clone();
     std::thread::spawn(move || {
+        let generation = svc.voice_generation();
         let s = svc.settings().voice;
         if !s.enabled || svc.is_demo() {
+            svc.update(|st| st.voice.running = None);
             return;
         }
-        if !bro_voice::Voice::api_key_available(&s.api_key_env) {
+        let key_found = bro_voice::Voice::api_key_available(&s.api_key_env);
+        svc.update(|st| st.voice.key_found = Some(key_found));
+        if !key_found {
             // the hotkey stays free until there is something to transcribe with
             svc.send(Event::Toast(Kind::Info, format!("voice is off: set {} to use push-to-talk with Hugh", s.api_key_env)));
             return;
@@ -415,10 +490,15 @@ pub(super) fn spawn_voice(svc: &Services) {
         });
         match started {
             Ok(voice) => {
-                svc.set_voice(Some(voice));
-                svc.push_known_folders();
+                if svc.keep_voice(voice, generation) {
+                    svc.update(|st| (st.voice.running, st.voice.error) = (Some(hotkey), None));
+                    svc.push_known_folders();
+                }
             }
-            Err(e) => svc.send(Event::Toast(Kind::Error, format!("voice ({hotkey}) didn't start: {e}"))),
+            Err(e) => {
+                svc.update(|st| st.voice.error = Some(e.to_string()));
+                svc.send(Event::Toast(Kind::Error, format!("voice ({hotkey}) didn't start: {e}")));
+            }
         }
     });
 }

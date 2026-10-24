@@ -91,6 +91,77 @@ pub fn parse_hotkey(s: &str) -> Option<u32> {
     })
 }
 
+/// The name [`parse_hotkey`] reads back as `vk`: `rwin`, `f13`, else `vk:0x87`.
+pub fn name_of(vk: u32) -> String {
+    let named = match vk {
+        VK_WIN_R => "rwin",
+        VK_WIN_L => "lwin",
+        VK_CONTROL_R => "rctrl",
+        VK_MENU_R => "ralt",
+        VK_SHIFT_R => "rshift",
+        VK_CAPITAL => "capslock",
+        VK_SCROLL => "scrolllock",
+        VK_PAUSE => "pause",
+        VK_INSERT => "insert",
+        VK_APPS => "apps",
+        _ if (VK_F13..VK_F13 + 12).contains(&vk) => return format!("f{}", vk - VK_F13 + 13),
+        _ => return format!("vk:0x{vk:02X}"),
+    };
+    named.into()
+}
+
+/// `vk` as people say it: "Right Win", "F13", "key 0x87".
+pub fn label(vk: u32) -> String {
+    let win = if cfg!(target_os = "macos") { "Cmd" } else if cfg!(windows) { "Win" } else { "Super" };
+    let alt = if cfg!(target_os = "macos") { "Option" } else { "Alt" };
+    match vk {
+        VK_WIN_R => format!("Right {win}"),
+        VK_WIN_L => format!("Left {win}"),
+        VK_CONTROL_R => "Right Ctrl".into(),
+        VK_CONTROL_L => "Left Ctrl".into(),
+        VK_MENU_R => format!("Right {alt}"),
+        VK_MENU_L => format!("Left {alt}"),
+        VK_SHIFT_R => "Right Shift".into(),
+        VK_SHIFT_L => "Left Shift".into(),
+        VK_CAPITAL => "Caps Lock".into(),
+        VK_SCROLL => "Scroll Lock".into(),
+        VK_PAUSE => "Pause".into(),
+        VK_INSERT => "Insert".into(),
+        VK_APPS => "Menu".into(),
+        0x70..=0x87 => format!("F{}", vk - 0x6F),
+        _ => format!("key 0x{vk:02X}"),
+    }
+}
+
+/// Keys you type or move the cursor with: holding one for voice would take it from every app.
+pub fn types_text(vk: u32) -> bool {
+    matches!(
+        vk,
+        0x08 | 0x09 | 0x0D | 0x1B | 0x20 // Backspace Tab Enter Esc Space
+            | 0x21..=0x28 | 0x2E // PgUp PgDn End Home arrows, Delete
+            | 0x30..=0x39 | 0x41..=0x5A // digits, letters
+            | 0x60..=0x6F // numpad
+            | 0xBA..=0xC0 | 0xDB..=0xDF | 0xE2 // punctuation
+    )
+}
+
+/// Whether [`capture`] works here.
+pub fn can_capture() -> bool {
+    cfg!(windows)
+}
+
+/// Block until the next key pressed anywhere (None: Esc, or nothing within `timeout`). Its press and release
+/// are swallowed, so the app in front doesn't see them and a Win key doesn't open Start.
+pub fn capture(timeout: std::time::Duration) -> anyhow::Result<Option<u32>> {
+    #[cfg(windows)]
+    return windows::capture(timeout);
+    #[cfg(not(windows))]
+    {
+        let _ = timeout;
+        anyhow::bail!("pressing the key to set it works on Windows only")
+    }
+}
+
 /// The canonical code of a modifier key (either side), for chord detection.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn is_modifier(vk: u32) -> bool {
@@ -162,6 +233,17 @@ pub fn needs_mask(vk: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_round_trip() {
+        for vk in [VK_WIN_R, VK_WIN_L, VK_CONTROL_R, VK_MENU_R, VK_SHIFT_R, VK_CAPITAL, VK_SCROLL, VK_PAUSE, VK_INSERT, VK_APPS, VK_F13, VK_F13 + 11, 0x70, VK_CONTROL_L] {
+            assert_eq!(parse_hotkey(&name_of(vk)), Some(vk), "{}", name_of(vk));
+        }
+        assert_eq!(name_of(VK_F13), "f13");
+        assert_eq!(label(VK_F13), "F13");
+        assert_eq!(label(0x87), "F24");
+        assert!(types_text(0x41) && types_text(0x20) && !types_text(VK_F13) && !types_text(VK_WIN_R));
+    }
 
     #[test]
     fn names() {

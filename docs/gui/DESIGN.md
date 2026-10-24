@@ -12,7 +12,14 @@ look is drawn, not borrowed from the OS.
    (`kit::radius::OVERLAY`). Nothing rounder, except the toggle switch's track and circular marks.
 2. **Depth by layers.** Window (`t.bg`, like Mica) → content layer (`t.layer`) → cards (`t.surface`) →
    floating (`t.raised`: dialogs, menus, tooltips). Steps are slight luminance changes; strokes are 1px
-   (`t.stroke` on controls, `t.hairline`/`t.border` elsewhere); shadows only on floating things.
+   (`t.stroke` on controls, `t.hairline`/`t.border` elsewhere); shadows only on floating things. A theme with its
+   own side bar colour (VS Code's, `Theme::panel`) is the window, and the cards are its editor colour. The
+   window's own surfaces (the content layer, session cards, the cards and panels inside views, scroll-edge fades
+   on them) are glass fills (`ui.glass`, `ui.glass_round`, `ui.glass_panel`, `scene.top_glass_quad`): they paint
+   their colour without changing how see-through the window is, so over a material (Acrylic, Mica, Glass) the
+   whole window, bro's title bar included, is evenly see-through at the tint (`t.window`'s alpha). Over a solid
+   window they're ordinary fills. Text, controls, buttons and floating things (dialogs, menus, toasts) are
+   ordinary fills and stay solid.
 3. **No accent bars, ever.** No coloured stripe on any edge of a card, row, tab, callout or panel, and no
    selection pill beside a list item. Selection is a fill (`t.selected`); keyboard focus is a full 1px outline.
 4. **No dots, no badges for identity or counts in lists.** A project is its name in its own colour (the

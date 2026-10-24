@@ -9,6 +9,51 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 const W: u16 = 160;
 const H: u16 = 46;
 
+#[test]
+fn gemini_usage_quick_launch_opens_the_tool_and_model_chooser() {
+    let mut a = app(false);
+    let compact = a.usage_lines();
+    let gemini = compact.iter().find(|line| line.profile.as_deref() == Some("gemini:work")).unwrap();
+    assert_eq!(gemini.note.as_deref(), Some("42 req"));
+    assert!(gemini.h5.is_none() && gemini.wk.is_none());
+    a.launch_usage(bro_core::Harness::Claude, Some("gemini:work".into()));
+    let Overlay::Launcher(l) = &a.overlay else { panic!("Gemini must offer a tool choice") };
+    assert_eq!(l.spec().unwrap().profile_id.as_deref(), Some("gemini:work"));
+    a.usage_expanded = true;
+    assert!(a.usage_lines().iter().any(|line| line.profile.as_deref() == Some("gemini:work")));
+}
+
+#[test]
+fn gemini_subscription_usage_launch_uses_the_connected_subscription() {
+    let mut a = app(false);
+    let compact = a.usage_lines();
+    let google = compact.iter().find(|line| line.profile.as_deref() == Some("gemini-sub:local")).unwrap();
+    assert_eq!(google.note.as_deref(), Some("73% left"));
+    assert!(google.h5.is_none() && google.wk.is_none());
+    a.launch_usage(bro_core::Harness::Codex, Some("gemini-sub:local".into()));
+    let Overlay::Launcher(l) = &a.overlay else { panic!("subscription needs a tool and model chooser") };
+    let spec = l.spec().unwrap();
+    assert_eq!(spec.harness, bro_core::Harness::Codex);
+    assert_eq!(spec.profile_id.as_deref(), Some("gemini-sub:local"));
+    assert_eq!(spec.model.as_deref(), Some("gemini-4-argon-high"));
+}
+
+#[test]
+fn gemini_profile_key_input_never_renders_the_secret() {
+    let mut a = app(false);
+    a.open_view("profiles");
+    key(&mut a, KeyCode::Char('g'), KeyModifiers::NONE);
+    for c in "new-key".chars() { key(&mut a, KeyCode::Char(c), KeyModifiers::NONE); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let id = a.focused().unwrap();
+    a.panes.get_mut(&id).unwrap().paste("secret-gemini-credential", &mut crate::pane::Cx {
+        id, svc: &a.svc, theme: &a.theme, tx: &a.tx, focused: true, actions: &mut vec![],
+    });
+    let screen = draw(&mut a);
+    assert!(!screen.contains("secret-gemini-credential"));
+    assert!(screen.contains("Gemini API key"));
+}
+
 fn app(demo: bool) -> App {
     testkit::isolate();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -130,7 +175,7 @@ fn new_session_picker_shows_weekly_only_codex_usage() {
 }
 
 #[test]
-fn codex_alt_up_reaches_terminal_and_prefix_up_still_navigates() {
+fn codex_alt_up_reaches_terminal_and_prefix_k_still_navigates() {
     use std::io::Write;
     struct Capture(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
     impl Write for Capture {
@@ -155,7 +200,7 @@ fn codex_alt_up_reaches_terminal_and_prefix_up_still_navigates() {
     assert_eq!(&*bytes.lock(), b"\x1b[1;3A");
     assert_eq!(a.focused(), Some(lower), "Codex's key must not move pane focus");
     key(&mut a, KeyCode::Char(' '), KeyModifiers::CONTROL);
-    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('k'), KeyModifiers::NONE);
     assert_eq!(a.focused(), Some(upper));
     assert_eq!(&*bytes.lock(), b"\x1b[1;3A", "prefix navigation must not reach Codex");
     a.focus_pane(lower);
@@ -1201,7 +1246,7 @@ fn profiles_view() {
     key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
     key(&mut a, KeyCode::Char('d'), KeyModifiers::NONE);
     let s = shot(&mut a, "profiles");
-    assert!(s.contains("Profiles · Claude and Codex logins") && s.contains("claude:personal"), "{s}");
+    assert!(s.contains("Profiles · Claude, Codex and Gemini") && s.contains("claude:personal"), "{s}");
     assert!(s.contains("Remove claude:personal?") && s.contains("accounts"), "confirm names the dir\n{s}");
 }
 
@@ -1682,6 +1727,152 @@ fn prefix_table_and_splits() {
     key(&mut a, KeyCode::Left, KeyModifiers::ALT);
     assert_eq!(a.focused(), f0);
     assert_eq!(a.tabs[a.cur].root.leaf_ids().len(), n0);
+}
+
+#[test]
+fn session_menu_keyboard_and_mouse_open_the_same_reload_picker() {
+    let mut a = app(true);
+    let id = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness == Some(bro_core::Harness::Claude))).map(|(id, _)| *id).unwrap();
+    a.focus_pane(id);
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::CONTROL);
+    let screen = draw(&mut a);
+    assert!(screen.contains("Reload session with a profile"), "{screen}");
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    assert!(a.prefix_armed);
+    assert_eq!(a.menu.sel, 1);
+    key(&mut a, KeyCode::Char('R'), KeyModifiers::SHIFT);
+    assert!(matches!(&a.overlay, Overlay::Resume(p) if matches!(p.from, super::overlays::ResumeFrom::Reload { pane, .. } if pane == id)));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.panes.contains_key(&id));
+    draw(&mut a);
+    let r = a.outer.iter().find(|(pane, _)| *pane == id).unwrap().1;
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
+    assert!(a.prefix_armed);
+    draw(&mut a);
+    let r = a.menu.hits.iter().find(|(_, act)| *act == Act::Reload).unwrap().0;
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
+    assert!(!a.prefix_armed);
+    assert!(matches!(&a.overlay, Overlay::Resume(p) if matches!(p.from, super::overlays::ResumeFrom::Reload { pane, .. } if pane == id)));
+    assert!(draw(&mut a).contains("reload with profile"));
+}
+
+#[test]
+fn session_menu_uses_remapped_keys_and_keeps_selection_visible() {
+    let mut a = app(true);
+    let mut keys = std::collections::BTreeMap::new();
+    keys.insert("reload".into(), "prefix v".into());
+    a.keymap = crate::keymap::Keymap::new("ctrl+b", &keys);
+    assert!(a.keymap.prefix_actions().contains(&("v".into(), Act::Reload)));
+    key(&mut a, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    draw(&mut a);
+    assert!(a.menu.top > 0);
+    assert_eq!(a.menu.hits.last().unwrap().1, *a.keymap.prefix_actions().last().map(|(_, a)| a).unwrap());
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!a.prefix_armed);
+    assert_eq!(a.keymap.after_prefix(&KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)), Some(Act::Continue));
+}
+
+#[test]
+fn session_menu_right_click_is_limited_to_the_title_bar() {
+    let mut a = app(true);
+    draw(&mut a);
+    let (id, outer) = a.outer[0];
+    let inner = a.inner.iter().find(|(pane, _)| *pane == id).unwrap().1;
+    for pos in [
+        inner.as_position(),
+        Position::new(outer.x, outer.y + 1),
+        Position::new(outer.x + 2, outer.bottom() - 1),
+        a.side_area.as_position(),
+        a.strip.as_position(),
+    ] {
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), column: pos.x, row: pos.y, modifiers: KeyModifiers::NONE });
+        assert!(!a.prefix_armed, "right click at {pos:?} must keep the session menu closed");
+    }
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), column: outer.x + 2, row: outer.y, modifiers: KeyModifiers::NONE });
+    assert!(a.prefix_armed);
+    assert_eq!(a.focused(), Some(id));
+}
+
+#[test]
+fn reload_current_profile_keeps_launch_choices_and_replaces_only_its_pane() {
+    use bro_core::launch::{LaunchSpec, Permission};
+    use bro_core::browser::BrowserMode;
+    let (mut a, rx) = usage_launch_app();
+    let id = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness == Some(bro_core::Harness::Claude))).map(|(id, _)| *id).unwrap();
+    let t = a.panes.get_mut(&id).unwrap().as_term().unwrap();
+    let profile = t.meta.store.clone().unwrap();
+    let sid = t.meta.sid.clone();
+    let spec = LaunchSpec { harness: bro_core::Harness::Claude, profile_id: Some(profile.clone()), provider_id: None, model: Some("claude-opus-4-6".into()), cwd: t.meta.cwd.clone(), resume: None, permission: Permission::Auto, browser: BrowserMode::Chrome, extra_args: vec!["--verbose".into()], orchestrator: false };
+    t.launch_spec = Some(spec.clone());
+    t.meta.name = Some("Keep this name".into());
+    t.meta.renamed = true;
+    let count = a.panes.len();
+    let slots: Vec<_> = a.tabs.iter().map(|tab| tab.root.leaf_ids()).collect();
+    a.focus_pane(id);
+    a.open_reload(id);
+    let Overlay::Resume(p) = &a.overlay else { panic!("profile picker") };
+    assert!(p.targets[p.sel].current);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.panes[&id].as_term_ref().unwrap().meta.sid, sid, "keep the session until its replacement is built");
+    assert!(a.panes[&id].as_term_ref().unwrap().reloading);
+    let mut result = usage_launch_result(&rx);
+    assert_eq!(result.into, Some(id));
+    assert_eq!(result.spec.profile_id, spec.profile_id);
+    assert_eq!(result.spec.model, spec.model);
+    assert_eq!(result.spec.permission, spec.permission);
+    assert_eq!(result.spec.browser, spec.browser);
+    assert_eq!(result.spec.extra_args, spec.extra_args);
+    assert_eq!(result.spec.cwd, spec.cwd);
+    result.result.as_mut().unwrap().program = "definitely-not-a-program-xyz".into();
+    a.launched(*result);
+    assert_eq!(a.panes.len(), count);
+    assert_eq!(a.tabs.iter().map(|tab| tab.root.leaf_ids()).collect::<Vec<_>>(), slots);
+    let t = a.panes[&id].as_term_ref().unwrap();
+    assert_ne!(t.meta.sid, sid);
+    assert_eq!(t.meta.name.as_deref(), Some("Keep this name"));
+    assert!(t.meta.renamed && !t.reloading);
+}
+
+#[test]
+fn reload_offers_one_profile_and_failed_build_preserves_the_session() {
+    let (mut a, rx) = usage_launch_app();
+    let id = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness == Some(bro_core::Harness::Codex))).map(|(id, _)| *id).unwrap();
+    let profile = a.panes[&id].as_term_ref().unwrap().meta.store.clone().unwrap();
+    let sid = a.panes[&id].as_term_ref().unwrap().meta.sid.clone();
+    a.svc.update(|st| st.profiles = crate::services::Avail::Ready(st.profiles.ready().unwrap().iter().filter(|p| p.id == profile).cloned().collect()));
+    a.open_reload(id);
+    let Overlay::Resume(p) = &a.overlay else { panic!("one profile must still be selectable") };
+    assert_eq!(p.targets.len(), 1);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let mut result = usage_launch_result(&rx);
+    result.result = Err("transcript unavailable".into());
+    a.launched(*result);
+    assert_eq!(a.panes[&id].as_term_ref().unwrap().meta.sid, sid);
+    assert!(!a.panes[&id].as_term_ref().unwrap().reloading);
+    a.open_reload(id);
+    assert!(matches!(a.overlay, Overlay::Resume(_)), "a failed reload can be retried");
+}
+
+#[test]
+fn reload_another_profile_uses_its_defaults_and_cancel_keeps_the_session() {
+    let (mut a, rx) = usage_launch_app();
+    let id = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness == Some(bro_core::Harness::Claude))).map(|(id, _)| *id).unwrap();
+    a.open_reload(id);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.panes.contains_key(&id));
+    assert!(!a.panes[&id].as_term_ref().unwrap().reloading);
+    a.open_reload(id);
+    let Overlay::Resume(p) = &mut a.overlay else { panic!("profile picker") };
+    p.sel = p.targets.iter().position(|t| !t.current).unwrap();
+    let target = p.targets[p.sel].profile_id.clone();
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let result = usage_launch_result(&rx);
+    assert_eq!(result.into, Some(id));
+    assert_eq!(result.spec.profile_id.as_deref(), Some(target.as_str()));
+    assert!(result.spec.provider_id.is_none() && result.spec.model.is_none());
+    a.open_reload(id);
+    assert!(matches!(a.overlay, Overlay::None), "only one reload can build at a time");
 }
 
 #[test]
@@ -3137,7 +3328,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert_eq!(a.panes[&id].view(), Some("settings"));
     let screen = draw(&mut a);
     // every section is listed down the left; Appearance is open first, and only its settings show
-    for s in ["Appearance", "Sessions", "Caveman", "Watchdog", "Claude Code", "Integrations", "Updates"] {
+    for s in ["Appearance", "Sessions", "Voice", "Caveman", "Watchdog", "Claude Code", "Integrations", "Updates"] {
         assert!(screen.contains(s), "{s}: {screen}");
     }
     assert!(screen.contains("Summary screensaver") && !screen.contains("Auto-resume"), "{screen}");
@@ -3176,6 +3367,18 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(a.svc.settings().insights.generate_recaps, !recaps);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // compression
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // push-to-talk
+    { let s = draw(&mut a); assert!(s.contains("Push-to-talk") && s.contains("Voice key") && s.contains("OpenAI key") && !s.contains("Auto-resume"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // its key
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // how Hugh answers
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().voice.mode, "transcribe");
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().voice.mode, "live");
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // his voice
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().voice.live_voice.as_deref(), Some("marin"));
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // the OpenAI key
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // caveman mode
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // off → caveman
     assert_eq!(a.svc.settings().caveman.active(), Some(bro_core::caveman::Level::Caveman));
@@ -3203,6 +3406,24 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     assert_eq!(a.svc.settings().watchdog.model, "fable");
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // wake-up budget
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // bro theme in Claude, first of the mod's rows
+    { let s = draw(&mut a); assert!(s.contains("bro theme in Claude") && s.contains("Session radar"), "{s}"); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().claude_mod.theme);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().claude_mod.theme);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // the mod itself: off until you turn it on
+    assert_eq!(a.svc.settings().claude_mod.summary(), "theme only");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().claude_mod.on);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().claude_mod.on && a.svc.settings().claude_mod.theme);
+    for _ in 0..4 {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // theme voice, limits, radar, tools
+    }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().claude_mod.tools);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
     assert_eq!(a.svc.settings().claude_env.preset, "quiet");
@@ -3255,6 +3476,12 @@ fn settings_view_switches_presets_and_overrides_switches() {
     }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustImagine: the demo has none
     { let s = draw(&mut a); assert!(s.contains("JustImagine") && s.contains("not installed"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Sounds: disabled until you turn them on
+    { let s = draw(&mut a); assert!(s.contains("Sounds") && s.contains("disabled") && s.contains("provided by PeonPing"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // the packs
+    { let s = draw(&mut a); assert!(s.contains("Sound packs"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // PeonPing, with its link
+    { let s = draw(&mut a); assert!(s.contains("Provided by PeonPing") && s.contains("https://peonping.com"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // bro version: the demo never looks
     { let s = draw(&mut a); assert!(s.contains("bro version") && s.contains(bro_core::self_update::CURRENT), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // check for updates: on unless you turn it off
@@ -3263,7 +3490,10 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert!(!a.svc.settings().updates.check);
     // shift+tab goes back a section to its first setting; tab wraps round from the last
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
-    { let s = draw(&mut a); assert!(s.contains("Quick install") && !s.contains("Check for updates"), "{s}"); }
+    { let s = draw(&mut a); assert!(s.contains("Sound packs") && !s.contains("Check for updates"), "{s}"); }
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    { let s = draw(&mut a); assert!(s.contains("Quick install") && !s.contains("Sound packs"), "{s}"); }
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     { let s = draw(&mut a); assert!(s.contains("Summary screensaver"), "{s}"); }
@@ -3278,6 +3508,7 @@ fn settings_show_a_justtools_update_its_progress_and_how_it_ended() {
     let mut a = app(false);
     a.run_act(Act::Settings);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Sounds
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     let _ = draw(&mut a);
     a.svc.update(|st| {
@@ -3314,6 +3545,7 @@ fn settings_say_smart_paste_leaves_file_copies_to_windows_unless_filters_are_on(
     let mut a = app(false);
     a.run_act(Act::Settings);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Sounds
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     for _ in 0..4 + usize::from(bro_core::justwatch::supported()) {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // on to Smart Paste
@@ -3340,6 +3572,7 @@ fn settings_show_justimagine_behind_github_and_where_it_runs() {
     let mut a = app(false);
     a.run_act(Act::Settings);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Sounds
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     let _ = draw(&mut a);
     let sha = "0a50ae7c5f0e7c2b1d1e9f8a7b6c5d4e3f2a1b0c";
@@ -3386,15 +3619,16 @@ fn sidebar_gear_opens_settings() {
 #[test]
 fn painted_themes_recolour_the_whole_window() {
     let mut a = app(true);
-    for name in ["tokyo-night", "catppuccin-mocha", "catppuccin-latte", "rose-pine", "rose-pine-dawn", "gruvbox", "nord", "kanagawa", "everforest", "nebula", "phosphor", "outrun", "blueprint", "cyber", "digital-rain", "vaporwave"] {
-        a.set_theme(name, false);
+    // every theme that paints its own background, the VS Code favourites included
+    for name in crate::theme::builtin_names().into_iter().filter(|n| crate::theme::get(n).painted()) {
+        a.set_theme(&name, false);
         let s = shot(&mut a, &format!("theme-{name}"));
         assert!(s.contains("bro"), "{name}");
     }
     a.set_theme("tokyo-night", false);
     a.open_palette("theme ");
     let s = shot(&mut a, "theme-picker");
-    assert!(s.contains("nebula") && s.contains("· light"), "{s}");
+    assert!(s.contains("github-dark") && s.contains("paper · light"), "{s}");
 }
 
 #[test]
@@ -3609,7 +3843,7 @@ fn prefix_w_starts_a_watchdog_with_milestones_and_shows_its_status() {
     let id = a.focused().expect("a demo session");
     let sid = a.panes[&id].as_term_ref().unwrap().meta.sid.clone();
     key(&mut a, KeyCode::Char(' '), KeyModifiers::CONTROL);
-    assert!(draw(&mut a).contains("w watchdog"), "the armed prefix offers it");
+    assert!(draw(&mut a).contains("Watchdog") && a.menu.hits.iter().any(|(_, act)| *act == Act::Watchdog), "the armed prefix offers it");
     key(&mut a, KeyCode::Char('w'), KeyModifiers::NONE);
     assert!(matches!(a.overlay, Overlay::Watchdog(_)));
     let s = shot(&mut a, "watchdog-setup");
@@ -4161,7 +4395,7 @@ fn settings_sections_open_from_the_left_or_say_where_they_sit() {
     let mut small = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, H)).unwrap();
     small.draw(|f| a.draw(f)).unwrap();
     let s = testkit::dump(small.backend().buffer());
-    assert!(s.contains("Updates  7 of 7") && !s.contains("SETTINGS"), "{s}");
+    assert!(s.contains("Updates  9 of 9") && !s.contains("SETTINGS"), "{s}");
 }
 
 fn tabs_on(a: &mut App) {
@@ -4481,4 +4715,31 @@ fn the_strip_holds_its_row_and_the_minimized_switch() {
     click_at(&mut a, r, MouseButton::Left);
     assert!(a.show_minimized);
     assert!(strip_hit(&a, &StripHit::New).is_some());
+}
+
+#[test]
+fn sounds_view_switches_sounds_moments_and_harnesses_without_touching_disk_in_the_demo() {
+    let mut a = app(false);
+    a.run_act(Act::Sounds);
+    let id = a.focused().unwrap();
+    assert_eq!(a.panes[&id].view(), Some("sounds"));
+    let s = shot(&mut a, "sounds");
+    assert!(s.contains("SOUNDS") && s.contains("disabled") && s.contains("peonping.com") && s.contains("Claude Code") && s.contains("installed (0)"), "{s}");
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE);
+    assert!(a.svc.settings().peon.on);
+    assert!(draw(&mut a).contains("SOUNDS   enabled"));
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE); // Codex off
+    assert!(!a.svc.settings().peon.codex && a.svc.settings().peon.claude);
+    key(&mut a, KeyCode::Char('3'), KeyModifiers::NONE); // "task done" off
+    assert!(draw(&mut a).contains("Codex: off"));
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert!(draw(&mut a).contains("browse"));
+    key(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
+    for c in "zel".chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    assert!(draw(&mut a).contains("/ zel"));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE);
+    assert!(!a.svc.settings().peon.on);
 }

@@ -87,6 +87,13 @@ impl Provider {
         self.extra.get("catalogue").and_then(Value::as_str) == Some("newapi") && self.base_url.is_some()
     }
 
+    /// The catalogue row for `id`; a thinking level the catalogue doesn't list
+    /// (`gemini-4-argon-medium`) falls back to its base model's row.
+    pub fn model(&self, id: &str) -> Option<&Model> {
+        let find = |id: &str| self.models.iter().find(|m| m.id == id);
+        find(id).or_else(|| ["-high", "-medium", "-low"].into_iter().find_map(|s| id.strip_suffix(s)).and_then(find))
+    }
+
     /// Concrete model ids (rows without an id, like v1's "Default" row, skipped).
     pub fn model_ids(&self) -> Vec<&str> {
         self.models.iter().map(|m| m.id.as_str()).filter(|id| !id.is_empty()).collect()
@@ -282,6 +289,16 @@ mod tests {
     use crate::config::Config;
     use crate::util::test_env::sandbox;
     use serde_json::json;
+
+    #[test]
+    fn unlisted_thinking_levels_use_their_base_model() {
+        let _sb = sandbox();
+        let mut gemini = find(&load(&Config::default()), "gemini").unwrap().clone();
+        assert_eq!(gemini.model("gemini-4-argon-medium").unwrap().id, "gemini-4-argon-medium");
+        gemini.models.retain(|m| m.id != "gemini-4-argon-medium");
+        assert_eq!(gemini.model("gemini-4-argon-medium").unwrap().id, "gemini-4-argon");
+        assert!(gemini.model("gemini-9-medium").is_none());
+    }
 
     #[test]
     fn bundled_parses_with_camel_case_fields() {

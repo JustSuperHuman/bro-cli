@@ -22,6 +22,7 @@ mod audio;
 mod hotkey;
 mod live;
 mod playback;
+pub mod sound;
 mod transcribe;
 mod worker;
 
@@ -269,6 +270,27 @@ impl Voice {
     /// Hotkey name -> Windows VK code (`None` if unknown), for config validation.
     pub fn parse_hotkey(s: &str) -> Option<u32> {
         hotkey::parse_hotkey(s)
+    }
+
+    /// A hotkey name as people say it ("Right Win", "F13"); the name itself when it isn't one.
+    pub fn hotkey_label(name: &str) -> String {
+        hotkey::parse_hotkey(name).map_or_else(|| name.to_string(), hotkey::label)
+    }
+
+    /// Whether [`Voice::capture_hotkey`] works on this platform.
+    pub fn can_capture_hotkey() -> bool {
+        hotkey::can_capture()
+    }
+
+    /// Blocking: wait up to `timeout` for the next key pressed anywhere (swallowed, so the app in front
+    /// doesn't see it) and return its hotkey name. None: Esc, or nothing pressed in time. A key you type
+    /// with is refused, since push-to-talk would take it from every app.
+    pub fn capture_hotkey(timeout: std::time::Duration) -> anyhow::Result<Option<String>> {
+        let Some(vk) = hotkey::capture(timeout)? else { return Ok(None) };
+        if hotkey::types_text(vk) {
+            anyhow::bail!("{} types text, so it can't be the voice key · try one you don't type with: a G-key set to F13-F24, Right Win, Right Alt, Pause", hotkey::label(vk));
+        }
+        Ok(Some(hotkey::name_of(vk)))
     }
 }
 

@@ -24,8 +24,12 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect) {
 }
 
 /// After everything else: the notifications over the sessions, the key tips and the launcher.
-pub fn draw_late(app: &App, ui: &mut Ui, window: Rect) {
+pub fn draw_late(app: &mut App, ui: &mut Ui, window: Rect) {
     if !under_dialog(app) {
+        if app.prefix_armed {
+            super::menu::draw(app, ui, window);
+            return;
+        }
         paint(app, ui, window);
     }
 }
@@ -35,15 +39,6 @@ fn paint(app: &App, ui: &mut Ui, window: Rect) {
     let prev = ui.layer();
     if app.prefix_armed {
         // the prefix table, bottom-right
-        let hint = app.keymap.prefix_hint();
-        let title = format!("{} …", app.keymap.prefix.display());
-        let body = ui.para(&hint, Style::new(size::SMALL, weight::MEDIUM, t.text), 460.0, Some(6));
-        let w = body.w.max(ui.measure(&title, Style::new(size::SMALL, weight::SEMIBOLD, t.accent))) + 28.0;
-        let h = body.h + 44.0;
-        let r = Rect::new(window.right() - w - 16.0, window.bottom() - h - 16.0, w, h);
-        super::kit::widgets::card(ui, r, radius::OVERLAY);
-        ui.label(Point::new(r.x + 14.0, r.y + 10.0), &title, Style::new(size::SMALL, weight::SEMIBOLD, t.accent));
-        ui.draw(&body, Point::new(r.x + 14.0, r.y + 32.0));
         ui.set_layer(prev);
         return;
     }

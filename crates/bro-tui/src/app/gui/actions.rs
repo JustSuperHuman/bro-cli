@@ -24,6 +24,10 @@ pub enum Action {
     Pane(PaneId, PaneAct),
     /// The open overlay's target `n` (its own list from the last frame).
     Overlay(usize),
+    /// An entry in the shared session context menu.
+    Menu(usize),
+    /// Copy (`true`) or paste (`false`) in the terminal's clipboard menu.
+    Clipboard(bool),
     /// A view pane's target `n`.
     View(PaneId, usize),
     /// The media panel's target `n`.

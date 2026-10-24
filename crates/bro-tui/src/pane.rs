@@ -80,6 +80,8 @@ pub enum Action {
     Toast(Kind, String),
     /// Start a new session from an account shown in the usage view.
     LaunchUsage(bro_core::Harness, Option<String>),
+    /// Connect a Google AI subscription through Bro's existing browser sign-in.
+    GeminiSignIn,
     /// Run an app action (the settings view's theme picker and toggles).
     Run(crate::keymap::Act),
 }

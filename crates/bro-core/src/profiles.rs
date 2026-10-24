@@ -21,6 +21,10 @@ pub enum ProfileKind {
     CodexLocal,
     /// `~/.bro/codex-profiles/<name>` (a CODEX_HOME)
     CodexProfile,
+    /// A Gemini API key, independent of the harness used to launch it.
+    GeminiApi,
+    /// The Google AI subscription signed in with `bro gemini login`.
+    GeminiSubscription,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,11 +45,16 @@ pub struct Profile {
 }
 
 impl Profile {
+    pub fn is_gemini(&self) -> bool { matches!(self.kind, ProfileKind::GeminiApi | ProfileKind::GeminiSubscription) }
+    pub fn is_gemini_api(&self) -> bool { self.kind == ProfileKind::GeminiApi }
+    pub fn is_gemini_subscription(&self) -> bool { self.kind == ProfileKind::GeminiSubscription }
     pub fn is_claude(&self) -> bool { matches!(self.kind, ProfileKind::ClaudeLocal | ProfileKind::ClaudeAccount) }
     pub fn is_codex(&self) -> bool { matches!(self.kind, ProfileKind::CodexLocal | ProfileKind::CodexProfile) }
     /// The machine's own login (`claude:local` / `codex:local`).
-    pub fn is_local(&self) -> bool { matches!(self.kind, ProfileKind::ClaudeLocal | ProfileKind::CodexLocal) }
+    pub fn is_local(&self) -> bool { matches!(self.kind, ProfileKind::ClaudeLocal | ProfileKind::CodexLocal) || (self.is_gemini() && self.name == "local") }
 }
+
+pub fn is_gemini_id(id: &str) -> bool { id.starts_with("gemini:") || id.starts_with("gemini-sub:") }
 
 /// Settings copied into a new Codex profile from `~/.codex` (v1 `SEEDED`).
 const CODEX_SEEDED: [&str; 6] = ["config.toml", "AGENTS.md", "prompts", "skills", "hooks", "hooks.json"];
@@ -68,6 +77,8 @@ pub fn describe(kind: ProfileKind, name: &str, dir: PathBuf) -> Profile {
         ProfileKind::CodexLocal => ("codex", "local"),
         ProfileKind::ClaudeAccount => ("claude", name),
         ProfileKind::CodexProfile => ("codex", name),
+        ProfileKind::GeminiApi => ("gemini", name),
+        ProfileKind::GeminiSubscription => ("gemini-sub", "local"),
     };
     let mut p = Profile {
         id: format!("{prefix}:{label}"),
@@ -80,7 +91,14 @@ pub fn describe(kind: ProfileKind, name: &str, dir: PathBuf) -> Profile {
         identity: None,
         email: None,
     };
-    if p.is_claude() {
+    if p.is_gemini_subscription() {
+        if let Some(account) = crate::gemini::account(&p.dir.join("oauth.json")) {
+            p.authenticated = true; p.plan = account.tier_name.or(account.tier); p.email = account.email;
+        }
+    } else if p.is_gemini_api() {
+        p.authenticated = crate::gemini_api::key(&p).is_some();
+        p.plan = Some("API key".into());
+    } else if p.is_claude() {
         let login = creds::claude_login(&p.dir);
         p.authenticated = login.authenticated;
         p.plan = login.plan;
@@ -123,6 +141,12 @@ pub fn list_codex() -> Vec<Profile> {
 pub fn list() -> Vec<Profile> {
     let mut all = list_claude();
     all.extend(list_codex());
+    let subscription = describe(ProfileKind::GeminiSubscription, "local", dir_for(ProfileKind::GeminiSubscription, "local"));
+    if subscription.authenticated { all.push(subscription); }
+    let root = paths::bro_dir().join("gemini-profiles");
+    let local = describe(ProfileKind::GeminiApi, "local", root.join("local"));
+    if local.authenticated { all.push(local); }
+    all.extend(sorted_subdirs(&root).into_iter().filter(|n| n != "local").map(|n| describe(ProfileKind::GeminiApi, &n, root.join(&n))));
     all
 }
 
@@ -134,6 +158,8 @@ pub fn parse_id(id: &str) -> Option<(ProfileKind, &str)> {
         ("codex", "local") => Some((ProfileKind::CodexLocal, name)),
         ("claude", n) if safe_component(n) => Some((ProfileKind::ClaudeAccount, n)),
         ("codex", n) if safe_component(n) => Some((ProfileKind::CodexProfile, n)),
+        ("gemini", n) if safe_component(n) => Some((ProfileKind::GeminiApi, n)),
+        ("gemini-sub", "local") => Some((ProfileKind::GeminiSubscription, name)),
         _ => None,
     }
 }
@@ -145,6 +171,8 @@ pub fn dir_for(kind: ProfileKind, name: &str) -> PathBuf {
         ProfileKind::CodexLocal => paths::codex_local_dir(),
         ProfileKind::ClaudeAccount => paths::claude_accounts_dir().join(name),
         ProfileKind::CodexProfile => paths::codex_profiles_dir().join(name),
+        ProfileKind::GeminiApi => paths::bro_dir().join("gemini-profiles").join(name),
+        ProfileKind::GeminiSubscription => paths::bro_dir().join("gemini"),
     }
 }
 
@@ -152,7 +180,7 @@ pub fn dir_for(kind: ProfileKind, name: &str) -> PathBuf {
 pub fn get(id: &str) -> Option<Profile> {
     let (kind, name) = parse_id(id)?;
     let dir = dir_for(kind, name);
-    let named = matches!(kind, ProfileKind::ClaudeAccount | ProfileKind::CodexProfile);
+    let named = matches!(kind, ProfileKind::ClaudeAccount | ProfileKind::CodexProfile) || (kind == ProfileKind::GeminiApi && name != "local");
     if named && !dir.is_dir() {
         return None;
     }
@@ -168,6 +196,8 @@ pub fn create(kind: ProfileKind, name: &str) -> anyhow::Result<Profile> {
     let dir = dir_for(kind, name);
     match kind {
         ProfileKind::ClaudeLocal | ProfileKind::CodexLocal => bail!("the local profile always exists"),
+        ProfileKind::GeminiApi => { create_named_dir(&dir)?; }
+        ProfileKind::GeminiSubscription => bail!("Use Google sign-in to connect a Gemini subscription."),
         ProfileKind::ClaudeAccount => {
             create_named_dir(&dir)?;
         }
@@ -197,7 +227,7 @@ fn create_named_dir(dir: &Path) -> anyhow::Result<()> {
 /// Delete a named profile's directory. Local logins are never removed.
 pub fn remove(id: &str) -> anyhow::Result<()> {
     let (kind, name) = parse_id(id).ok_or_else(|| anyhow!("unknown profile id {id:?}"))?;
-    if matches!(kind, ProfileKind::ClaudeLocal | ProfileKind::CodexLocal) {
+    if matches!(kind, ProfileKind::ClaudeLocal | ProfileKind::CodexLocal) || matches!(kind, ProfileKind::GeminiSubscription) || (kind == ProfileKind::GeminiApi && name == "local") {
         bail!("refusing to remove the machine's own login ({id})");
     }
     let dir = dir_for(kind, name);

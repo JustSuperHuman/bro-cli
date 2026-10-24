@@ -77,16 +77,17 @@ pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashM
 fn draw_group(app: &App, ui: &mut Ui, g: &GroupBox) {
     let t = ui.t;
     let r = g.rect;
-    ui.panel(r, radius::OVERLAY, t.text.with_alpha(if g.focused { 0.035 } else { 0.02 }), if g.focused { t.border } else { t.hairline });
+    // the frame in the project's colour, as the terminal UI's group frame
+    let color = t.project(&g.key, ui.theme);
+    ui.glass_panel(r, radius::OVERLAY, color.with_alpha(if g.focused { 0.05 } else { 0.03 }), color.with_alpha(if g.focused { 0.75 } else { 0.4 }));
     // the label sits in the frame's top band: what its sessions share (the project, the agent by its logo, the
     // login and model, a folder that isn't the project's root), then how many there are
     let ink = if g.focused { t.text } else { t.muted };
     let st = Style::new(size::SMALL, weight::SEMIBOLD, ink);
     let quiet = Style::new(size::SMALL, weight::MEDIUM, t.muted);
-    let lr = Rect::new(r.x + 12.0, r.y + 1.0, r.w - 24.0, 16.0);
+    let lr = Rect::new(r.x + 16.0, r.y + 3.0, r.w - 32.0, 16.0);
     let count = format!("{} session{}", g.count, if g.count == 1 { "" } else { "s" });
-    ui.icon(Rect::new(lr.x - 1.0, lr.y, 14.0, 16.0), "\u{F0256}", size::SMALL, ink);
-    let mut x = lr.x + 16.0;
+    let mut x = lr.x;
     let end = lr.right();
     let Some((id, term)) = g.pane.and_then(|id| app.panes.get(&id).and_then(|p| p.as_term_ref()).map(|term| (id, term))) else {
         ui.label_in(Rect::new(x, lr.y, (end - x).max(0.0), lr.h), &format!("{}  ·  {count}", g.label), st, Align::Left);
@@ -121,7 +122,12 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
     let t = ui.t;
     let term = p.as_term_ref();
     let orchestrator = term.is_some_and(|t| t.meta.orchestrator);
-    let accent = if orchestrator { t.gold } else { t.accent };
+    // the project's colour, as the terminal UI's session frame; the orchestrator stands out in gold
+    let accent = match term {
+        Some(_) if orchestrator => t.gold,
+        Some(term) => t.project(&term.meta.project.key, ui.theme),
+        None => t.accent,
+    };
     let r = b.card;
     if r.w < 4.0 || r.h < 4.0 {
         return;
@@ -144,14 +150,17 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
     let border = match (b.focused, orchestrator) {
         (true, _) => accent.with_alpha(0.7),
         (false, true) => t.gold.with_alpha(0.32 + 0.18 * hover),
+        (false, false) if term.is_some() => accent.with_alpha(0.3 + 0.2 * hover),
         (false, false) => t.hairline.mix(t.border, hover),
     };
     // square where it shares a line with the tile beside it (shared borders), rounded elsewhere
     let corners = b.joined.corners(radius::OVERLAY);
     {
+        // the card is a surface of the window (as see-through as the rest of it over a material), its edge isn't
         let px = ui.px(shown);
         let w = ui.scale.round().max(1.0);
-        ui.scene.quad(bro_gfx::Quad::new(px, t.surface).corners(corners.scale(ui.scale)).border(w, border));
+        ui.scene.glass_quad(bro_gfx::Quad::new(px, t.surface).corners(corners.scale(ui.scale)));
+        ui.scene.quad(bro_gfx::Quad::new(px, bro_gfx::Color::TRANSPARENT).corners(corners.scale(ui.scale)).border(w, border));
     }
     ui.clip(shown, if b.joined.any() { 0.0 } else { radius::OVERLAY });
     // anywhere on the card is a click on it (focus, double-click zooms, alt+double-click turns it): the frame, a
@@ -196,8 +205,9 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
         // drawn natively by the view's own module
     } else {
         if let Some(p) = app.panes.get_mut(&id) {
-            // views not drawn natively yet: the terminal UI's own drawing
-            let fill = Some(ui.t.surface);
+            // views not drawn natively yet: the terminal UI's own drawing, straight onto the card (filling it again
+            // would stack over a see-through window)
+            let fill = None;
             let theme = app.theme.clone();
             let svc = app.svc.clone();
             let tx = app.tx.clone();
@@ -455,6 +465,7 @@ fn view_icon(name: &str) -> &'static str {
         "proxy" => "\u{F04E1}",
         "bridge" => "\u{F05A9}",
         "rocket" => "\u{F0463}",
+        "sound" => "\u{F057E}",
         _ => "\u{F05AF}",
     }
 }

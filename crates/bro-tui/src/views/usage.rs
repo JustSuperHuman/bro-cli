@@ -27,6 +27,22 @@ impl UsageView {
     }
 }
 
+fn subscription_block(f: &mut Frame, area: Rect, y: u16, p: &Profile, e: Option<&UsageEntry>, t: &Theme) -> u16 {
+    let row = |k: u16| Rect { y: y + k, height: 1, ..area };
+    ui::line(f, row(0), vec![Span::styled(" ✦ Gemini subscription", ui::bold_accent(t)), Span::styled(format!(" · {}", p.plan.as_deref().unwrap_or("Google AI")), muted(t))]);
+    let groups = e.and_then(|e| e.usage.as_ref()).and_then(|u| u.subscription.as_ref()).map(|q| bro_core::gemini::quota_groups(q)).unwrap_or_default();
+    let mut next = 1;
+    for model in groups {
+        let left = model.remaining.map(|left| format!("{:.0}% left", left * 100.0)).unwrap_or_else(|| "quota not reported".into());
+        let reset = model.reset.as_deref().and_then(bro_core::util::parse_iso_secs).map(|at| format!(" · resets in {}", crate::util::countdown(at - crate::util::now_secs()))).unwrap_or_default();
+        ui::line(f, row(next), vec![Span::styled(format!("   {} · {left}{reset}", model.name.as_deref().unwrap_or(&model.id)), fg(t.fg))]);
+        next += 1;
+    }
+    ui::line(f, row(next), vec![Span::styled("   Live quota from Google · click to choose a tool and model", muted(t))]);
+    if let Some(error) = e.and_then(|e| e.error.as_ref()) { ui::line(f, row(next + 1), vec![Span::styled(format!("   {error}"), fg(t.danger))]); }
+    (next + 3).max(5)
+}
+
 fn window_row(f: &mut Frame, r: Rect, name: &str, w: Option<&Window>, t: &Theme) {
     let Some(w) = w else {
         ui::line(f, r, vec![Span::styled(format!("   {name:<6}"), muted(t)), Span::styled("—", muted(t))]);
@@ -47,6 +63,20 @@ fn block(f: &mut Frame, area: Rect, y: u16, p: &Profile, e: Option<&UsageEntry>,
     let row = |k: u16| Rect { y: y + k, height: 1, ..area };
     if y >= area.bottom() {
         return 0;
+    }
+    if p.is_gemini_subscription() {
+        return subscription_block(f, area, y, p, e, t);
+    }
+    if p.is_gemini_api() {
+        let api = e.and_then(|e| e.usage.as_ref()).and_then(|u| u.api.as_ref());
+        ui::line(f, row(0), vec![Span::styled(format!(" ✦ {} · API key · choose tool + model", p.id), ui::bold_accent(t))]);
+        if let Some(api) = api {
+            ui::line(f, row(1), vec![Span::styled(format!("   Today: {} requests · {} tokens reported", api.today.requests, api.today.tokens()), fg(t.fg))]);
+            ui::line(f, row(2), vec![Span::styled(format!("   This month: {} requests · {} tokens reported", api.month.requests, api.month.tokens()), fg(t.fg))]);
+        } else { ui::line(f, row(1), vec![Span::styled("   No usage recorded yet. Start a Gemini session here.", muted(t))]); }
+        ui::line(f, row(3), vec![Span::styled("   Recorded through Bro · s opens account usage in AI Studio", muted(t))]);
+        if let Some(error) = e.and_then(|e| e.error.as_ref()) { ui::line(f, row(4), vec![Span::styled(format!("   {error}"), fg(t.danger))]); }
+        return 5;
     }
     let h = if p.is_claude() { Some(bro_core::Harness::Claude) } else { Some(bro_core::Harness::Codex) };
     let brand = ui::harness_color(h, t);
@@ -123,7 +153,7 @@ impl Pane for UsageView {
         self.hits.clear();
         let t = cx.theme;
         let st = cx.svc.state();
-        let area = ui::hint_line(f, area, &[("click account", "new session"), ("r", "refresh"), ("j/k", "scroll"), ("alt+o", "profiles")], t);
+        let area = ui::hint_line(f, area, &[("click account", "new session"), ("g", "add Gemini"), ("s", "AI Studio"), ("r", "refresh"), ("j/k", "scroll"), ("alt+o", "profiles")], t);
         let ago = match st.usage_at.map(|a| a.elapsed().as_secs()) {
             Some(s) if s < 5 => "just refreshed".to_string(),
             Some(s) => format!("refreshed {} ago", crate::util::short_dur(s)),
@@ -143,7 +173,7 @@ impl Pane for UsageView {
             }
             let height = block(f, body, y, p, st.usage.get(&p.id), &st.picks, t);
             if p.authenticated {
-                let h = if p.is_claude() { bro_core::Harness::Claude } else { bro_core::Harness::Codex };
+                let h = if p.is_codex() { bro_core::Harness::Codex } else { bro_core::Harness::Claude };
                 self.hits.push((Rect { y, height: height.min(body.bottom() - y), ..body }, h, p.id.clone()));
             }
             y += height;
@@ -154,6 +184,9 @@ impl Pane for UsageView {
     }
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         match key.code {
+            KeyCode::Char('g') => cx.act(Action::Open(Box::new(super::profiles::ProfilesView::adding(bro_core::profiles::ProfileKind::GeminiApi)), crate::pane::Place::Tab)),
+            KeyCode::Char('G') => cx.act(Action::GeminiSignIn),
+            KeyCode::Char('s') => { if let Err(error) = crate::panes::links::open(bro_core::gemini_api::STUDIO) { cx.toast(crate::alerts::Kind::Error, error); } }
             KeyCode::Char('r') => {
                 cx.svc.refresh_usage();
                 cx.toast(crate::alerts::Kind::Usage, "refreshing usage…");

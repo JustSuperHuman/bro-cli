@@ -4,6 +4,7 @@ use crate::browser::{self, BrowserCtx};
 use crate::profiles::ProfileKind;
 use crate::providers::ProviderMode;
 use crate::{Harness, caveman, paths};
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 /// Vars that would point Claude Code at some other backend than the one chosen.
@@ -58,6 +59,8 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     }
 
     let who;
+    // who serves the model, for bro's mod: the login, a provider id, or what the proxy routes to
+    let backend;
     let mut third_party = true;
     // A native login routed through bro-proxy for request compression: Claude Code then
     // authenticates with the proxy token, but the backend and models stay first-party.
@@ -68,6 +71,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         Target::Login => {
             third_party = false;
             who = login.map(|p| p.name.clone()).unwrap_or_else(|| "local".into());
+            backend = target_profile.clone();
             if ctx.routes_native() {
                 proxied_anthropic = wire_proxy(&mut cmd, &target_profile, spec, ctx)?;
                 proxied_login = true;
@@ -76,6 +80,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         Target::Provider(p, _) if p.mode == ProviderMode::Native => {
             third_party = false;
             who = login.map(|p| p.name.clone()).unwrap_or_else(|| "local".into());
+            backend = target_profile.clone();
         }
         Target::Provider(p, key) if p.mode == ProviderMode::Anthropic => {
             require_key(p, key)?;
@@ -89,15 +94,18 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
                 cmd.set_env(k, v.clone());
             }
             who = p.id.clone();
+            backend = p.id.clone();
         }
         Target::Provider(p, key) => {
             // OpenAI-format provider: Claude Code speaks Anthropic, so bro-proxy translates.
             require_key(p, key)?;
             who = p.id.clone();
+            backend = p.id.clone();
             proxied_anthropic = wire_proxy(&mut cmd, &p.id, spec, ctx)?;
         }
         Target::Upstream(up) => {
             who = up.clone();
+            backend = up.clone();
             proxied_anthropic = wire_proxy(&mut cmd, up, spec, ctx)?;
         }
     }
@@ -107,18 +115,13 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             cmd.set_env(var, m.to_string());
         }
         // Claude Code assumes 200k for a model it doesn't know (and warns): give it the real
-        // window and output limit from the catalogue. The provider's own `env` wins.
-        if let Target::Provider(p, _) = &r.target
-            && !m.to_lowercase().starts_with("claude")
-            && let Some(info) = p.models.iter().find(|x| x.id == m)
-        {
-            let limits = [
-                ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", info.context),
-                ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", info.extra.get("maxOutput").and_then(serde_json::Value::as_u64)),
-            ];
-            for (var, value) in limits {
+        // window and output limit (see [`crate::catalogue::KnownLimits`]). The provider's own `env` wins.
+        if !m.to_lowercase().starts_with("claude") {
+            let limits = crate::catalogue::KnownLimits::load().get(m, listed_limits(&r.target, m));
+            let own_env = |var| matches!(&r.target, Target::Provider(p, _) if p.env.contains_key(var));
+            for (var, value) in [("CLAUDE_CODE_MAX_CONTEXT_TOKENS", limits.context), ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", limits.max_output)] {
                 if let Some(v) = value
-                    && !p.env.contains_key(var)
+                    && !own_env(var)
                 {
                     cmd.set_env(var, v.to_string());
                 }
@@ -160,10 +163,20 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         }
     }
     args.extend(spec.extra_args.iter().cloned());
+    let mut extra_settings = bro_mod(&mut cmd, &mut args, ctx, &config_dir, &target_profile, &backend);
     if spec.orchestrator {
         orchestrator_args(&mut args, &config_dir, ctx)?;
+    } else if let (Some(scope), Some(bin)) = (crate::peers::Scope::of(&ctx.claude_env), &ctx.bro_bin) {
+        // messages between sessions stay in this one's project; the orchestrator spans them all
+        crate::peers::add_hooks(&mut extra_settings, scope, bin, &spec.cwd);
     }
-    cmd.caveman = apply_caveman(&mut cmd, &mut args, spec, ctx);
+    // PeonPing sounds, unless this login's own settings already play them
+    if let Some(bin) = ctx.bro_bin.as_ref().filter(|_| ctx.peon.wires(Harness::Claude))
+        && !crate::peon::wire::claude_own(&config_dir).covered()
+    {
+        crate::peon::wire::add_claude_hooks(&mut extra_settings, bin);
+    }
+    cmd.caveman = apply_caveman(&mut cmd, &mut args, spec, ctx, extra_settings);
     let strict_mcp = spec.extra_args.iter().any(|a| a == "--strict-mcp-config");
     if let Some(p) = account.filter(|_| !strict_mcp)
         && let Ok(Some(servers)) = crate::claude_shared::write_shared_mcp(&p.dir, &spec.cwd)
@@ -210,15 +223,56 @@ fn orchestrator_args(args: &mut Vec<String>, config_dir: &Path, ctx: &LaunchCtx)
     Ok(())
 }
 
+/// bro's Claude Code mod and theme (see [`crate::claude_mod`]): the plugin folder, bro's theme written
+/// into this login's config dir, and what the mod reads about the launch. Returns the `--settings`
+/// entries they need. Best effort: a file bro can't write leaves Claude as it ships.
+fn bro_mod(cmd: &mut CommandSpec, args: &mut Vec<String>, ctx: &LaunchCtx, config_dir: &Path, profile: &str, backend: &str) -> Map<String, Value> {
+    let Some(settings) = &ctx.claude_mod else { return Map::new() };
+    // written before Claude starts: it watches its themes folder only if the folder was there
+    let themed = settings.theme && ctx.palette.as_ref().is_some_and(|p| crate::claude_theme::write(config_dir, p).is_ok());
+    if settings.on
+        && let Ok(dir) = crate::claude_mod::install()
+    {
+        let end = options_end(args);
+        args.splice(end..end, ["--plugin-dir".to_string(), dir.to_string_lossy().into_owned()]);
+    }
+    cmd.set_env("BRO_PROFILE", profile);
+    cmd.set_env("BRO_BACKEND", backend);
+    cmd.set_env("BRO_VERSION", env!("CARGO_PKG_VERSION"));
+    settings.launch_settings(themed)
+}
+
+/// What the backend itself lists for `model`: the provider's catalogue, a Gemini sign-in's, or the
+/// models a ChatGPT login reports to Codex.
+fn listed_limits(target: &Target, model: &str) -> Option<crate::catalogue::Limits> {
+    let provider = |id: &str| {
+        let cfg = crate::config::Config::load().unwrap_or_default();
+        crate::providers::find(&crate::providers::load(&cfg), id).and_then(|p| p.model(model).map(Into::into))
+    };
+    match target {
+        Target::Login => None,
+        Target::Provider(p, _) => p.model(model).map(Into::into),
+        Target::Upstream(id) if crate::profiles::is_gemini_id(id) => provider("gemini"),
+        Target::Upstream(id) => match crate::profiles::get(id) {
+            Some(login) if login.is_codex() => crate::catalogue::codex_models(&login.dir)
+                .into_iter()
+                .find(|m| m.id == model)
+                .map(|m| crate::catalogue::Limits { context: m.context, max_output: None }),
+            Some(_) => None,
+            None => provider(id),
+        },
+    }
+}
+
 /// The options part of `args`: everything before a `--`.
 fn options_end(args: &[String]) -> usize {
     args.iter().position(|a| a == "--").unwrap_or(args.len())
 }
 
 /// Caveman mode (see [`crate::caveman`]): the rules in the system prompt, hooks for subagents
-/// and resumes. Best effort: a file bro can't write leaves the launch as it was. Returns the
-/// level applied.
-fn apply_caveman(cmd: &mut CommandSpec, args: &mut Vec<String>, spec: &LaunchSpec, ctx: &LaunchCtx) -> Option<caveman::Level> {
+/// and resumes. The `--settings` file it writes also carries bro's own settings and `extra` (the
+/// mod's). Best effort: a file bro can't write leaves the launch as it was. Returns the level applied.
+fn apply_caveman(cmd: &mut CommandSpec, args: &mut Vec<String>, spec: &LaunchSpec, ctx: &LaunchCtx, extra: Map<String, Value>) -> Option<caveman::Level> {
     let level = ctx.caveman.active();
     let rules = level.and_then(|l| caveman::rules_file(l).ok());
     if let Some(merged) = merge_prompt_files(args, rules.as_deref(), &spec.cwd) {
@@ -227,10 +281,12 @@ fn apply_caveman(cmd: &mut CommandSpec, args: &mut Vec<String>, spec: &LaunchSpe
     let opts = &args[..options_end(args)];
     let has = |names: &[&str]| opts.iter().any(|a| names.iter().any(|n| a == n || a.starts_with(&format!("{n}="))));
     let resuming = spec.resume.is_some() || has(&["--continue", "-c", "--resume", "-r"]);
-    // Claude Code keeps one --settings; yours wins (no focus view default, and caveman then has
-    // no subagent / resume hooks).
+    // Claude Code keeps one --settings; yours wins (no focus view default, no bro theme, and caveman
+    // then has no subagent / resume hooks).
+    let mut base = ctx.claude_env.settings();
+    base.extend(extra);
     if !has(&["--settings"])
-        && let Ok(Some(file)) = caveman::claude_settings_file(&ctx.caveman, resuming, ctx.claude_env.settings())
+        && let Ok(Some(file)) = caveman::claude_settings_file(&ctx.caveman, resuming, base)
     {
         args.splice(0..0, ["--settings".to_string(), file.to_string_lossy().into_owned()]);
     }

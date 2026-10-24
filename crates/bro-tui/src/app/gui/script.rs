@@ -2,7 +2,8 @@
 //!
 //! Steps: `wait:<ms>`, `key:<chord>` (any chord the keymap understands: `alt+n`, `ctrl+space`, `esc`, `enter`),
 //! `type:<text>`, `move:<x>,<y>` / `click:<x>,<y>` / `rclick:` / `dclick:` (logical pixels), `wheel:<x>,<y>,<lines>`,
-//! `alt:down` / `alt:up` (holding alt alone), `shot:<file.png>`, `exit`.
+//! `alt:down` / `alt:up` (holding alt alone), `theme:<name>`, `material:<solid|acrylic|mica|glass>[,<tint %>]`,
+//! `shot:<file.png>`, `exit`.
 
 use super::Gui;
 use crate::pane::Event;
@@ -24,6 +25,10 @@ pub enum Step {
     Drop(std::path::PathBuf),
     /// alt held down alone (`true`) or let go: the key hints
     Alt(bool),
+    /// show a theme (not saved)
+    Theme(String),
+    /// the window's material and tint (not saved)
+    Material(bro_core::config::Material, Option<u8>),
     Exit,
 }
 
@@ -76,6 +81,11 @@ fn parse(raw: &str) -> Option<Step> {
         "shot" => Step::Shot(arg.to_string()),
         "drop" => Step::Drop(std::path::PathBuf::from(arg)),
         "alt" => Step::Alt(arg != "up"),
+        "theme" => Step::Theme(arg.trim().to_string()),
+        "material" => {
+            let (m, tint) = arg.split_once(',').map_or((arg, None), |(m, t)| (m, t.trim().parse().ok()));
+            Step::Material(bro_core::config::Material::ALL.into_iter().find(|x| x.id() == m.trim())?, tint)
+        }
         "exit" => Step::Exit,
         _ => return None,
     })
@@ -128,6 +138,16 @@ pub fn step(g: &mut Gui) {
                 g.screenshot(&path);
             }
             Step::Alt(down) => g.app_event(Event::Alt(down)),
+            Step::Theme(name) => g.app.set_theme(&name, false),
+            Step::Material(m, tint) => {
+                // the settings the window reads, in memory only (a demo never saves)
+                let mut s = g.app.svc.settings();
+                s.material = m;
+                if let Some(t) = tint {
+                    s.material_tint = t;
+                }
+                g.app.svc.set_settings_unsaved(s);
+            }
             Step::Exit => {
                 g.app.quit = true;
                 g.script.active = false;

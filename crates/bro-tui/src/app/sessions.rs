@@ -56,7 +56,11 @@ impl App {
     pub(super) fn launched(&mut self, l: Launched) {
         let Launched { spec, place, reply, name, remember, result, route_id, note, into } = l;
         // a queued resume: its placeholder (unless you closed it meanwhile) becomes the session
-        let placeholder = into.filter(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.queued.is_some()));
+        let replacement = into.filter(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some());
+        let placeholder = replacement.filter(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.queued.is_some()));
+        if let Some(t) = replacement.and_then(|id| self.panes.get_mut(&id)).and_then(|p| p.as_term()) {
+            t.reloading = false;
+        }
         if let Some(id) = into {
             self.resume_started(id);
         }
@@ -111,9 +115,10 @@ impl App {
             orchestrator: spec.orchestrator,
         };
         let sid = meta.sid.clone();
-        let term = Term::new(meta, Spawn { program: cmd.program, args: cmd.args, env: cmd.env, env_remove: cmd.env_remove }, self.svc.clone());
+        let mut term = Term::new(meta, Spawn { program: cmd.program, args: cmd.args, env: cmd.env, env_remove: cmd.env_remove }, self.svc.clone());
+        term.launch_spec = Some(spec.clone());
         // there is only ever one orchestrator: a second that finished building is ended unstarted
-        if spec.orchestrator && let Some(existing) = self.orchestrator_pane() {
+        if spec.orchestrator && let Some(existing) = self.orchestrator_pane().filter(|id| Some(*id) != replacement) {
             let id = self.add(Box::new(term));
             self.close(id);
             self.focus_pane(existing);
@@ -125,11 +130,28 @@ impl App {
             crate::orchestrator_state::save(&spec);
         }
         if into.is_some() {
-            match placeholder {
+            match replacement {
                 Some(id) => {
                     // same pane id: it keeps its tab, grid slot and sidebar place
+                    let old_route = self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.meta.route_id.clone());
+                    if let Some(old) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
+                        self.svc.watchdog_stop(&old.meta.sid);
+                        old.kill();
+                        old.on_exit();
+                        // Keep staged transcript files until the reloaded session ends.
+                        term.meta.cleanup.append(&mut old.meta.cleanup);
+                        term.meta.name = old.meta.name.clone();
+                        term.meta.renamed = old.meta.renamed;
+                    }
                     self.panes.insert(id, Box::new(term));
+                    if let Some(route) = old_route {
+                        if !self.panes.values().any(|p| p.as_term_ref().is_some_and(|t| t.meta.route_id.as_deref() == Some(&route))) {
+                            self.svc.remove_route(&route);
+                        }
+                    }
                     self.agent_state.remove(&id);
+                    self.done.remove(&id);
+                    self.flips.remove(&id);
                     self.last_tick.remove(&id);
                     self.start_now(id);
                 }
@@ -204,6 +226,7 @@ impl App {
         }
         let cwd = self.focused_cwd().or_else(|| std::env::current_dir().ok()).unwrap_or_default();
         let term = crate::views::quick_install::bro_term(&self.svc, cwd, "sign in · gemini", &["gemini", "login", "--wait"]);
+        self.svc.watch_login("gemini-sub:local".into());
         Some(self.open(Box::new(term), Place::Tab))
     }
 
@@ -718,6 +741,50 @@ impl App {
         self.overlay = Overlay::Resume(Box::new(super::overlays::ResumePicker { from, targets, sel, hits: vec![] }));
     }
 
+    /// Reload an agent in place after choosing its profile, even when there is only one.
+    pub(crate) fn open_reload(&mut self, pane: PaneId) {
+        use super::overlays::{ResumeFrom, ResumePicker, ResumeTarget};
+        let Some(t) = self.panes.get(&pane).and_then(|p| p.as_term_ref()) else {
+            self.toast(Kind::Info, "choose an agent session to reload");
+            return;
+        };
+        let Some(harness) = t.meta.harness else {
+            self.toast(Kind::Info, "choose an agent session to reload");
+            return;
+        };
+        if t.queued.is_some() || t.reloading {
+            self.toast(Kind::Info, "this session is already starting");
+            return;
+        }
+        let spec = t.launch_spec.clone().unwrap_or_else(|| LaunchSpec {
+            harness, profile_id: t.meta.profile.clone(), provider_id: None, model: t.meta.model.clone(),
+            cwd: t.meta.cwd.clone(), resume: None, permission: self.svc.settings().permission,
+            browser: BrowserMode::Off, extra_args: vec![], orchestrator: t.meta.orchestrator,
+        });
+        let current = spec.provider_id.as_deref().or(spec.profile_id.as_deref());
+        let store = t.meta.store.clone();
+        let since = std::time::SystemTime::now() - t.meta.started.elapsed();
+        let title = t.meta.name.clone().unwrap_or_else(|| t.meta.label.clone());
+        let mut targets = if matches!(harness, Harness::Claude | Harness::Codex) {
+            self.resume_targets(harness, current)
+        } else {
+            self.svc.state().profiles.ready().into_iter().flatten().filter(|p| p.authenticated).map(|p| ResumeTarget {
+                profile_id: p.id.clone(), name: p.name.clone(), detail: p.email.clone().unwrap_or_default(),
+                left: None, current: Some(p.id.as_str()) == current,
+            }).collect()
+        };
+        if !targets.iter().any(|t| t.current) {
+            let id = current.unwrap_or("").to_string();
+            targets.insert(0, ResumeTarget {
+                name: if id.is_empty() { "default".into() } else { id.clone() },
+                profile_id: id, detail: "current session profile".into(), left: None, current: true,
+            });
+        }
+        let sel = targets.iter().position(|t| t.current).unwrap_or(0);
+        let from = ResumeFrom::Reload { pane, spec, store, since, title };
+        self.overlay = Overlay::Resume(Box::new(ResumePicker { from, targets, sel, hits: vec![] }));
+    }
+
     /// Enter in the resume picker.
     pub(crate) fn resume_chosen(&mut self) {
         let Overlay::Resume(p) = std::mem::take(&mut self.overlay) else { return };
@@ -742,9 +809,28 @@ impl App {
                 let spec = LaunchSpec { harness, profile_id: Some(profile.clone()), provider_id: None, model: None, cwd: cwd.clone(), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false };
                 let mut req = LaunchRequest::new(spec, Place::Tab);
                 req.name = Some(crate::ui::fit(&title, 28));
-                req.find_live = Some(crate::services::launch::FindLive { harness, store, cwd, since });
+                req.find_live = Some(crate::services::launch::FindLive { harness, store: Some(store), cwd, since, session_id: None });
                 self.svc.launch(req);
                 self.toast(Kind::Info, format!("moving to {profile}\u{2026}"));
+            }
+            super::overlays::ResumeFrom::Reload { pane, mut spec, store, since, title } => {
+                let Some(t) = self.panes.get_mut(&pane).and_then(|p| p.as_term()) else { return };
+                if t.reloading { return; }
+                t.reloading = true;
+                if !current {
+                    spec.profile_id = Some(profile.clone());
+                    spec.provider_id = None;
+                    spec.model = None;
+                }
+                let session_id = t.insights().and_then(|s| s.session_id).or_else(|| spec.resume.as_ref().filter(|r| !r.fork).map(|r| r.session_id.clone()));
+                let find = crate::services::launch::FindLive { harness: spec.harness, store, cwd: spec.cwd.clone(), since, session_id };
+                spec.resume = None;
+                let mut req = LaunchRequest::new(spec, Place::Tab);
+                req.name = Some(title);
+                req.find_live = Some(find);
+                req.into = Some(pane);
+                self.svc.launch(req);
+                self.toast(Kind::Info, "reloading session…");
             }
         }
     }
@@ -883,13 +969,5 @@ fn resume_request(s: &SessionInfo) -> LaunchRequest {
 
 /// Where a launch keeps its transcript: its own login when it's the harness's kind, else the machine's own.
 pub(crate) fn transcript_store(spec: &LaunchSpec) -> Option<String> {
-    let own = |family: &str| match &spec.profile_id {
-        Some(p) if p.starts_with(family) => p.clone(),
-        _ => format!("{family}local"),
-    };
-    match spec.harness {
-        Harness::Claude => Some(own("claude:")),
-        Harness::Codex => Some(own("codex:")),
-        Harness::Pi | Harness::Omp => None,
-    }
+    crate::services::launch::transcript_store(spec)
 }

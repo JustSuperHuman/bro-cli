@@ -49,7 +49,10 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     widgets::scrim(ui, window, k, Action::None);
     let w = WIDTH.min(window.w - 32.0).max(300.0);
     let live = matches!(p.from, ResumeFrom::Live { .. });
-    let (caption, note) = if live {
+    let reload = matches!(p.from, ResumeFrom::Reload { .. });
+    let (caption, note) = if reload {
+        ("reload with profile", "reload the conversation with the selected profile's current settings")
+    } else if live {
         ("move to another login", "the running session closes and continues in the login you pick")
     } else {
         ("resume in", "another login continues from a copy of the conversation")
@@ -107,15 +110,16 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     // the band along the bottom: the keys, quietly, and the buttons
     let band = button_band(ui, r, BAND_H);
     let by = band.y + ((band.h - BUTTON_H) / 2.0).round();
-    let rw = widgets::button_width(ui, "Resume").max(96.0);
+    let verb = if reload { "Reload" } else { "Resume" };
+    let rw = widgets::button_width(ui, verb).max(96.0);
     let cw = widgets::button_width(ui, "Cancel").max(88.0);
     let resume = Rect::new(r.right() - PAD - rw, by, rw, BUTTON_H);
     let cancel = Rect::new(resume.x - 8.0 - cw, by, cw, BUTTON_H);
     widgets::button(ui, cancel, "Cancel", widgets::Kind::Secondary, Action::Overlay(CANCEL));
-    widgets::button(ui, resume, "Resume", widgets::Kind::Primary, Action::Overlay(RESUME));
+    widgets::button(ui, resume, verb, widgets::Kind::Primary, Action::Overlay(RESUME));
     let room = cancel.x - 16.0 - (r.x + PAD);
     if room > 40.0 {
-        let pairs = [("⏎", "resume"), ("1-9", "pick + go"), ("↑↓", "move"), ("esc", "cancel")];
+        let pairs = [("⏎", if reload { "reload" } else { "resume" }), ("1-9", "pick + go"), ("↑↓", "move"), ("esc", "cancel")];
         hints(ui, Some(Point::new(r.x + PAD, by + (BUTTON_H - CAP_H) / 2.0)), &pairs, room);
     }
     true

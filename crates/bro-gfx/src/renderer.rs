@@ -1,6 +1,10 @@
 //! The wgpu side: device and surface, the pipelines (shadows, quads, images, glyphs, and subpixel glyphs where
 //! the GPU blends two sources), the glyph atlases' textures and the image textures. [`Renderer::render`] draws a
-//! [`Scene`] and presents it.
+//! [`Scene`] and presents it, through the effects pass (a theme's glow, CRT and vignette) when one is on.
+//!
+//! A see-through window ([`Options::transparent`]) gets a swap chain that carries alpha: on Windows a
+//! DirectComposition one (DX12), which is what lets Acrylic and Mica show behind the frame. The frame is
+//! premultiplied throughout, which is what the blending below produces when the clear colour is.
 
 use crate::atlas::{Atlas, Kind};
 use crate::scene::{GlyphInstance, ImageId, ImageInstance, QuadInstance, Scene, ShadowInstance};
@@ -14,6 +18,19 @@ const GLYPH: &str = include_str!("shaders/glyph.wgsl");
 const GLYPH_LCD: &str = include_str!("shaders/glyph_lcd.wgsl");
 const IMAGE: &str = include_str!("shaders/image.wgsl");
 const POST: &str = include_str!("shaders/post.wgsl");
+const BLOOM: &str = include_str!("shaders/bloom.wgsl");
+/// The glow's half-size textures (smooth falloff without banding).
+const BLOOM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// How the window's drawing surface is set up.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Options {
+    /// wait for the display (no tearing)
+    pub vsync: bool,
+    /// the window can be see-through: a swap chain with alpha (on Windows a DX12 DirectComposition one). Falls
+    /// back to an opaque one when the system can't; [`Renderer::see_through`] tells.
+    pub transparent: bool,
+}
 
 /// Whole-screen effects (a theme's skin), applied after the scene is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -25,12 +42,22 @@ pub struct Effects {
     /// how much every other band of `scanline_px` pixels darkens (0 = off)
     pub scanlines: f32,
     pub scanline_px: f32,
+    /// how strongly bright, saturated colours glow like neon (0 = off, 1 = strong)
+    pub glow: f32,
+    /// how far the glow spreads (its blur's sigma), physical pixels
+    pub glow_px: f32,
 }
 
 impl Effects {
     pub fn active(&self) -> bool {
-        self.phosphor.is_some() || self.vignette > 0.0 || self.scanlines > 0.0
+        self.phosphor.is_some() || self.vignette > 0.0 || self.scanlines > 0.0 || self.glow > 0.0
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BloomUniform {
+    step: [f32; 4],
 }
 
 #[repr(C)]
@@ -46,6 +73,14 @@ struct Offscreen {
     bind: wgpu::BindGroup,
     w: u32,
     h: u32,
+    /// the glow at half size: bright pixels land in `bloom_a`, blur across into `bloom_b`, then down into `bloom_a`
+    bloom_a: wgpu::TextureView,
+    bloom_b: wgpu::TextureView,
+    bright_bind: wgpu::BindGroup,
+    across_bind: wgpu::BindGroup,
+    down_bind: wgpu::BindGroup,
+    bw: u32,
+    bh: u32,
 }
 
 #[repr(C)]
@@ -115,6 +150,8 @@ pub struct Renderer {
     globals: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
     quad_pipe: wgpu::RenderPipeline,
+    /// quads painted into the window's glass (see [`crate::scene::Layer::glass`])
+    glass_pipe: wgpu::RenderPipeline,
     shadow_pipe: wgpu::RenderPipeline,
     glyph_pipe: wgpu::RenderPipeline,
     /// glyphs with subpixel text among them (dual-source blending), when the GPU has it
@@ -136,7 +173,14 @@ pub struct Renderer {
     post_pipe: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
     post_uniform: wgpu::Buffer,
+    bright_pipe: wgpu::RenderPipeline,
+    blur_pipe: wgpu::RenderPipeline,
+    bloom_layout: wgpu::BindGroupLayout,
+    /// the bright pass's, the blur across's and the blur down's
+    bloom_uniforms: [wgpu::Buffer; 3],
     offscreen: Option<Offscreen>,
+    /// the swap chain carries alpha: the window shows through where the frame is see-through
+    see_through: bool,
     /// Whole-screen effects for the next frames.
     pub effects: Effects,
     /// Glyph coverage exponents: (light text, dark text). Below 1 thickens, above 1 thins.
@@ -152,6 +196,29 @@ impl Renderer {
     /// Set up the GPU for `target` (a window) of `width`×`height` physical pixels.
     pub fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, width: u32, height: u32, vsync: bool) -> Result<Renderer, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        Self::build(instance, target, width, height, Options { vsync, transparent: false })
+    }
+
+    /// [`Renderer::new`] with more say: a see-through window. When the see-through set-up can't start (no DX12
+    /// on this PC), the usual one is used instead.
+    pub fn with_options(target: impl Into<wgpu::SurfaceTarget<'static>> + Clone, width: u32, height: u32, options: Options) -> Result<Renderer, String> {
+        let usual = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        // Windows composes a window's alpha only from a DirectComposition swap chain: DX12's (unless WGPU_BACKEND
+        // asks for another API)
+        if options.transparent && cfg!(windows) && std::env::var_os("WGPU_BACKEND").is_none() {
+            let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+            desc.backends = wgpu::Backends::DX12;
+            desc.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+            match Self::build(wgpu::Instance::new(desc), target.clone(), width, height, options) {
+                Ok(r) => return Ok(r),
+                Err(e) => log::warn!("gpu: no see-through swap chain ({e}), drawing opaque"),
+            }
+        }
+        Self::build(wgpu::Instance::new(usual), target, width, height, options)
+    }
+
+    fn build(instance: wgpu::Instance, target: impl Into<wgpu::SurfaceTarget<'static>>, width: u32, height: u32, options: Options) -> Result<Renderer, String> {
+        let vsync = options.vsync;
         let surface = instance.create_surface(target).map_err(|e| format!("couldn't create a drawing surface: {e}"))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::LowPower),
@@ -185,6 +252,8 @@ impl Renderer {
         } else {
             wgpu::PresentMode::Immediate
         };
+        // see-through: the frame is premultiplied (Core Animation composes Metal's "post-multiplied" layers that way too)
+        let see_through_mode = options.transparent.then(|| [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied].into_iter().find(|m| caps.alpha_modes.contains(m))).flatten();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -193,10 +262,11 @@ impl Renderer {
             height: height.max(1),
             present_mode,
             desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Auto),
+            alpha_mode: see_through_mode.or(caps.alpha_modes.first().copied()).unwrap_or(wgpu::CompositeAlphaMode::Auto),
             view_formats: if view_format != format { vec![view_format] } else { vec![] },
         };
         surface.configure(&device, &config);
+        let see_through = see_through_mode.is_some();
 
         let globals = device.create_buffer(&wgpu::BufferDescriptor { label: Some("globals"), size: std::mem::size_of::<Globals>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -249,6 +319,12 @@ impl Renderer {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
         };
+        // glass: premultiplied colour scaled by the destination's alpha, the destination's alpha kept, so the colour
+        // changes and the see-through doesn't
+        let glass_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::DstAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+        };
         // premultiplied colour, each channel over the destination by its own coverage (the second output)
         let lcd_blend = wgpu::BlendState {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrc1, operation: wgpu::BlendOperation::Add },
@@ -283,6 +359,7 @@ impl Renderer {
         let glyph_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4];
         let image_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4];
         let quad_pipe = pipeline("quads", &plain_layout, &quad_mod, "vs_quad", "fs_quad", std::mem::size_of::<QuadInstance>(), &quad_attrs);
+        let glass_pipe = blended("glass", &plain_layout, &quad_mod, "vs_quad", "fs_quad_glass", std::mem::size_of::<QuadInstance>(), &quad_attrs, glass_blend);
         let shadow_pipe = pipeline("shadows", &plain_layout, &shadow_mod, "vs_shadow", "fs_shadow", std::mem::size_of::<ShadowInstance>(), &shadow_attrs);
         let glyph_pipe = pipeline("glyphs", &atlas_pipe_layout, &glyph_mod, "vs_glyph", "fs_glyph", std::mem::size_of::<GlyphInstance>(), &glyph_attrs);
         let lcd_pipe = (!dual_source.is_empty()).then(|| {
@@ -292,20 +369,14 @@ impl Renderer {
         });
         let image_pipe = pipeline("images", &image_pipe_layout, &image_mod, "vs_image", "fs_image", std::mem::size_of::<ImageInstance>(), &image_attrs);
 
-        // the effects pass: the drawn frame in, the swapchain out
-        let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("post"),
-            entries: &[
-                tex_entry(0),
-                sampler_entry(1),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                    count: None,
-                },
-            ],
-        });
+        // the effects pass: the drawn frame and its glow in, the swapchain out
+        let uniform_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+            count: None,
+        };
+        let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("post"), entries: &[tex_entry(0), sampler_entry(1), uniform_entry(2), tex_entry(3), sampler_entry(4)] });
         let post_pipe_layout = layout("post", &[Some(&globals_layout), Some(&post_layout)]);
         let post_mod = module("post", POST);
         let post_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -325,6 +396,32 @@ impl Renderer {
             cache: None,
         });
         let post_uniform = device.create_buffer(&wgpu::BufferDescriptor { label: Some("post"), size: std::mem::size_of::<PostUniform>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        // the glow: a bright pass at half size, then a blur across and one down
+        let bloom_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("bloom"), entries: &[tex_entry(0), sampler_entry(1), uniform_entry(2)] });
+        let bloom_pipe_layout = layout("bloom", &[Some(&globals_layout), Some(&bloom_layout)]);
+        let bloom_mod = module("bloom", BLOOM);
+        let fullscreen = |name: &str, fs: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(name),
+                layout: Some(&bloom_pipe_layout),
+                vertex: wgpu::VertexState { module: &bloom_mod, entry_point: Some("vs_bloom"), compilation_options: Default::default(), buffers: &[] },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &bloom_mod,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format: BLOOM_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let bright_pipe = fullscreen("bloom-bright", "fs_bright");
+        let blur_pipe = fullscreen("bloom-blur", "fs_blur");
+        let bloom_uniform = || device.create_buffer(&wgpu::BufferDescriptor { label: Some("bloom"), size: std::mem::size_of::<BloomUniform>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let bloom_uniforms = [bloom_uniform(), bloom_uniform(), bloom_uniform()];
 
         let mask = Self::atlas_texture(&device, Kind::Mask, 2048, 0);
         let color = Self::atlas_texture(&device, Kind::Color, 1024, 0);
@@ -342,6 +439,7 @@ impl Renderer {
             globals,
             globals_bind,
             quad_pipe,
+            glass_pipe,
             shadow_pipe,
             glyph_pipe,
             lcd_pipe,
@@ -358,7 +456,12 @@ impl Renderer {
             post_pipe,
             post_layout,
             post_uniform,
+            bright_pipe,
+            blur_pipe,
+            bloom_layout,
+            bloom_uniforms,
             offscreen: None,
+            see_through,
             effects: Effects::default(),
             text_gamma: std::env::var("BRO_TEXT_GAMMA")
                 .ok()
@@ -377,6 +480,12 @@ impl Renderer {
     /// draw greyscale.
     pub fn subpixel_text(&self) -> bool {
         self.lcd_pipe.is_some()
+    }
+
+    /// The window shows through where the frame is see-through (a [`Scene::background`] with alpha below 1):
+    /// asked for with [`Options::transparent`], and the system could.
+    pub fn see_through(&self) -> bool {
+        self.see_through
     }
 
     fn atlas_texture(device: &wgpu::Device, kind: Kind, size: u32, generation: u64) -> AtlasTexture {
@@ -554,18 +663,7 @@ impl Renderer {
         };
         self.stalls = 0;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(self.view_format), ..Default::default() });
-        if self.effects.active() {
-            self.ensure_offscreen();
-            let off = self.offscreen.as_ref().map(|o| o.view.clone());
-            if let Some(off) = off {
-                self.draw_into(&off, scene, lcd);
-                self.post_pass(&view);
-            } else {
-                self.draw_into(&view, scene, lcd);
-            }
-        } else {
-            self.draw_into(&view, scene, lcd);
-        }
+        self.compose(&view, scene, lcd);
         self.queue.present(frame);
         if stale {
             self.surface.configure(&self.device, &self.config);
@@ -573,23 +671,49 @@ impl Renderer {
         Ok(())
     }
 
-    /// An offscreen frame the size of the window (for the effects pass).
+    /// Draw `scene` into `view`: straight there, or through the offscreen frame and the effects pass (and the glow's
+    /// passes) when a theme has effects on.
+    fn compose(&mut self, view: &wgpu::TextureView, scene: &Scene, lcd: bool) {
+        if !self.effects.active() {
+            self.draw_into(view, scene, lcd);
+            return;
+        }
+        self.ensure_offscreen();
+        let Some(off) = self.offscreen.as_ref().map(|o| o.view.clone()) else {
+            self.draw_into(view, scene, lcd);
+            return;
+        };
+        self.draw_into(&off, scene, lcd);
+        if self.effects.glow > 0.0 {
+            self.bloom_pass();
+        }
+        self.post_pass(view);
+    }
+
+    /// An offscreen frame the size of the window, and the glow's half-size pair (for the effects pass).
     fn ensure_offscreen(&mut self) {
         let (w, h) = (self.config.width, self.config.height);
         if self.offscreen.as_ref().is_some_and(|o| o.w == w && o.h == h) {
             return;
         }
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("offscreen"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.view_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let texture = |label: &str, w: u32, h: u32, format: wgpu::TextureFormat| {
+            self.device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let view = texture("offscreen", w, h, self.view_format);
+        let (bw, bh) = (w.div_ceil(2).max(1), h.div_ceil(2).max(1));
+        let bloom_a = texture("bloom-a", bw, bh, BLOOM_FORMAT);
+        let bloom_b = texture("bloom-b", bw, bh, BLOOM_FORMAT);
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("post"),
             layout: &self.post_layout,
@@ -597,9 +721,58 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.nearest) },
                 wgpu::BindGroupEntry { binding: 2, resource: self.post_uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&bloom_a) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear) },
             ],
         });
-        self.offscreen = Some(Offscreen { view, bind, w, h });
+        let bloom_bind = |src: &wgpu::TextureView, uniform: &wgpu::Buffer| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bloom"),
+                layout: &self.bloom_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.linear) },
+                    wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
+                ],
+            })
+        };
+        let bright_bind = bloom_bind(&view, &self.bloom_uniforms[0]);
+        let across_bind = bloom_bind(&bloom_a, &self.bloom_uniforms[1]);
+        let down_bind = bloom_bind(&bloom_b, &self.bloom_uniforms[2]);
+        self.offscreen = Some(Offscreen { view, bind, w, h, bloom_a, bloom_b, bright_bind, across_bind, down_bind, bw, bh });
+    }
+
+    /// The glow of the offscreen frame: its neon at half size, blurred across then down, left in `bloom_a`.
+    fn bloom_pass(&mut self) {
+        let Some(off) = &self.offscreen else { return };
+        // the blur's sigma in half-size pixels; past ~3 taps its 17 taps spread out (linear filtering fills in)
+        let sigma = (self.effects.glow_px / 2.0).max(0.75);
+        let spacing = (sigma / 2.75).max(1.0);
+        let put = |buf: &wgpu::Buffer, step: [f32; 4]| self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&BloomUniform { step }));
+        put(&self.bloom_uniforms[0], [0.0; 4]);
+        put(&self.bloom_uniforms[1], [spacing / off.bw as f32, 0.0, sigma / spacing, 0.0]);
+        put(&self.bloom_uniforms[2], [0.0, spacing / off.bh as f32, sigma / spacing, 0.0]);
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bloom") });
+        for (pipe, bind, target) in [(&self.bright_pipe, &off.bright_bind, &off.bloom_a), (&self.blur_pipe, &off.across_bind, &off.bloom_b), (&self.blur_pipe, &off.down_bind, &off.bloom_a)] {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipe);
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            pass.set_bind_group(1, bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([enc.finish()]);
     }
 
     /// Draw the offscreen frame into `target` through the effects.
@@ -610,7 +783,9 @@ impl Renderer {
             Some((g, i)) => (g, i, 1.0),
             None => ([0.0; 3], [1.0; 3], 0.0),
         };
-        let u = PostUniform { ground: [ground[0], ground[1], ground[2], on], ink: [ink[0], ink[1], ink[2], e.vignette], lines: [e.scanlines, e.scanline_px.max(1.0), 0.0, 0.0] };
+        // the glow's half-size average dims thin strokes: brought back up here
+        let glow = e.glow.max(0.0) * 2.6;
+        let u = PostUniform { ground: [ground[0], ground[1], ground[2], on], ink: [ink[0], ink[1], ink[2], e.vignette], lines: [e.scanlines, e.scanline_px.max(1.0), glow, 0.0] };
         self.queue.write_buffer(&self.post_uniform, 0, bytemuck::bytes_of(&u));
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("post") });
         {
@@ -651,19 +826,7 @@ impl Renderer {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        if self.effects.active() {
-            self.ensure_offscreen();
-            let off = self.offscreen.as_ref().map(|o| o.view.clone());
-            match off {
-                Some(off) => {
-                    self.draw_into(&off, scene, lcd);
-                    self.post_pass(&view);
-                }
-                None => self.draw_into(&view, scene, lcd),
-            }
-        } else {
-            self.draw_into(&view, scene, lcd);
-        }
+        self.compose(&view, scene, lcd);
         let row = (w * 4).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size: (row * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
@@ -694,14 +857,25 @@ impl Renderer {
                 out.extend_from_slice(line);
             }
         }
+        // a see-through frame is premultiplied: pictures want the colour without the alpha in it
+        if self.see_through {
+            for px in out.as_chunks_mut::<4>().0 {
+                let a = px[3] as u32;
+                if a > 0 && a < 255 {
+                    for c in &mut px[..3] {
+                        *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+                    }
+                }
+            }
+        }
         drop(data);
         buf.unmap();
         Some((w, h, out))
     }
 
-    /// Draw the scene's layers into `view`: per layer shadows, quads, images, quads over the images, glyphs,
-    /// then top quads. `lcd`: the glyphs include subpixel text (drawn by the dual-source pipeline when there is
-    /// one).
+    /// Draw the scene's layers into `view`: per layer glass, shadows, quads, images, quads over the images,
+    /// glyphs, top quads, then top glass. `lcd`: the glyphs include subpixel text (drawn by the dual-source
+    /// pipeline when there is one).
     fn draw_into(&mut self, view: &wgpu::TextureView, scene: &Scene, lcd: bool) {
         let glyph_pipe = match &self.lcd_pipe {
             Some(p) if lcd => p,
@@ -709,7 +883,9 @@ impl Renderer {
         };
         let g = Globals { viewport: [self.config.width as f32, self.config.height as f32], text: self.text_gamma };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
+        // premultiplied, so the blending keeps the frame premultiplied; opaque unless the window can show through
         let bg = scene.background;
+        let a = if self.see_through { bg.a.clamp(0.0, 1.0) as f64 } else { 1.0 };
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         let layers = scene.used_layers();
         let mut quads: Vec<QuadInstance> = Vec::new();
@@ -718,6 +894,8 @@ impl Renderer {
         let mut images: Vec<ImageInstance> = Vec::new();
         let mut plan = vec![];
         for l in layers {
+            let gl0 = quads.len() as u32..(quads.len() + l.glass.len()) as u32;
+            quads.extend_from_slice(&l.glass);
             let s = shadows.len() as u32..(shadows.len() + l.shadows.len()) as u32;
             shadows.extend_from_slice(&l.shadows);
             let q = quads.len() as u32..(quads.len() + l.quads.len()) as u32;
@@ -737,7 +915,9 @@ impl Renderer {
             glyphs.extend_from_slice(&l.glyphs);
             let t = quads.len() as u32..(quads.len() + l.top.len()) as u32;
             quads.extend_from_slice(&l.top);
-            plan.push((s, q, im, m, gl, t));
+            let tg = quads.len() as u32..(quads.len() + l.top_glass.len()) as u32;
+            quads.extend_from_slice(&l.top_glass);
+            plan.push((gl0, s, q, im, m, gl, t, tg));
         }
         self.quads.write(&self.device, &self.queue, bytemuck::cast_slice(&quads));
         self.shadows.write(&self.device, &self.queue, bytemuck::cast_slice(&shadows));
@@ -750,7 +930,7 @@ impl Renderer {
                     view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg.r as f64, g: bg.g as f64, b: bg.b as f64, a: 1.0 }), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg.r as f64 * a, g: bg.g as f64 * a, b: bg.b as f64 * a, a }), store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
@@ -758,7 +938,12 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.globals_bind, &[]);
-            for (s, q, im, m, gl, t) in plan {
+            for (gl0, s, q, im, m, gl, t, tg) in plan {
+                if !gl0.is_empty() {
+                    pass.set_pipeline(&self.glass_pipe);
+                    pass.set_vertex_buffer(0, self.quads.buf.slice(..));
+                    pass.draw(0..4, gl0);
+                }
                 if !s.is_empty() {
                     pass.set_pipeline(&self.shadow_pipe);
                     pass.set_vertex_buffer(0, self.shadows.buf.slice(..));
@@ -794,6 +979,11 @@ impl Renderer {
                     pass.set_pipeline(&self.quad_pipe);
                     pass.set_vertex_buffer(0, self.quads.buf.slice(..));
                     pass.draw(0..4, t);
+                }
+                if !tg.is_empty() {
+                    pass.set_pipeline(&self.glass_pipe);
+                    pass.set_vertex_buffer(0, self.quads.buf.slice(..));
+                    pass.draw(0..4, tg);
                 }
             }
         }

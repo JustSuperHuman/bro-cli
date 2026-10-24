@@ -69,6 +69,7 @@
       "models": [
         { "id": "gemini-4-argon", "name": "Gemini 4 Argon", "context": 1048576, "maxOutput": 65536 },
         { "id": "gemini-4-argon-high", "name": "Gemini 4 Argon (high thinking)", "context": 1048576, "maxOutput": 65536 },
+        { "id": "gemini-4-argon-medium", "name": "Gemini 4 Argon (medium thinking)", "context": 1048576, "maxOutput": 65536 },
         { "id": "gemini-4-argon-low", "name": "Gemini 4 Argon (low thinking)", "context": 1048576, "maxOutput": 65536 }
       ]
     },

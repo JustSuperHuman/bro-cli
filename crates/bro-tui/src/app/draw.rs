@@ -527,12 +527,7 @@ impl App {
     pub(super) fn draw_toasts(&mut self, f: &mut Frame, area: Rect) {
         let t = self.theme.clone();
         if self.prefix_armed {
-            let text = format!(" {} ", self.keymap.prefix_hint());
-            let w = (ui::width(&text) as u16 + 4).min(area.width);
-            let r = Rect { x: area.right().saturating_sub(w + 1), y: area.bottom().saturating_sub(4), width: w, height: 3 };
-            ui::clear(f, r, &t);
-            let inner = ui::frame(f, r, &format!("{} …", self.keymap.prefix.display()), None, true, &t);
-            ui::line(f, inner, vec![Span::styled(text, ui::accent(&t))]);
+            self.draw_menu(f, area);
             return;
         }
         if area.width < 8 || area.height < 3 {

@@ -372,6 +372,7 @@ fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Ve
 fn account_glyph(kind: &AccountKind, harness: Harness, t: &Theme) -> (&'static str, Color) {
     let brand = |h: Harness| (ui::harness_glyph(Some(h)), ui::harness_color(Some(h), t));
     match kind {
+        AccountKind::Profile(p) if bro_core::profiles::is_gemini_id(&p) => ui::provider_glyph("gemini", t.shine, t),
         AccountKind::Profile(p) if p.starts_with("codex:") => brand(Harness::Codex),
         AccountKind::Profile(_) | AccountKind::Pool => brand(Harness::Claude),
         AccountKind::Provider(id) => ui::provider_glyph(id, t.shine, t),

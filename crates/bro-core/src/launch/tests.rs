@@ -7,6 +7,46 @@ use std::path::Path;
 
 const PROXY: &str = "http://127.0.0.1:3458";
 
+#[test]
+fn gemini_api_profiles_route_every_harness_without_putting_the_key_in_the_command() {
+    let _sandbox = setup();
+    let p = profiles::create(profiles::ProfileKind::GeminiApi, "work").unwrap();
+    crate::gemini_api::save_key(&p.dir, "private-test-key").unwrap();
+    for harness in Harness::ALL {
+        let command = build(&spec(harness, Some("gemini:work"), None, Some("gemini-text")), &ctx()).unwrap();
+        let route = command.route.as_ref().expect("every harness translates through Bro");
+        assert_eq!(route.upstream, "gemini:work");
+        assert_eq!(route.model.as_deref(), Some("gemini-text"));
+        assert!(!format!("{command:?}").contains("private-test-key"));
+        assert!(matches!(resolve_upstream(&route.upstream, route.model.as_deref(), &crate::config::Config::default()).unwrap(), UpstreamTarget::OpenAiChat { base_url, api_key: Some(key) } if base_url == crate::gemini_api::BASE && key == "private-test-key"));
+    }
+}
+
+#[test]
+fn gemini_subscription_profiles_route_every_harness_to_google_sign_in() {
+    let _sandbox = setup();
+    let path = crate::gemini::creds_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, r#"{"refresh_token":"fake-subscription","email":"me@example.com","tier_name":"Google AI Ultra"}"#).unwrap();
+    let profile = profiles::list().into_iter().find(|p| p.is_gemini_subscription()).unwrap();
+    assert_eq!(profile.id, "gemini-sub:local");
+    assert!(profile.is_local());
+    assert!(!profile.is_gemini_api());
+    for harness in Harness::ALL {
+        let missing = build(&spec(harness, Some(&profile.id), None, Some("gemini-4-argon-high")), &LaunchCtx::default()).unwrap_err();
+        assert!(missing.is::<ProxyRequired>(), "the host must be able to start a missing proxy: {missing:#}");
+        let command = build(&spec(harness, Some(&profile.id), None, Some("gemini-4-argon-high")), &ctx()).unwrap();
+        if harness == Harness::Claude {
+            assert_eq!(env(&command, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("1048576"));
+            assert_eq!(env(&command, "CLAUDE_CODE_MAX_OUTPUT_TOKENS"), Some("65536"));
+        }
+        let route = command.route.unwrap();
+        assert_eq!(route.upstream, profile.id);
+        assert!(matches!(resolve_upstream(&route.upstream, route.model.as_deref(), &crate::config::Config::default()).unwrap(), UpstreamTarget::GeminiCodeAssist { creds_file } if creds_file == path));
+    }
+    assert!(profiles::remove(&profile.id).is_err());
+}
+
 /// Focus view and spinner tips at Claude's defaults, so `--settings` only shows up in the tests about it.
 fn ctx() -> LaunchCtx {
     let mut claude_env = crate::claude_env::ClaudeEnvSettings::default();
@@ -744,9 +784,17 @@ fn provider_models_tell_claude_code_and_codex_their_real_window() {
     let c = build(&spec(Harness::Claude, None, Some("gemini"), Some("gemini-4-argon-high")), &ctx()).unwrap();
     assert_eq!(env(&c, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("1048576"));
     assert_eq!(env(&c, "CLAUDE_CODE_MAX_OUTPUT_TOKENS"), Some("65536"));
+    let c = build(&spec(Harness::Claude, None, Some("gemini"), Some("gemini-4-argon-medium")), &ctx()).unwrap();
+    assert_eq!(env(&c, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("1048576"));
     // a model the catalogue doesn't size gets nothing
     let c = build(&spec(Harness::Claude, None, Some("zai"), Some("glm-5.3")), &ctx()).unwrap();
     assert_eq!(env(&c, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), None);
+    // ...until the cached OpenRouter catalogue does
+    let data = json!([{ "id": "z-ai/glm-5.3", "context_length": 202752, "top_provider": { "max_completion_tokens": 131072 } }]);
+    crate::util::write_json_pretty(&crate::catalogue::openrouter_cache_path(), &Value::Array(crate::catalogue::map_openrouter(&data))).unwrap();
+    let c = build(&spec(Harness::Claude, None, Some("zai"), Some("glm-5.3")), &ctx()).unwrap();
+    assert_eq!(env(&c, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("202752"));
+    assert_eq!(env(&c, "CLAUDE_CODE_MAX_OUTPUT_TOKENS"), Some("131072"));
 
     let c = build(&spec(Harness::Codex, None, Some("gemini"), Some("gemini-4-argon-high")), &ctx()).unwrap();
     let arg = c.args.iter().find(|a| a.starts_with("model_catalog_json=")).expect("catalog arg");
@@ -758,4 +806,185 @@ fn provider_models_tell_claude_code_and_codex_their_real_window() {
     assert!(m.get("supported_reasoning_levels").is_some() && m.get("experimental_supported_tools").is_some());
     let prompt = m["model_messages"]["instructions_template"].as_str().unwrap();
     assert!(prompt.contains("based on Gemini 4 Argon (high thinking)") && !prompt.contains("based on GPT-"), "{}", &prompt[..120]);
+}
+
+fn mod_ctx() -> LaunchCtx {
+    use crate::claude_theme::{Ink, Palette};
+    let palette = Palette {
+        id: "ember".into(),
+        base: "ember".into(),
+        light: false,
+        rainbow: false,
+        marker: "▶".into(),
+        bg: Ink::Terminal,
+        fg: Ink::Terminal,
+        accent: Ink::Rgb(255, 95, 58),
+        shine: Ink::Rgb(255, 199, 168),
+        frame: Ink::Rgb(65, 51, 50),
+        muted: Ink::Rgb(125, 110, 110),
+        user: Ink::Rgb(100, 73, 71),
+        inline: Ink::Rgb(255, 155, 107),
+        good: Ink::Rgb(194, 204, 90),
+        danger: Ink::Rgb(255, 74, 58),
+        ansi: None,
+        panel: None,
+    };
+    let on = crate::claude_mod::ClaudeModSettings { on: true, ..Default::default() };
+    LaunchCtx { claude_mod: Some(on), palette: Some(palette), ..ctx() }
+}
+
+#[test]
+fn claude_launches_load_bros_mod_in_bros_theme() {
+    let _sb = setup();
+    let c = build(&spec(Harness::Claude, Some("claude:work"), None, None), &mod_ctx()).unwrap();
+    let dir = arg_after(&c.args, "--plugin-dir").expect("the mod's folder");
+    assert!(Path::new(dir).join(".claude-plugin/plugin.json").is_file());
+    assert_eq!(env(&c, "BRO_PROFILE"), Some("claude:work"));
+    assert_eq!(env(&c, "BRO_BACKEND"), Some("claude:work"));
+    assert_eq!(env(&c, "BRO_VERSION"), Some(env!("CARGO_PKG_VERSION")));
+    // the theme lands in the login's own config dir, before Claude starts watching it
+    let config = Path::new(env(&c, "CLAUDE_CONFIG_DIR").unwrap());
+    let theme: Value = serde_json::from_str(&std::fs::read_to_string(crate::claude_theme::path(config)).unwrap()).unwrap();
+    assert_eq!(theme["overrides"]["claude"], "#ff9b6b", "Ember's own orange for the mascot, not its accent");
+    let settings: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").unwrap()).unwrap()).unwrap();
+    assert_eq!(settings["theme"], "custom:bro");
+    assert_eq!(settings["pluginConfigs"]["bro"]["options"]["hud"], true);
+
+    // a provider: the mod hears who serves the model
+    let z = build(&spec(Harness::Claude, None, Some("zai"), Some("glm-5.3")), &mod_ctx()).unwrap();
+    assert_eq!(env(&z, "BRO_BACKEND"), Some("zai"));
+    assert_eq!(env(&z, "BRO_PROFILE"), Some("claude:local"));
+}
+
+#[test]
+fn bros_mod_can_be_turned_off_apart_from_the_theme() {
+    let _sb = setup();
+    let mut cx = mod_ctx();
+    cx.claude_mod = Some(crate::claude_mod::ClaudeModSettings { on: false, ..Default::default() });
+    let c = build(&spec(Harness::Claude, None, None, None), &cx).unwrap();
+    assert!(c.args.iter().all(|a| a != "--plugin-dir"), "{:?}", c.args);
+    let settings: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").unwrap()).unwrap()).unwrap();
+    assert_eq!(settings["theme"], "custom:bro");
+    assert!(settings.get("pluginConfigs").is_none());
+
+    cx.claude_mod = Some(crate::claude_mod::ClaudeModSettings { on: false, theme: false, ..Default::default() });
+    let c = build(&spec(Harness::Claude, None, None, None), &cx).unwrap();
+    assert!(c.args.iter().all(|a| a != "--plugin-dir" && a != "--settings"), "{:?}", c.args);
+    // and without the mod in the context, Claude runs as it ships
+    let c = build(&spec(Harness::Claude, None, None, None), &ctx()).unwrap();
+    assert!(c.args.iter().all(|a| a != "--plugin-dir") && env(&c, "BRO_PROFILE").is_none());
+}
+
+#[test]
+fn bros_mod_sits_among_the_options_and_yields_to_your_settings() {
+    let _sb = setup();
+    let mut s = spec(Harness::Claude, None, None, None);
+    s.extra_args = vec!["--settings".into(), "mine.json".into(), "--".into(), "--plugin-dir".into()];
+    let c = build(&s, &mod_ctx()).unwrap();
+    let dashdash = c.args.iter().position(|a| a == "--").unwrap();
+    let flag = c.args.iter().position(|a| a == "--plugin-dir").unwrap();
+    assert!(flag < dashdash, "{:?}", c.args);
+    assert_eq!(c.args.iter().filter(|a| *a == "--settings").count(), 1, "yours wins: no bro theme then");
+}
+
+fn peers_ctx() -> LaunchCtx {
+    LaunchCtx { bro_bin: Some(PathBuf::from("/opt/bro/bro")), ..ctx() }
+}
+
+fn settings_of(c: &CommandSpec) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").expect("a --settings file")).unwrap()).unwrap()
+}
+
+fn set_peers(cx: &mut LaunchCtx, option: &str) {
+    let k = crate::claude_env::knob(crate::peers::KNOB).unwrap();
+    cx.claude_env.set_choice(k, k.options.iter().position(|o| o.id == option).unwrap());
+}
+
+#[test]
+fn claude_sessions_reach_only_their_project_unless_you_say_otherwise() {
+    let _sb = setup();
+    let s = settings_of(&build(&spec(Harness::Claude, None, None, None), &peers_ctx()).unwrap());
+    let send = &s["hooks"]["PreToolUse"][0];
+    assert_eq!(send["matcher"], "SendMessage");
+    assert_eq!(send["hooks"][0]["command"], "/opt/bro/bro", "bro itself, exec form: no shell to quote for");
+    assert_eq!(send["hooks"][0]["args"], json!(["hook", "peers", "project", "/work"]));
+    assert_eq!(s["hooks"]["PostToolUse"][0]["matcher"], "ListAgents");
+    assert_eq!(s["hooks"]["PostToolUse"][0]["hooks"][0], send["hooks"][0]);
+    assert!(s.get("crossSessionInbound").is_none(), "this project's sessions still get through");
+
+    let mut cx = peers_ctx();
+    set_peers(&mut cx, "off");
+    let s = settings_of(&build(&spec(Harness::Claude, None, None, None), &cx).unwrap());
+    assert_eq!(s["hooks"]["PreToolUse"][0]["hooks"][0]["args"][2], "off");
+    assert_eq!(s["crossSessionInbound"], "refuse");
+    assert_eq!(s["isolatePeerMachines"], true);
+
+    set_peers(&mut cx, "default");
+    let c = build(&spec(Harness::Claude, None, None, None), &cx).unwrap();
+    assert!(c.args.iter().all(|a| a != "--settings"), "Claude's own reach: {:?}", c.args);
+    // nor without bro's executable to run
+    let c = build(&spec(Harness::Claude, None, None, None), &ctx()).unwrap();
+    assert!(c.args.iter().all(|a| a != "--settings"), "{:?}", c.args);
+}
+
+#[test]
+fn peer_hooks_share_the_settings_file_with_caveman_and_skip_the_orchestrator() {
+    let _sb = setup();
+    let mut cx = caveman_ctx(crate::caveman::Level::Caveman);
+    cx.bro_bin = Some(PathBuf::from("/opt/bro/bro"));
+    let s = settings_of(&build(&spec(Harness::Claude, None, None, None), &cx).unwrap());
+    assert!(s["hooks"]["SubagentStart"].is_array() && s["hooks"]["SessionStart"].is_array(), "{s}");
+    assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "SendMessage");
+
+    let o = LaunchCtx { bridge_url: Some("http://127.0.0.1:7357".into()), ..peers_ctx() };
+    let c = build(&orchestrator(Harness::Claude), &o).unwrap();
+    assert!(c.args.iter().all(|a| a != "--settings"), "the orchestrator reaches every project: {:?}", c.args);
+}
+
+fn peon_ctx() -> LaunchCtx {
+    LaunchCtx { bro_bin: Some(PathBuf::from("/opt/bro/bro")), peon: crate::peon::PeonSettings { on: true, ..Default::default() }, ..ctx() }
+}
+
+#[test]
+fn peon_sounds_hook_every_harness_bro_starts() {
+    let _sb = setup();
+    // Claude: bro's hook on each event, in the launch's settings
+    let s = settings_of(&build(&spec(Harness::Claude, Some("claude:work"), None, None), &peon_ctx()).unwrap());
+    for e in crate::peon::wire::CLAUDE_EVENTS {
+        let hooks = s["hooks"][e].as_array().unwrap_or_else(|| panic!("{e}: {s}"));
+        assert!(hooks.iter().any(|g| g["hooks"][0]["args"] == json!(["hook", "peon", "claude"])), "{e}");
+    }
+    // Codex: hooks and their trust as overrides
+    let c = build(&spec(Harness::Codex, None, None, None), &peon_ctx()).unwrap();
+    assert!(c.args.iter().any(|a| a.starts_with("hooks.Stop=") && a.contains("hook peon codex")), "{:?}", c.args);
+    assert!(c.args.iter().any(|a| a.starts_with("hooks.state=")));
+    // Pi and omp: the extension, and where bro is
+    for h in [Harness::Pi, Harness::Omp] {
+        let c = build(&spec(h, None, None, None), &peon_ctx()).unwrap();
+        let ext = arg_after(&c.args, "-e").unwrap_or_else(|| panic!("{h:?}: {:?}", c.args));
+        assert!(ext.ends_with(".ts"));
+        assert_eq!(env(&c, "BRO_PEON_BIN"), Some("/opt/bro/bro"));
+        assert_eq!(env(&c, "BRO_PEON_HARNESS"), Some(h.label()));
+    }
+    // off, or a harness switched off: nothing
+    let off = LaunchCtx { peon: crate::peon::PeonSettings { on: false, ..Default::default() }, ..peon_ctx() };
+    assert!(build(&spec(Harness::Codex, None, None, None), &off).unwrap().args.iter().all(|a| !a.starts_with("hooks.")));
+    let no_pi = LaunchCtx { peon: crate::peon::PeonSettings { on: true, pi: false, ..Default::default() }, ..peon_ctx() };
+    assert!(arg_after(&build(&spec(Harness::Pi, None, None, None), &no_pi).unwrap().args, "-e").is_none());
+}
+
+#[test]
+fn a_login_running_peon_ping_itself_gets_no_second_copy() {
+    let _sb = setup();
+    let work = crate::paths::claude_accounts_dir().join("work");
+    std::fs::write(work.join("settings.json"), r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash ~/.claude/hooks/peon-ping/peon.sh"}]}]}}"#).unwrap();
+    let c = build(&spec(Harness::Claude, Some("claude:work"), None, None), &peon_ctx()).unwrap();
+    if arg_after(&c.args, "--settings").is_some() {
+        let s = settings_of(&c);
+        let stop = s["hooks"]["Stop"].as_array().cloned().unwrap_or_default();
+        assert!(stop.iter().all(|g| g["hooks"][0]["args"] != json!(["hook", "peon", "claude"])), "{s}");
+    }
+    // the other account still gets bro's
+    let s = settings_of(&build(&spec(Harness::Claude, Some("claude:other"), None, None), &peon_ctx()).unwrap());
+    assert!(s["hooks"]["Stop"].as_array().unwrap().iter().any(|g| g["hooks"][0]["args"] == json!(["hook", "peon", "claude"])));
 }

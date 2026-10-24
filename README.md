@@ -3,6 +3,25 @@
 One workspace for all your coding agents (Claude Code, Codex, Pi and omp), side by side. Windows, macOS and
 Linux.
 
+![bro: agents side by side, grouped by project, with usage left for every login](docs/images/screenshot.png)
+
+## Highlights
+
+- **Every model in your favourite harness.** Run Claude Code on Gemini, GPT, DeepSeek, Kimi, Grok, local
+  LM Studio models and more, or Codex, Pi and omp on Claude. A built-in proxy translates Anthropic and
+  OpenAI formats, so you keep the agent you like and pick the model per session.
+- **Gemini on your Google AI subscription** or an API key, in any of the four agents
+  ([docs/gemini.md](docs/gemini.md)).
+- **Multiple profiles.** Several Claude, Codex and Gemini logins side by side, with 5-hour and weekly usage
+  left for each. Resume a session on another login when one runs out.
+- **Optional caveman mode.** Terse replies that keep every technical fact: fewer output tokens, faster
+  answers. Three levels, off by default ([docs/caveman.md](docs/caveman.md)).
+- **Sound packs.** PeonPing voice lines when an agent finishes or needs you, in all four agents. Browse,
+  preview and install 370+ packs. MP3 packs and the volume work on every OS ([docs/sounds.md](docs/sounds.md)).
+- **A beautiful desktop app, and the same workspace as a TUI.** GPU-rendered GUI on Windows, macOS and
+  Linux; over SSH or with no display, `bro` opens the terminal version with the same sessions and keys.
+- **On your phone.** The Just Terminal mobile and web clients connect to a built-in bridge.
+
 ## Install
 
 **Windows** (PowerShell):
@@ -51,12 +70,12 @@ Running the install line again works too.
 ## More
 
 - [Installing and updating](docs/install.md): the installer, what it puts where, building from source
-- [Using bro](docs/using.md): profiles, pasting images, fonts
+- [Using bro](docs/using.md): profiles, pasting images, fonts, themes
 - [The desktop app](docs/gui.md) and its keys
 - [Quick Install](docs/quick-install.md): `bro install` for Git, Node.js, the agents and more
 - [Gemini on your Google AI subscription](docs/gemini.md)
 - [Env files](docs/env-files.md): carry your API keys to a new machine
-- [Claude Code presets](docs/claude-env.md), [watchdogs](docs/watchdog.md), [caveman mode](docs/caveman.md)
+- [Claude Code presets](docs/claude-env.md), [Claude in bro's theme and the bro mod](docs/claude-mod.md), [watchdogs](docs/watchdog.md), [caveman mode](docs/caveman.md), [sounds](docs/sounds.md)
 
 ## License
 

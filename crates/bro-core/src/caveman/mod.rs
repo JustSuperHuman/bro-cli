@@ -163,8 +163,18 @@ pub fn claude_settings_file(s: &CavemanSettings, resuming: bool, base: serde_jso
         return Ok(None);
     }
     let mut settings = base;
-    if !hooks.is_empty() {
-        settings.insert("hooks".into(), hooks.into());
+    // next to the hooks `base` brings (bro's peer hooks, see `crate::peers`)
+    if !hooks.is_empty()
+        && let Some(all) = settings.entry("hooks").or_insert_with(|| json!({})).as_object_mut()
+    {
+        for (event, list) in hooks {
+            match all.get_mut(&event).and_then(serde_json::Value::as_array_mut) {
+                Some(have) => have.extend(list.as_array().cloned().unwrap_or_default()),
+                None => {
+                    all.insert(event, list);
+                }
+            }
+        }
     }
     let body = serde_json::to_string_pretty(&settings).unwrap_or_default();
     let path = dir().join(format!("claude-settings-{}.json", short_hash(&body, 12)));

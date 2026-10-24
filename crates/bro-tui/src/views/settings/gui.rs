@@ -9,7 +9,8 @@
 //! on a row selects it while a click on the selected row steps it (the terminal UI's mouse). The wheel scrolls the
 //! page and the selection follows it, so it always stays in view.
 
-use super::{Block, BroOpt, CaveOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, ToolOpt, UpdOpt, WatchOpt, cave_choices, rows};
+use super::{Block, BroOpt, CaveOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, live_mode, rows};
+use bro_core::config::Material;
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::brand::{self, Mark};
 use crate::app::gui::kit::{self, Cursor, Style, TextBox, Tokens, Ui, radius, size, weight, widgets};
@@ -85,10 +86,12 @@ fn glyph(s: Section) -> &'static str {
     match s {
         Section::Appearance => "\u{F03D8}",
         Section::Sessions => "\u{F018D}",
+        Section::Voice => "\u{F036C}",
         Section::Caveman => "\u{F08B7}",
         Section::Watchdog => "\u{F0A43}",
         Section::Claude => "\u{F0674}",
         Section::Integrations => "\u{F0463}",
+        Section::Sounds => "\u{F057E}",
         Section::Updates => "\u{F02DA}",
     }
 }
@@ -224,11 +227,11 @@ pub(crate) fn draw(v: &mut SettingsView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
     let surface = t.surface;
     if offset > 0.5 {
         let r = ui.px(Rect::new(view.x, view.y, view.w, 22.0));
-        ui.scene.top_quad(Quad::new(r, Fill::Vertical(surface, surface.with_alpha(0.0))));
+        ui.scene.top_glass_quad(Quad::new(r, Fill::Vertical(surface, surface.with_alpha(0.0))));
     }
     if offset < max - 0.5 {
         let r = ui.px(Rect::new(view.x, view.bottom() - 22.0, view.w, 22.0));
-        ui.scene.top_quad(Quad::new(r, Fill::Vertical(surface.with_alpha(0.0), surface)));
+        ui.scene.top_glass_quad(Quad::new(r, Fill::Vertical(surface.with_alpha(0.0), surface)));
     }
     ui.unclip();
     let over = ui.hovered(view);
@@ -239,7 +242,7 @@ pub(crate) fn draw(v: &mut SettingsView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
         let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
         match v.row() {
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
-            Row::Watch(_) => hints.push(("r", "bro's default")),
+            Row::Watch(_) | Row::Voice(VoiceOpt::Key | VoiceOpt::Mode | VoiceOpt::Speaker) => hints.push(("r", "bro's default")),
             _ => {}
         }
         let y = area.bottom() - 26.0;
@@ -330,6 +333,7 @@ fn prepare(v: &mut SettingsView, cx: &mut Cx) {
     };
     let u = cx.svc.state().updates.clone();
     v.update_busy = u.job.is_some() || u.checking;
+    v.voice_busy = cx.svc.state().voice.capturing.is_some();
 }
 
 /// Option `j` of segmented setting `i`: select it and step until it's on that option (one step from a value on
@@ -442,7 +446,9 @@ fn rain_label(r: RainMode) -> &'static str {
 fn option(row: Row, st: &Settings) -> Option<usize> {
     match row {
         Row::Bro(BroOpt::Rain) => RAIN.iter().position(|r| *r == st.rain),
+        Row::Bro(BroOpt::Material) => Material::ALL.iter().position(|m| *m == st.material),
         Row::Cave(CaveOpt::Mode) => cave_choices().iter().position(|c| *c == st.caveman.active()),
+        Row::Voice(VoiceOpt::Mode) => Some(usize::from(!live_mode(&st.voice))),
         Row::Watch(WatchOpt::Model) => crate::watchdog::MODEL_CHOICES.iter().position(|m| *m == st.watchdog.model),
         Row::Knob(k) => Some(st.claude_env.choice(&KNOBS[k]).0),
         _ => None,
@@ -461,6 +467,9 @@ fn resettable(row: Row, st: &Settings) -> Option<&'static str> {
         Row::Watch(WatchOpt::Reviewer) => w.reviewer != d.reviewer,
         Row::Watch(WatchOpt::Model) => w.model != d.model,
         Row::Watch(WatchOpt::Budget) => w.max_wakes != d.max_wakes,
+        Row::Voice(VoiceOpt::Key) => st.voice.hotkey.is_some(),
+        Row::Voice(VoiceOpt::Speaker) => st.voice.live_voice.is_some(),
+        Row::Voice(VoiceOpt::Mode) => !live_mode(&st.voice),
         _ => false,
     };
     changed.then_some("bro's default · r")
@@ -506,6 +515,16 @@ fn button(v: &SettingsView, row: Row, cx: &Cx) -> Option<(&'static str, widgets:
                 Some(_) => Some((if ji.error.is_some() { "Try again" } else { "Check" }, Secondary)),
             }
         }
+        Row::Voice(VoiceOpt::Key) if bro_voice::Voice::can_capture_hotkey() => {
+            cx.svc.state().voice.capturing.is_none().then_some(("Set key", Secondary))
+        }
+        Row::Voice(VoiceOpt::ApiKey) => {
+            let vs = cx.svc.state().voice.clone();
+            match vs.key_found {
+                Some(false) => Some(("Look again", Primary)),
+                _ => Some(("Check", Secondary)),
+            }
+        }
         Row::Update(UpdOpt::Version) => {
             let u = cx.svc.state().updates.clone();
             match () {
@@ -535,13 +554,17 @@ fn control(v: &SettingsView, it: &Item, ui: &Ui, st: &Settings, cx: &Cx) -> Ctl 
         Row::Bro(BroOpt::Theme) => Ctl::Link { value, ink: vink.value(t) },
         Row::Bro(BroOpt::Font) => Ctl::Step { value, ink: vink.value(t), mono: true, mark: None },
         Row::Watch(WatchOpt::Reviewer) => step(login_mark(&value, cx)),
-        Row::Bro(BroOpt::Screensaver) | Row::Watch(WatchOpt::Wake | WatchOpt::Budget) | Row::Preset => step(None),
+        Row::Bro(BroOpt::Screensaver | BroOpt::Tint) | Row::Watch(WatchOpt::Wake | WatchOpt::Budget) | Row::Preset | Row::Voice(VoiceOpt::Speaker) => step(None),
+        Row::Voice(VoiceOpt::Key) if !bro_voice::Voice::can_capture_hotkey() => step(None),
+        Row::Voice(VoiceOpt::Mode) => seg(vec!["out loud".into(), "as text".into()], None),
+        Row::Bro(BroOpt::Material) => seg(Material::ALL.iter().map(|m| m.id().to_string()).collect(), None),
         Row::Bro(BroOpt::Rain) => seg(RAIN.iter().map(|r| rain_label(*r).to_string()).collect(), None),
         Row::Cave(CaveOpt::Mode) => seg(cave_choices().iter().map(|c| c.map_or("off", |l| l.id()).to_string()).collect(), None),
         // Claude's models: Claude's logo beside them
         Row::Watch(WatchOpt::Model) => seg(crate::watchdog::MODEL_CHOICES.iter().map(|m| m.to_string()).collect(), Some(brand::harness(Harness::Claude))),
         Row::Knob(k) => seg(KNOBS[k].options.iter().map(|o| o.label.to_string()).collect(), None),
-        Row::Watch(WatchOpt::Prompt) | Row::Tool(ToolOpt::QuickInstall) => Ctl::Link { value, ink: vink.value(t) },
+        Row::Watch(WatchOpt::Prompt) | Row::Tool(ToolOpt::QuickInstall | ToolOpt::Sounds | ToolOpt::PeonPing) => Ctl::Link { value, ink: vink.value(t) },
+        Row::Tool(ToolOpt::SoundsOn) => Ctl::Switch { on: text.starts_with('●'), live: true },
         _ if text.starts_with('●') || text.starts_with('○') => switch(),
         row => {
             let (value, spin) = match spinning(&value) {
@@ -848,7 +871,7 @@ fn draw_page(v: &SettingsView, ui: &mut Ui, p: &Page, x: f32, w: f32, top: f32, 
             Piece::Well { y, h, lines } => {
                 // read-only: a sunken box in the terminal font
                 let r = Rect::new(x, top + y, w, *h);
-                ui.panel(r, radius::CONTROL, t.sunken, t.hairline);
+                ui.glass_panel(r, radius::CONTROL, t.sunken, t.hairline);
                 let mut ly = r.y + 12.0;
                 for b in lines {
                     ui.draw(b, Point::new(r.x + 16.0, ly));
@@ -870,7 +893,7 @@ fn item(ui: &mut Ui, it: &Laid, r: Rect, selected: bool, focused: bool, id: Pane
     // while the view has the keys
     let fill = if selected { t.selected.fade(0.65).over(card) } else { t.hover.fade(0.8 * hot).over(card) };
     let edge = if selected && focused { t.accent.with_alpha(0.8) } else { t.hairline };
-    ui.panel(r, radius::CONTROL, fill, edge);
+    ui.glass_panel(r, radius::CONTROL, fill, edge);
     ui.hit_with(r, Action::View(id, ROW + it.i), Cursor::Default);
 
     let x = r.x + PAD_X;

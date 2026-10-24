@@ -22,6 +22,8 @@ pub enum Cmd {
     ClaudePreset(String),
     /// Caveman mode for new sessions: a level, or None for off.
     Caveman(Option<bro_core::caveman::Level>),
+    /// The desktop app's window: solid, acrylic, mica or glass.
+    Material(bro_core::config::Material),
     Recent(usize),
     /// Tile one project's sessions (its key), or every session (None).
     Tiles(Option<String>),
@@ -64,6 +66,7 @@ fn icon_for(a: Act) -> &'static str {
         Proxy => "proxy",
         Bridge => "bridge",
         Settings | QuickInstall => "settings",
+        Sounds => "sound",
         Setup => "rocket",
         Themes => "theme",
         Help => "help",
@@ -133,6 +136,27 @@ impl Palette {
             swatch: None,
         });
         self.items.splice(at..at, levels.chain([off]));
+        self
+    }
+
+    /// One entry per window material (the desktop app's), before the themes.
+    pub fn with_materials(mut self, current: bro_core::config::Material) -> Palette {
+        use bro_core::config::Material;
+        let at = self.items.iter().position(|i| matches!(i.cmd, Cmd::Theme(_))).unwrap_or(self.items.len());
+        let blurb = |m: Material| match m {
+            Material::Solid => "the theme's colours, edge to edge",
+            Material::Acrylic => "your desktop behind bro, frosted",
+            Material::Mica => "a soft wash of your wallpaper's colours",
+            Material::Glass => "see-through, nothing frosted",
+        };
+        let items = Material::ALL.into_iter().map(|m| Item {
+            icon: "theme",
+            label: format!("window {}{} — {}", m.id(), if m == current { " · current" } else { "" }, blurb(m)),
+            hint: String::new(),
+            cmd: Cmd::Material(m),
+            swatch: None,
+        });
+        self.items.splice(at..at, items);
         self
     }
 

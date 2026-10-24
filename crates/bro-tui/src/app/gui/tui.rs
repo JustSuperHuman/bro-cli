@@ -92,13 +92,14 @@ impl TuiCanvas {
                     TuiColor::Reset => fill,
                     c => Some(color(c, t.surface, &t.ansi)),
                 };
+                // colour sums use the fill's colour, never its see-through alpha (a material behind the card)
                 if cell.modifier.contains(Modifier::REVERSED) {
-                    let b = bg.unwrap_or(fill.unwrap_or(t.surface));
+                    let b = bg.unwrap_or(fill.unwrap_or(t.surface)).with_alpha(1.0);
                     bg = Some(fg);
                     fg = b;
                 }
                 if cell.modifier.contains(Modifier::DIM) {
-                    fg = fg.mix(bg.unwrap_or(t.surface), 0.4);
+                    fg = fg.mix(bg.unwrap_or(t.surface).with_alpha(1.0), 0.4);
                 }
                 match (bg, &mut run) {
                     (Some(c), Some((_, end, rc))) if *end == x && *rc == c => *end = x + 1,
@@ -142,9 +143,9 @@ pub fn draw_overlay(app: &mut crate::app::App, ui: &mut Ui, canvas: &mut TuiCanv
     if let Overlay::Launcher(l) = &mut app.overlay {
         let prev = ui.layer();
         let r = Rect::new(body.x - 2.0, body.y - 2.0, body.w + 4.0, body.h + 4.0);
-        ui.panel(r, super::kit::radius::OVERLAY, ui.t.surface, ui.t.border);
+        ui.glass_panel(r, super::kit::radius::OVERLAY, ui.t.surface, ui.t.border);
         ui.block(r);
-        let fill = Some(ui.t.surface);
+        let fill = None;
         let grid = canvas.paint(ui, super::layout::inset(r, 6.0), fill, |f, area| crate::launcher::view::draw(f, area, l, &theme, time));
         ui.hit(Rect::new(grid.origin.x, grid.origin.y, grid.cols as f32 * grid.cell_w, grid.rows as f32 * grid.cell_h), super::actions::Action::Overlay(0));
         ui.set_layer(prev);

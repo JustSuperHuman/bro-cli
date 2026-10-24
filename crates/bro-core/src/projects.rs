@@ -49,6 +49,25 @@ fn compute(cwd: &Path) -> ProjectKey {
     key_for_root(&root)
 }
 
+/// The repository `cwd` belongs to: [`project_for`], except that a linked worktree (`git worktree add`) resolves to
+/// its main checkout, so every worktree of a repo is one repository. A submodule stays its own.
+pub fn repository_for(cwd: &Path) -> ProjectKey {
+    let project = project_for(cwd);
+    main_checkout(&project.root).map_or(project, |root| key_for_root(&root))
+}
+
+/// Behind a linked worktree at `root`: its `.git` file names `<repo>/.git/worktrees/<name>`, whose `commondir`
+/// leads back to `<repo>/.git`. A bare repository's worktrees resolve to the bare repository.
+fn main_checkout(root: &Path) -> Option<PathBuf> {
+    // a directory doesn't read as text: a main checkout, nothing to resolve
+    let text = std::fs::read_to_string(root.join(".git")).ok()?;
+    let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    let gitdir = if gitdir.is_absolute() { gitdir } else { root.join(gitdir) };
+    let common = PathBuf::from(std::fs::read_to_string(gitdir.join("commondir")).ok()?.trim());
+    let common = normalize_path(&if common.is_absolute() { common } else { gitdir.join(common) });
+    Some(if common.file_name()? == ".git" { common.parent()?.to_path_buf() } else { common })
+}
+
 /// Nearest ancestor (inclusive) containing a `.git` file or directory.
 pub fn git_root(start: &Path) -> Option<PathBuf> {
     start.ancestors().find(|dir| dir.join(".git").exists()).map(Path::to_path_buf)
@@ -144,6 +163,38 @@ mod tests {
             assert_eq!(p.key, p.key.to_lowercase());
             assert!(!p.key.contains('\\'));
         }
+    }
+
+    #[test]
+    fn worktrees_belong_to_their_repository_and_submodules_to_themselves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("app");
+        let admin = repo.join(".git").join("worktrees").join("feature");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        // Claude Code's own worktrees sit inside the repo; git's anywhere
+        for wt in [repo.join(".claude").join("worktrees").join("feature"), tmp.path().join("app-feature")] {
+            std::fs::create_dir_all(wt.join("src")).unwrap();
+            std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+            assert_eq!(project_for(&wt.join("src")).name, wt.file_name().unwrap().to_string_lossy(), "the sidebar keeps it apart");
+            assert_eq!(repository_for(&wt.join("src")), project_for(&repo));
+        }
+        assert_eq!(repository_for(&repo.join("deep")), project_for(&repo));
+
+        let sub = repo.join("vendor").join("lib");
+        std::fs::create_dir_all(repo.join(".git").join("modules").join("lib")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../../.git/modules/lib\n").unwrap();
+        assert_eq!(repository_for(&sub).name, "lib");
+
+        let bare = tmp.path().join("store.git");
+        let admin = bare.join("worktrees").join("main");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..").unwrap();
+        let wt = tmp.path().join("store-main");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}", admin.display())).unwrap();
+        assert_eq!(repository_for(&wt), key_for_root(&bare));
     }
 
     #[test]

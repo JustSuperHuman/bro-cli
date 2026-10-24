@@ -19,6 +19,10 @@ use std::collections::BTreeMap;
 /// The view's background (wheel, focus).
 const BODY: usize = 0;
 const REFRESH: usize = 1;
+const ADD_GEMINI: usize = 2;
+const STUDIO: usize = 3;
+const GOOGLE: usize = 4;
+const SUBSCRIPTION_ACCOUNT: usize = 5;
 /// `CARD + i`: profile `i`'s card.
 const CARD: usize = 1000;
 
@@ -52,7 +56,7 @@ fn snapshot(cx: &Cx) -> Snap {
 }
 
 fn harness(p: &Profile) -> Harness {
-    if p.is_claude() { Harness::Claude } else { Harness::Codex }
+    if p.is_codex() { Harness::Codex } else { Harness::Claude }
 }
 
 /// An agent's colour: its logo's own (Claude's orange), or the text colour for marks that are black or white
@@ -114,7 +118,8 @@ pub(crate) fn card(ui: &mut Ui, r: Rect, hot: f32, down: bool) -> Color {
     let t = ui.t;
     let rest = t.control.over(t.surface);
     let fill = if down { t.control_pressed.over(t.surface) } else { rest.mix(t.control_hover.over(t.surface), hot) };
-    ui.panel(r, radius::OVERLAY, fill, t.hairline);
+    // a surface of the window: as see-through as the rest of it over a material
+    ui.glass_panel(r, radius::OVERLAY, fill, t.hairline);
     fill
 }
 
@@ -198,11 +203,11 @@ pub(crate) fn edge_fades(ui: &mut Ui, r: Rect, content: f32, off: f32) {
     let prev = ui.layer();
     if above > 0.0 {
         let p = ui.px(Rect::new(r.x, r.y, r.w, H));
-        ui.scene.quad(Quad::new(p, Fill::Vertical(bg.fade(above), bg.with_alpha(0.0))));
+        ui.scene.glass_quad(Quad::new(p, Fill::Vertical(bg.fade(above), bg.with_alpha(0.0))));
     }
     if below > 0.0 {
         let p = ui.px(Rect::new(r.x, r.bottom() - H, r.w, H));
-        ui.scene.quad(Quad::new(p, Fill::Vertical(bg.with_alpha(0.0), bg.fade(below))));
+        ui.scene.glass_quad(Quad::new(p, Fill::Vertical(bg.with_alpha(0.0), bg.fade(below))));
     }
     ui.set_layer(prev);
 }
@@ -233,9 +238,15 @@ pub(crate) fn draw(v: &mut super::UsageView, ui: &mut Ui, area: Rect, cx: &mut C
     let label = "Refresh";
     let bw = icon_text_button_width(ui, label);
     let br = Rect::new(head.right() - bw, head.y + 2.0, bw, 32.0);
+    let aw = icon_text_button_width(ui, "API key");
+    let ar = Rect::new(br.x - 8.0 - aw, br.y, aw, 32.0);
+    icon_text_button(ui, ar, "\u{F0415}", "API key", widgets::Kind::Secondary, Action::View(cx.id, ADD_GEMINI));
     icon_text_button(ui, br, "\u{F0450}", label, widgets::Kind::Secondary, Action::View(cx.id, REFRESH));
+    let gw = icon_text_button_width(ui, "Google");
+    let gr = Rect::new(ar.x - 8.0 - gw, ar.y, gw, ar.h);
+    icon_text_button(ui, gr, "\u{F0415}", "Google", widgets::Kind::Secondary, Action::View(cx.id, GOOGLE));
     let meta = vec![(format!("{} · every 60s", snap.ago), Style::new(size::SMALL, weight::REGULAR, t.muted))];
-    title(ui, Rect { w: br.x - 16.0 - head.x, ..head }, "Usage", &meta);
+    title(ui, Rect { w: gr.x - 16.0 - head.x, ..head }, "Usage", &meta);
 
     // key hints along the bottom
     let foot_y = area.bottom() - 30.0;
@@ -365,6 +376,8 @@ const METER_GAP: f32 = 14.0;
 
 /// How tall a card wants to be at width `w`.
 fn card_height(ui: &mut Ui, p: &Profile, e: Option<&UsageEntry>, w: f32) -> f32 {
+    if p.is_gemini_subscription() { return subscription_card_height(ui, e, w); }
+    if p.is_gemini_api() { return api_card_height(ui, e, w); }
     let inner = w - 2.0 * INSET;
     let mut h = INSET + 36.0;
     match e.and_then(|e| e.usage.as_ref()) {
@@ -383,6 +396,8 @@ fn card_height(ui: &mut Ui, p: &Profile, e: Option<&UsageEntry>, w: f32) -> f32 
 
 fn draw_card(ui: &mut Ui, r: Rect, i: usize, p: &Profile, e: Option<&UsageEntry>, picks: &(Option<String>, Option<String>), cx: &Cx) {
     let t = ui.t;
+    if p.is_gemini_subscription() { draw_subscription_card(ui, r, i, p, e, cx); return; }
+    if p.is_gemini_api() { draw_api_card(ui, r, i, p, e, cx); return; }
     let h = harness(p);
     let launchable = p.authenticated;
     let hot = if launchable { ui.hover_amount(("usage-card", cx.id, i), r) } else { 0.0 };
@@ -427,8 +442,9 @@ fn draw_card(ui: &mut Ui, r: Rect, i: usize, p: &Profile, e: Option<&UsageEntry>
         let b = ui.line("+ session", st, None);
         let chip = Rect::new(right - b.w - 16.0, row1.y, b.w + 16.0, 20.0);
         let prev = ui.layer();
-        ui.fill(Rect::new(chip.x - 8.0, chip.y - 2.0, right - chip.x + 8.0, chip.h + 4.0), fill.fade(hot));
-        ui.round(chip, radius::CONTROL, t.accent.with_alpha(0.12).over(fill).fade(hot));
+        // painted onto the card (glass), so it covers what's there without making the card any less see-through
+        ui.glass(Rect::new(chip.x - 8.0, chip.y - 2.0, right - chip.x + 8.0, chip.h + 4.0), bro_gfx::Corners::ZERO, fill.fade(hot));
+        ui.glass_round(chip, radius::CONTROL, t.accent.with_alpha(0.12).over(fill).fade(hot));
         ui.draw_faded(&b, Point::new(chip.x + 8.0, chip.y + (chip.h - b.h) / 2.0), hot);
         ui.set_layer(prev);
     }
@@ -493,6 +509,107 @@ fn draw_card(ui: &mut Ui, r: Rect, i: usize, p: &Profile, e: Option<&UsageEntry>
     }
 }
 
+fn subscription_models(e: Option<&UsageEntry>) -> Vec<bro_core::gemini::ModelQuota> {
+    e.and_then(|e| e.usage.as_ref()).and_then(|u| u.subscription.as_ref()).map(|q| bro_core::gemini::quota_groups(q)).unwrap_or_default()
+}
+
+const SUBSCRIPTION_NOTE: &str = "Live quota from Google. Shared across this subscription's sessions.";
+
+fn subscription_card_height(ui: &mut Ui, e: Option<&UsageEntry>, w: f32) -> f32 {
+    let inner = (w - 2.0 * INSET).max(1.0);
+    let note = ui.para(SUBSCRIPTION_NOTE, Style::new(size::SMALL, weight::REGULAR, ui.t.muted), inner, None);
+    let error = e.and_then(|e| e.error.as_ref()).map(|error| ui.para(error, Style::new(size::SMALL, weight::REGULAR, ui.t.danger), inner, None).h + 8.0).unwrap_or(0.0);
+    144.0 + subscription_models(e).len().max(1) as f32 * 54.0 + note.h + error
+}
+
+fn draw_subscription_card(ui: &mut Ui, r: Rect, i: usize, p: &Profile, e: Option<&UsageEntry>, cx: &Cx) {
+    let t = ui.t;
+    let hot = ui.hover_amount(("gemini-subscription", cx.id, i), r);
+    card(ui, r, hot, false);
+    let x = r.x + INSET;
+    let inner = r.w - 2.0 * INSET;
+    ui.mark(brand::provider("gemini").unwrap(), Rect::new(x, r.y + INSET, 28.0, 36.0), 28.0, None);
+    ui.label_in(Rect::new(x + 40.0, r.y + INSET, inner - 40.0, 22.0), "Gemini subscription", Style::new(size::TITLE, weight::SEMIBOLD, t.text), Align::Left);
+    let subtitle = [p.plan.as_deref(), p.email.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+    ui.label_in(Rect::new(x + 40.0, r.y + INSET + 23.0, inner - 40.0, 18.0), &subtitle, Style::new(size::SMALL, weight::REGULAR, t.muted), Align::Left);
+    let mut y = r.y + 74.0;
+    let models = subscription_models(e);
+    if models.is_empty() {
+        ui.label_in(Rect::new(x, y, inner, 36.0), if e.is_some_and(|e| e.fetching) { "Reading Google's model quota…" } else { "No model quota reported yet" }, Style::new(size::SMALL, weight::REGULAR, t.muted), Align::Left);
+        y += 54.0;
+    }
+    for model in models {
+        let color = model.remaining.map(|left| pct_color((1.0 - left) as f32 * 100.0, t)).unwrap_or(t.faint);
+        let value = model.remaining.map(|left| format!("{:.0}% left", left * 100.0)).unwrap_or_else(|| "Unavailable".into());
+        let value_style = Style::new(size::BODY, weight::SEMIBOLD, color);
+        let value_w = ui.measure(&value, value_style);
+        let name = model.name.as_deref().unwrap_or(&model.id);
+        ui.label_in(Rect::new(x, y, (inner - value_w - 10.0).max(1.0), 18.0), name, Style::new(size::SMALL, weight::SEMIBOLD, t.text), Align::Left);
+        ui.label_in(Rect::new(x, y, inner, 18.0), &value, value_style, Align::Right);
+        let reset = model.reset.as_deref().and_then(bro_core::util::parse_iso_secs).map(|at| format!("resets in {}", crate::util::countdown(at - crate::util::now_secs()))).unwrap_or_else(|| "reset time not reported".into());
+        ui.label_in(Rect::new(x, y + 20.0, inner, 16.0), &reset, Style::new(size::SMALL, weight::REGULAR, t.muted), Align::Left);
+        let bar = gauge_fit(ui, Rect::new(x, y + 40.0, inner, 6.0));
+        gauge(ui, bar, model.remaining.unwrap_or(0.0) as f32, color);
+        y += 54.0;
+    }
+    let note = ui.para(SUBSCRIPTION_NOTE, Style::new(size::SMALL, weight::REGULAR, t.muted), inner, None);
+    ui.draw(&note, Point::new(x, y + 8.0));
+    if let Some(error) = e.and_then(|e| e.error.as_ref()) {
+        let message = ui.para(error, Style::new(size::SMALL, weight::REGULAR, t.danger), inner, None);
+        ui.draw(&message, Point::new(x, y + 16.0 + note.h));
+    }
+    let by = r.bottom() - INSET - 32.0;
+    let bw = (inner - 8.0) * 0.5;
+    icon_text_button(ui, Rect::new(x, by, bw, 32.0), "\u{F0415}", "Launch", widgets::Kind::Primary, Action::View(cx.id, CARD + i));
+    icon_text_button(ui, Rect::new(x + bw + 8.0, by, bw, 32.0), "\u{F03CC}", "Google AI", widgets::Kind::Secondary, Action::View(cx.id, SUBSCRIPTION_ACCOUNT));
+}
+
+fn api_note(e: Option<&UsageEntry>) -> String {
+    let mut note = "Recorded through Bro on this computer. Account totals and limits are in AI Studio.".to_string();
+    if let Some(api) = e.and_then(|e| e.usage.as_ref()).and_then(|u| u.api.as_ref()) {
+        if api.month.requests > api.month.metered { note.push_str(" Some requests did not report tokens."); }
+    }
+    note
+}
+
+fn api_card_height(ui: &mut Ui, e: Option<&UsageEntry>, w: f32) -> f32 {
+    let inner = (w - 2.0 * INSET).max(1.0);
+    let note = ui.para(&api_note(e), Style::new(size::SMALL, weight::REGULAR, ui.t.muted), inner, None);
+    let error = e.and_then(|e| e.error.as_ref()).map(|error| ui.para(error, Style::new(size::SMALL, weight::REGULAR, ui.t.danger), inner, None).h + 8.0).unwrap_or(0.0);
+    252.0 + note.h + error
+}
+
+fn draw_api_card(ui: &mut Ui, r: Rect, i: usize, p: &Profile, e: Option<&UsageEntry>, cx: &Cx) {
+    let t = ui.t;
+    let hot = ui.hover_amount(("gemini-usage", cx.id, i), r);
+    card(ui, r, hot, false);
+    let x = r.x + INSET;
+    let inner = r.w - 2.0 * INSET;
+    let mark = brand::provider("gemini").unwrap();
+    ui.mark(mark, Rect::new(x, r.y + INSET, 28.0, 36.0), 28.0, None);
+    let title = if p.name == "local" { "Gemini".to_string() } else { format!("Gemini · {}", p.name) };
+    ui.label_in(Rect::new(x + 40.0, r.y + INSET, inner - 40.0, 22.0), &title, Style::new(size::TITLE, weight::SEMIBOLD, t.text), Align::Left);
+    ui.label_in(Rect::new(x + 40.0, r.y + INSET + 23.0, inner - 40.0, 18.0), if p.name == "local" { "Detected API key" } else { "API key profile" }, Style::new(size::SMALL, weight::REGULAR, t.muted), Align::Left);
+    let api = e.and_then(|e| e.usage.as_ref()).and_then(|u| u.api.as_ref());
+    let metric = |ui: &mut Ui, y: f32, label: &str, total: Option<&bro_core::gemini_api::Totals>| {
+        ui.label_in(Rect::new(x, y, inner, 18.0), label, Style::new(size::SMALL, weight::SEMIBOLD, t.muted), Align::Left);
+        let value = match total { Some(total) => format!("{} requests · {} tokens", total.requests, crate::views::stats::compact(total.tokens())), None => "No usage recorded yet".into() };
+        ui.label_in(Rect::new(x, y + 20.0, inner, 24.0), &value, Style::new(size::BODY, weight::SEMIBOLD, t.text), Align::Left);
+    };
+    metric(ui, r.y + 78.0, "Today", api.map(|u| &u.today));
+    metric(ui, r.y + 134.0, "This month", api.map(|u| &u.month));
+    let note = ui.para(&api_note(e), Style::new(size::SMALL, weight::REGULAR, t.muted), inner, None);
+    ui.draw(&note, Point::new(x, r.y + 190.0));
+    if let Some(error) = e.and_then(|e| e.error.as_ref()) {
+        let message = ui.para(error, Style::new(size::SMALL, weight::REGULAR, t.danger), inner, None);
+        ui.draw(&message, Point::new(x, r.y + 198.0 + note.h));
+    }
+    let by = r.bottom() - INSET - 32.0;
+    let first = Rect::new(x, by, (inner - 8.0) * 0.55, 32.0);
+    icon_text_button(ui, first, "\u{F0415}", if p.authenticated { "Launch" } else { "Add key" }, widgets::Kind::Primary, Action::View(cx.id, CARD + i));
+    icon_text_button(ui, Rect::new(first.right() + 8.0, by, inner - first.w - 8.0, 32.0), "\u{F03CC}", "AI Studio", widgets::Kind::Secondary, Action::View(cx.id, STUDIO));
+}
+
 /// One window: its name and reset countdown, the % used, and the segments coloured by how full it is.
 fn meter(ui: &mut Ui, r: Rect, name: &str, w: Option<&Window>, bar_h: f32) {
     let t = ui.t;
@@ -521,6 +638,10 @@ fn meter(ui: &mut Ui, r: Rect, name: &str, w: Option<&Window>, bar_h: f32) {
 /// Target `n` was clicked.
 pub(crate) fn click(_v: &mut super::UsageView, n: usize, _p: Point, _mods: KeyModifiers, _count: u32, cx: &mut Cx) {
     match n {
+        GOOGLE => cx.act(crate::pane::Action::GeminiSignIn),
+        SUBSCRIPTION_ACCOUNT => { if let Err(error) = crate::panes::links::open("https://gemini.google/subscriptions/") { cx.toast(Kind::Error, error); } }
+        ADD_GEMINI => cx.act(crate::pane::Action::Open(Box::new(crate::views::profiles::ProfilesView::adding(bro_core::profiles::ProfileKind::GeminiApi)), crate::pane::Place::Tab)),
+        STUDIO => { if let Err(error) = crate::panes::links::open(bro_core::gemini_api::STUDIO) { cx.toast(Kind::Error, error); } }
         REFRESH => {
             cx.svc.refresh_usage();
             cx.toast(Kind::Usage, "refreshing usage…");
@@ -529,10 +650,16 @@ pub(crate) fn click(_v: &mut super::UsageView, n: usize, _p: Point, _mods: KeyMo
             // the same as the terminal UI's click on a signed-in login's block
             let pick = {
                 let st = cx.svc.state();
-                st.profiles.ready().and_then(|ps| ps.get(n - CARD)).filter(|p| p.authenticated).map(|p| (harness(p), p.id.clone()))
+                st.profiles.ready().and_then(|ps| ps.get(n - CARD)).cloned()
             };
-            if let Some((h, id)) = pick {
-                cx.act(crate::pane::Action::LaunchUsage(h, Some(id)));
+            if let Some(p) = pick {
+                if p.is_gemini_subscription() && !p.authenticated {
+                    cx.act(crate::pane::Action::GeminiSignIn);
+                } else if p.is_gemini_api() && !p.authenticated {
+                    cx.act(crate::pane::Action::Open(Box::new(crate::views::profiles::ProfilesView::editing_key(&p)), crate::pane::Place::Tab));
+                } else if p.authenticated {
+                    cx.act(crate::pane::Action::LaunchUsage(harness(&p), Some(p.id)));
+                }
             }
         }
         _ => {}

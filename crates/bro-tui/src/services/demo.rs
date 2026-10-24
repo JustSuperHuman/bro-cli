@@ -29,8 +29,10 @@ fn profile(id: &str, kind: ProfileKind, plan: &str, email: &str) -> Profile {
         ProfileKind::ClaudeAccount => home.join(".claude-max-pool").join("accounts").join(&name),
         ProfileKind::CodexLocal => home.join(".codex"),
         ProfileKind::CodexProfile => home.join(".bro").join("codex-profiles").join(&name),
+        ProfileKind::GeminiApi => home.join(".bro").join("gemini-profiles").join(&name),
+        ProfileKind::GeminiSubscription => home.join(".bro").join("gemini"),
     };
-    Profile { id: id.into(), kind, name, dir, authenticated: true, plan: Some(plan.into()), tier: None, identity: None, email: Some(email.into()) }
+    Profile { id: id.into(), kind, name, dir, authenticated: true, plan: Some(plan.into()), tier: None, identity: None, email: (!email.is_empty()).then(|| email.into()) }
 }
 
 fn model(id: &str, name: &str) -> Model {
@@ -59,7 +61,7 @@ fn window(pct: f32, resets_in: i64, mins: u32) -> Option<Window> {
 }
 
 fn usage(h5: f32, r5: i64, wk: f32, rwk: i64, plan: &str) -> Usage {
-    Usage { five_hour: window(h5, r5, 300), weekly: window(wk, rwk, 10_080), scoped: vec![], plan: Some(plan.into()), credits: None, fetched_at: crate::util::now_secs() }
+    Usage { five_hour: window(h5, r5, 300), weekly: window(wk, rwk, 10_080), scoped: vec![], plan: Some(plan.into()), credits: None, api: None, subscription: None, fetched_at: crate::util::now_secs() }
 }
 
 fn past(h: Harness, profile: Option<&str>, project: &str, title: &str, ago_secs: u64) -> SessionInfo {
@@ -86,6 +88,8 @@ pub fn fill(st: &mut State) {
         profile("claude:work", ProfileKind::ClaudeAccount, "max", "me@work.example"),
         profile("codex:local", ProfileKind::CodexLocal, "plus", "me@example.com"),
         profile("codex:team", ProfileKind::CodexProfile, "pro", "team@work.example"),
+        profile("gemini-sub:local", ProfileKind::GeminiSubscription, "Google AI Ultra", "me@example.com"),
+        profile("gemini:work", ProfileKind::GeminiApi, "API key", ""),
     ]);
     st.providers = Avail::Ready(vec![
         provider("anthropic", "Claude (Anthropic)", ProviderMode::Native, "", vec![model("claude-opus-5", "Claude Opus 5"), model("claude-sonnet-5", "Claude Sonnet 5"), model("claude-haiku-4-5-20251001", "Claude Haiku 4.5")]),
@@ -96,6 +100,8 @@ pub fn fill(st: &mut State) {
         provider("gemini", "Gemini (Google AI subscription)", ProviderMode::Antigravity, "", vec![model("gemini-4-argon", "Gemini 4 Argon"), model("gemini-4-argon-high", "Gemini 4 Argon (high thinking)")]),
     ]);
     st.models = demo_models(st.providers.ready().map(Vec::as_slice).unwrap_or(&[]));
+    st.models.insert("gemini:work".into(), vec![bro_core::catalogue::ModelRow { id: "gemini-3.8-flash".into(), name: "Gemini Flash".into(), context: Some(1048576), pricing: None, reasoning: true, created: None }]);
+    st.models.insert("gemini-sub:local".into(), vec![bro_core::catalogue::ModelRow { id: "gemini-4-argon-high".into(), name: "Gemini 4 Argon (high)".into(), context: Some(1048576), pricing: None, reasoning: true, created: None }]);
     st.past = Avail::Ready(vec![
         past(Harness::Claude, Some("claude:work"), "bro-cli-v2", "port the oriel event loop and split tree", 1_800),
         past(Harness::Codex, Some("codex:local"), "bro-cli-v2", "anthropic <-> responses streaming fixtures", 7_200),
@@ -117,6 +123,8 @@ pub fn fill(st: &mut State) {
     put("claude:local", usage(91.0, 38 * 60, 88.0, 86_400 + 5 * 3600, "max"), 9.0, 12.0, true);
     put("codex:local", usage(12.0, 3 * 3600, 40.0, 5 * 86_400, "plus"), 88.0, 60.0, false);
     put("codex:team", usage(3.0, 4 * 3600 + 40 * 60, 8.0, 6 * 86_400, "pro"), 97.0, 92.0, false);
+    u.insert("gemini:work".into(), UsageEntry { usage: Some(Usage { api: Some(bro_core::gemini_api::ApiUsage { today: bro_core::gemini_api::Totals { requests: 42, input: 120000, output: 34000, cached: 80000, metered: 42, errors: 0 }, month: bro_core::gemini_api::Totals { requests: 680, input: 2100000, output: 470000, cached: 900000, metered: 680, errors: 2 } }), ..Default::default() }), ..Default::default() });
+    u.insert("gemini-sub:local".into(), UsageEntry { usage: Some(Usage { plan: Some("Google AI Ultra".into()), subscription: Some(vec![bro_core::gemini::ModelQuota { id: "gemini-4-argon-high".into(), name: Some("Gemini 4 Argon".into()), remaining: Some(0.73), reset: Some(chrono::DateTime::from_timestamp(crate::util::now_secs() + 7200, 0).unwrap().to_rfc3339()) }, bro_core::gemini::ModelQuota { id: "gemini-3.8-flash-high".into(), name: Some("Gemini 3.8 Flash".into()), remaining: Some(0.94), reset: None }]), ..Default::default() }), ..Default::default() });
     st.usage = u;
     st.usage_at = Some(std::time::Instant::now());
     st.picks = (Some("claude:work".into()), Some("claude:personal".into()));

@@ -419,6 +419,7 @@ fn glyph(name: &str) -> &'static str {
         "key" => "\u{F0306}",
         "caveman" => "\u{F08B7}",
         "search" => "\u{F0349}",
+        "sound" => "\u{F057E}",
         _ => "\u{F05AF}",
     }
 }

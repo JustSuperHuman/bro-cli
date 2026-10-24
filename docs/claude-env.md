@@ -49,6 +49,7 @@ Source: <https://code.claude.com/docs/en/env-vars> (checked 2026-10-11).
 | Transcripts & history | `CLAUDE_CODE_SKIP_PROMPT_HISTORY` |
 | Auto memory | `CLAUDE_CODE_DISABLE_AUTO_MEMORY` |
 | Screen-share safe | `IS_DEMO`, `CLAUDE_CODE_HIDE_CWD` |
+| Messages between sessions | bro's hooks on `SendMessage` and `ListAgents` (this project, the default); off adds `crossSessionInbound: "refuse"` and `isolatePeerMachines: true`. See [below](#messages-between-sessions). |
 | Claude updates | `DISABLE_AUTOUPDATER` (manual) / `DISABLE_UPDATES` (frozen) |
 | Overload errors | `CLAUDE_CODE_RETRY_WATCHDOG` |
 | Shell command time limit | `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_TIMEOUT_MS` |
@@ -57,6 +58,38 @@ Source: <https://code.claude.com/docs/en/env-vars> (checked 2026-10-11).
 | Tool search via proxy | `ENABLE_TOOL_SEARCH=true`, on by default for launches through bro-proxy to a Claude upstream (pool, Claude logins with compression, Anthropic providers). Claude Code otherwise turns tool search off behind any proxy and loads every MCP tool definition into context up front. |
 | Agent teams | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` |
 | Claude renderer | `CLAUDE_CODE_NO_FLICKER` (fullscreen) / `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` (classic) |
+
+## Messages between sessions
+
+Claude Code sessions on one machine can find each other with `ListAgents` and write to each other with
+`SendMessage`, and Claude Code doesn't scope that by project. Every session on a login registers in that login's
+`sessions` folder (`~/.claude/sessions`, or a pooled account's own config dir), and each one sees every other one
+there. So a session in one repo can be told about, or interrupted by, work in an unrelated one. bro keeps them apart
+with the **Messages between sessions** switch, under Settings › Claude Code › privacy:
+
+| Option | What Claude can reach |
+|---|---|
+| this project (default) | Sessions in the same repository, and bro's orchestrator. Every worktree of a repo counts as the repo; a folder outside git is a project of its own. |
+| off | No other session. Incoming messages are refused too, and a message bound for another machine waits for your approval. |
+| Claude default | Every session on this machine, as Claude Code ships. |
+
+Each Claude launch's `--settings` file gets two hooks that run bro itself (`bro hook peers <scope> <folder>`). They
+use the exec form, so no shell sits in between. A `PreToolUse` hook on `SendMessage` denies a send to a session out of
+reach, and Claude tells you what it meant to send instead. A `PostToolUse` hook on `ListAgents` takes those sessions
+out of the listing Claude reads and adds a line saying how many it left out. Subagents, teammates and `main` aren't
+sessions in the registry, so messages to them go through as before. Your own `/list-agents` still shows everything.
+
+What it doesn't cover:
+
+- Only sessions bro starts carry the hooks. A `claude` you run in another terminal can still message bro's sessions,
+  and under "this project" they take it, because Claude Code can't filter incoming messages by sender. Under "off" they
+  refuse it.
+- Sessions on other machines and in the cloud (listed only while Remote Control is connected) aren't in the local
+  registry. "This project" leaves them alone; "off" hides them and holds anything sent to them for your approval.
+- Pass your own `--settings` and bro adds none, so no hooks either.
+- The orchestrator's own launch gets no hooks, since its job spans every project.
+- Exec-form hooks need Claude Code 2.1.139 or later. Cross-session messaging itself needs 2.1.224, or 2.1.239 on
+  Windows.
 
 ## Already set by bro's launch code
 

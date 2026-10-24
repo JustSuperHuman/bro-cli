@@ -26,6 +26,12 @@ pub struct Usage {
     pub scoped: Vec<(String, Window)>,
     pub plan: Option<String>,
     pub credits: Option<f64>,
+    /// Gemini API totals recorded by Bro; account-wide quota is available in AI Studio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<crate::gemini_api::ApiUsage>,
+    /// Live model quotas from the connected Google AI subscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription: Option<Vec<crate::gemini::ModelQuota>>,
     /// unix seconds when fetched
     pub fetched_at: i64,
 }
@@ -53,6 +59,15 @@ pub fn fetch(profile: &crate::profiles::Profile) -> anyhow::Result<Usage> {
 }
 
 fn fetch_uncached(profile: &crate::profiles::Profile) -> anyhow::Result<Usage> {
+    if profile.is_gemini_subscription() {
+        let quotas = crate::gemini::quotas(&profile.dir.join("oauth.json"))?.into_iter().filter(|m| m.id.starts_with("gemini-")).collect();
+        return Ok(Usage { subscription: Some(quotas), plan: profile.plan.clone(), fetched_at: crate::util::now_secs(), ..Default::default() });
+    }
+    if profile.is_gemini_api() {
+        let key = crate::gemini_api::key(profile).ok_or_else(|| anyhow::anyhow!("Add a Gemini API key to this profile."))?;
+        crate::gemini_api::models(&key)?;
+        return Ok(Usage { api: Some(crate::gemini_api::usage(&profile.id)?), plan: profile.plan.clone(), fetched_at: crate::util::now_secs(), ..Default::default() });
+    }
     let mut usage = if profile.is_claude() { claude::fetch(&profile.dir)? } else { codex::fetch(&profile.dir)? };
     if usage.plan.is_none() {
         usage.plan = profile.plan.clone();

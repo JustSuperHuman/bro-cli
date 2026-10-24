@@ -129,6 +129,7 @@ impl App {
             Act::Stats => self.open_view("stats"),
             Act::Settings => self.open_view("settings"),
             Act::QuickInstall => self.open_view("quick-install"),
+            Act::Sounds => self.open_view("sounds"),
             Act::Setup => self.open_view("setup"),
             Act::Proxy => self.open_view("proxy"),
             Act::Bridge => self.open_view("bridge"),
@@ -165,6 +166,13 @@ impl App {
                 self.set_caveman((!s.on).then_some(s.level));
             }
             Act::Continue => self.open_continue(),
+            Act::Reload => {
+                if let Some(id) = self.focused() {
+                    self.open_reload(id);
+                } else {
+                    self.toast(Kind::Info, "choose an agent session to reload");
+                }
+            }
             Act::Orchestrator => self.open_orchestrator(),
             Act::CloseProject => {
                 if let Some(root) = self.current_project() {
@@ -423,11 +431,19 @@ impl App {
             return;
         };
         self.svc.refresh_usage();
+        let is_gemini = bro_core::profiles::is_gemini_id(&profile);
+        let h = if is_gemini {
+            self.recents.iter().find(|r| r.profile_id.as_deref() == Some(&profile)).map(|r| r.harness).unwrap_or(h)
+        } else { h };
         let launcher = self.session_launcher(self.preferred_dir(), Place::Tab).with_harness(h);
         let Some(launcher) = launcher.with_profile(&profile) else {
             self.toast(Kind::Error, "that account is no longer available");
             return;
         };
+        if is_gemini {
+            self.overlay = Overlay::Launcher(Box::new(launcher));
+            return;
+        }
         match launcher.quick_spec() {
             Some(spec) => {
                 self.launch_spec(spec, Place::Tab);
@@ -493,12 +509,15 @@ impl App {
         let themes = crate::theme::names();
         let tiles: Vec<(String, String, usize)> = self.project_tabs().into_iter().map(|t| (t.key, t.name, t.live)).collect();
         let all = self.tile_ids(None).len();
-        self.overlay = Overlay::Palette(Box::new(
-            Palette::new(&self.keymap, &self.recents, &themes, &self.theme.name, query)
-                .with_presets(&self.svc.settings().claude_env.preset)
-                .with_caveman(self.svc.settings().caveman.active())
-                .with_tiles(&tiles, all),
-        ));
+        let mut p = Palette::new(&self.keymap, &self.recents, &themes, &self.theme.name, query)
+            .with_presets(&self.svc.settings().claude_env.preset)
+            .with_caveman(self.svc.settings().caveman.active())
+            .with_tiles(&tiles, all);
+        // the desktop app has a window of its own to dress
+        if crate::fonts::GUI.load(std::sync::atomic::Ordering::Relaxed) {
+            p = p.with_materials(self.svc.settings().material);
+        }
+        self.overlay = Overlay::Palette(Box::new(p));
     }
 
     /// Caveman mode for new sessions: a level, or None for off.
@@ -530,6 +549,12 @@ impl App {
                 self.toast(Kind::Info, format!("Claude preset: {label} (new launches)"));
             }
             Cmd::Caveman(level) => self.set_caveman(level),
+            Cmd::Material(m) => {
+                let mut s = self.svc.settings();
+                s.material = m;
+                self.svc.save_settings(s);
+                self.toast(Kind::Info, format!("window: {}", m.id()));
+            }
             Cmd::Tiles(None) => self.show_tab(super::project_tabs::StripTab::All),
             Cmd::Tiles(Some(key)) => self.show_tab(super::project_tabs::StripTab::Project(key)),
             Cmd::Recent(i) => {

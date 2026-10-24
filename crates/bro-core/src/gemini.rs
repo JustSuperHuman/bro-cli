@@ -314,7 +314,7 @@ fn discover(token: &str) -> anyhow::Result<Discovered> {
 }
 
 /// Quota left on one model.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelQuota {
     /// Wire id (`gemini-4-argon-medium`)
     pub id: String,
@@ -323,6 +323,35 @@ pub struct ModelQuota {
     pub remaining: Option<f64>,
     /// RFC 3339
     pub reset: Option<String>,
+}
+
+/// The subscription's actual Gemini models, for every harness's model picker.
+pub fn model_rows(quotas: &[ModelQuota]) -> Vec<crate::catalogue::ModelRow> {
+    quotas.iter().filter(|m| m.id.starts_with("gemini-")).map(|m| crate::catalogue::ModelRow {
+        id: m.id.clone(), name: m.name.clone().unwrap_or_else(|| m.id.clone()),
+        context: None, pricing: None, reasoning: true, created: None,
+    }).collect()
+}
+
+/// Collapse thinking levels only when Google reports the same allowance and reset for every level.
+/// Different readings stay separate; absent readings never become zero or unlimited quota.
+pub fn quota_groups(quotas: &[ModelQuota]) -> Vec<ModelQuota> {
+    let mut groups: std::collections::BTreeMap<String, Vec<ModelQuota>> = Default::default();
+    for model in quotas.iter().filter(|m| m.id.starts_with("gemini-")) {
+        let base = ["-high", "-medium", "-low"].into_iter().find_map(|suffix| model.id.strip_suffix(suffix)).unwrap_or(&model.id);
+        groups.entry(base.into()).or_default().push(model.clone());
+    }
+    let mut out = vec![];
+    for (base, levels) in groups {
+        if levels.len() > 1 && levels.iter().all(|m| m.remaining == levels[0].remaining && m.reset == levels[0].reset) {
+            let words: Vec<String> = base.split('-').map(|word| {
+                let mut chars = word.chars();
+                chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+            }).collect();
+            out.push(ModelQuota { id: base, name: Some(words.join(" ")), remaining: levels[0].remaining, reset: levels[0].reset.clone() });
+        } else { out.extend(levels); }
+    }
+    out
 }
 
 /// Models the subscription offers in Antigravity's picker, with quota left. Blocking.
@@ -353,7 +382,7 @@ fn parse_quotas(body: &Value) -> Vec<ModelQuota> {
         .map(|(id, m)| ModelQuota {
             id: id.clone(),
             name: m.get("displayName").and_then(Value::as_str).map(str::to_string),
-            remaining: m.pointer("/quotaInfo/remainingFraction").and_then(Value::as_f64),
+            remaining: m.pointer("/quotaInfo/remainingFraction").and_then(Value::as_f64).filter(|r| r.is_finite() && (0.0..=1.0).contains(r)),
             reset: m.pointer("/quotaInfo/resetTime").and_then(Value::as_str).map(str::to_string),
         })
         .collect();
@@ -519,6 +548,61 @@ fn respond(stream: &mut TcpStream, status: &str, title: &str, body: &str) {
 mod tests {
     use super::*;
     use crate::util::test_env::sandbox;
+
+    #[test]
+    fn quota_groups_preserve_distinct_limits_and_unreported_usage() {
+        let mut quotas: Vec<ModelQuota> = ["high", "medium", "low"].iter().map(|level| ModelQuota {
+            id: format!("gemini-4-argon-{level}"), name: None, remaining: Some(0.75), reset: Some("2026-10-24T06:20:37Z".into()),
+        }).collect();
+        let grouped = quota_groups(&quotas);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].remaining, Some(0.75));
+        quotas[1].remaining = Some(0.25);
+        assert_eq!(quota_groups(&quotas).len(), 3);
+        quotas[1].remaining = None;
+        assert_eq!(quota_groups(&quotas).len(), 3);
+        assert!(quota_groups(&quotas).iter().any(|m| m.remaining.is_none()));
+    }
+
+    #[test]
+    fn subscription_usage_fetches_google_quota_and_keeps_missing_readings_unknown() {
+        use std::io::{BufRead, BufReader};
+        let _sandbox = sandbox();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        unsafe { std::env::set_var("BRO_GEMINI_BASE_URL", base); }
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("POST /v1internal:fetchAvailableModels "));
+            let mut length = 0;
+            loop {
+                line.clear(); reader.read_line(&mut line).unwrap();
+                if line == "\r\n" { break; }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") { length = value.trim().parse::<usize>().unwrap(); }
+            }
+            let mut request = vec![0; length]; reader.read_exact(&mut request).unwrap();
+            let body = json!({"models": {
+                "gemini-4-argon-high": {"displayName":"Gemini 4 Argon", "quotaInfo":{"remainingFraction":0.73,"resetTime":"2026-10-24T06:20:37Z"}},
+                "gemini-3.8-flash-high": {"displayName":"Gemini Flash"},
+                "claude-test": {"quotaInfo":{"remainingFraction":0.5}}
+            }}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        save(&creds_path(), &Stored { access_token: "test-access".into(), refresh_token: "test-refresh".into(), expires_at: now_ms() + 3_600_000, project: Some("test-project".into()), tier_name: Some("Google AI Ultra".into()), ..Default::default() }).unwrap();
+        let profile = crate::profiles::get("gemini-sub:local").unwrap();
+        let usage = crate::usage::fetch(&profile).unwrap();
+        worker.join().unwrap();
+        assert!(usage.five_hour.is_none() && usage.weekly.is_none() && usage.api.is_none());
+        let quotas = usage.subscription.unwrap();
+        assert_eq!(quotas.len(), 2);
+        assert!(quotas.iter().any(|m| m.remaining == Some(0.73)));
+        assert!(quotas.iter().any(|m| m.remaining.is_none()));
+        assert_eq!(model_rows(&quotas).len(), 2);
+    }
 
     #[test]
     fn pkce_challenge_is_s256_of_verifier() {

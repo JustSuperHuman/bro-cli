@@ -533,11 +533,16 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
                 None => Action::Side(SideHit::Usage),
             });
             if let Some(h) = u.harness {
-                ui.mark(harness_mark(Some(h)), Rect::new(row.x + 4.0, row.y, 16.0, row.h), 13.0, None);
+                let mark = if u.profile.as_deref().is_some_and(|p| bro_core::profiles::is_gemini_id(&p)) { super::kit::brand::provider("gemini").unwrap() } else { harness_mark(Some(h)) };
+                ui.mark(mark, Rect::new(row.x + 4.0, row.y, 16.0, row.h), 13.0, None);
             }
             let label_x = row.x + 24.0;
             let ls = Style::new(size::SMALL, if launchable { weight::SEMIBOLD } else { weight::REGULAR }, if launchable { t.text } else { t.muted });
-            let lb = ui.line(&u.label, ls, Some(66.0));
+            let label_room = if u.profile.as_deref().is_some_and(bro_core::profiles::is_gemini_id) {
+                let note_w = u.note.as_ref().map(|note| ui.measure(note, Style::new(size::SMALL, weight::MEDIUM, t.faint))).unwrap_or(0.0);
+                (wk_r - label_x - note_w - 12.0).max(32.0)
+            } else { 66.0 };
+            let lb = ui.line(&u.label, ls, Some(label_room));
             ui.draw(&lb, Point::new(label_x, row.y + (24.0 - lb.h) / 2.0));
             if let Some(open) = u.fable {
                 let fr = Rect::new(label_x + lb.w + 2.0, row.y + 3.0, 16.0, 18.0);
@@ -843,7 +848,7 @@ pub fn draw_strip(app: &mut App, ui: &mut Ui, r: Rect) {
         let kb = picked.as_ref() == Some(&e.tab);
         if on {
             // filled like the content below, outlined on three sides, open at the bottom
-            ui.round_corners(Rect { h: tr.h + 1.0, ..tr }, Corners::top(radius::OVERLAY), t.layer);
+            ui.glass(Rect { h: tr.h + 1.0, ..tr }, Corners::top(radius::OVERLAY), t.layer);
             let o = Rect { h: tr.h + radius::OVERLAY, ..tr };
             ui.clip(Rect { h: tr.h, ..tr }, 0.0);
             ui.outline(o, radius::OVERLAY, 1.0, t.stroke);

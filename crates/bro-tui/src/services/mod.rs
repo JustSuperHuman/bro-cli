@@ -30,6 +30,7 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
@@ -128,6 +129,7 @@ pub struct State {
     pub updates: updates::UpdateState,
     /// Every session's watchdog as the bridge last reported it, by session id.
     pub watchdogs: HashMap<String, bro_bridge::WatchdogSnapshot>,
+    pub voice: VoiceState,
     /// Things that didn't work at startup, shown once as toasts and in the views.
     pub issues: Vec<String>,
 }
@@ -145,6 +147,8 @@ struct Inner {
     state: RwLock<State>,
     tx: Mutex<Sender<Event>>,
     demo: bool,
+    guest: bool,
+    proxy_starting: AtomicBool,
     proxy: Mutex<Option<ProxyHandle>>,
     bridge: RwLock<Option<Bridge>>,
     bridge_fuse: guard::Fuse,
@@ -152,11 +156,33 @@ struct Inner {
     projects: Mutex<HashMap<PathBuf, ProjectKey>>,
     /// Push-to-talk listener; dropping it unhooks the hotkey.
     voice: Mutex<Option<bro_voice::Voice>>,
+    /// Bumped on every (re)start, so a slow start that lost the race stops itself.
+    voice_gen: std::sync::atomic::AtomicU64,
     /// Bridge id of the session in the focused pane (kept current by the UI loop).
     focused: Mutex<Option<String>>,
     /// Profiles with a login tab open that a watcher is polling until they read signed in.
     login_watch: Mutex<HashMap<String, Instant>>,
+    /// bro's theme on screen as Claude Code takes it: Claude launches write and select it.
+    claude_palette: Mutex<Option<bro_core::claude_theme::Palette>>,
+    /// The worker that writes it into every Claude config dir, so running sessions recolour.
+    claude_theme_tx: Mutex<Option<Sender<bro_core::claude_theme::Palette>>>,
 }
+
+/// Push-to-talk as it stands, for the settings view.
+#[derive(Clone, Debug, Default)]
+pub struct VoiceState {
+    /// the hotkey name it listens on, while it does
+    pub running: Option<String>,
+    /// an OpenAI key was found in the configured variable (None: not looked yet)
+    pub key_found: Option<bool>,
+    /// why it didn't start
+    pub error: Option<String>,
+    /// waiting for the key to listen on (see [`Services::capture_voice_hotkey`])
+    pub capturing: Option<Instant>,
+}
+
+/// How long "press the key you want" waits.
+const CAPTURE_FOR: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Words spoken with push-to-talk, on their way to the orchestrator session.
 #[derive(Clone, Debug)]
@@ -223,6 +249,8 @@ pub fn fallback_settings() -> Settings {
         icons: "auto".into(),
         rain: Default::default(),
         font: None,
+        material: Default::default(),
+        material_tint: bro_core::config::MATERIAL_TINT,
         bridge: BridgeSettings::default(),
         proxy: ProxySettings::default(),
         voice: bro_core::config::VoiceSettings::default(),
@@ -235,6 +263,8 @@ pub fn fallback_settings() -> Settings {
         permission: Default::default(),
         claude_env: Default::default(),
         caveman: Default::default(),
+        claude_mod: Default::default(),
+        peon: Default::default(),
         justtools: Default::default(),
         justwatch: Default::default(),
         updates: Default::default(),
@@ -261,20 +291,25 @@ pub fn load_settings() -> (Settings, Option<String>) {
 }
 
 impl Services {
-    fn with_state(state: State, tx: Sender<Event>, demo: bool) -> Services {
+    fn with_state(state: State, tx: Sender<Event>, demo: bool, guest: bool) -> Services {
         Services {
             inner: Arc::new(Inner {
                 state: RwLock::new(state),
                 tx: Mutex::new(tx),
                 demo,
+                guest,
+                proxy_starting: AtomicBool::new(false),
                 proxy: Mutex::new(None),
                 bridge: RwLock::new(None),
                 bridge_fuse: guard::Fuse::default(),
                 usage_kick: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
                 voice: Mutex::new(None),
+                voice_gen: Default::default(),
                 focused: Mutex::new(None),
                 login_watch: Mutex::new(Default::default()),
+                claude_palette: Mutex::new(None),
+                claude_theme_tx: Mutex::new(None),
             }),
         }
     }
@@ -296,6 +331,7 @@ impl Services {
             usage_at: None,
             picks: (None, None),
             watchdogs: HashMap::new(),
+            voice: VoiceState::default(),
             issues: vec![],
         }
     }
@@ -303,16 +339,16 @@ impl Services {
     /// Real services: loads data, starts the proxy and bridge (when enabled) and the usage refresher, all on
     /// background threads. Returns immediately.
     pub fn start(settings: Settings, tx: Sender<Event>) -> Services {
-        let svc = Services::with_state(Services::empty_state(settings), tx, false);
+        let svc = Services::with_state(Services::empty_state(settings), tx, false, false);
         workers::spawn_all(&svc);
         svc
     }
 
     /// A second bro beside a running one (the desktop app opened with `--new`): your real settings, profiles,
-    /// usage and past sessions, but the proxy, the phone bridge, voice and update checks stay with the bro that
-    /// already runs them (two would fight over the same ports and hotkey).
+    /// usage and past sessions. The phone bridge, voice and update checks stay with the bro that already runs
+    /// them; a launch that needs translation starts this window's own proxy on an unused loopback port.
     pub fn start_guest(settings: Settings, tx: Sender<Event>) -> Services {
-        let svc = Services::with_state(Services::empty_state(settings), tx, false);
+        let svc = Services::with_state(Services::empty_state(settings), tx, false, true);
         workers::spawn_guest(&svc);
         svc
     }
@@ -328,7 +364,7 @@ impl Services {
     pub fn offline(settings: Settings, tx: Sender<Event>) -> Services {
         let mut st = Services::empty_state(settings);
         demo::fill(&mut st);
-        Services::with_state(st, tx, true)
+        Services::with_state(st, tx, true, false)
     }
 
     pub fn is_demo(&self) -> bool {
@@ -358,6 +394,11 @@ impl Services {
         self.state().settings.clone()
     }
 
+    /// Change settings for this run only, nothing written (scripted checks of the desktop app).
+    pub fn set_settings_unsaved(&self, s: Settings) {
+        self.update(|st| st.settings = s);
+    }
+
     /// Persist settings on a background thread (no-op in demo mode).
     pub fn save_settings(&self, s: Settings) {
         self.update(|st| st.settings = s.clone());
@@ -370,6 +411,36 @@ impl Services {
                 svc.send(Event::Toast(crate::alerts::Kind::Error, format!("couldn't save settings: {e}")));
             }
         });
+    }
+
+    /// bro's theme changed (or bro started): Claude launches take it from now on, and a worker writes it into
+    /// every Claude config dir, where Claude Code's watcher recolours the running sessions. A burst of previews
+    /// writes only the last.
+    pub fn claude_theme(&self, palette: bro_core::claude_theme::Palette) {
+        *self.inner.claude_palette.lock() = Some(palette.clone());
+        if self.is_demo() || !self.state().settings.claude_mod.theme {
+            return;
+        }
+        let mut tx = self.inner.claude_theme_tx.lock();
+        let worker = tx.get_or_insert_with(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<bro_core::claude_theme::Palette>();
+            std::thread::spawn(move || {
+                while let Ok(mut latest) = rx.recv() {
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    while let Ok(newer) = rx.try_recv() {
+                        latest = newer;
+                    }
+                    let _ = guard("claude_theme::write_everywhere", || bro_core::claude_theme::write_everywhere(&latest));
+                }
+            });
+            tx
+        });
+        let _ = worker.send(palette);
+    }
+
+    /// The theme Claude launches write and select (see [`Services::claude_theme`]).
+    pub fn claude_palette(&self) -> Option<bro_core::claude_theme::Palette> {
+        self.inner.claude_palette.lock().clone()
     }
 
     /// Project identity for a directory: cached; bro-core's `project_for` when available, else a local git-root
@@ -477,6 +548,31 @@ impl Services {
         rx
     }
 
+    /// Check and save a Gemini key without running a billable prompt.
+    pub fn save_gemini_profile(&self, name: String, key: String, existing: bool) -> std::sync::mpsc::Receiver<Result<Profile, String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let svc = self.clone();
+        std::thread::spawn(move || {
+            let result = guard_res("Gemini key check", || {
+                if svc.is_demo() { anyhow::bail!("Demo mode: profiles are read-only."); }
+                let detected = key.trim().is_empty();
+                let key = if detected { bro_core::gemini_api::detected_key(&bro_core::config::Config::load()?).ok_or_else(|| anyhow::anyhow!("Paste a Gemini API key."))? } else { key.trim().to_string() };
+                let models = bro_core::gemini_api::models(&key)?;
+                let p = if existing { bro_core::profiles::get(&format!("gemini:{name}")).ok_or_else(|| anyhow::anyhow!("Profile no longer exists."))? } else { bro_core::profiles::create(bro_core::profiles::ProfileKind::GeminiApi, &name)? };
+                let saved = if detected { bro_core::gemini_api::save_detected_key(&p.dir) } else { bro_core::gemini_api::save_key(&p.dir, &key) };
+                if let Err(error) = saved {
+                    if !existing { let _ = std::fs::remove_dir(&p.dir); }
+                    return Err(error);
+                }
+                svc.update(|st| { st.models.insert(p.id.clone(), models); });
+                Ok(bro_core::profiles::describe(p.kind, &name, p.dir))
+            });
+            if result.is_ok() { workers::load_profiles(&svc); }
+            let _ = tx.send(result);
+        });
+        rx
+    }
+
     /// Remove a profile (its login dir) on a background thread.
     pub fn remove_profile(&self, id: String) -> std::sync::mpsc::Receiver<Result<(), String>> {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -495,6 +591,21 @@ impl Services {
 
     pub(crate) fn set_proxy(&self, h: Option<ProxyHandle>) {
         *self.inner.proxy.lock() = h;
+    }
+
+    /// Start a proxy when an explicit launch needs it. Called only from a launch worker, never the UI thread.
+    pub(crate) fn ensure_proxy(&self) -> Result<ProxyInfo, String> {
+        workers::spawn_proxy(self);
+        let until = Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            match self.state().proxy.status.clone() {
+                Avail::Ready(info) => return Ok(info),
+                Avail::Unavailable(reason) if !self.inner.proxy_starting.load(Ordering::Acquire) => return Err(reason),
+                _ => {}
+            }
+            if Instant::now() >= until { return Err("The translating proxy did not start. Check the Proxy page and try again.".into()); }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
     }
 
     /// Run `f` against the live proxy (guarded). None if it isn't running or panicked.
@@ -662,6 +773,66 @@ impl Services {
         }
     }
 
+    /// Whether this bro runs push-to-talk: the first bro (a second one leaves it to that), with the phone
+    /// bridge on, since the words go to Hugh through it.
+    pub(crate) fn runs_voice(&self) -> bool {
+        !self.inner.guest && !self.is_demo() && self.settings().bridge.enabled
+    }
+
+    /// Voice settings changed: stop the listener and start it again with them (or not, when it's off).
+    pub(crate) fn restart_voice(&self) {
+        if !self.runs_voice() {
+            return;
+        }
+        self.set_voice(None);
+        self.update(|st| st.voice.running = None);
+        workers::spawn_voice(self);
+    }
+
+    /// Start a new listener generation; [`Services::keep_voice`] takes a listener only from the newest.
+    pub(super) fn voice_generation(&self) -> u64 {
+        self.inner.voice_gen.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Keep `voice` if no restart came after generation `gen` (else stop it). Returns whether it was kept.
+    pub(super) fn keep_voice(&self, voice: bro_voice::Voice, gen_: u64) -> bool {
+        let mut slot = self.inner.voice.lock();
+        if self.inner.voice_gen.load(Ordering::Acquire) != gen_ {
+            voice.stop();
+            return false;
+        }
+        if let Some(old) = slot.replace(voice) {
+            old.stop();
+        }
+        true
+    }
+
+    /// "Press the key you want": wait for the next key pressed anywhere, make it the push-to-talk key and
+    /// restart voice on it. Esc, or nothing for a while, keeps the one there was.
+    pub(crate) fn capture_voice_hotkey(&self) {
+        if self.state().voice.capturing.is_some() {
+            return;
+        }
+        self.update(|st| st.voice.capturing = Some(Instant::now()));
+        let svc = self.clone();
+        std::thread::spawn(move || {
+            let got = guard_res("voice::capture_hotkey", || bro_voice::Voice::capture_hotkey(CAPTURE_FOR));
+            svc.update(|st| st.voice.capturing = None);
+            match got {
+                Ok(Some(name)) => {
+                    let label = bro_voice::Voice::hotkey_label(&name);
+                    let mut s = svc.settings();
+                    s.voice.hotkey = Some(name);
+                    svc.save_settings(s);
+                    svc.restart_voice();
+                    svc.send(Event::Toast(crate::alerts::Kind::Info, format!("push-to-talk is on {label} now")));
+                }
+                Ok(None) => svc.send(Event::Toast(crate::alerts::Kind::Info, "voice key unchanged".into())),
+                Err(e) => svc.send(Event::Toast(crate::alerts::Kind::Error, e.to_string())),
+            }
+        });
+    }
+
     /// Keep the push-to-talk listener alive (None stops it).
     pub(crate) fn set_voice(&self, voice: Option<bro_voice::Voice>) {
         if let Some(old) = std::mem::replace(&mut *self.inner.voice.lock(), voice) {
@@ -768,7 +939,7 @@ impl Services {
         };
         let mut list = vec![tp("shell", "Shell".into(), &shell, shell_args, "shell", None, None)];
         if let Some(ps) = self.state().profiles.ready() {
-            for p in ps.iter().filter(|p| p.authenticated) {
+            for p in ps.iter().filter(|p| p.authenticated && !p.is_gemini()) {
                 let h = if p.is_codex() { "codex" } else { "claude" };
                 let desc = [p.plan.clone(), p.email.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
                 list.push(tp(&p.id, format!("{} · {}", if p.is_codex() { "Codex" } else { "Claude" }, p.name), h, vec![], "agent", (!desc.is_empty()).then_some(desc), Some(h)));

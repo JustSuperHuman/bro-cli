@@ -92,7 +92,7 @@ impl StatsView {
         let Some(profiles) = cx.svc.state().profiles.ready().cloned() else { return };
         // one row per login directory (v1 `listUsageProfiles`)
         let mut seen = std::collections::HashSet::new();
-        let profiles: Vec<_> = profiles.into_iter().filter(|p| seen.insert((p.is_claude(), bro_core::util::path_key(&p.dir)))).collect();
+        let profiles: Vec<_> = profiles.into_iter().filter(|p| !p.is_gemini()).filter(|p| seen.insert((p.is_claude(), bro_core::util::path_key(&p.dir)))).collect();
         let job = Arc::new(Job { progress: Progress::default(), started: Instant::now(), report: Mutex::new(None) });
         self.job = Some(job.clone());
         let waker: Waker = cx.waker();

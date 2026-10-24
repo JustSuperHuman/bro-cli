@@ -6,6 +6,7 @@
 /// Drawn by the desktop app (`bro gui`).
 #[cfg(feature = "gui")]
 pub(crate) mod gui;
+mod markdown;
 
 use crate::layout::PaneId;
 use crate::pane::Event;
@@ -44,6 +45,8 @@ pub struct Doc {
     /// first loaded line (1-based)
     pub start: usize,
     pub lines: Vec<Styled>,
+    /// Markdown files: the same lines rendered (one per source line, so numbers and paging still hold)
+    pub preview: Option<Vec<Styled>>,
     pub total: usize,
     pub bytes: u64,
 }
@@ -51,6 +54,14 @@ pub struct Doc {
 impl Doc {
     fn end(&self) -> usize {
         self.start + self.lines.len().saturating_sub(1)
+    }
+
+    /// The lines to draw: the rendered Markdown when `rendered`, else the highlighted source.
+    pub fn shown(&self, rendered: bool) -> &[Styled] {
+        match &self.preview {
+            Some(p) if rendered => p,
+            _ => &self.lines,
+        }
     }
 }
 
@@ -94,6 +105,8 @@ pub enum Outcome {
     Copy,
     /// type `@path ` into the session
     Mention,
+    /// Markdown: switch rendered / source (handled by the view; a click on its hint)
+    ToggleRendered,
     /// an OSC 8 `file://` link bro can't preview (outside the workspace, a folder): open it the old way
     Fallback(String),
 }
@@ -120,6 +133,8 @@ pub struct FileView {
     /// clickable hints from the last draw
     pub hits: Vec<(Rect, Outcome)>,
     pub frame: Rect,
+    /// Markdown shows rendered (the default) or as source; `m` flips it and the choice is remembered
+    pub rendered: bool,
     theme: Theme,
     tx: Sender<Event>,
 }
@@ -144,6 +159,7 @@ impl FileView {
             rows: 20,
             hits: vec![],
             frame: Rect::default(),
+            rendered: markdown::rendered_pref(),
             theme: theme.clone(),
             tx,
         };
@@ -218,6 +234,17 @@ impl FileView {
             Body::Media(m) => Some(&m.mention),
             _ => None,
         }
+    }
+
+    /// A Markdown file is shown, so the rendered / source switch applies.
+    pub fn is_markdown(&self) -> bool {
+        matches!(&self.body, Body::Text(d) if d.preview.is_some())
+    }
+
+    /// Flip Markdown between rendered and source, and remember it for the next file.
+    pub fn toggle_rendered(&mut self) {
+        self.rendered = !self.rendered;
+        markdown::save_rendered_pref(self.rendered);
     }
 
     #[cfg(test)]
@@ -300,6 +327,7 @@ impl FileView {
             KeyCode::Left | KeyCode::Char('h') => self.left = self.left.saturating_sub(8),
             KeyCode::Right | KeyCode::Char('l') => self.left += 8,
             KeyCode::Char('0') => self.left = 0,
+            KeyCode::Char('m') if self.is_markdown() => self.toggle_rendered(),
             KeyCode::Char('e') if media => return Outcome::System,
             KeyCode::Char('e') if openable => return Outcome::Editor,
             KeyCode::Enter if matches!(self.body, Body::Text(_)) => return Outcome::Editor,
@@ -320,6 +348,10 @@ impl FileView {
             MouseEventKind::ScrollLeft => self.left = self.left.saturating_sub(8),
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some((_, o)) = self.hits.iter().find(|(r, _)| r.contains(pos)) {
+                    if *o == Outcome::ToggleRendered {
+                        self.toggle_rendered();
+                        return Outcome::None;
+                    }
                     return o.clone();
                 }
                 if !self.frame.contains(pos) {
@@ -371,9 +403,10 @@ pub fn read(roots: &ResolveRoots, target: &str, r: PreviewRequest, theme: &Theme
     let number = |k: &str| v[k].as_u64().unwrap_or(0) as usize;
     let language = v["language"].as_str().unwrap_or("plaintext").to_string();
     let lines = highlight(content, &path, &language, theme);
+    let preview = (language == "markdown").then(|| markdown::render(&content.split('\n').map(clean).collect::<Vec<_>>(), &lines, theme));
     let start = number("startLine").max(1);
     let total = number("totalLines").max(start + lines.len().saturating_sub(1));
-    Ok(Payload::Text(Doc { relative: resolved.relative, mention, language, start, lines, total, bytes: v["bytes"].as_u64().unwrap_or(0), path }))
+    Ok(Payload::Text(Doc { relative: resolved.relative, mention, language, start, lines, preview, total, bytes: v["bytes"].as_u64().unwrap_or(0), path }))
 }
 
 /// `@src/app.rs` when it's under the session's cwd, else the absolute path; quoted when it has spaces.
@@ -659,7 +692,7 @@ pub fn draw(f: &mut Frame, area: Rect, v: &mut FileView, hover: Position, t: &Th
                     continue;
                 }
                 let mut spans = vec![num, bar];
-                spans.extend(slice(&d.lines[n - d.start], v.left, text_w));
+                spans.extend(slice(&d.shown(v.rendered)[n - d.start], v.left, text_w));
                 ui::line(f, r, spans);
                 if here {
                     let tint = crate::theme::project_tint(t.accent, t);
@@ -671,6 +704,10 @@ pub fn draw(f: &mut Frame, area: Rect, v: &mut FileView, hover: Position, t: &Th
 
     // hints, clickable
     let mut pairs: Vec<(&str, &str, Outcome)> = vec![];
+    match &v.body {
+        Body::Text(_) if v.is_markdown() => pairs.push(("m", if v.rendered { "source" } else { "preview" }, Outcome::ToggleRendered)),
+        _ => {}
+    }
     match &v.body {
         Body::Text(_) => pairs.extend([("e", "editor", Outcome::Editor), ("o", "system app", Outcome::System), ("c", "copy path", Outcome::Copy), ("@", "mention", Outcome::Mention), ("↑↓ pgup pgdn", "scroll", Outcome::None)]),
         Body::Media(_) => pairs.extend([("⏎", "open", Outcome::System), ("c", "copy path", Outcome::Copy), ("@", "mention", Outcome::Mention)]),

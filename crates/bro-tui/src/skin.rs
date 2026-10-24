@@ -1,6 +1,7 @@
 //! Skins: what a theme changes beyond colour — border shapes, how titles are set into the frame, the focused
 //! session's marker, a backdrop drawn into empty space (stars, graph paper, hatching, digital rain) and
-//! whole-screen effects (a background gradient, CRT phosphor + scanlines, a vignette).
+//! whole-screen effects (a background gradient, CRT phosphor + scanlines, a vignette, and in the desktop app a
+//! neon glow).
 //!
 //! Backdrops only fill cells that are still blank and on the theme's background after the panes are drawn, so
 //! they never sit under text. Effects run last, over everything bro drew.
@@ -55,6 +56,15 @@ pub struct Fx {
     pub scanlines: bool,
     /// edges and corners darken
     pub vignette: bool,
+    /// bright, saturated colours bloom like neon (0 = off, 1 = SynthWave '84 strong); the desktop app only
+    pub glow: f32,
+}
+
+impl Fx {
+    /// Something the terminal UI can draw (the glow needs a GPU).
+    pub fn in_terminal(&self) -> bool {
+        self.gradient.is_some() || self.phosphor || self.scanlines || self.vignette
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -143,9 +153,13 @@ pub fn for_theme(name: &str) -> Skin {
             session_focus: border::DOUBLE,
             brackets: ("◢ ", " ◣"),
             backdrop: Backdrop::Stars,
-            fx: Fx { gradient: Some((hex("#0a001c"), hex("#3a0a4a"))), ..Fx::default() },
+            fx: Fx { gradient: Some((hex("#0a001c"), hex("#3a0a4a"))), glow: 0.6, ..Fx::default() },
             ..d
         },
+        // the editor's famous neon: every bright colour glows, on a dusk-purple sky
+        "synthwave-84" => Skin { marker: "✦", fx: Fx { gradient: Some((hex("#2b1f42"), hex("#1c1727"))), glow: 1.0, ..Fx::default() }, ..d },
+        // a galaxy: stars in every empty corner
+        "andromeda" => Skin { marker: "✦", backdrop: Backdrop::Stars, ..d },
         "blueprint" => Skin {
             border: border::LIGHT_DOUBLE_DASHED,
             focus: border::PLAIN,
@@ -165,7 +179,7 @@ pub fn for_theme(name: &str) -> Skin {
             invert_titles: true,
             marker: "◆",
             backdrop: Backdrop::Hatch,
-            ..d
+            fx: Fx { glow: 0.45, ..Fx::default() },
         },
         "digital-rain" => Skin {
             border: border::PLAIN,
@@ -183,10 +197,10 @@ pub fn for_theme(name: &str) -> Skin {
             case: Case::Wide,
             marker: "✦",
             backdrop: Backdrop::Stars,
-            fx: Fx { gradient: Some((hex("#2a1048"), hex("#0c2d3d"))), ..Fx::default() },
+            fx: Fx { gradient: Some((hex("#2a1048"), hex("#0c2d3d"))), glow: 0.6, ..Fx::default() },
             ..d
         },
-        "nebula" => Skin { marker: "✦", backdrop: Backdrop::Stars, fx: Fx { vignette: true, ..Fx::default() }, ..d },
+        "nebula" => Skin { marker: "✦", backdrop: Backdrop::Stars, fx: Fx { vignette: true, glow: 0.3, ..Fx::default() }, ..d },
         _ => d,
     }
 }
@@ -395,7 +409,7 @@ fn darken(c: Color, k: f32) -> Color {
 /// Run the skin's whole-screen effects over what's been drawn.
 pub fn effects(buf: &mut Buffer, area: Rect, t: &Theme) {
     let fx = t.skin.fx;
-    if fx == Fx::default() || area.width == 0 || area.height == 0 {
+    if !fx.in_terminal() || area.width == 0 || area.height == 0 {
         return;
     }
     let (w, h) = (area.width as f32, area.height as f32);

@@ -24,6 +24,7 @@ const SYSTEM: usize = 2;
 const COPY: usize = 3;
 const MENTION: usize = 4;
 const CLOSE: usize = 5;
+const RENDERED: usize = 6;
 
 /// The card: the window less this on every side, at most `MAX_W` wide.
 const MARGIN: f32 = 24.0;
@@ -56,13 +57,17 @@ pub(crate) fn draw(s: &mut FileView, ui: &mut Ui, area: Rect, _cx: &Cx) -> bool 
 }
 
 /// Target `n` was clicked: the same outcome as the terminal UI's hint (or its click outside the popup).
-pub(crate) fn click(_s: &mut FileView, n: usize, _p: Point, _mods: KeyModifiers, _count: u32) -> Outcome {
+pub(crate) fn click(s: &mut FileView, n: usize, _p: Point, _mods: KeyModifiers, _count: u32) -> Outcome {
     match n {
         SCRIM | CLOSE => Outcome::Close,
         EDITOR => Outcome::Editor,
         SYSTEM => Outcome::System,
         COPY => Outcome::Copy,
         MENTION => Outcome::Mention,
+        RENDERED => {
+            s.toggle_rendered();
+            Outcome::None
+        }
         _ => Outcome::None,
     }
 }
@@ -452,7 +457,7 @@ fn code(ui: &mut Ui, s: &FileView, d: &Doc, l: &Layout, m: &MonoMetrics, pitch_p
             ui.text.draw_cell(ui.scene, "…", false, false, c.text_x, ly + pad, 1, t.muted);
             continue;
         }
-        let (before, after) = line(ui, &d.lines[n - d.start], &c, cw, x_pos, ly + pad, m, map.as_ref());
+        let (before, after) = line(ui, &d.shown(s.rendered)[n - d.start], &c, cw, x_pos, ly + pad, m, map.as_ref());
         let bg = if target == Some(n) { band.over(well) } else { well };
         if before {
             ui.scene.top_quad(Quad::new(Rect::new(c.text_x, ly, fade, pitch_px), Fill::Horizontal(bg, bg.with_alpha(0.0))));
@@ -609,7 +614,7 @@ struct Button {
 const CLOSE_BUTTON: Button = Button { key: "esc", label: "close", target: CLOSE };
 
 /// The terminal UI's hints for what's shown; the first is what Enter does.
-fn buttons(body: &Body) -> &'static [Button] {
+fn buttons(s: &FileView) -> &'static [Button] {
     const TEXT: &[Button] = &[
         Button { key: "e", label: "editor", target: EDITOR },
         Button { key: "o", label: "system app", target: SYSTEM },
@@ -618,7 +623,17 @@ fn buttons(body: &Body) -> &'static [Button] {
     ];
     const MEDIA: &[Button] = &[Button { key: "⏎", label: "open", target: SYSTEM }, Button { key: "c", label: "copy path", target: COPY }, Button { key: "@", label: "mention", target: MENTION }];
     const FAILED: &[Button] = &[Button { key: "⏎", label: "system app", target: SYSTEM }, Button { key: "c", label: "copy path", target: COPY }];
-    match body {
+    // Markdown: the source / preview switch last, beside close
+    const MD_RENDERED: &[Button] = &[TEXT[0], TEXT[1], TEXT[2], TEXT[3], Button { key: "m", label: "source", target: RENDERED }];
+    const MD_SOURCE: &[Button] = &[TEXT[0], TEXT[1], TEXT[2], TEXT[3], Button { key: "m", label: "preview", target: RENDERED }];
+    match &s.body {
+        Body::Text(_) if s.is_markdown() => {
+            if s.rendered {
+                MD_RENDERED
+            } else {
+                MD_SOURCE
+            }
+        }
         Body::Text(_) => TEXT,
         Body::Media(_) => MEDIA,
         Body::Failed { path: Some(_), .. } => FAILED,
@@ -677,7 +692,7 @@ fn button(ui: &mut Ui, r: Rect, b: &Button, look: Look, keys: bool) {
 /// Bottom-left the scroll keys; bottom-right close, then the actions with Enter's rightmost.
 fn footer(ui: &mut Ui, s: &FileView, r: Rect) {
     let t = ui.t;
-    let acts = buttons(&s.body);
+    let acts = buttons(s);
     let avail = r.w - 2.0 * PAD;
     let hint_w = |ui: &mut Ui| -> f32 {
         let keys: f32 = SCROLL_KEYS.iter().map(|k| keycap_w(ui, k) + 4.0).sum();

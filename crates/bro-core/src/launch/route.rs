@@ -53,6 +53,16 @@ pub fn resolve_upstream(upstream: &str, model: Option<&str>, cfg: &Config) -> an
         return Ok(match kind {
             ProfileKind::ClaudeLocal | ProfileKind::ClaudeAccount => UpstreamTarget::ClaudeOAuth { config_dir: dir },
             ProfileKind::CodexLocal | ProfileKind::CodexProfile => UpstreamTarget::ChatGptCodex { codex_home: dir },
+            ProfileKind::GeminiSubscription => {
+                let creds_file = dir.join("oauth.json");
+                if !crate::gemini::signed_in(&creds_file) { bail!("{}", crate::gemini::SIGN_IN_HINT); }
+                UpstreamTarget::GeminiCodeAssist { creds_file }
+            }
+            ProfileKind::GeminiApi => {
+                let profile = profiles::get(upstream).ok_or_else(|| anyhow!("Gemini profile no longer exists"))?;
+                let key = crate::gemini_api::key(&profile).ok_or_else(|| anyhow!("Add an API key to this Gemini profile."))?;
+                UpstreamTarget::OpenAiChat { base_url: crate::gemini_api::BASE.into(), api_key: Some(key) }
+            }
         });
     }
     let all = providers::load(cfg);

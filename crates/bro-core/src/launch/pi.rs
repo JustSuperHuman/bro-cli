@@ -336,6 +336,16 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             }
         }
     }
+    // PeonPing sounds through bro's extension, unless peon-ping's own is installed
+    if let Some(bin) = ctx.bro_bin.as_ref().filter(|_| ctx.peon.wires(spec.harness))
+        && !crate::peon::wire::pi_own(spec.harness).covered()
+        && let Ok((ext, env)) = crate::peon::wire::pi_launch(spec.harness, bin)
+    {
+        args.extend(ext);
+        for (k, v) in env {
+            cmd.set_env(&k, v);
+        }
+    }
     if let Some(resume) = &spec.resume {
         // Both take a session file path (or an id / id prefix they look up themselves).
         let target = crate::sessions::find_by_id(spec.harness, &resume.session_id)
