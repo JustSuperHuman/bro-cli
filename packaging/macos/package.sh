@@ -28,7 +28,7 @@ release_ref=$(printf '%s' "$2" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')
 [[ -n "$release_ref" ]] || { echo "bro: empty release ref" >&2; exit 2; }
 name="bro-$release_ref-$target"
 binary="${CARGO_TARGET_DIR:-target}/$target/release/bro"
-lipo -verify_arch "$arch" "$binary"
+lipo "$binary" -verify_arch "$arch"
 version=$("$binary" --version)
 version=${version#bro }
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]] || {
