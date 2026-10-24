@@ -50,7 +50,8 @@ trap cleanup EXIT
 app="$work/image/Bro.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$work/Bro.iconset" dist
 cp "$binary" "$app/Contents/MacOS/bro"
-cp packaging/bro-cli "$app/Contents/MacOS/bro-cli"
+rustc --edition=2024 --target "$target" -C opt-level=s -C strip=symbols \
+  packaging/macos/bro-cli.rs -o "$app/Contents/MacOS/bro-cli"
 chmod 755 "$app/Contents/MacOS/bro" "$app/Contents/MacOS/bro-cli"
 cp packaging/macos/Info.plist "$app/Contents/Info.plist"
 # Apple bundle versions use the numeric portion of Cargo's version.
@@ -67,6 +68,7 @@ done
 iconutil -c icns "$work/Bro.iconset" -o "$app/Contents/Resources/Bro.icns"
 # Ad-hoc signing seals the bundle and supports Apple Silicon execution. Developer ID
 # signing and notarization require Apple credentials, which are not configured here.
+codesign --force --sign - "$app/Contents/MacOS/bro-cli"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 ln -s /Applications "$work/image/Applications"
@@ -83,6 +85,7 @@ test "$(readlink "$work/mounted/Applications")" = /Applications
 test -s "$delivered/Contents/Resources/Bro.icns"
 cmp "$app/Contents/MacOS/bro" "$delivered/Contents/MacOS/bro"
 test "$("$delivered/Contents/MacOS/bro" --version)" = "bro $version"
+test "$("$delivered/Contents/MacOS/bro-cli" --version)" = "bro $version"
 # Exercise the GUI from the mounted app in demo mode, with a deadline for startup failures.
 python3 - "$delivered/Contents/MacOS/bro" "$work/smoke.png" <<'PY'
 import os
