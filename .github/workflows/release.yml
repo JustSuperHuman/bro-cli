@@ -39,6 +39,14 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Release file name
+        shell: bash
+        env:
+          BRO_RELEASE_REF: ${{ github.ref_name }}
+        run: |
+          ref=$(printf '%s' "$BRO_RELEASE_REF" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')
+          printf 'BRO_RELEASE_NAME=%s\n' "$ref" >> "$GITHUB_ENV"
+
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
@@ -50,7 +58,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "bro-${{ github.ref_name }}-${{ matrix.target }}"
+          $name = "bro-$env:BRO_RELEASE_NAME-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/bro.exe", "target/${{ matrix.target }}/release/bro-app.exe", packaging/bro-cli.cmd, README.md, LICENSE "dist/$name"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
@@ -65,7 +73,7 @@ jobs:
             choco install innosetup -y --no-progress | Out-Null
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:BRO_RELEASE_NAME
           # a manual run builds from a branch: the version comes from Cargo.toml
           $version = if ($tag -match '^v\d') { $tag.Substring(1) } else { (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value }
           $name = "bro-$tag-${{ matrix.target }}"
@@ -75,7 +83,7 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          name="bro-${{ github.ref_name }}-${{ matrix.target }}"
+          name="bro-$BRO_RELEASE_NAME-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/bro" packaging/bro-cli README.md LICENSE "dist/$name"
           chmod 755 "dist/$name/bro" "dist/$name/bro-cli"
