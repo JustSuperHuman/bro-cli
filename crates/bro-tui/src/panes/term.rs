@@ -393,7 +393,7 @@ impl Term {
             // SAFETY: tree owns this job until after spawn_command returns, including error paths.
             unsafe { cmd.set_windows_job_handle(tree.job_handle().as_raw_handle()) };
         }
-        let child = pair.slave.spawn_command(cmd).map_err(|e| format!("couldn't start {}: {e}", s.program))?;
+        let child = pair.slave.spawn_command(cmd).map_err(|e| format!("couldn't start {}: {e:#}", s.program))?;
         drop(pair.slave);
         let pid = child.process_id();
         let mut live = Live { tree, master: pair.master, child };
@@ -456,6 +456,16 @@ impl Term {
             .and_then(|s| s.facts)
             .and_then(|f| f.pending.as_ref().map(|p| QUESTION_TOOLS.contains(&p.tool.as_str())))
             .unwrap_or(false)
+    }
+
+    /// `bro --demo`: this session leads `team`.
+    pub fn set_demo_team(&mut self, team: bro_core::agent_teams::Team) {
+        self.insights = Some(super::insights::Insights::fixed_team(team));
+    }
+
+    /// The agent team this Claude session leads, as Claude Code last wrote it (see [`super::insights::Snapshot::team`]).
+    pub fn team(&self) -> Option<std::sync::Arc<bro_core::agent_teams::Team>> {
+        self.insights.as_ref().and_then(|i| i.team())
     }
 
     /// The transcript worker's handle (a finished `/recap` is handed to it).
@@ -830,26 +840,21 @@ impl Term {
         (self.meta.cwd != self.meta.project.root).then(|| crate::util::short_path(&self.meta.cwd, width))
     }
 
-    /// Tiles that share a project, agent, login, model and folder sit in one frame that names them once:
-    /// (what they share, the frame's label) — "bro-cli-v2 · ✱ local".
+    /// Tiles that share a project and agent sit in one frame that names them once: (what they share, the frame's
+    /// label) — "bro-cli-v2 · ✱ claude". Each tile's own header says its login, model and folder.
     pub fn tile_group(&self) -> (String, String) {
         let m = &self.meta;
-        let key = format!("{}\u{1f}{:?}\u{1f}{:?}\u{1f}{:?}\u{1f}{}", m.project.key, m.harness, m.profile, m.model, m.cwd.display());
-        let mut label = format!("{} · {} {}", m.project.name, crate::ui::harness_glyph(m.harness), self.who());
-        if let Some(cwd) = self.cwd_note(32) {
-            label.push_str(&format!(" — {cwd}"));
-        }
-        (key, label)
+        let key = format!("{}\u{1f}{:?}", m.project.key, m.harness);
+        let agent = m.harness.map(|h| h.label()).unwrap_or("shell");
+        (key, format!("{} · {} {agent}", m.project.name, crate::ui::harness_glyph(m.harness)))
     }
 
-    /// The header title inside a [`Self::tile_group`] frame, which carries everything else: its number, then its
-    /// own title when it has one.
+    /// The header title inside a [`Self::tile_group`] frame, which names the project and agent: its number, its
+    /// own title when it has one, then its login · model and its folder when that isn't the project's root.
     pub fn group_title(&self, n: Option<usize>) -> Line<'static> {
-        let mut text = n.map(|n| format!(" {n}")).unwrap_or_default();
-        if let Some(title) = self.display_title() {
-            text.push_str(&if text.is_empty() { format!(" {title}") } else { format!(" · {title}") });
-        }
-        Line::from(Span::styled(format!("{text} "), Style::default().add_modifier(Modifier::BOLD)))
+        let who = Some(self.who()).filter(|w| !w.is_empty());
+        let parts: Vec<String> = n.map(|n| n.to_string()).into_iter().chain(self.display_title()).chain(who).chain(self.cwd_note(32)).collect();
+        Line::from(Span::styled(format!(" {} ", parts.join(" · ")), Style::default().add_modifier(Modifier::BOLD)))
     }
 
     /// The program's window title (OSC 0/2), cleaned: spinner / status glyphs off the front, and nothing

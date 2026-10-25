@@ -1,7 +1,7 @@
 use super::WinChild;
 use crate::cmdbuilder::CommandBuilder;
 use crate::win::procthreadattr::ProcThreadAttributeList;
-use anyhow::{bail, ensure, Error};
+use anyhow::{ensure, Context, Error};
 use filedescriptor::{FileDescriptor, OwnedHandle};
 use lazy_static::lazy_static;
 use shared_library::shared_library;
@@ -15,9 +15,12 @@ use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
 use winapi::shared::winerror::{HRESULT, S_OK};
 use winapi::um::handleapi::*;
+use winapi::um::jobapi2::AssignProcessToJobObject;
 use winapi::um::processthreadsapi::*;
+use winapi::um::synchapi::WaitForSingleObject;
 use winapi::um::winbase::{
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::HANDLE;
@@ -111,6 +114,41 @@ impl PsuedoCon {
     }
 
     pub fn spawn_command(&self, cmd: CommandBuilder) -> anyhow::Result<WinChild> {
+        let job = cmd.windows_job_handle().map(|h| h as HANDLE);
+        // JOB_LIST can reject Store apps and leave the job tied to a failed activation. Start
+        // suspended instead: Windows resolves aliases normally, and no code runs before ownership.
+        let (proc, thread) = self.create_process(&cmd, job.is_some())?;
+        if let Some(job) = job {
+            let owned = (|| -> anyhow::Result<()> {
+                if unsafe { AssignProcessToJobObject(job, proc.as_raw_handle() as _) } == 0 {
+                    return Err(IoError::last_os_error())
+                        .context("assign suspended PTY child to session job");
+                }
+                if unsafe { ResumeThread(thread.as_raw_handle() as _) } == u32::MAX {
+                    return Err(IoError::last_os_error()).context("resume job-owned PTY child");
+                }
+                Ok(())
+            })();
+            if let Err(error) = owned {
+                // Never leave an unowned suspended process behind on an assignment/resume failure.
+                unsafe {
+                    if TerminateProcess(proc.as_raw_handle() as _, 1) != 0 {
+                        WaitForSingleObject(proc.as_raw_handle() as _, INFINITE);
+                    }
+                }
+                return Err(error);
+            }
+        }
+        Ok(WinChild {
+            proc: Mutex::new(proc),
+        })
+    }
+
+    fn create_process(
+        &self,
+        cmd: &CommandBuilder,
+        suspended: bool,
+    ) -> anyhow::Result<(OwnedHandle, OwnedHandle)> {
         let mut si: STARTUPINFOEXW = unsafe { mem::zeroed() };
         si.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
         // Explicitly set the stdio handles as invalid handles otherwise
@@ -124,11 +162,13 @@ impl PsuedoCon {
         si.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
         si.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
 
-        let jobs: Vec<HANDLE> = cmd.windows_job_handle().into_iter().map(|h| h as HANDLE).collect();
-        let mut attrs = ProcThreadAttributeList::with_capacity(if jobs.is_empty() { 1 } else { 2 })?;
+        // Packaged shells otherwise launch descendants outside their job hierarchy, including
+        // our session job. Keep that hierarchy when the caller owns the process tree.
+        let desktop_policy: DWORD = 0x2; // PROCESS_CREATION_DESKTOP_APP_BREAKAWAY_DISABLE_PROCESS_TREE
+        let mut attrs = ProcThreadAttributeList::with_capacity(if suspended { 2 } else { 1 })?;
         attrs.set_pty(self.con)?;
-        if !jobs.is_empty() {
-            attrs.set_jobs(&jobs)?;
+        if suspended {
+            attrs.set_desktop_app_policy(&desktop_policy)?;
         }
         si.lpAttributeList = attrs.as_mut_ptr();
 
@@ -146,7 +186,9 @@ impl PsuedoCon {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                EXTENDED_STARTUPINFO_PRESENT
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | if suspended { CREATE_SUSPENDED } else { 0 },
                 cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
                 cwd.as_ref()
                     .map(|c| c.as_slice().as_ptr())
@@ -158,22 +200,15 @@ impl PsuedoCon {
         if res == 0 {
             let err = IoError::last_os_error();
             let msg = format!(
-                "CreateProcessW `{:?}` in cwd `{:?}` failed: {}",
+                "CreateProcessW `{:?}` in cwd `{:?}` failed",
                 cmd_os,
-                cwd.as_ref().map(|c| OsString::from_wide(c)),
-                err
+                cwd.as_ref().map(|c| OsString::from_wide(c))
             );
-            log::error!("{}", msg);
-            bail!("{}", msg);
+            return Err(err).context(msg);
         }
 
-        // Make sure we close out the thread handle so we don't leak it;
-        // we do this simply by making it owned
-        let _main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
+        let thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
         let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) };
-
-        Ok(WinChild {
-            proc: Mutex::new(proc),
-        })
+        Ok((proc, thread))
     }
 }

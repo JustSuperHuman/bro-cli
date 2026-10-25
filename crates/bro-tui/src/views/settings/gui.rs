@@ -9,7 +9,7 @@
 //! on a row selects it while a click on the selected row steps it (the terminal UI's mouse). The wheel scrolls the
 //! page and the selection follows it, so it always stays in view.
 
-use super::{Block, BroOpt, CaveOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, live_mode, rows};
+use super::{Block, BroOpt, CaveOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, live_mode, rows, team_knob};
 use bro_core::config::Material;
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::brand::{self, Mark};
@@ -241,6 +241,7 @@ pub(crate) fn draw(v: &mut SettingsView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
     if hints_h > 0.0 {
         let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
         match v.row() {
+            r if team_knob(r) => hints.push(("r", "bro's default")),
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
             Row::Watch(_) | Row::Voice(VoiceOpt::Key | VoiceOpt::Mode | VoiceOpt::Speaker) => hints.push(("r", "bro's default")),
             _ => {}
@@ -460,8 +461,11 @@ fn resettable(row: Row, st: &Settings) -> Option<&'static str> {
     let w = &st.watchdog;
     let d = bro_core::config::WatchdogSettings::default();
     let changed = match row {
-        Row::Preset => return (!st.claude_env.overrides.is_empty()).then_some("reset to preset · r"),
-        Row::Knob(k) => return (st.claude_env.choice(&KNOBS[k]).1 == Source::Override).then_some("reset to preset · r"),
+        Row::Preset => return (st.claude_env.preset_changes() > 0).then_some("reset to preset · r"),
+        Row::Knob(k) => {
+            let label = if team_knob(row) { "bro's default · r" } else { "reset to preset · r" };
+            return (st.claude_env.choice(&KNOBS[k]).1 == Source::Override).then_some(label);
+        }
         Row::Watch(WatchOpt::Prompt) => w.prompt.is_some(),
         Row::Watch(WatchOpt::Wake) => w.idle_secs != d.idle_secs,
         Row::Watch(WatchOpt::Reviewer) => w.reviewer != d.reviewer,
@@ -562,6 +566,8 @@ fn control(v: &SettingsView, it: &Item, ui: &Ui, st: &Settings, cx: &Cx) -> Ctl 
         Row::Cave(CaveOpt::Mode) => seg(cave_choices().iter().map(|c| c.map_or("off", |l| l.id()).to_string()).collect(), None),
         // Claude's models: Claude's logo beside them
         Row::Watch(WatchOpt::Model) => seg(crate::watchdog::MODEL_CHOICES.iter().map(|m| m.to_string()).collect(), Some(brand::harness(Harness::Claude))),
+        // agent teams: a switch, as the terminal UI draws it
+        Row::Knob(k) if KNOBS[k].id == bro_core::claude_env::AGENT_TEAMS => switch(),
         Row::Knob(k) => seg(KNOBS[k].options.iter().map(|o| o.label.to_string()).collect(), None),
         Row::Watch(WatchOpt::Prompt) | Row::Tool(ToolOpt::QuickInstall | ToolOpt::Sounds | ToolOpt::PeonPing) => Ctl::Link { value, ink: vink.value(t) },
         Row::Tool(ToolOpt::SoundsOn) => Ctl::Switch { on: text.starts_with('●'), live: true },

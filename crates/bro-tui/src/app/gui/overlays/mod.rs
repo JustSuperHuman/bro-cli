@@ -27,6 +27,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, canvas: &mut TuiCanvas, window: Rect, bo
         return None;
     }
     let time = app.start.elapsed().as_secs_f64();
+    app.refresh_team_view();
     let prev = ui.layer();
     let native = match &app.overlay {
         Overlay::Palette(_) => palette::draw(app, ui, window, time),
@@ -40,6 +41,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, canvas: &mut TuiCanvas, window: Rect, bo
                 Overlay::Launcher(l) => crate::launcher::gui::draw(l, ui, body, &cx),
                 Overlay::File(v) => crate::file_view::gui::draw(v, ui, window, &cx),
                 Overlay::AgentFiles(v) => crate::agent_files::gui::draw(v, ui, window, &cx),
+                Overlay::Team(v) => crate::team_board::gui::draw(v, ui, window, &cx),
                 Overlay::Watchdog(v) => {
                     let dog = app.svc.watchdog(&v.sid);
                     crate::watchdog::view::gui::draw(v, ui, window, dog.as_ref(), &cx)
@@ -82,6 +84,10 @@ pub fn click(g: &mut Gui, n: usize, p: Point, button: CButton, m: KeyModifiers, 
             let o = crate::agent_files::gui::click(v, n, p, m, count);
             app.agent_files_outcome(o);
         }
+        Overlay::Team(v) => {
+            let o = crate::team_board::gui::click(v, n, p, m, count);
+            app.team_outcome(o);
+        }
         Overlay::Watchdog(v) => {
             let dog = app.svc.watchdog(&v.sid);
             let o = crate::watchdog::view::gui::click(v, n, p, m, count, dog.as_ref());
@@ -108,6 +114,7 @@ pub fn wheel(g: &mut Gui, n: Option<usize>, down: bool) {
         Overlay::Launcher(l) => crate::launcher::gui::wheel(l, n, down),
         Overlay::File(v) => crate::file_view::gui::wheel(v, n, down),
         Overlay::AgentFiles(v) => crate::agent_files::gui::wheel(v, n, down),
+        Overlay::Team(v) => crate::team_board::gui::wheel(v, n, down),
         Overlay::Watchdog(v) => crate::watchdog::view::gui::wheel(v, n, down),
         Overlay::WatchdogPrompt(e) => crate::watchdog::prompt_editor::gui::wheel(e, n, down),
         _ => {}

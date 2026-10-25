@@ -198,6 +198,10 @@ impl App {
                 let o = v.key(k);
                 self.agent_files_outcome(o);
             }
+            Overlay::Team(v) => {
+                let o = v.key(k);
+                self.team_outcome(o);
+            }
             Overlay::Watchdog(_) => self.watchdog_key(k),
             Overlay::WatchdogPrompt(_) => self.watchdog_prompt_key(k),
         }

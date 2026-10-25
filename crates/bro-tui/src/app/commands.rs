@@ -190,6 +190,7 @@ impl App {
             }
             Act::OpenedFile => self.show_last_opened(),
             Act::AgentFiles => self.show_agent_files(),
+            Act::Team => self.show_team(None),
             Act::Watchdog => self.open_watchdog(),
             Act::WatchdogPrompt => self.open_watchdog_prompt(),
             Act::Media => {

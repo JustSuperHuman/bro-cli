@@ -1,7 +1,8 @@
 //! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), push-to-talk
 //! voice (its key, set by pressing it), watchdog
 //! defaults and the reviewer's prompt, caveman
-//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install, the JustWatch skill and JustImagine), bro's own updates and the Claude Code environment bro sets on every Claude launch — a preset (Standard, Quiet, Private, Lockdown,
+//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install, the JustWatch skill and JustImagine), bro's own updates and the Claude Code environment bro sets on every Claude launch — agent teams (on, the
+//! teammates' model, the teams running now), then a preset (Standard, Quiet, Private, Lockdown,
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
 //! part applies to sessions launched from now on.
 
@@ -16,7 +17,7 @@ use crate::services::justimagine::commits;
 use crate::services::justtools::JobKind;
 use crate::ui::{self, fg, muted};
 use bro_core::caveman::Level;
-use bro_core::claude_env::{self, ClaudeEnvSettings, KNOBS, PRESETS, Source};
+use bro_core::claude_env::{self, ClaudeEnvSettings, Group, KNOBS, PRESETS, Source};
 use bro_core::config::{MATERIAL_TINTS, Material, RainMode};
 use bro_core::justtools::Step;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -407,7 +408,8 @@ impl ModOpt {
 }
 
 /// A selectable row, in the order the sections run: bro's own options (Appearance, then Sessions), caveman mode,
-/// watchdogs, bro's Claude mod, the Claude preset and each [`KNOBS`] switch, the integrations, then bro's updates.
+/// watchdogs, bro's Claude mod, agent teams, the Claude preset and each other [`KNOBS`] switch, the integrations,
+/// then bro's updates.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
     Bro(BroOpt),
@@ -429,13 +431,54 @@ fn rows() -> Vec<Row> {
         .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents)])
         .chain(WATCH_OPTS.map(Row::Watch))
         .chain(MOD_OPTS.map(Row::Mod))
+        .chain(knobs(true).map(Row::Knob))
         .chain([Row::Preset])
-        .chain((0..KNOBS.len()).map(Row::Knob))
+        .chain(knobs(false).map(Row::Knob))
         .chain([Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
         .chain(bro_core::justpaste::supported().then_some(Row::Tool(ToolOpt::SmartPaste)))
         .chain([Row::Tool(ToolOpt::Imagine), Row::Tool(ToolOpt::SoundsOn), Row::Tool(ToolOpt::Sounds), Row::Tool(ToolOpt::PeonPing), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
         .collect()
+}
+
+/// The [`KNOBS`] for agent teams (`teams`), drawn in a group of their own above the preset, or all the others.
+fn knobs(teams: bool) -> impl Iterator<Item = usize> {
+    (0..KNOBS.len()).filter(move |&k| (KNOBS[k].group == Group::Teams) == teams)
+}
+
+/// An agent teams switch: reset goes back to bro's default, not to a preset (no preset touches them).
+fn team_knob(r: Row) -> bool {
+    matches!(r, Row::Knob(k) if KNOBS[k].group == Group::Teams)
+}
+
+/// The agent teams running in sessions here, under the switch: one line each (lead, project, teammates, tasks), or
+/// how to start one.
+fn team_notes(on: bool, teams: &[crate::services::LiveTeam], t: &crate::theme::Theme) -> Vec<Vec<Span<'static>>> {
+    if !on {
+        return vec![vec![Span::styled("off · sessions you start now can't form a team; ones already running keep theirs", muted(t))]];
+    }
+    if teams.is_empty() {
+        return vec![vec![Span::styled(format!("none running · in a new Claude session, ask: “{}”", crate::team_board::EXAMPLE), muted(t))]];
+    }
+    let mut out = vec![vec![Span::styled(format!("{} running · prefix M on a session opens its team board", teams.len()), muted(t))]];
+    for l in teams.iter().take(5) {
+        let c = l.team.counts();
+        let mates = l.team.teammates().count();
+        let mut line = vec![
+            Span::styled(ui::lead("team"), fg(t.accent)),
+            Span::styled(ui::fit(&l.lead, 28), ui::bold()),
+            Span::styled(format!("  {}", l.project), muted(t)),
+            Span::styled(format!("  ·  {mates} teammate{}", if mates == 1 { "" } else { "s" }), fg(t.fg)),
+        ];
+        if l.team.working() > 0 {
+            line.push(Span::styled(format!(", {} working", l.team.working()), fg(t.accent)));
+        }
+        if c.total > 0 {
+            line.push(Span::styled(format!("  ·  {} of {} tasks done", c.done, c.total), fg(if c.done == c.total { t.good } else { t.fg })));
+        }
+        out.push(line);
+    }
+    out
 }
 
 /// The sections down the left; every row belongs to one.
@@ -561,7 +604,7 @@ fn shown(v: impl Into<String>, style: Style) -> Vec<Span<'static>> {
 }
 
 /// `text` word-wrapped to `w` columns; a word wider than that is cut across lines.
-fn wrap(text: &str, w: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, w: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthChar;
     let w = w.max(8);
     let mut out = vec![];
@@ -666,6 +709,12 @@ impl SettingsView {
 
     fn go(&mut self, s: Section) {
         self.sel = rows().iter().position(|r| Section::of(*r) == s).unwrap_or(0);
+    }
+
+    /// Select the agent teams switch (the team board's s).
+    pub fn show_agent_teams(&mut self) {
+        let k = KNOBS.iter().position(|k| k.id == claude_env::AGENT_TEAMS).unwrap_or(0);
+        self.sel = rows().iter().position(|r| *r == Row::Knob(k)).unwrap_or(self.sel);
     }
 
     /// Enter on a JustTools row: open Quick Install (JustTools isn't installed), update or check for a release;
@@ -879,7 +928,7 @@ impl SettingsView {
                     WatchOpt::Budget => s.watchdog.max_wakes = d.max_wakes,
                 }
             }
-            Row::Preset => s.claude_env.overrides.clear(),
+            Row::Preset => s.claude_env.clear_preset_changes(),
             Row::Knob(k) => {
                 s.claude_env.overrides.remove(KNOBS[k].id);
             }
@@ -1039,17 +1088,35 @@ impl SettingsView {
                 let m = &st.claude_mod;
                 let mut out = vec![Block::Sub("bro mod".into())];
                 out.extend(MOD_OPTS.iter().map(|&o| Block::Item(Item::new(Row::Mod(o), o.label(), switch(o.get(m), o.live(m), t), o.help()))));
-                out.push(Block::Sub("environment".into()));
                 let env = &st.claude_env;
+                out.push(Block::Sub(Group::Teams.label().into()));
+                let teams_on = env.agent_teams();
+                for k_i in knobs(true) {
+                    let k = &KNOBS[k_i];
+                    let (o, src) = env.choice(k);
+                    let value = match k.id {
+                        claude_env::AGENT_TEAMS => switch(teams_on, true, t),
+                        _ => choice(k.options[o].label, if src == Source::Override { bold(t.shine) } else { muted(t) }, t),
+                    };
+                    let mut item = Item::new(Row::Knob(k_i), k.label, value, k.help);
+                    if k.id == claude_env::AGENT_TEAMS {
+                        item.notes = team_notes(teams_on, &cx.svc.live_teams(), t);
+                    } else if src == Source::Override {
+                        item.tag = Some(Span::styled("  changed", fg(t.shine)));
+                    }
+                    out.push(Block::Item(item));
+                }
+                out.push(Block::Sub("environment".into()));
                 let p = claude_env::preset(&env.preset);
                 let mut preset = Item::new(Row::Preset, "Preset", choice(p.label, bold(t.shine), t), p.help);
-                preset.tag = match env.overrides.len() {
+                preset.tag = match env.preset_changes() {
                     0 => None,
                     n => Some(Span::styled(format!("  + {n} change{}", if n == 1 { "" } else { "s" }), fg(t.inline))),
                 };
                 out.push(Block::Item(preset));
                 let mut group = None;
-                for (k_i, k) in KNOBS.iter().enumerate() {
+                for k_i in knobs(false) {
+                    let k = &KNOBS[k_i];
                     if group != Some(k.group) {
                         group = Some(k.group);
                         out.push(Block::Sub(k.group.label().into()));
@@ -1307,7 +1374,7 @@ impl SettingsView {
             Section::Watchdog => Span::styled(format!("{} idle", crate::watchdog::human(st.watchdog.idle_secs)), muted(t)),
             Section::Claude => {
                 let label = claude_env::preset(&st.claude_env.preset).label;
-                match st.claude_env.overrides.len() {
+                match st.claude_env.preset_changes() {
                     0 => Span::styled(label, muted(t)),
                     n => Span::styled(format!("{label} +{n}"), fg(t.inline)),
                 }
@@ -1382,6 +1449,7 @@ impl Pane for SettingsView {
         let row = self.row();
         let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
         match row {
+            r if team_knob(r) => hints.push(("r", "bro's default")),
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
             Row::Watch(_) | Row::Voice(VoiceOpt::Key | VoiceOpt::Mode | VoiceOpt::Speaker) => hints.push(("r", "bro's default")),
             _ => {}
@@ -1522,7 +1590,7 @@ mod tests {
         let mut env = ClaudeEnvSettings::default();
         assert_eq!(
             env_parts(&env),
-            ["CLAUDE_CODE_NO_FLICKER=1", r#"--settings {"viewMode":"focus","spinnerTipsEnabled":false}"#, "hooks on SendMessage and ListAgents: bro hook peers project"]
+            ["CLAUDE_CODE_NO_FLICKER=1", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1", r#"--settings {"viewMode":"focus","spinnerTipsEnabled":false}"#, "hooks on SendMessage and ListAgents: bro hook peers project"]
         );
         env.use_preset("presenter");
         let p = env_parts(&env);
@@ -1542,7 +1610,9 @@ mod tests {
         assert_eq!(r[n], Row::Cave(CaveOpt::Mode));
         assert_eq!(r[n + 2], Row::Watch(WatchOpt::Prompt));
         assert_eq!(r[n + 2 + WATCH_OPTS.len()], Row::Mod(ModOpt::Theme));
-        assert_eq!(r[n + 2 + WATCH_OPTS.len() + MOD_OPTS.len()], Row::Preset);
+        let teams = knobs(true).count();
+        assert!(teams >= 1 && r[n + 2 + WATCH_OPTS.len() + MOD_OPTS.len()] == Row::Knob(0), "agent teams lead the Claude settings after the mod");
+        assert_eq!(r[n + 2 + WATCH_OPTS.len() + MOD_OPTS.len() + teams], Row::Preset);
         let tools = n + 3 + WATCH_OPTS.len() + MOD_OPTS.len() + KNOBS.len();
         assert_eq!(r[tools], Row::Tool(ToolOpt::Install));
         assert_eq!(r[tools + 1], Row::Tool(ToolOpt::QuickInstall));
@@ -1557,6 +1627,24 @@ mod tests {
         let order: Vec<usize> = r.iter().map(|row| SECTIONS.iter().position(|s| *s == Section::of(*row)).unwrap()).collect();
         assert!(order.is_sorted(), "{order:?}");
         assert!((0..SECTIONS.len()).all(|i| order.contains(&i)), "every section has a row");
+    }
+
+    #[test]
+    fn agent_teams_sit_above_the_preset_and_list_running_teams() {
+        let mut v = SettingsView::default();
+        v.show_agent_teams();
+        assert_eq!(v.row(), Row::Knob(KNOBS.iter().position(|k| k.id == claude_env::AGENT_TEAMS).unwrap()));
+        assert!(team_knob(v.row()));
+        assert!(!team_knob(Row::Preset));
+        let t = crate::theme::get("graphite");
+        let text = |notes: Vec<Vec<Span<'static>>>| notes.iter().map(|l| l.iter().map(|s| s.content.as_ref()).collect::<String>()).collect::<Vec<_>>();
+        assert!(text(team_notes(false, &[], &t))[0].starts_with("off"));
+        assert!(text(team_notes(true, &[], &t))[0].contains(crate::team_board::EXAMPLE));
+        let team = std::sync::Arc::new(crate::team_board::tests::team());
+        let live = crate::services::LiveTeam { lead: "Refactor auth".into(), project: "bro-cli-v2".into(), seq: 3, team };
+        let lines = text(team_notes(true, &[live], &t));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("Refactor auth") && lines[1].contains("2 teammates, 1 working") && lines[1].contains("1 of 4 tasks done"), "{lines:?}");
     }
 
     #[test]

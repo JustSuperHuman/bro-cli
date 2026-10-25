@@ -251,7 +251,8 @@ impl Binder {
         changed
     }
 
-    fn config_dir(&self) -> PathBuf {
+    /// The agent's config dir: `CLAUDE_CONFIG_DIR` / `CODEX_HOME` as launched, else its login's, else the default.
+    pub fn config_dir(&self) -> PathBuf {
         if let Some(d) = &self.spec.config_dir {
             return d.clone();
         }

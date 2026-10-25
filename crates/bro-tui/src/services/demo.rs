@@ -275,6 +275,47 @@ pub fn sessions() -> Vec<DemoSession> {
     ]
 }
 
+/// The agent team the first demo session leads: three teammates on a review, their task list half done.
+pub fn team() -> bro_core::agent_teams::Team {
+    use bro_core::agent_teams::{Member, Task, TaskStatus, Team};
+    let member = |name: &str, color: &str, agent_type: Option<&str>, model: Option<&str>, active: bool| Member {
+        name: name.into(),
+        agent_id: format!("{name}@session-demo"),
+        agent_type: agent_type.map(String::from),
+        color: Some(color.into()),
+        model: model.map(String::from),
+        active,
+        ..Member::default()
+    };
+    let task = |id: &str, subject: &str, doing: &str, status: TaskStatus, owner: Option<&str>, after: &[&str], description: &str| Task {
+        id: id.into(),
+        subject: subject.into(),
+        description: description.into(),
+        active_form: Some(doing.into()),
+        owner: owner.map(String::from),
+        status,
+        blocked_by: after.iter().map(|s| s.to_string()).collect(),
+    };
+    use TaskStatus::*;
+    Team {
+        name: "session-demo".into(),
+        members: vec![
+            Member { name: "team-lead".into(), agent_id: "team-lead@session-demo".into(), lead: true, ..Member::default() },
+            member("security", "blue", Some("security-reviewer"), Some("opus"), true),
+            member("perf", "green", None, Some("sonnet"), true),
+            member("tests", "purple", Some("test-runner"), Some("sonnet"), false),
+        ],
+        tasks: vec![
+            task("1", "Map the auth and session code", "Mapping the auth code", Completed, Some("security"), &[], "List every place tokens are minted, stored or checked."),
+            task("2", "Audit token handling", "Auditing token handling", InProgress, Some("security"), &["1"], "JWTs in httpOnly cookies: expiry, rotation, revocation, and what a stolen refresh token can do."),
+            task("3", "Profile the request hot path", "Profiling the hot path", InProgress, Some("perf"), &[], "Find what each request allocates and where the time goes under 200 concurrent sessions."),
+            task("4", "Cover the new branches with tests", "Writing tests", Completed, Some("tests"), &[], "Every new branch in src/auth gets a test that fails without it."),
+            task("5", "Run the suite against the fixes", "Running the suite", Pending, Some("tests"), &["2", "3"], "Once security and perf land their fixes, run everything and report flakes."),
+            task("6", "Write up the findings", "Writing the report", Pending, None, &["2", "3", "5"], "One report: each finding with its severity, the fix and the test that covers it."),
+        ],
+    }
+}
+
 /// An agent-looking transcript (ANSI) for a demo pane.
 pub fn transcript(h: Option<Harness>) -> String {
     let (o, d, g, r, b, x) = ("\x1b[38;2;217;119;87m", "\x1b[2m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[0m");

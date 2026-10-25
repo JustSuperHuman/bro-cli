@@ -6,7 +6,7 @@ use winapi::shared::minwindef::DWORD;
 use winapi::um::processthreadsapi::*;
 
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
-const PROC_THREAD_ATTRIBUTE_JOB_LIST: usize = 0x0002000d;
+const PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY: usize = 0x00020012;
 
 pub struct ProcThreadAttributeList {
     data: Vec<u8>,
@@ -45,6 +45,27 @@ impl ProcThreadAttributeList {
         self.data.as_mut_slice().as_mut_ptr() as *mut _
     }
 
+    /// `policy` must remain alive until the process has been created.
+    pub fn set_desktop_app_policy(&mut self, policy: &DWORD) -> Result<(), Error> {
+        let res = unsafe {
+            UpdateProcThreadAttribute(
+                self.as_mut_ptr(),
+                0,
+                PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY,
+                policy as *const _ as *mut _,
+                mem::size_of_val(policy),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        ensure!(
+            res != 0,
+            "setting desktop app policy failed: {}",
+            IoError::last_os_error()
+        );
+        Ok(())
+    }
+
     pub fn set_pty(&mut self, con: HPCON) -> Result<(), Error> {
         let res = unsafe {
             UpdateProcThreadAttribute(
@@ -62,23 +83,6 @@ impl ProcThreadAttributeList {
             "UpdateProcThreadAttribute failed: {}",
             IoError::last_os_error()
         );
-        Ok(())
-    }
-
-    /// `jobs` must remain alive until the process has been created.
-    pub fn set_jobs(&mut self, jobs: &[winapi::um::winnt::HANDLE]) -> Result<(), Error> {
-        let res = unsafe {
-            UpdateProcThreadAttribute(
-                self.as_mut_ptr(),
-                0,
-                PROC_THREAD_ATTRIBUTE_JOB_LIST,
-                jobs.as_ptr() as *mut _,
-                mem::size_of_val(jobs),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        };
-        ensure!(res != 0, "setting process job failed: {}", IoError::last_os_error());
         Ok(())
     }
 }

@@ -1,10 +1,12 @@
 //! What an agent pane's transcript says (`docs/agent-insights.md`): a worker per Claude / Codex pane binds the
 //! pane to the transcript it is writing (`bro_core::sessions::live::Binder`), tails it once a second (only new
 //! bytes) into `AgentFacts`, and publishes a snapshot the UI reads without touching the disk. It wakes the pane
-//! when something changed. A generated `/recap` lands here too ([`Insights::set_generated`]).
+//! when something changed. A generated `/recap` lands here too ([`Insights::set_generated`]), and a Claude
+//! session's agent team ([`bro_core::agent_teams`]) is read alongside, once a second.
 
 use crate::pane::Waker;
 use bro_core::Harness;
+use bro_core::agent_teams::{self, Team};
 use bro_core::recap::CachedRecap;
 use bro_core::sessions::live::{AgentFacts, BindSpec, Binder, Tail};
 use parking_lot::Mutex;
@@ -29,6 +31,9 @@ pub struct Snapshot {
     /// The agent's own word on whether a turn is running: Claude's `sessions/<pid>.json` status, Codex's
     /// `task_started` / `task_complete`. None = unknown (fall back to the screen).
     pub busy: Option<bool>,
+    /// The agent team this Claude session leads, as Claude Code last wrote it (None: agent teams off, or no
+    /// session id yet). A team of the lead alone is still Some: see [`Team::is_empty`].
+    pub team: Option<Arc<Team>>,
     /// Bumped on every change
     pub rev: u64,
 }
@@ -58,6 +63,20 @@ impl Insights {
         me
     }
 
+    /// A worker-less handle that only carries `team` (`bro --demo`'s lead).
+    pub fn fixed_team(team: Team) -> Insights {
+        let me = Insights::empty(None);
+        me.set_team(Some(team));
+        me
+    }
+
+    /// Give a fixed pane a team (tests, the demo).
+    pub fn set_team(&self, team: Option<Team>) {
+        let mut s = self.inner.snap.lock();
+        s.team = team.map(Arc::new);
+        s.rev += 1;
+    }
+
     /// Tests: facts from a whole transcript, read now on this thread (no worker, no binding).
     #[cfg(test)]
     pub fn from_transcript(harness: Harness, path: &Path, session_id: Option<&str>) -> Insights {
@@ -77,6 +96,11 @@ impl Insights {
 
     pub fn snapshot(&self) -> Snapshot {
         self.inner.snap.lock().clone()
+    }
+
+    /// [`Snapshot::team`] without cloning the rest.
+    pub fn team(&self) -> Option<Arc<Team>> {
+        self.inner.snap.lock().team.clone()
     }
 
     /// [`Snapshot::busy`] without cloning the rest.
@@ -116,6 +140,7 @@ impl Insights {
         let mut tail: Option<Tail> = None;
         let mut facts: Option<AgentFacts> = None;
         let mut busy = None;
+        let mut team: Option<Arc<Team>> = None;
         while !self.inner.stop.load(Ordering::SeqCst) {
             let step = crate::services::guard("insights::step", || step(harness, &mut binder, &mut tail, &mut facts));
             match step {
@@ -140,6 +165,19 @@ impl Insights {
                     s.rev += 1;
                 }
                 self.wake();
+            }
+            if harness == Harness::Claude {
+                let sid = binder.session_id().map(str::to_string).or_else(|| self.inner.snap.lock().session_id.clone());
+                let now = crate::services::guard("insights::team", || sid.and_then(|sid| agent_teams::read(&binder.config_dir(), &sid))).ok().flatten();
+                if now.as_ref() != team.as_deref() {
+                    team = now.map(Arc::new);
+                    {
+                        let mut s = self.inner.snap.lock();
+                        s.team = team.clone();
+                        s.rev += 1;
+                    }
+                    self.wake();
+                }
             }
             // sleep in short slices so a closed pane's worker ends promptly
             let until = Instant::now() + EVERY;

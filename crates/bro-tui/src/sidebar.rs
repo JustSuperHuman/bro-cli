@@ -7,8 +7,18 @@
 
 use crate::pane::{Activity, PaneId};
 use bro_core::Harness;
+use bro_core::agent_teams::Team;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Teammates listed under their lead; a bigger team shows this many less one, then "+N more".
+pub const TEAM_ROWS: usize = 4;
+
+/// The lines a lead's team takes under its row: a summary, then its teammates (at most [`TEAM_ROWS`]).
+pub fn team_lines(team: &Team) -> usize {
+    1 + team.teammates().count().min(TEAM_ROWS)
+}
 
 /// A live session, as the sidebar needs it.
 #[derive(Clone, Debug)]
@@ -33,6 +43,8 @@ pub struct LiveInfo {
     pub seq: u64,
     /// bro's orchestrator: pinned above every project, first in the numbering
     pub orchestrator: bool,
+    /// The agent team it leads, while it has teammates (listed under it)
+    pub team: Option<Arc<Team>>,
 }
 
 /// An earlier session, as the sidebar needs it: which project, and how long ago (for "last used").
@@ -227,6 +239,7 @@ mod tests {
             age_secs: 60,
             seq,
             orchestrator: false,
+            team: None,
         }
     }
 

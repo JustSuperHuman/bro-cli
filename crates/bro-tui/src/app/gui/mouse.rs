@@ -273,6 +273,7 @@ fn side_click(g: &mut Gui, hit: SideHit, cb: CButton, m: KeyModifiers) {
         }
         SideHit::Row(i) => app.activate_row(i),
         SideHit::Close(id) => app.ask_close(id),
+        SideHit::Team(id) => app.show_team(Some(id)),
         SideHit::CloseProject(root, live) => app.close_project(root, live),
         SideHit::Fable => app.show_fable = !app.show_fable,
         SideHit::Usage => app.open_view("usage"),

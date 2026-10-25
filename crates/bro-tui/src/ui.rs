@@ -47,6 +47,7 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("caveman", "⛏", "⛏"),
     ("mic", "\u{F036C}", "♪"),
     ("watchdog", "\u{F0A43}", "◉"),
+    ("team", "\u{F0849}", "⚑"),
     ("history", "\u{F02DA}", "↺"),
     ("branch", "\u{E725}", "⎇"),
 ];

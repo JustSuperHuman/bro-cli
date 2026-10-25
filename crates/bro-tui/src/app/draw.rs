@@ -28,7 +28,7 @@ impl App {
         crate::theme::project_color(key, &self.theme)
     }
 
-    /// The tiled sessions by what they share (project, agent, login, model, folder: [`Term::tile_group`]):
+    /// The tiled sessions by what they share (project and agent: [`Term::tile_group`]):
     /// (project key, label, panes), in tile order, each group where it first appears. The orchestrator isn't in
     /// any: it has its own column (see [`App::orchestrator_column`]).
     pub(crate) fn tile_groups(&self) -> Vec<(String, String, Vec<crate::pane::PaneId>)> {

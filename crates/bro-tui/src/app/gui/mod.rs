@@ -726,7 +726,10 @@ impl Gui {
             glow: fx.glow,
             glow_px: 7.0 * self.scale,
         };
-        match gfx.renderer.render(&gfx.scene, &mut gfx.text) {
+        // on Wayland the next redraw now waits for the compositor to want a frame: a window off screen (another
+        // workspace, the screen off or locked) draws nothing, instead of waiting out a 1 s acquire every frame and
+        // rebuilding the swapchain each time
+        match gfx.renderer.render_with(&gfx.scene, &mut gfx.text, || window.pre_present_notify()) {
             Ok(()) => {}
             Err(bro_gfx::FrameError::Reconfigured) => self.dirty = true,
             Err(bro_gfx::FrameError::Skipped) => {}

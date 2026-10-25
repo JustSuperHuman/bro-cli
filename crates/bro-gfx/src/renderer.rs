@@ -10,6 +10,7 @@ use crate::atlas::{Atlas, Kind};
 use crate::scene::{GlyphInstance, ImageId, ImageInstance, QuadInstance, Scene, ShadowInstance};
 use crate::text::{Antialias, Text};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 const COMMON: &str = include_str!("shaders/common.wgsl");
 const QUAD: &str = include_str!("shaders/quad.wgsl");
@@ -132,6 +133,43 @@ struct AtlasTexture {
     generation: u64,
 }
 
+/// The swapchain rebuilds the renderer does by itself to get frames again (after a stall or an outdated swapchain; a
+/// resize's isn't one). Each hands the driver a new set of window-sized images. A Wayland window off screen never
+/// gets an image, and rebuilding for it once a second for hours is the likeliest way bro 2.1.4 ran a machine with
+/// NVIDIA's driver out of memory. So after the first, each waits twice as long as the one before (1 s, 2 s, 4 s ...
+/// a minute), until ten quiet minutes or a resize start the count over.
+#[derive(Default)]
+struct Rebuilds {
+    /// rebuilds in this run of trouble
+    count: u32,
+    last: Option<Instant>,
+}
+
+impl Rebuilds {
+    const MAX_WAIT: Duration = Duration::from_secs(60);
+    const QUIET: Duration = Duration::from_secs(600);
+
+    /// Whether a rebuild may go at `now` (it's counted when it may).
+    fn allow(&mut self, now: Instant) -> bool {
+        if let Some(last) = self.last {
+            let since = now.saturating_duration_since(last);
+            if since >= Self::QUIET {
+                self.count = 0;
+            }
+            let wait = match self.count {
+                0 => Duration::ZERO,
+                n => Duration::from_secs(1 << (n - 1).min(6)).min(Self::MAX_WAIT),
+            };
+            if since < wait {
+                return false;
+            }
+        }
+        self.count += 1;
+        self.last = Some(now);
+        true
+    }
+}
+
 /// Why a frame wasn't drawn.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FrameError {
@@ -190,6 +228,9 @@ pub struct Renderer {
     hidden: bool,
     /// Frames in a row whose swapchain image never came (each waits wgpu's 1 s acquire timeout).
     stalls: u32,
+    rebuilds: Rebuilds,
+    /// The swapchain was rebuilt for being suboptimal at this size: one the driver still calls that is drawn to as it is.
+    suboptimal_rebuilt: bool,
 }
 
 impl Renderer {
@@ -473,6 +514,8 @@ impl Renderer {
             adapter_info,
             hidden: false,
             stalls: 0,
+            rebuilds: Rebuilds::default(),
+            suboptimal_rebuilt: false,
         })
     }
 
@@ -533,6 +576,8 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.rebuilds = Rebuilds::default();
+        self.suboptimal_rebuilt = false;
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -640,35 +685,58 @@ impl Renderer {
 
     /// Draw `scene` and present it.
     pub fn render(&mut self, scene: &Scene, text: &mut Text) -> Result<(), FrameError> {
+        self.render_with(scene, text, || {})
+    }
+
+    /// [`Renderer::render`], calling `pre_present` just before the frame goes to the window: winit's
+    /// `Window::pre_present_notify`, which on Wayland holds the next redraw until the compositor wants a frame (and
+    /// none comes while the window is off screen).
+    pub fn render_with(&mut self, scene: &Scene, text: &mut Text, pre_present: impl FnOnce()) -> Result<(), FrameError> {
         self.sync_atlas(text);
         let lcd = text.antialias() != Antialias::Grayscale;
-        let (frame, stale) = match self.surface.get_current_texture() {
+        let (frame, suboptimal) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => (f, false),
-            // draw this one; reconfigure once it's presented (never while a frame is held)
+            // draw this one; rebuild once it's presented (never while a frame is held)
             wgpu::CurrentSurfaceTexture::Suboptimal(f) => (f, true),
-            wgpu::CurrentSurfaceTexture::Occluded => return Err(FrameError::Skipped),
+            wgpu::CurrentSurfaceTexture::Occluded => return self.skip(),
             // no image for a whole second: the swapchain is wedged (seen on Intel Vulkan after the window was
             // minimised or a display changed) and waiting on it again would freeze the window for good, so
             // build a new one, which is what a resize does and what brings such a window back
             wgpu::CurrentSurfaceTexture::Timeout => {
                 self.stalls += 1;
-                log::warn!("gpu: no swapchain image within 1 s ({} in a row), rebuilding the swapchain", self.stalls);
-                self.surface.configure(&self.device, &self.config);
-                return Err(FrameError::Reconfigured);
+                return self.rebuild(&format!("no swapchain image within 1 s ({} in a row)", self.stalls));
             }
-            _ => {
-                self.surface.configure(&self.device, &self.config);
-                return Err(FrameError::Reconfigured);
-            }
+            other => return self.rebuild(&format!("{other:?}")),
         };
         self.stalls = 0;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(self.view_format), ..Default::default() });
         self.compose(&view, scene, lcd);
+        pre_present();
         self.queue.present(frame);
-        if stale {
+        // once per size: a fresh swapchain the driver still calls suboptimal is drawn to as it is
+        if suboptimal && !std::mem::replace(&mut self.suboptimal_rebuilt, true) {
             self.surface.configure(&self.device, &self.config);
         }
         Ok(())
+    }
+
+    /// No frame this time: what was written for it (glyphs, a video frame) goes to the GPU now, not held for a frame
+    /// that may be a long time coming.
+    fn skip(&mut self) -> Result<(), FrameError> {
+        self.queue.submit([]);
+        Err(FrameError::Skipped)
+    }
+
+    /// No image from the swapchain: build a new one, unless the last rebuilds didn't help and their back-off hasn't
+    /// run out (see [`Rebuilds`]).
+    fn rebuild(&mut self, why: &str) -> Result<(), FrameError> {
+        if !self.rebuilds.allow(Instant::now()) {
+            return self.skip();
+        }
+        log::warn!("gpu: {why}, rebuilding the swapchain");
+        self.surface.configure(&self.device, &self.config);
+        self.queue.submit([]);
+        Err(FrameError::Reconfigured)
     }
 
     /// Draw `scene` into `view`: straight there, or through the offscreen frame and the effects pass (and the glow's
@@ -988,5 +1056,38 @@ impl Renderer {
             }
         }
         self.queue.submit([enc.finish()]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuilds_back_off_until_quiet() {
+        let t0 = Instant::now();
+        let at = |s: f64| t0 + Duration::from_secs_f64(s);
+        let mut r = Rebuilds::default();
+        // the first goes at once, the next after a second, then two, four ...
+        assert!(r.allow(at(0.0)));
+        assert!(!r.allow(at(0.5)));
+        assert!(r.allow(at(1.0)));
+        assert!(!r.allow(at(2.9)));
+        assert!(r.allow(at(3.0)));
+        assert!(!r.allow(at(6.9)));
+        assert!(r.allow(at(7.0)));
+        // a window that never gets an image: a minute apart at most, not once a second
+        let mut t = 7.0;
+        let mut n = 0;
+        while t < 3600.0 {
+            t += 1.0;
+            if r.allow(at(t)) {
+                n += 1;
+            }
+        }
+        assert!(n <= 70, "{n} rebuilds in an hour");
+        // ten quiet minutes: the next one goes at once again
+        assert!(r.allow(at(t + 600.0)));
+        assert!(!r.allow(at(t + 600.5)));
     }
 }

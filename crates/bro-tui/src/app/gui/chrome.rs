@@ -318,6 +318,14 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
         if let Some(note) = term.resume_note() {
             badges.push((note, t.inline));
         }
+        // the agent team it leads (prefix M shows the board)
+        if let Some(team) = term.team().filter(|team| !team.is_empty()) {
+            let n = team.teammates().count();
+            badges.push(match team.working() {
+                0 => (format!("team · {n} idle"), t.muted),
+                w => (format!("team · {w} of {n} working"), t.accent),
+            });
+        }
         if term.remote_grown() {
             let (rows, cols) = term.pty_size();
             badges.push((format!("⇲ {cols}×{rows} remote"), t.muted));
@@ -345,10 +353,9 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
         x = mark.right() + 8.0;
         let avail = (right - x - 8.0).max(0.0);
         // the session's own title (yours, else the agent's) leads; without one, its login · model does. Inside a
-        // group frame, which names the project, agent, login and folder, it's its number and title alone.
+        // group frame, which names the project and agent, its number leads.
         let (who, place) = who_line(term, b.grouped);
         let (title, meta) = match term.display_title() {
-            Some(t) if b.grouped => (t, String::new()),
             Some(t) => (t, [place, who].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")),
             None => (who, place),
         };

@@ -23,6 +23,7 @@ mod project_tabs;
 mod screensaver;
 mod sessions;
 mod side_view;
+mod teams;
 mod voice;
 mod watchdogs;
 mod welcome;
@@ -90,6 +91,8 @@ pub(crate) enum SideHit {
     Stats,
     /// the × on a running session's row
     Close(PaneId),
+    /// the agent team under a session's row: its team board
+    Team(PaneId),
     /// the × on a project row: (root, running sessions)
     CloseProject(std::path::PathBuf, usize),
     /// the disclosure arrow beside the Claude usage total
@@ -872,6 +875,7 @@ impl App {
         self.track_agents();
         self.tick_watchdogs();
         self.update_insights();
+        self.publish_teams();
         self.pump_voice();
         self.toasts.expire();
     }

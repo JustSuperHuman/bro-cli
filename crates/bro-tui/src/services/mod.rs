@@ -166,6 +166,19 @@ struct Inner {
     claude_palette: Mutex<Option<bro_core::claude_theme::Palette>>,
     /// The worker that writes it into every Claude config dir, so running sessions recolour.
     claude_theme_tx: Mutex<Option<Sender<bro_core::claude_theme::Palette>>>,
+    /// Agent teams running in sessions here (kept current by the UI loop), for the settings view.
+    teams: Mutex<Vec<LiveTeam>>,
+}
+
+/// An agent team running in one of bro's Claude sessions.
+#[derive(Clone, Debug)]
+pub struct LiveTeam {
+    /// the lead session's name
+    pub lead: String,
+    pub project: String,
+    /// launch order (the sidebar's)
+    pub seq: u64,
+    pub team: Arc<bro_core::agent_teams::Team>,
 }
 
 /// Push-to-talk as it stands, for the settings view.
@@ -310,6 +323,7 @@ impl Services {
                 login_watch: Mutex::new(Default::default()),
                 claude_palette: Mutex::new(None),
                 claude_theme_tx: Mutex::new(None),
+                teams: Mutex::new(vec![]),
             }),
         }
     }
@@ -722,6 +736,16 @@ impl Services {
         if focused.as_deref() != sid {
             *focused = sid.map(str::to_owned);
         }
+    }
+
+    /// The UI loop reports the agent teams running in its sessions.
+    pub(crate) fn set_live_teams(&self, teams: Vec<LiveTeam>) {
+        *self.inner.teams.lock() = teams;
+    }
+
+    /// Agent teams running in sessions here, in sidebar order.
+    pub fn live_teams(&self) -> Vec<LiveTeam> {
+        self.inner.teams.lock().clone()
     }
 
     pub(crate) fn focused_session(&self) -> Option<String> {

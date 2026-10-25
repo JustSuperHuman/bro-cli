@@ -47,6 +47,8 @@ pub struct Doc {
     pub lines: Vec<Styled>,
     /// Markdown files: the same lines rendered (one per source line, so numbers and paging still hold)
     pub preview: Option<Vec<Styled>>,
+    /// Markdown files: what each loaded line belongs to (headings, quotes, tables, code), for the desktop app
+    pub blocks: Vec<markdown::Block>,
     pub total: usize,
     pub bytes: u64,
 }
@@ -403,10 +405,16 @@ pub fn read(roots: &ResolveRoots, target: &str, r: PreviewRequest, theme: &Theme
     let number = |k: &str| v[k].as_u64().unwrap_or(0) as usize;
     let language = v["language"].as_str().unwrap_or("plaintext").to_string();
     let lines = highlight(content, &path, &language, theme);
-    let preview = (language == "markdown").then(|| markdown::render(&content.split('\n').map(clean).collect::<Vec<_>>(), &lines, theme));
+    let (preview, blocks) = match language == "markdown" {
+        true => {
+            let (p, h) = markdown::render(&content.split('\n').map(clean).collect::<Vec<_>>(), &lines, theme);
+            (Some(p), h)
+        }
+        false => (None, vec![]),
+    };
     let start = number("startLine").max(1);
     let total = number("totalLines").max(start + lines.len().saturating_sub(1));
-    Ok(Payload::Text(Doc { relative: resolved.relative, mention, language, start, lines, preview, total, bytes: v["bytes"].as_u64().unwrap_or(0), path }))
+    Ok(Payload::Text(Doc { relative: resolved.relative, mention, language, start, lines, preview, blocks, total, bytes: v["bytes"].as_u64().unwrap_or(0), path }))
 }
 
 /// `@src/app.rs` when it's under the session's cwd, else the absolute path; quoted when it has spaces.

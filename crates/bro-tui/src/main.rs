@@ -43,6 +43,7 @@ mod orchestrator_state;
 mod recents;
 mod services;
 mod sidebar;
+mod team_board;
 mod skin;
 mod testkit;
 mod textarea;

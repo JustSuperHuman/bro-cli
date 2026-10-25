@@ -97,10 +97,26 @@ fn session_process_worker() {
 }
 
 fn session(mode: &str, marker: &Path) -> Term {
+    let spawn = Spawn {
+        program: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+        args: ["--exact", WORKER, "--ignored", "--nocapture"].map(String::from).to_vec(),
+        env: vec![
+            ("SESSION_PROCESS_TEST_MODE".into(), mode.into()),
+            ("SESSION_PROCESS_TEST_MARKER".into(), marker.to_string_lossy().into_owned()),
+        ],
+        ..Spawn::default()
+    };
+    spawned_session(spawn, marker.parent().unwrap())
+}
+
+fn spawned_session(mut spawn: Spawn, cwd: &Path) -> Term {
     crate::testkit::isolate();
+    for key in ["HOME", "USERPROFILE", "BRO_DIR", "CLAUDE_POOL_DIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "BRO_CODEX_PROFILES_DIR"] {
+        spawn.env.push((key.into(), cwd.to_string_lossy().into_owned()));
+    }
     let (tx, _rx) = std::sync::mpsc::channel();
     let svc = Services::offline(Default::default(), tx.clone());
-    let cwd = marker.parent().unwrap().to_path_buf();
+    let cwd = cwd.to_path_buf();
     let meta = Meta {
         sid: uuid::Uuid::new_v4().to_string(),
         harness: None,
@@ -117,19 +133,83 @@ fn session(mode: &str, marker: &Path) -> Term {
         cleanup: vec![],
         orchestrator: false,
     };
-    let spawn = Spawn {
-        program: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
-        args: ["--exact", WORKER, "--ignored", "--nocapture"].map(String::from).to_vec(),
-        env: vec![
-            ("SESSION_PROCESS_TEST_MODE".into(), mode.into()),
-            ("SESSION_PROCESS_TEST_MARKER".into(), marker.to_string_lossy().into_owned()),
-        ],
-        ..Spawn::default()
-    };
     let mut term = Term::new(meta, spawn, svc);
     term.ensure_started(24, 80, Waker::new(1, tx));
     assert!(term.error.is_none(), "session startup failed: {:?}", term.error);
     term
+}
+
+#[test]
+fn conpty_default_shell_starts_and_exits_in_session_job() {
+    let (program, mut args) = crate::util::default_shell(None);
+    if program.eq_ignore_ascii_case("cmd.exe") {
+        args.extend(["/d", "/c", "exit 7"].map(String::from));
+    } else {
+        args.extend(["-NoProfile", "-NonInteractive", "-Command", "exit 7"].map(String::from));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut term = spawned_session(Spawn { program, args, ..Spawn::default() }, dir.path());
+    let until = Instant::now() + Duration::from_secs(15);
+    while term.exit_code().is_none() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(term.exit_code(), Some(7), "default shell did not execute its command");
+}
+
+#[test]
+#[ignore = "set BRO_VERIFY_SHELL to a PowerShell executable or Store execution alias"]
+fn conpty_powershell_execution_alias_starts_in_session_job() {
+    let program = std::env::var("BRO_VERIFY_SHELL").expect("set BRO_VERIFY_SHELL");
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("shell-started");
+    let spawn = Spawn {
+        program,
+        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "[IO.File]::WriteAllText($env:BRO_SHELL_MARKER, 'ready'); exit 0"].map(String::from).to_vec(),
+        env: vec![("BRO_SHELL_MARKER".into(), marker.to_string_lossy().into_owned())],
+        ..Spawn::default()
+    };
+    let mut term = spawned_session(spawn, dir.path());
+    let until = Instant::now() + Duration::from_secs(15);
+    while term.exit_code().is_none() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(term.exit_code(), Some(0), "shell did not exit cleanly");
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "ready");
+}
+
+#[test]
+#[ignore = "set BRO_VERIFY_SHELL to a PowerShell executable or Store execution alias"]
+fn conpty_powershell_execution_alias_close_and_exit_end_descendants() {
+    let program = std::env::var("BRO_VERIFY_SHELL").expect("set BRO_VERIFY_SHELL");
+    for natural_exit in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("descendant.pid");
+        let finish = if natural_exit { "exit 7" } else { "$p.WaitForExit()" };
+        let script = format!(
+            "$p = Start-Process -FilePath $env:BRO_TEST_WORKER -ArgumentList '--exact','{WORKER}','--ignored','--nocapture' -NoNewWindow -PassThru; \
+             [IO.File]::WriteAllText($env:BRO_SHELL_MARKER, [string]$p.Id); {finish}"
+        );
+        let spawn = Spawn {
+            program: program.clone(),
+            args: vec!["-NoLogo".into(), "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script],
+            env: vec![
+                ("BRO_SHELL_MARKER".into(), marker.to_string_lossy().into_owned()),
+                ("BRO_TEST_WORKER".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned()),
+                ("SESSION_PROCESS_TEST_MODE".into(), "leaf".into()),
+            ],
+            ..Spawn::default()
+        };
+        let mut term = spawned_session(spawn, dir.path());
+        let pid = wait_pid(&marker);
+        if !natural_exit {
+            assert!(alive(pid));
+            term.kill();
+        }
+        assert_dead(pid);
+        if natural_exit {
+            assert_eq!(term.exit_code(), Some(7));
+        }
+    }
 }
 
 #[test]

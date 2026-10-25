@@ -98,7 +98,7 @@ pub struct GroupBox {
     pub label: String,
     pub count: usize,
     pub focused: bool,
-    /// one of its sessions (they share project, agent, login, model and folder): what the label names
+    /// one of its sessions (they share project and agent): what the label names
     pub pane: Option<PaneId>,
 }
 

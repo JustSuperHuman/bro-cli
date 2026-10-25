@@ -146,12 +146,95 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_win
 }
 
 /// (gap above, height) of a row: a project gets a gap above it (none for the first) and two lines; a session one
-/// line, two with a note, and room for the field and its hint while it's being renamed.
+/// line, two with a note, and room for the field and its hint while it's being renamed; a lead its team under that.
 fn row_height(row: &Row, renaming: Option<crate::layout::PaneId>) -> (f32, f32) {
     match row {
         Row::Project { .. } => (10.0, 48.0),
-        Row::Live { info, .. } if info.note.is_some() || renaming == Some(info.pane) => (0.0, 48.0),
-        Row::Live { .. } => (0.0, 32.0),
+        Row::Live { info, .. } => {
+            let base = if info.note.is_some() || renaming == Some(info.pane) { 48.0 } else { 32.0 };
+            (0.0, base + info.team.as_deref().map_or(0.0, team_height))
+        }
+    }
+}
+
+/// One line of a lead's team under its row.
+const TEAM_LINE: f32 = 19.0;
+
+/// The room a lead's team takes under its row.
+fn team_height(team: &bro_core::agent_teams::Team) -> f32 {
+    2.0 + TEAM_LINE * crate::sidebar::team_lines(team) as f32 + 4.0
+}
+
+/// A lead's team under its row, from `top`: how many are working and the tasks done (a thin bar), then a line per
+/// teammate on a rail — its status (a spinner in its colour while it works), its name in Claude's colour for it and
+/// what it's doing — a bigger team ending in "+N more". A click anywhere on it opens the team board.
+fn draw_team(ui: &mut Ui, r: Rect, top: f32, x: f32, team: &bro_core::agent_teams::Team, pane: crate::layout::PaneId) {
+    let t = ui.t;
+    let area = Rect::new(r.x, top, r.w, r.bottom() - top);
+    let hot = ui.hover_amount(("side-team", pane), area);
+    if hot > 0.0 {
+        ui.round(Rect::new(x - 6.0, top, r.right() - 6.0 - (x - 6.0), area.h - 3.0), radius::CONTROL, t.hover.fade(hot));
+    }
+    ui.hit(area, Action::Side(SideHit::Team(pane)));
+    let mates: Vec<_> = team.teammates().collect();
+    let working = team.working();
+    let c = team.counts();
+    let right = r.right() - 12.0;
+    // the summary: the team mark, who's working, the tasks done
+    let mut y = top + 2.0;
+    let mid = y + TEAM_LINE / 2.0;
+    ui.icon(Rect::new(x - 1.0, y, 14.0, TEAM_LINE), "\u{F0849}", size::SMALL, t.accent);
+    let (text, tc) = match working {
+        0 => (format!("{} idle", mates.len()), t.muted),
+        n => (format!("{n} of {} working", mates.len()), t.accent),
+    };
+    let mut room = right;
+    if c.total > 0 {
+        let all = c.done == c.total;
+        let label = format!("{}/{}", c.done, c.total);
+        let st = Style::new(size::CAPTION, weight::SEMIBOLD, if all { t.good } else { t.muted });
+        let lw = ui.measure(&label, st);
+        ui.label(Point::new(right - lw, mid - 7.5), &label, st);
+        let bar = Rect::new(right - lw - 6.0 - 34.0, mid - 1.5, 34.0, 3.0);
+        ui.round(bar, 1.5, t.text.with_alpha(0.1));
+        if c.done > 0 {
+            ui.round(Rect::new(bar.x, bar.y, (bar.w * c.done as f32 / c.total as f32).max(3.0), bar.h), 1.5, t.good);
+        }
+        room = bar.x - 8.0;
+    }
+    ui.label_in(Rect::new(x + 16.0, y, (room - x - 16.0).max(10.0), TEAM_LINE), &text, Style::new(size::SMALL, weight::MEDIUM, tc), Align::Left);
+    y += TEAM_LINE;
+    // the teammates, on a rail down from the mark
+    let more = if mates.len() > crate::sidebar::TEAM_ROWS { mates.len() + 1 - crate::sidebar::TEAM_ROWS } else { 0 };
+    let shown = if more > 0 { crate::sidebar::TEAM_ROWS - 1 } else { mates.len() };
+    let lines = shown + usize::from(more > 0);
+    if lines > 0 {
+        ui.vline(x + 5.5, y - 3.0, TEAM_LINE * (lines as f32 - 0.5) + 3.0, t.hairline);
+    }
+    for m in mates.iter().take(shown) {
+        let mid = y + TEAM_LINE / 2.0;
+        ui.hline(x + 5.5, mid, 6.0, t.hairline);
+        let mc = match m.rgb() {
+            Some((r, g, b)) => Color::rgb8(r, g, b),
+            None => t.inline,
+        };
+        let dot = Point::new(x + 17.0, mid);
+        if m.active {
+            ui.spinner(dot, 3.6, 1.3, mc);
+        } else {
+            ui.ring(dot, 3.2, 1.2, mc.with_alpha(0.7));
+        }
+        let name_st = Style::new(size::SMALL, weight::SEMIBOLD, if m.active { mc } else { mc.mix(t.muted, 0.45) });
+        let doing = crate::team_board::doing(team, m);
+        let spans = vec![(m.name.clone(), name_st), (format!("  {doing}"), Style::new(size::CAPTION, weight::REGULAR, if m.active { t.muted } else { t.faint }))];
+        let b = ui.rich(&spans, size::SMALL, Some((right - x - 26.0).max(10.0)), false, Some(1));
+        ui.draw(&b, Point::new(x + 26.0, (mid - b.h / 2.0).round()));
+        y += TEAM_LINE;
+    }
+    if more > 0 {
+        let mid = y + TEAM_LINE / 2.0;
+        ui.hline(x + 5.5, mid, 6.0, t.hairline);
+        ui.label_in(Rect::new(x + 14.0, y, right - x - 14.0, TEAM_LINE), &format!("+{more} more"), Style::new(size::CAPTION, weight::MEDIUM, t.faint), Align::Left);
     }
 }
 
@@ -399,6 +482,11 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
                 let nr = Rect::new(text_x, r.y + 28.0, r.right() - 10.0 - text_x, 16.0);
                 ui.icon(Rect::new(nr.x - 1.0, nr.y, 12.0, 16.0), if waiting { "\u{F03E4}" } else { "\u{F0045}" }, size::CAPTION, c);
                 ui.label_in(Rect { x: nr.x + 14.0, w: nr.w - 14.0, ..nr }, text, Style::new(size::SMALL, weight::REGULAR, c), Align::Left);
+            }
+            // the team it leads, under that
+            if let Some(team) = info.team.as_deref() {
+                let top = r.y + if info.note.is_some() { 46.0 } else { 30.0 };
+                draw_team(ui, r, top, text_x, team, info.pane);
             }
         }
     }

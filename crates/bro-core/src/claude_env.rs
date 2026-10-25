@@ -4,8 +4,8 @@
 //!
 //! Each [`Knob`] has options; the first is the default and is usually "Claude's default",
 //! which sets nothing. The `standard` preset leaves Claude Code as it ships apart from
-//! [`ALWAYS`] (the fullscreen renderer), focus view, tool search behind the proxy, and messages
-//! between sessions kept to their project ([`crate::peers`]).
+//! [`ALWAYS`] (the fullscreen renderer), agent teams, focus view, tool search behind the proxy, and
+//! messages between sessions kept to their project ([`crate::peers`]).
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -29,6 +29,8 @@ impl Default for ClaudeEnvSettings {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
+    /// Agent teams: drawn in a group of their own above the preset, which never touches them.
+    Teams,
     Privacy,
     Updates,
     LongRuns,
@@ -38,6 +40,7 @@ pub enum Group {
 impl Group {
     pub fn label(self) -> &'static str {
         match self {
+            Group::Teams => "agent teams",
             Group::Privacy => "privacy",
             Group::Updates => "updates",
             Group::LongRuns => "long runs",
@@ -74,9 +77,36 @@ pub struct Knob {
     pub options: &'static [Opt],
 }
 
+/// The knob that turns agent teams on ([`crate::agent_teams`]).
+pub const AGENT_TEAMS: &str = "agent_teams";
+
 const DEFAULT: Opt = Opt { id: "default", label: "Claude default", vars: &[], settings: &[] };
 
 pub const KNOBS: &[Knob] = &[
+    Knob {
+        id: AGENT_TEAMS,
+        label: "Agent teams",
+        group: Group::Teams,
+        help: "Ask Claude for teammates and it spawns them: each its own Claude, sharing a task list and messaging the others. Off: named subagents stay subagents.",
+        when: When::Always,
+        options: &[
+            Opt { id: "on", label: "on", vars: &[("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")], settings: &[] },
+            Opt { id: "default", label: "off", vars: &[], settings: &[] },
+        ],
+    },
+    Knob {
+        id: "teammate_model",
+        label: "Teammate model",
+        group: Group::Teams,
+        help: "What teammates and subagents run on when Claude doesn't name a model. Sonnet or Haiku keep a big team's tokens down.",
+        when: When::Always,
+        options: &[
+            Opt { id: "default", label: "lead's", vars: &[], settings: &[] },
+            Opt { id: "opus", label: "Opus", vars: &[("CLAUDE_CODE_SUBAGENT_MODEL", "opus")], settings: &[] },
+            Opt { id: "sonnet", label: "Sonnet", vars: &[("CLAUDE_CODE_SUBAGENT_MODEL", "sonnet")], settings: &[] },
+            Opt { id: "haiku", label: "Haiku", vars: &[("CLAUDE_CODE_SUBAGENT_MODEL", "haiku")], settings: &[] },
+        ],
+    },
     Knob {
         id: "error_reporting",
         label: "Error reports",
@@ -239,14 +269,6 @@ pub const KNOBS: &[Knob] = &[
         options: &[Opt { id: "auto", label: "auto", vars: &[("ENABLE_TOOL_SEARCH", "true")], settings: &[] }, Opt { id: "off", label: "Claude default", vars: &[], settings: &[] }],
     },
     Knob {
-        id: "agent_teams",
-        label: "Agent teams",
-        group: Group::Features,
-        help: "Experimental: Claude coordinates a team of teammate sessions on one task.",
-        when: When::Always,
-        options: &[DEFAULT, Opt { id: "on", label: "on", vars: &[("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")], settings: &[] }],
-    },
-    Knob {
         id: "focus",
         label: "Focus view",
         group: Group::Features,
@@ -372,10 +394,21 @@ impl ClaudeEnvSettings {
         }
     }
 
-    /// Switch preset and forget overrides (a preset is a fresh starting point).
+    /// Switch preset and forget its overrides (a preset is a fresh starting point). Agent teams stay as they
+    /// are: no preset touches them.
     pub fn use_preset(&mut self, id: &str) {
         self.preset = preset(id).id.into();
-        self.overrides.clear();
+        self.clear_preset_changes();
+    }
+
+    /// Drop the overrides on top of the preset, keeping the agent teams ones.
+    pub fn clear_preset_changes(&mut self) {
+        self.overrides.retain(|k, _| knob(k).is_some_and(|k| k.group == Group::Teams));
+    }
+
+    /// How many switches differ from the preset (agent teams aside: no preset touches them).
+    pub fn preset_changes(&self) -> usize {
+        self.overrides.keys().filter(|k| knob(k).is_some_and(|k| k.group != Group::Teams)).count()
     }
 
     /// The variables a Claude launch gets, in order. `proxied_anthropic`: the launch goes
@@ -409,10 +442,15 @@ impl ClaudeEnvSettings {
         out
     }
 
+    /// New Claude sessions can form agent teams.
+    pub fn agent_teams(&self) -> bool {
+        knob(AGENT_TEAMS).is_some_and(|k| k.options[self.choice(k).0].id == "on")
+    }
+
     /// Short status for toasts and the sidebar: "Private" or "Private + 2 changes".
     pub fn summary(&self) -> String {
         let p = preset(&self.preset).label;
-        match self.overrides.keys().filter(|k| knob(k).is_some()).count() {
+        match self.preset_changes() {
             0 => p.into(),
             1 => format!("{p} + 1 change"),
             n => format!("{p} + {n} changes"),
@@ -429,11 +467,12 @@ mod tests {
     }
 
     #[test]
-    fn standard_sets_the_renderer_focus_view_no_tips_and_proxy_tool_search() {
+    fn standard_sets_the_renderer_agent_teams_focus_view_no_tips_and_proxy_tool_search() {
         let s = ClaudeEnvSettings::default();
         let flicker = ("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
-        assert_eq!(s.vars(false), vec![flicker.clone()]);
-        assert_eq!(s.vars(true), vec![flicker, ("ENABLE_TOOL_SEARCH".to_string(), "true".to_string())]);
+        let teams = ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(), "1".to_string());
+        assert_eq!(s.vars(false), vec![flicker.clone(), teams.clone()]);
+        assert_eq!(s.vars(true), vec![flicker, teams, ("ENABLE_TOOL_SEARCH".to_string(), "true".to_string())]);
         assert_eq!(serde_json::Value::Object(s.settings()), serde_json::json!({ "viewMode": "focus", "spinnerTipsEnabled": false }));
     }
 
@@ -483,6 +522,34 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), KNOBS.len());
+    }
+
+    #[test]
+    fn agent_teams_are_on_until_switched_off_and_no_preset_touches_them() {
+        let mut s = ClaudeEnvSettings::default();
+        assert!(s.agent_teams());
+        let k = knob(AGENT_TEAMS).unwrap();
+        s.set_choice(k, 1);
+        assert!(!s.agent_teams());
+        assert_eq!(get(&s.vars(false), "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"), None, "off is Claude's own default");
+        // a v2.toml from before teams were on by default
+        let old: ClaudeEnvSettings = toml::from_str("[overrides]
+agent_teams = \"on\"
+").unwrap();
+        assert!(old.agent_teams());
+        let model = knob("teammate_model").unwrap();
+        s.set_choice(model, 2);
+        assert_eq!(get(&s.vars(false), "CLAUDE_CODE_SUBAGENT_MODEL"), Some("sonnet"));
+        for p in PRESETS {
+            assert!(p.picks.iter().all(|(k, _)| knob(k).is_some_and(|k| k.group != Group::Teams)), "{} picks a team knob", p.id);
+        }
+        // and switching presets keeps them
+        s.set_choice(knob("telemetry").unwrap(), 1);
+        assert_eq!((s.preset_changes(), s.summary().as_str()), (1, "Standard + 1 change"), "teams aren't preset changes");
+        s.use_preset("private");
+        assert!(!s.agent_teams() && get(&s.vars(false), "CLAUDE_CODE_SUBAGENT_MODEL") == Some("sonnet"), "a preset leaves agent teams as they were");
+        assert_eq!(s.preset_changes(), 0);
+        assert!(KNOBS.iter().take_while(|k| k.group == Group::Teams).count() == KNOBS.iter().filter(|k| k.group == Group::Teams).count(), "team knobs come first");
     }
 
     #[test]

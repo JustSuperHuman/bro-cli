@@ -248,6 +248,11 @@ impl App {
         {
             // the × cell wins over the row (hits are searched in order)
             self.side_hits.push((Rect { x: r.right().saturating_sub(1), width: 1, height: 1, ..r }, SideHit::Close(info.pane)));
+            // so does its team, which opens the team board
+            if info.team.is_some() {
+                let top = r.y + 1 + u16::from(info.note.is_some());
+                self.side_hits.push((Rect { y: top, height: r.bottom().saturating_sub(top), ..r }, SideHit::Team(info.pane)));
+            }
         }
         self.side_hits.push((r, SideHit::Row(i)));
     }
@@ -355,6 +360,12 @@ impl App {
                     let style = if note.starts_with('⏸') { fg(crate::theme::mix(t.danger, t.muted, 0.45)) } else { muted(t) };
                     let text = ui::fit(note, w.saturating_sub(INDENT + 1));
                     ui::line(f, Rect { y: r.y + 1, height: 1, ..r }, vec![Span::styled(bar, bar_style), Span::raw(" ".repeat(INDENT - 1)), Span::styled(text, style)]);
+                }
+                // the team it leads, under that
+                if let Some(team) = info.team.as_deref() {
+                    let top = r.y + 1 + u16::from(info.note.is_some());
+                    let rail = Span::styled(if is_focus { "│" } else { bar }, bar_style);
+                    draw_team(f, Rect { y: top, height: r.bottom().saturating_sub(top), ..r }, team, rail, t, time);
                 }
             }
         }
@@ -660,13 +671,70 @@ fn row_lines(rows: &[Row]) -> Vec<(u16, u16)> {
                 seen_project = true;
                 (gap, 2)
             }
-            // the sticky orchestrator: the hairline under it spaces the first project
-            Row::Live { info, .. } if info.orchestrator => (0, if info.note.is_some() { 2 } else { 1 }),
-            // a running session with something to say gets a second line
-            Row::Live { info, .. } if info.note.is_some() => (0, 2),
-            _ => (0, 1),
+            // a running session with something to say gets a second line, a lead its team's under that (the sticky
+            // orchestrator too: the hairline under it spaces the first project)
+            Row::Live { info, .. } => (0, 1 + u16::from(info.note.is_some()) + info.team.as_deref().map_or(0, |t| crate::sidebar::team_lines(t) as u16)),
         })
         .collect()
+}
+
+/// A lead's team under its row: how many teammates are working and the tasks done, then a line per teammate (its
+/// status, its name in Claude's colour for it, what it's doing), a bigger team ending in "+N more".
+fn draw_team(f: &mut Frame, r: Rect, team: &bro_core::agent_teams::Team, rail: Span<'static>, t: &Theme, time: f64) {
+    const INDENT: usize = 7;
+    let w = r.width as usize;
+    let mates: Vec<_> = team.teammates().collect();
+    let working = team.working();
+    let c = team.counts();
+    let lead = || vec![rail.clone(), Span::raw(" ".repeat(INDENT - 1))];
+    let mut left = lead();
+    left.push(Span::styled(ui::lead("team"), fg(t.accent)));
+    left.push(match working {
+        0 => Span::styled(format!("{} idle", mates.len()), muted(t)),
+        n => Span::styled(format!("{n} of {} working", mates.len()), fg(t.accent)),
+    });
+    let mut right = vec![];
+    if c.total > 0 {
+        let all = c.done == c.total;
+        right.push(Span::styled(format!("{}/{} ", c.done, c.total), if all { fg(t.good) } else { muted(t) }));
+        right.push(Span::styled("✓ ", if all { fg(t.good) } else { fg(t.frame) }));
+    }
+    let mut y = r.y;
+    if y >= r.bottom() {
+        return;
+    }
+    ui::line_lr(f, Rect { y, height: 1, ..r }, left, right);
+    y += 1;
+    let more = if mates.len() > crate::sidebar::TEAM_ROWS { mates.len() + 1 - crate::sidebar::TEAM_ROWS } else { 0 };
+    let shown = if more > 0 { crate::sidebar::TEAM_ROWS - 1 } else { mates.len() };
+    for (n, m) in mates.iter().take(shown).enumerate() {
+        if y >= r.bottom() {
+            return;
+        }
+        let last = n + 1 == shown && more == 0;
+        let (dot, dot_c) = match m.active {
+            true => status_look(Some(crate::pane::Activity::Working), false, t, time).map(|(g, _, c)| (g, c)).unwrap_or(("●", t.accent)),
+            false => ("○", t.muted),
+        };
+        let name = ui::fit(&m.name, 14);
+        let room = w.saturating_sub(INDENT + 6 + ui::width(&name));
+        let mut spans = lead();
+        spans.extend([
+            Span::styled(if last { "└ " } else { "├ " }, fg(t.frame)),
+            Span::styled(format!("{dot} "), fg(dot_c).add_modifier(Modifier::BOLD)),
+            Span::styled(name, fg(crate::team_board::member_color(m, t))),
+        ]);
+        if room > 3 {
+            spans.push(Span::styled(format!(" {}", ui::fit(&crate::team_board::doing(team, m), room)), muted(t)));
+        }
+        ui::line(f, Rect { y, height: 1, ..r }, spans);
+        y += 1;
+    }
+    if more > 0 && y < r.bottom() {
+        let mut spans = lead();
+        spans.extend([Span::styled("└ ", fg(t.frame)), Span::styled(format!("+{more} more"), muted(t))]);
+        ui::line(f, Rect { y, height: 1, ..r }, spans);
+    }
 }
 
 /// When a login gets room back: the reset of whichever window is tighter (the week once it's the limit, else the

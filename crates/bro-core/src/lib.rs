@@ -43,6 +43,7 @@ pub mod self_update;
 pub mod proc_tree;
 pub mod orchestrator;
 pub mod peon;
+pub mod agent_teams;
 
 use serde::{Deserialize, Serialize};
 

@@ -387,6 +387,7 @@ impl App {
                     age_secs: t.meta.started.elapsed().as_secs(),
                     seq: self.seqs.get(id).copied().unwrap_or(*id),
                     orchestrator: t.meta.orchestrator,
+                    team: t.team().filter(|team| !team.is_empty()),
                 })
             })
             .collect()
@@ -937,6 +938,10 @@ impl App {
                 Term::new(meta, Spawn { program: c.program, args: c.args, ..Spawn::default() }, self.svc.clone())
             };
             term.demo_activity = d.activity;
+            // the first Claude session leads an agent team (not in the fixed demo the tests draw)
+            if i == 0 && !self.opts.fixed_demo {
+                term.set_demo_team(crate::services::demo::team());
+            }
             // the shell shares the first tab as a split; the rest get tabs
             let id = if i == 2 {
                 self.cur = 0;

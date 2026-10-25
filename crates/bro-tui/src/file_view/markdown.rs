@@ -50,11 +50,13 @@ pub fn save_rendered_pref(rendered: bool) {
 }
 
 /// Render `raw` (the loaded window's lines, cleaned) using `highlighted` (the same lines highlighted) for code.
-pub fn render(raw: &[String], highlighted: &[Styled], t: &Theme) -> Vec<Styled> {
+/// Also gives each line's [`Block`], which the desktop app groups with tints and draws headings larger by.
+pub fn render(raw: &[String], highlighted: &[Styled], t: &Theme) -> (Vec<Styled>, Vec<Block>) {
     let text = Style::default().fg(t.fg);
     let faint = Style::default().fg(t.frame);
     let mut fence: Option<String> = None;
     let mut out = Vec::with_capacity(raw.len());
+    let mut kinds = vec![Block::Text; raw.len()];
     for (i, line) in raw.iter().enumerate() {
         let trimmed = line.trim_start();
         let indent = &line[..line.len() - trimmed.len()];
@@ -68,15 +70,50 @@ pub fn render(raw: &[String], highlighted: &[Styled], t: &Theme) -> Vec<Styled> 
             fence = if closing { None } else { Some(m.to_string()) };
             let label = if closing || lang.is_empty() { "─".repeat(40) } else { format!("── {lang} {}", "─".repeat(36usize.saturating_sub(lang.len()))) };
             out.push(vec![(faint, format!("{indent}{label}"))]);
+            kinds[i] = Block::Code;
             continue;
         }
         if fence.is_some() {
+            kinds[i] = Block::Code;
             out.push(highlighted.get(i).cloned().unwrap_or_else(|| vec![(text, line.clone())]));
             continue;
         }
+        kinds[i] = kind(trimmed);
         out.push(block(indent, trimmed, t));
     }
-    out
+    (out, kinds)
+}
+
+/// What a rendered line belongs to, so the desktop app can group runs of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Block {
+    #[default]
+    Text,
+    /// level 1 to 6
+    Heading(u8),
+    Quote,
+    Table,
+    /// a fenced block, its fences included
+    Code,
+    Rule,
+}
+
+/// The [`Block`] of a line outside code fences (the same tests as [`block`]).
+fn kind(trimmed: &str) -> Block {
+    let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+    match heading(trimmed) {
+        0 if compact.len() >= 3 && ["-", "*", "_"].iter().any(|c| compact.chars().all(|x| x.to_string() == *c)) => Block::Rule,
+        0 if trimmed.starts_with('>') => Block::Quote,
+        0 if trimmed.starts_with('|') => Block::Table,
+        0 => Block::Text,
+        n => Block::Heading(n),
+    }
+}
+
+/// `#` to `######` and a space (or nothing) after: the heading's level, else 0.
+fn heading(trimmed: &str) -> u8 {
+    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes) && (trimmed[hashes..].starts_with(' ') || trimmed[hashes..].is_empty()) { hashes as u8 } else { 0 }
 }
 
 /// One line outside code fences.
@@ -85,8 +122,8 @@ fn block(indent: &str, trimmed: &str, t: &Theme) -> Styled {
     let faint = Style::default().fg(t.frame);
     let accent = Style::default().fg(t.accent);
     // headings
-    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-    if (1..=6).contains(&hashes) && (trimmed[hashes..].starts_with(' ') || trimmed[hashes..].is_empty()) {
+    let hashes = heading(trimmed) as usize;
+    if hashes > 0 {
         let style = match hashes {
             1 => accent.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             2 => accent.add_modifier(Modifier::BOLD),
@@ -222,8 +259,12 @@ mod tests {
         let src = "# Title\n\nSome **bold** and `code`, a [link](http://x) and snake_case.\n- item\n- [x] done\n1. first\n> quote\n---\n| a | b |\n|---|---|\n```rust\nlet x = 1;\n```";
         let raw: Vec<String> = src.split('\n').map(str::to_string).collect();
         let hl: Vec<Styled> = raw.iter().map(|l| vec![(Style::default(), l.clone())]).collect();
-        let out = render(&raw, &hl, &t);
+        let (out, kinds) = render(&raw, &hl, &t);
         assert_eq!(out.len(), raw.len(), "one line per source line");
+        assert_eq!(kinds.len(), raw.len());
+        assert_eq!((kinds[0], kinds[2]), (Block::Heading(1), Block::Text));
+        assert_eq!((kinds[6], kinds[7], kinds[8], kinds[9]), (Block::Quote, Block::Rule, Block::Table, Block::Table));
+        assert_eq!((kinds[10], kinds[11], kinds[12]), (Block::Code, Block::Code, Block::Code), "fences and code");
         let got: Vec<String> = out.iter().map(text).collect();
         assert_eq!(got[0], "Title");
         assert_eq!(got[2], "Some bold and code, a link and snake_case.");

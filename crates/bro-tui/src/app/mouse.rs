@@ -74,6 +74,11 @@ impl App {
                     self.agent_files_outcome(o);
                     return;
                 }
+                Overlay::Team(v) => {
+                    let o = v.mouse(m);
+                    self.team_outcome(o);
+                    return;
+                }
                 Overlay::Launcher(l) if left => {
                     match l.click(pos, m.modifiers) {
                         crate::launcher::Outcome::None => self.remember_launcher_permission(),
@@ -238,6 +243,7 @@ impl App {
                             self.activate_row(i);
                         }
                         SideHit::Close(id) => self.ask_close(id),
+                        SideHit::Team(id) => self.show_team(Some(id)),
                         SideHit::CloseProject(root, live) => self.close_project(root, live),
                         SideHit::Fable => self.show_fable = !self.show_fable,
                         SideHit::Usage => self.open_view("usage"),

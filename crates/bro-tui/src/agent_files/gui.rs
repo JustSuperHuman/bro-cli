@@ -137,7 +137,7 @@ fn layout(window: Rect, content: Option<f32>, lift: f32) -> Layout {
 
 /// The offset that keeps line `sel` in view, moving as little as the terminal UI does: up to show the line
 /// above it (its section's header), down until it fits with the top line whole.
-fn keep(off: f32, view: f32, content: f32, tops: &[f32], heights: &[f32], sel: Option<usize>) -> f32 {
+pub(crate) fn keep(off: f32, view: f32, content: f32, tops: &[f32], heights: &[f32], sel: Option<usize>) -> f32 {
     let mut off = off;
     if let Some(i) = sel {
         let (top, bottom) = (tops[i], tops[i] + heights[i]);

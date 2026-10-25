@@ -229,11 +229,6 @@ fn claude_resume_same_and_cross_profile() {
     assert!(work.join("projects").join("F--work").join(format!("{id}.jsonl")).exists());
 }
 
-/// Codex args minus `--no-daemon`, which depends on whether the test runs elevated.
-fn codex_args(c: &CommandSpec) -> Vec<&str> {
-    c.args.iter().map(String::as_str).filter(|a| *a != "--no-daemon").collect()
-}
-
 #[test]
 fn codex_profile_native_and_resume() {
     let sb = setup();
@@ -241,8 +236,7 @@ fn codex_profile_native_and_resume() {
     s.permission = Permission::Skip;
     let c = build(&s, &ctx()).unwrap();
     assert!(env(&c, "CODEX_HOME").unwrap().ends_with("smol"));
-    assert_eq!(c.args.iter().any(|a| a == "--no-daemon"), codex::elevated(), "--no-daemon exactly when elevated");
-    assert_eq!(codex_args(&c), ["--yolo", "--model", "gpt-5.3-codex"]);
+    assert_eq!(c.args, ["--yolo", "--no-daemon", "--model", "gpt-5.3-codex"]);
     assert_eq!(c.label, "codex · smol · gpt-5.3-codex");
 
     // A rollout owned by the local login, resumed as smol → staged + fork.
@@ -254,15 +248,52 @@ fn codex_profile_native_and_resume() {
     s.model = None;
     s.resume = Some(Resume { session_id: id.into(), fork: false });
     let c = build(&s, &ctx()).unwrap();
-    assert_eq!(codex_args(&c), ["fork", id]);
+    assert_eq!(c.args, ["fork", id, "--no-daemon"]);
     assert_eq!(c.cleanup.len(), 1);
     assert!(c.cleanup[0].starts_with(crate::paths::codex_profiles_dir().join("smol")));
     crate::sessions::cleanup_staged(&c.cleanup);
 
     s.profile_id = Some("codex:local".into());
     let c = build(&s, &ctx()).unwrap();
-    assert_eq!(codex_args(&c), ["resume", id]);
+    assert_eq!(c.args, ["resume", id, "--no-daemon"]);
     assert!(c.cleanup.is_empty());
+
+    s.resume.as_mut().unwrap().fork = true;
+    let c = build(&s, &ctx()).unwrap();
+    assert_eq!(c.args, ["fork", id, "--no-daemon"]);
+
+    s.permission = Permission::Skip;
+    s.model = Some("gpt-5.3-codex".into());
+    s.extra_args = vec!["--no-daemon".into(), "--no-alt-screen".into(), "continue".into()];
+    for (fork, verb) in [(false, "resume"), (true, "fork")] {
+        s.resume.as_mut().unwrap().fork = fork;
+        assert_eq!(build(&s, &ctx()).unwrap().args, [verb, id, "--yolo", "--model", "gpt-5.3-codex", "--no-daemon", "--no-alt-screen", "continue"]);
+    }
+}
+
+#[test]
+fn codex_runs_in_process_for_every_route_without_duplicating_user_flags() {
+    let _sb = setup();
+    for (profile, provider) in [
+        (None, None),
+        (Some("codex:smol"), None),
+        (None, Some("openai")),
+        (None, Some("zai")),
+        (None, Some("pool")),
+        (Some("claude:work"), None),
+    ] {
+        let mut s = spec(Harness::Codex, profile, provider, None);
+        for extra in [vec![], vec!["--no-daemon".into(), "--no-alt-screen".into()]] {
+            s.extra_args = extra.clone();
+            let c = build(&s, &ctx()).unwrap();
+            assert_eq!(c.args.iter().filter(|a| *a == "--no-daemon").count(), 1, "{profile:?} / {provider:?}: {:?}", c.args);
+            assert!(c.args.ends_with(&extra));
+        }
+    }
+
+    let mut s = spec(Harness::Codex, None, None, None);
+    s.extra_args = vec!["--".into(), "--no-daemon".into()];
+    assert_eq!(build(&s, &ctx()).unwrap().args, ["--no-daemon", "--", "--no-daemon"]);
 }
 
 #[test]

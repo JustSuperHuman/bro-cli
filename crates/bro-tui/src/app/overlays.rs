@@ -25,6 +25,8 @@ pub enum Overlay {
     File(Box<crate::file_view::FileView>),
     /// What the focused agent sent you and the files it touched.
     AgentFiles(Box<crate::agent_files::AgentFilesView>),
+    /// The agent team a Claude session leads: its teammates and their task list (prefix M).
+    Team(Box<crate::team_board::TeamView>),
     /// The focused session's watchdog: setup form or status page (prefix w).
     Watchdog(Box<crate::watchdog::view::WatchdogView>),
     /// The watchdog reviewer's instructions (settings).
@@ -102,6 +104,7 @@ pub struct Confirm {
 impl App {
     /// Draw whatever overlay is open.
     pub(super) fn draw_overlay(&mut self, f: &mut Frame, area: Rect) {
+        self.refresh_team_view();
         let t = self.theme.clone();
         let time = self.start.elapsed().as_secs_f64();
         match &mut self.overlay {
@@ -114,6 +117,7 @@ impl App {
             Overlay::Confirm(c) => self.confirm_hits = draw_confirm(f, area, c, self.hover, &t),
             Overlay::File(v) => crate::file_view::draw(f, area, v, self.hover, &t),
             Overlay::AgentFiles(v) => crate::agent_files::draw(f, area, v, &t),
+            Overlay::Team(v) => crate::team_board::draw(f, area, v, time, &t),
             Overlay::Watchdog(v) => {
                 let dog = self.svc.watchdog(&v.sid);
                 crate::watchdog::view::draw(f, area, v, dog.as_ref(), &t);

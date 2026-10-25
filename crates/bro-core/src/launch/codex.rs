@@ -212,9 +212,10 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     if spec.permission == Permission::Skip {
         args.push("--yolo".into());
     }
-    // An elevated codex refuses to start its shared background server ("start the Windows daemon from a
-    // non-elevated terminal") and exits before showing anything; without the daemon it runs in-process.
-    if elevated() {
+    // Bro owns each pane's process and CODEX_HOME. Do not depend on Codex's shared background
+    // server: it can fail outside elevated terminals too, before the interactive session starts.
+    // Keep an explicit user flag, but a literal after `--` is a prompt, not an option.
+    if !spec.extra_args.iter().take_while(|a| a.as_str() != "--").any(|a| a == "--no-daemon") {
         args.push("--no-daemon".into());
     }
     if let Some(m) = spec.model.as_deref().filter(|m| !m.is_empty()) {
@@ -253,31 +254,6 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     (cmd.program, cmd.args) = super::program_and_args("codex", args);
     cmd.label = label(Harness::Codex, &who, spec.model.as_deref());
     Ok(cmd)
-}
-
-/// Is bro running as administrator (an elevated token)? Children inherit it.
-#[cfg(windows)]
-pub(super) fn elevated() -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    static ELEVATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ELEVATED.get_or_init(|| unsafe {
-        let mut token: HANDLE = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return false;
-        }
-        let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
-        let mut len = 0u32;
-        let ok = GetTokenInformation(token, TokenElevation, (&raw mut e).cast(), size_of::<TOKEN_ELEVATION>() as u32, &mut len) != 0;
-        CloseHandle(token);
-        ok && e.TokenIsElevated != 0
-    })
-}
-
-#[cfg(not(windows))]
-pub(super) fn elevated() -> bool {
-    false
 }
 
 fn wire_proxy(cmd: &mut CommandSpec, upstream: &str, spec: &LaunchSpec, ctx: &LaunchCtx) -> anyhow::Result<Vec<String>> {

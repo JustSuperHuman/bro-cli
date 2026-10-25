@@ -1,7 +1,7 @@
 //! Own the lifetime of a session and every process it starts.
 //!
-//! Windows uses a non-inheritable, kill-on-close Job Object. ConPTY assigns the job during
-//! CreateProcess; ordinary commands start suspended and join before their first instruction.
+//! Windows uses a non-inheritable, kill-on-close Job Object. ConPTY and ordinary commands
+//! start suspended and join the job before their first instruction.
 //! A root-process watcher ends the job when the root exits, even if descendants keep its output
 //! pipes open. Dropping the owner or terminating Bro also ends the job. No PID walk or executable
 //! subsystem heuristic can lose descendants after a launcher exits.
@@ -62,7 +62,7 @@ impl ProcessTree {
         Ok(())
     }
 
-    /// Borrow the job for ConPTY's process-creation attribute. The owner must outlive the spawn.
+    /// Borrow the job for ConPTY's suspended-child assignment. The owner must outlive the spawn.
     #[cfg(windows)]
     pub fn job_handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
         use std::os::windows::io::AsHandle;

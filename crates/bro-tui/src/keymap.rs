@@ -92,6 +92,8 @@ pub enum Act {
     OpenedFile,
     /// What the focused agent sent you and the files it touched.
     AgentFiles,
+    /// The agent team the focused Claude session leads: teammates and their shared task list.
+    Team,
     /// Start or look at the focused session's watchdog (milestones, a reviewer that hands it its next task).
     Watchdog,
     /// Edit the instructions every watchdog reviewer starts with.
@@ -128,7 +130,7 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, QuickAgent, NewShell, Reload, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenClipboardFolder, OpenedFile, AgentFiles, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, QuickAgent, NewShell, Reload, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenClipboardFolder, OpenedFile, AgentFiles, Team, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend((0..=9).map(ShowTab));
         v.extend([LastTab, NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
@@ -204,6 +206,7 @@ impl Act {
             OpenClipboardFolder => "open_clipboard_folder".into(),
             OpenedFile => "opened_file".into(),
             AgentFiles => "agent_files".into(),
+            Team => "agent_team".into(),
             Watchdog => "watchdog".into(),
             WatchdogPrompt => "watchdog_prompt".into(),
             Media => "media".into(),
@@ -282,6 +285,7 @@ impl Act {
             OpenClipboardFolder => "open the folder whose path you copied as a project".into(),
             OpenedFile => "show the file an agent last opened (bro open)".into(),
             AgentFiles => "agent files: what it sent you and the files it touched".into(),
+            Team => "agent team: this session's teammates, what each is doing and their task list".into(),
             Watchdog => "watchdog: keep this session working through your milestones while you're away".into(),
             WatchdogPrompt => "watchdog prompt: edit what every reviewer is told".into(),
             Media => "media panel: the pictures and videos your agents open, send or make (desktop app)".into(),
@@ -292,7 +296,7 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Reload | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Watchdog => Group::Sessions,
+            NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Reload | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Team | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | ShowTab(_) | LastTab | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
             Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Sounds | Setup | RefreshUsage | Media => Group::Views,
@@ -399,6 +403,7 @@ impl Act {
             CloseProject => vec!["X"],
             OpenedFile => vec!["f"],
             AgentFiles => vec!["F"],
+            Team => vec!["M"],
             Watchdog => vec!["w"],
             Profiles => vec!["o"],
             Proxy => vec!["y"],

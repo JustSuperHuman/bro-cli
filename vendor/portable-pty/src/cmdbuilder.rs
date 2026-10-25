@@ -256,7 +256,7 @@ impl CommandBuilder {
         self.controlling_tty
     }
 
-    /// Assign a Windows child to this job atomically during process creation.
+    /// Assign a suspended Windows child to this job before its primary thread is allowed to run.
     ///
     /// # Safety
     /// `handle` must be a valid job handle that stays open until `spawn_command` returns.

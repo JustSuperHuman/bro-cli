@@ -928,7 +928,7 @@ fn same_login_workspace() -> App {
 }
 
 #[test]
-fn tiles_on_the_same_login_share_one_frame_that_names_it_once() {
+fn tiles_of_one_project_and_agent_share_one_frame_whatever_their_login() {
     let mut a = same_login_workspace();
     let s = testkit::snapshot("tiles_same_login", 200, 50, |f| a.draw(f));
     if std::env::var("BRO_PRINT_TILES").is_ok() {
@@ -936,10 +936,11 @@ fn tiles_on_the_same_login_share_one_frame_that_names_it_once() {
     }
     let claude = ui::harness_glyph(Some(bro_core::Harness::Claude));
     let groups: Vec<(String, usize)> = a.tile_groups().into_iter().map(|(_, label, ids)| (label, ids.len())).collect();
-    assert_eq!(groups, vec![(format!("bro-cli-v2 · {claude} CPF"), 1), (format!("bro-cli-v2 · {claude} local"), 5)]);
-    assert_eq!(s.matches("bro-cli-v2 ·").count(), 2, "only the frame and the lone CPF tile name the project: {s}");
-    assert!(s.contains(&format!("● bro-cli-v2 · {claude} local · 5 sessions")), "{s}");
-    assert!(s.contains(" 2 · Fix the proxy retry "), "a framed tile goes by its number and title: {s}");
+    assert_eq!(groups, vec![(format!("bro-cli-v2 · {claude} claude"), 6)]);
+    assert_eq!(s.matches("bro-cli-v2 ·").count(), 1, "only the frame names the project: {s}");
+    assert!(s.contains(&format!("● bro-cli-v2 · {claude} claude · 6 sessions")), "{s}");
+    assert!(s.contains(" 2 · Fix the proxy retry · local "), "a framed tile goes by its number, title and login: {s}");
+    assert!(s.contains(" 1 · CPF "), "{s}");
     assert!(!s.contains("— "), "the project's own folder isn't repeated: {s}");
 }
 
@@ -3424,6 +3425,18 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().claude_mod.tools);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // agent teams: on unless you turn them off
+    assert!(a.svc.settings().claude_env.agent_teams());
+    { let s = draw(&mut a); assert!(s.contains("AGENT TEAMS") && s.contains("Teammate model") && s.contains("none running"), "{s}"); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().claude_env.agent_teams());
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE); // r: bro's default
+    assert!(a.svc.settings().claude_env.agent_teams());
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // teammate model: the lead's
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().claude_env.overrides.get("teammate_model").map(String::as_str), Some("opus"));
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert!(a.svc.settings().claude_env.overrides.is_empty());
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
     assert_eq!(a.svc.settings().claude_env.preset, "quiet");
@@ -3433,7 +3446,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     let screen = shot(&mut a, "settings");
     assert!(screen.contains("+ 1 change") && screen.contains("changed"), "{screen}");
     // the launch preview sits below the last switch
-    let knobs = bro_core::claude_env::KNOBS.len();
+    let knobs = bro_core::claude_env::KNOBS.iter().filter(|k| k.group != bro_core::claude_env::Group::Teams).count();
     for _ in 1..knobs {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     }
@@ -4742,4 +4755,40 @@ fn sounds_view_switches_sounds_moments_and_harnesses_without_touching_disk_in_th
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE);
     assert!(!a.svc.settings().peon.on);
+}
+
+#[test]
+fn a_lead_lists_its_teammates_in_the_sidebar_and_opens_its_team_board() {
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    let line = serde_json::json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","sessionId":"0b6e3c1e-0000-4000-8000-0000000000bb","message":{"id":"m1","content":[{"type":"text","text":"Spawning the team."}]}});
+    let (id, _) = insight_pane(&mut a, dir.path(), &[line], Activity::Working);
+    let worker = a.panes[&id].as_term_ref().unwrap().insights_handle().unwrap().clone();
+    // a team of the lead alone shows nothing
+    worker.set_team(Some(bro_core::agent_teams::Team { members: vec![crate::team_board::tests::team().members[0].clone()], ..Default::default() }));
+    a.after_events();
+    assert!(a.live_infos().iter().all(|l| l.team.is_none()) && a.svc.live_teams().is_empty());
+    worker.set_team(Some(crate::team_board::tests::team()));
+    a.after_events();
+    let screen = draw(&mut a);
+    assert!(screen.contains("1 of 2 working") && screen.contains("researcher") && screen.contains("auditor") && screen.contains("1/4"), "the team under its lead:\n{screen}");
+    assert!(a.side_hits.iter().any(|(_, h)| matches!(h, SideHit::Team(p) if *p == id)), "a click on the team opens its board");
+    assert_eq!(a.svc.live_teams().len(), 1, "the settings list it");
+
+    // prefix M: members, then the tasks lane by lane, kept live
+    a.side_focus = false;
+    a.run_act(Act::Team);
+    assert!(matches!(&a.overlay, Overlay::Team(v) if v.pane == id && v.sel == 1), "on the first teammate");
+    let screen = draw(&mut a);
+    assert!(screen.contains("TEAMMATES") && screen.contains("in progress") && screen.contains("Audit token handling") && screen.contains("after #2"), "{screen}");
+    worker.set_team(None);
+    let screen = draw(&mut a);
+    assert!(screen.contains("no team"), "{screen}");
+    // s: agent teams in the settings
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE);
+    assert!(!a.overlay.is_open());
+    let settings = a.focused().and_then(|f| a.panes.get(&f)).and_then(|p| p.view());
+    assert_eq!(settings, Some("settings"));
+    let screen = draw(&mut a);
+    assert!(screen.contains("Agent teams") && screen.contains("Teammate model"), "{screen}");
 }

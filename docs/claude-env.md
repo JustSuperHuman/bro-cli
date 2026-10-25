@@ -34,6 +34,36 @@ Source: <https://code.claude.com/docs/en/env-vars> (checked 2026-10-11).
 | Presenter | Quiet + email, org and working directory hidden | none |
 | Marathon | Quiet + retries overloads indefinitely, long shell timeouts, 1h prompt cache, manual updates | 1h cache writes cost 2x on API keys |
 
+## Agent teams
+
+[Agent teams](https://code.claude.com/docs/en/agent-teams) let a Claude session lead a team: you ask for teammates
+("Spawn three teammates to review this branch: one on security, one on performance, one on tests"), Claude spawns
+them, each its own Claude instance, and they share a task list and message each other. bro turns them **on** for every
+Claude launch. They sit in a group of their own at the top of Settings › Claude Code, above the preset. No preset
+touches them, and switching presets keeps what you picked:
+
+| Switch | Options | Variables |
+|---|---|---|
+| Agent teams | **on** (bro's default) / off (Claude's default) | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` |
+| Teammate model | **lead's** / Opus / Sonnet / Haiku | `CLAUDE_CODE_SUBAGENT_MODEL`: what teammates and subagents run on when Claude doesn't name a model. A third-party backend pins every model slot, this one included. |
+
+`r` on either switch goes back to bro's default. With agent teams on, a subagent that Claude names launches as a
+teammate, so teams can form without being asked for. Turn the switch off if you'd rather keep subagents.
+
+While a session leads a team, bro shows the team live, read from Claude Code's own files in the session's config dir
+(`teams/session-<first 8 of its id>/config.json` and `tasks/<team>/`), once a second off the UI thread:
+
+- **Sidebar**: under the lead's row, how many teammates are working and the tasks done, then each teammate with its
+  status, its name in Claude's colour for it, and what it's doing. A click opens the team board.
+- **Team board** (prefix `M`, "agent team" in the palette): the members, then the task list lane by lane (in
+  progress, up next, blocked, done), each task with its owner, or what it waits on. A selected task shows its
+  description. Enter goes to the lead; `s` opens these settings.
+- **Pane header** (desktop app): "team · 2 of 3 working".
+- **Settings**: the teams running now, under the switch.
+
+To talk to one teammate, go to the lead and use Claude's agent panel (↑/↓ picks a teammate, enter opens it). Teammates
+run in-process inside the lead's pane. Claude Code's split-pane mode needs tmux or iTerm2, which bro's terminals aren't.
+
 ## Built in: the Settings view's switches
 
 | Switch | Variables |
@@ -56,7 +86,6 @@ Source: <https://code.claude.com/docs/en/env-vars> (checked 2026-10-11).
 | Prompt cache lifetime | `CLAUDE_CODE_PROMPT_CACHE_TTL`, `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` / `FORCE_PROMPT_CACHING_5M` |
 | Auto-compact | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` / `DISABLE_AUTO_COMPACT` |
 | Tool search via proxy | `ENABLE_TOOL_SEARCH=true`, on by default for launches through bro-proxy to a Claude upstream (pool, Claude logins with compression, Anthropic providers). Claude Code otherwise turns tool search off behind any proxy and loads every MCP tool definition into context up front. |
-| Agent teams | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` |
 | Claude renderer | `CLAUDE_CODE_NO_FLICKER` (fullscreen) / `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` (classic) |
 
 ## Messages between sessions

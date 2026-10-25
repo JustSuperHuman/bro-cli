@@ -5,6 +5,7 @@
 //! this draws its state and turns clicks into the [`Outcome`]s the terminal UI's mouse handler gives (a click
 //! outside the card closes it).
 
+use super::markdown::Block;
 use super::{Body, Doc, FileView, Media, Outcome, Styled, size_text};
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::{self, Style, TextBox, Ui, radius, size, weight, widgets};
@@ -436,6 +437,27 @@ fn code(ui: &mut Ui, s: &FileView, d: &Doc, l: &Layout, m: &MonoMetrics, pitch_p
 
     ui.clip(l.code, 0.0);
     let mut buf = [0u8; 4];
+    // Markdown's groups, tinted like blocks: code, quotes (with an accent bar), tables; rules and big headings'
+    // underlines drawn as hairlines
+    let (gx, gr) = (c.text_x - (6.0 * sc).round(), c.text_r);
+    let hair = sc.round().max(1.0);
+    for &(n, ly) in &shown {
+        let kind = if s.rendered && n >= d.start && n <= d.end() { d.blocks.get(n - d.start).copied().unwrap_or_default() } else { Block::Text };
+        if let Some(fill) = group_fill(kind, t) {
+            ui.scene.rect(Rect::new(gx, ly, gr - gx, pitch_px), fill);
+        }
+        match kind {
+            Block::Quote => {
+                ui.scene.rect(Rect::new(gx, ly, (3.0 * sc).round(), pitch_px), t.accent.with_alpha(0.8));
+            }
+            Block::Rule => ui.scene.rect(Rect::new(gx, ly + (pitch_px / 2.0).round(), gr - gx, hair), t.text.with_alpha(0.22)),
+            Block::Heading(1 | 2) => {
+                let a = if kind == Block::Heading(1) { 0.55 } else { 0.3 };
+                ui.scene.rect(Rect::new(gx, ly + pitch_px - hair, gr - gx, hair), t.accent.with_alpha(a));
+            }
+            _ => {}
+        }
+    }
     for &(n, ly) in &shown {
         let here = target == Some(n);
         if here {
@@ -457,8 +479,19 @@ fn code(ui: &mut Ui, s: &FileView, d: &Doc, l: &Layout, m: &MonoMetrics, pitch_p
             ui.text.draw_cell(ui.scene, "…", false, false, c.text_x, ly + pad, 1, t.muted);
             continue;
         }
-        let (before, after) = line(ui, &d.shown(s.rendered)[n - d.start], &c, cw, x_pos, ly + pad, m, map.as_ref());
-        let bg = if target == Some(n) { band.over(well) } else { well };
+        let styled = &d.shown(s.rendered)[n - d.start];
+        let kind = if s.rendered { d.blocks.get(n - d.start).copied().unwrap_or_default() } else { Block::Text };
+        match kind {
+            Block::Heading(level @ 1..=3) => {
+                heading(ui, styled, level, &c, cw, x_pos, ly + pitch_px - pad, m, map.as_ref());
+                continue;
+            }
+            Block::Rule => continue,
+            _ => {}
+        }
+        let (before, after) = line(ui, styled, &c, cw, x_pos, ly + pad, m, map.as_ref());
+        let row = group_fill(kind, t).map_or(well, |f| f.over(well));
+        let bg = if target == Some(n) { band.over(row) } else { row };
         if before {
             ui.scene.top_quad(Quad::new(Rect::new(c.text_x, ly, fade, pitch_px), Fill::Horizontal(bg, bg.with_alpha(0.0))));
         }
@@ -472,6 +505,17 @@ fn code(ui: &mut Ui, s: &FileView, d: &Doc, l: &Layout, m: &MonoMetrics, pitch_p
     let track = Rect::new(l.body.x, l.code.y, l.body.w - 3.0, l.code.h);
     let hot = ui.hover_amount("file-view-scroll", l.body);
     widgets::scrollbar(ui, track, total as f32 * pitch, l.rows as f32 * pitch, (y_pos - 1.0) * pitch, 0.6 + 0.4 * hot);
+}
+
+/// The tint behind a Markdown group's rows, if it has one.
+fn group_fill(kind: Block, t: &kit::Tokens) -> Option<Color> {
+    let a = match kind {
+        Block::Code => 0.06,
+        Block::Table => 0.04,
+        Block::Quote => return Some(t.accent.with_alpha(0.09)),
+        _ => return None,
+    };
+    Some(t.text.with_alpha(if t.light { a * 0.8 } else { a }))
 }
 
 /// The seven theme colours the highlighter paints code with (`file_view::Palette`), in its order.
@@ -490,6 +534,36 @@ fn recolour(then: &Theme, now: &Theme) -> Option<[(TuiColor, TuiColor); 7]> {
 /// `c` in the live theme (see [`recolour`]).
 fn live(c: TuiColor, map: Option<&[(TuiColor, TuiColor); 7]>) -> TuiColor {
     map.and_then(|m| m.iter().find(|(then, _)| *then == c)).map_or(c, |(_, now)| *now)
+}
+
+/// A Markdown heading (levels 1 to 3), larger and in the UI face. Its row keeps the code's pitch, so numbers and
+/// paging still hold: the text sits on the row's bottom (`bottom`, physical) and rises into the line above, which
+/// is blank before most headings.
+#[allow(clippy::too_many_arguments)]
+fn heading(ui: &mut Ui, styled: &Styled, level: u8, c: &Columns, cw: f32, x_pos: f32, bottom: f32, m: &MonoMetrics, map: Option<&[(TuiColor, TuiColor); 7]>) {
+    let t = ui.t;
+    let sc = ui.scale;
+    let grow = match level {
+        1 => 1.8,
+        2 => 1.5,
+        _ => 1.25,
+    };
+    let size = m.size / sc * grow;
+    let spans: Vec<(String, Style)> = styled
+        .iter()
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(st, text)| {
+            let ink = kit::color(live(st.fg.unwrap_or(TuiColor::Reset), map), t.text, &t.ansi);
+            let mut style = Style::new(size, weight::BOLD, ink);
+            style.italic = st.add_modifier.contains(Modifier::ITALIC);
+            (text.clone(), style)
+        })
+        .collect();
+    let b = ui.rich(&spans, size, None, false, Some(1));
+    let x = c.text_x - x_pos * cw;
+    // the descenders' share of the line hangs under the row's baseline
+    let y = bottom - b.h * sc * 0.88;
+    ui.draw(&b, Point::new(x / sc, y / sc));
 }
 
 /// One line's cells from column `x_pos` on, at `y` (physical). Says whether text is cut off on the left and on

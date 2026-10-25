@@ -66,6 +66,8 @@ Running the install line again works too.
 - **Reaches your phone**: the Just Terminal mobile and web clients connect to a built-in bridge.
 - **An orchestrator**: one session that runs the others, hands them tasks and reports back. See
   [docs/watchdog.md](docs/watchdog.md) for keeping sessions working while you're away.
+- **Claude Code agent teams**, on by default: each lead lists its teammates in the sidebar, and a team board shows
+  who's doing what and the task list they share ([docs/claude-env.md](docs/claude-env.md#agent-teams)).
 
 ## More
 
