@@ -83,14 +83,16 @@ pub struct LaunchCtx {
     pub justtools_skill: bool,
     /// Claude / Codex launches get the JustWatch skill (`Settings::justwatch`).
     pub justwatch_skill: bool,
+    /// The `bro-open` skill is switched off (`Settings::skills`): launches don't write it.
+    pub bro_open_off: bool,
+    /// Watched skill repos (`Settings::skills`): their cloned skills go into the launch's home too, which the
+    /// last sync may not have seen (a login added since).
+    pub skill_repos: Vec<String>,
     /// Loopback URL of the running bridge (`http://127.0.0.1:<port>`): an orchestrator launch
     /// points its tools here.
     pub bridge_url: Option<String>,
-    /// bro's Claude Code mod and theme (`Settings::claude_mod`). None: Claude as it ships.
+    /// bro's Claude Code mod (`Settings::claude_mod`). None: Claude as it ships.
     pub claude_mod: Option<crate::claude_mod::ClaudeModSettings>,
-    /// bro's theme on screen, written as the launch's Claude Code theme (see
-    /// [`crate::claude_theme`]). None leaves Claude's theme alone.
-    pub palette: Option<crate::claude_theme::Palette>,
     /// The bro executable: Claude launches run it as the hooks that keep messages between sessions to their
     /// project (see [`crate::peers`]). None: no such hooks, Claude Code's own reach.
     pub bro_bin: Option<PathBuf>,

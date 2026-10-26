@@ -19,6 +19,7 @@
 //! against. Add freely; do not rename or remove.
 
 mod audio;
+pub mod cue;
 mod hotkey;
 mod live;
 mod playback;

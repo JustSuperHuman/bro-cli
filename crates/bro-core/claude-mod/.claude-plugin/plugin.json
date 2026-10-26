@@ -1,33 +1,29 @@
 {
   "name": "bro",
   "version": "1.0.0",
-  "description": "Claude Code, at home in bro: your bro theme on every pixel, plus your sessions, limits and bro's tools one keystroke away.",
+  "description": "Claude Code, at home in bro: your sessions and limits one keystroke away, and a chime and a clock on Claude's questions.",
   "author": { "name": "bro" },
-  "keywords": ["bro", "theme", "sessions", "terminal"],
+  "keywords": ["bro", "sessions", "questions", "terminal"],
   "types": "./types/index.d.ts",
   "userConfig": {
-    "flair": {
+    "chime": {
       "type": "boolean",
-      "title": "Theme flair",
-      "description": "The spinner and the turn line speak in your bro theme's voice: Forging… on Ember, Decrypting… on Matrix.",
+      "title": "Question chime",
+      "description": "A chime when Claude asks you a question.",
       "default": true
     },
-    "hud": {
-      "type": "boolean",
-      "title": "Limits in the hint line",
-      "description": "Your login, its 5-hour and weekly use and the context fill, at the end of the hint line.",
-      "default": true
+    "timer": {
+      "type": "number",
+      "title": "Question timer",
+      "description": "Seconds a question waits for you before Claude goes with its best judgement, with a countdown above it; 0 for no timer.",
+      "default": 0,
+      "min": 0,
+      "max": 3600
     },
-    "radar": {
+    "ticks": {
       "type": "boolean",
-      "title": "Session radar",
-      "description": "A status line when another bro session is waiting on you or has finished.",
-      "default": true
-    },
-    "tools": {
-      "type": "boolean",
-      "title": "bro tools for Claude",
-      "description": "Claude can put a file in front of you in bro's preview, ping your phone, and check your other sessions.",
+      "title": "Countdown ticks",
+      "description": "The question timer ticks for its last 15 seconds.",
       "default": true
     }
   }

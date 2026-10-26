@@ -28,6 +28,9 @@ pub enum Command {
     EnvHelp,
     /// `bro imagine` — open the running JustImagine gallery, signed in.
     Imagine,
+    /// `bro skills [add | remove | sync] [repo]` — the git repos bro watches for agent skills.
+    Skills(crate::skills_cmd::SkillsCmd),
+    SkillsHelp,
     /// `bro gemini login | status | logout` — the Google sign-in behind the `gemini` provider.
     Gemini(crate::gemini_cmd::GeminiCmd),
     GeminiHelp,
@@ -75,6 +78,9 @@ usage
   bro gemini login | status | logout
                    sign in with Google to run Claude Code, Codex and Pi on Gemini 4 Argon through
                    your Google AI subscription (status: plan and quota left per model)
+  bro skills [add | remove | sync] [repo]
+                   agent skills from git repos bro watches (e.g. bro skills add t3dotgg/tstack):
+                   every skill in them goes into your Claude and Codex homes and stays in step
   bro imagine      open your JustImagine gallery in the browser, signed in, and refresh the
                    generate-images, -video and -voice skills for your agents
   bro --version    print the version
@@ -118,6 +124,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             None => Ok(Command::Imagine),
             Some(other) => Err(format!("bro imagine: unknown argument '{other}'")),
         };
+    }
+    if args.first().map(String::as_str) == Some("skills") {
+        return crate::skills_cmd::parse(&args[1..]).map(|a| a.map_or(Command::SkillsHelp, Command::Skills));
     }
     if args.first().map(String::as_str) == Some("gemini") {
         return crate::gemini_cmd::parse(&args[1..]).map(|a| a.map_or(Command::GeminiHelp, Command::Gemini));

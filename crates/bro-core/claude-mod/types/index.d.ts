@@ -1,32 +1,4 @@
-/** bro's theme as the session's `themes/bro.json` carries it (bro writes it; see `look.ts`). */
-export type BroLook = {
-  /** bro's theme id (`tokyo-night`, or a custom theme's file name). */
-  id: string
-  /** Shown to people: `Tokyo Night`. */
-  label: string
-  /** The built-in theme a custom theme derives from; `id` for a built-in. */
-  base: string
-  isLight: boolean
-  /** The theme's title marker in bro (`▶`, `✦`, `◆`). */
-  marker: string
-  /** Colours as Ink takes them: `#rrggbb`, or a terminal colour name. */
-  palette: BroPalette
-}
-
-export type BroPalette = {
-  accent: string
-  shine: string
-  good: string
-  warn: string
-  danger: string
-  muted: string
-  frame: string
-  /** Absent where bro leaves the terminal's own colour. */
-  fg?: string
-  bg?: string
-}
-
-/** One of the user's bro sessions, as the radar and the dashboard show it. */
+/** One of the user's bro sessions, as the pane shows it. */
 export type BroSession = {
   id: string
   title: string
@@ -51,15 +23,18 @@ export type BroLimit = {
   isExhausted: boolean
 }
 
+/** The question on the clock: its dialog (the call's tool_use_id) and its seconds, all and left. */
+export type BroQuestion = { id: string; left: number; total: number }
+
 declare module 'claude-code' {
   interface PluginState {
     bro: {
-      look: BroLook | null
-      hud: string | null
       sessions: BroSession[]
       limits: BroLimit[]
       /** bro answered the last poll. */
       isOnline: boolean
+      /** The question timer's countdown, while a question waits on it. */
+      question: BroQuestion | null
     }
   }
 }

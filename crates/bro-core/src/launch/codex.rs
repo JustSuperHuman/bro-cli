@@ -139,7 +139,10 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     let target_profile = login.map(|p| p.id.clone()).unwrap_or_else(|| "codex:local".into());
     cmd.set_env("CODEX_HOME", home.to_string_lossy());
     // Best effort: a read-only CODEX_HOME must not block the launch.
-    let _ = crate::skills::write_bro_open_skill(&home);
+    if !ctx.bro_open_off {
+        let _ = crate::skills::write_bro_open_skill(&home);
+    }
+    crate::skill_repos::write_cached(&home, &ctx.skill_repos);
     if spec.orchestrator {
         let _ = crate::orchestrator::write_skill(&home);
     }

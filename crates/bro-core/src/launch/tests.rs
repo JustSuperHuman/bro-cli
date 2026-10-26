@@ -559,6 +559,26 @@ fn launches_install_the_bro_open_skill_in_the_harness_home() {
 }
 
 #[test]
+fn bro_open_off_and_watched_repo_skills_reach_the_harness_home() {
+    let _sb = setup();
+    // a watched repo bro already cloned
+    let repo = "t3dotgg/tstack";
+    let clone = crate::skill_repos::cache_dir(repo);
+    std::fs::create_dir_all(clone.join(".git")).unwrap();
+    std::fs::create_dir_all(clone.join("skills").join("council")).unwrap();
+    std::fs::write(clone.join("skills").join("council").join("SKILL.md"), "---\nname: council\n---\n").unwrap();
+    let ctx = LaunchCtx { bro_open_off: true, skill_repos: vec![repo.into()], ..ctx() };
+    let c = build(&spec(Harness::Codex, Some("codex:smol"), None, None), &ctx).unwrap();
+    let codex_home = Path::new(env(&c, "CODEX_HOME").unwrap());
+    assert!(!crate::skills::bro_open_skill_path(codex_home).exists());
+    assert!(codex_home.join("skills").join("council").join("SKILL.md").is_file());
+    let c = build(&spec(Harness::Claude, Some("claude:work"), None, None), &ctx).unwrap();
+    let claude_home = Path::new(env(&c, "CLAUDE_CONFIG_DIR").unwrap());
+    assert!(!crate::skills::bro_open_skill_path(claude_home).exists());
+    assert!(claude_home.join("skills").join("council").join("SKILL.md").is_file());
+}
+
+#[test]
 fn claude_env_preset_applies_and_provider_env_wins() {
     let _sb = setup();
     let mut ctx = ctx();
@@ -840,32 +860,12 @@ fn provider_models_tell_claude_code_and_codex_their_real_window() {
 }
 
 fn mod_ctx() -> LaunchCtx {
-    use crate::claude_theme::{Ink, Palette};
-    let palette = Palette {
-        id: "ember".into(),
-        base: "ember".into(),
-        light: false,
-        rainbow: false,
-        marker: "▶".into(),
-        bg: Ink::Terminal,
-        fg: Ink::Terminal,
-        accent: Ink::Rgb(255, 95, 58),
-        shine: Ink::Rgb(255, 199, 168),
-        frame: Ink::Rgb(65, 51, 50),
-        muted: Ink::Rgb(125, 110, 110),
-        user: Ink::Rgb(100, 73, 71),
-        inline: Ink::Rgb(255, 155, 107),
-        good: Ink::Rgb(194, 204, 90),
-        danger: Ink::Rgb(255, 74, 58),
-        ansi: None,
-        panel: None,
-    };
     let on = crate::claude_mod::ClaudeModSettings { on: true, ..Default::default() };
-    LaunchCtx { claude_mod: Some(on), palette: Some(palette), ..ctx() }
+    LaunchCtx { claude_mod: Some(on), ..ctx() }
 }
 
 #[test]
-fn claude_launches_load_bros_mod_in_bros_theme() {
+fn claude_launches_load_bros_mod() {
     let _sb = setup();
     let c = build(&spec(Harness::Claude, Some("claude:work"), None, None), &mod_ctx()).unwrap();
     let dir = arg_after(&c.args, "--plugin-dir").expect("the mod's folder");
@@ -873,13 +873,9 @@ fn claude_launches_load_bros_mod_in_bros_theme() {
     assert_eq!(env(&c, "BRO_PROFILE"), Some("claude:work"));
     assert_eq!(env(&c, "BRO_BACKEND"), Some("claude:work"));
     assert_eq!(env(&c, "BRO_VERSION"), Some(env!("CARGO_PKG_VERSION")));
-    // the theme lands in the login's own config dir, before Claude starts watching it
-    let config = Path::new(env(&c, "CLAUDE_CONFIG_DIR").unwrap());
-    let theme: Value = serde_json::from_str(&std::fs::read_to_string(crate::claude_theme::path(config)).unwrap()).unwrap();
-    assert_eq!(theme["overrides"]["claude"], "#ff9b6b", "Ember's own orange for the mascot, not its accent");
     let settings: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").unwrap()).unwrap()).unwrap();
-    assert_eq!(settings["theme"], "custom:bro");
-    assert_eq!(settings["pluginConfigs"]["bro"]["options"]["hud"], true);
+    assert_eq!(settings["pluginConfigs"]["bro"]["options"]["chime"], true);
+    assert!(settings.get("theme").is_none(), "Claude keeps its own theme");
 
     // a provider: the mod hears who serves the model
     let z = build(&spec(Harness::Claude, None, Some("zai"), Some("glm-5.3")), &mod_ctx()).unwrap();
@@ -888,17 +884,10 @@ fn claude_launches_load_bros_mod_in_bros_theme() {
 }
 
 #[test]
-fn bros_mod_can_be_turned_off_apart_from_the_theme() {
+fn bros_mod_can_be_turned_off() {
     let _sb = setup();
     let mut cx = mod_ctx();
     cx.claude_mod = Some(crate::claude_mod::ClaudeModSettings { on: false, ..Default::default() });
-    let c = build(&spec(Harness::Claude, None, None, None), &cx).unwrap();
-    assert!(c.args.iter().all(|a| a != "--plugin-dir"), "{:?}", c.args);
-    let settings: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").unwrap()).unwrap()).unwrap();
-    assert_eq!(settings["theme"], "custom:bro");
-    assert!(settings.get("pluginConfigs").is_none());
-
-    cx.claude_mod = Some(crate::claude_mod::ClaudeModSettings { on: false, theme: false, ..Default::default() });
     let c = build(&spec(Harness::Claude, None, None, None), &cx).unwrap();
     assert!(c.args.iter().all(|a| a != "--plugin-dir" && a != "--settings"), "{:?}", c.args);
     // and without the mod in the context, Claude runs as it ships
@@ -915,7 +904,7 @@ fn bros_mod_sits_among_the_options_and_yields_to_your_settings() {
     let dashdash = c.args.iter().position(|a| a == "--").unwrap();
     let flag = c.args.iter().position(|a| a == "--plugin-dir").unwrap();
     assert!(flag < dashdash, "{:?}", c.args);
-    assert_eq!(c.args.iter().filter(|a| *a == "--settings").count(), 1, "yours wins: no bro theme then");
+    assert_eq!(c.args.iter().filter(|a| *a == "--settings").count(), 1, "yours wins: no mod options then");
 }
 
 fn peers_ctx() -> LaunchCtx {

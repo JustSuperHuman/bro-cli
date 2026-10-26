@@ -3329,7 +3329,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert_eq!(a.panes[&id].view(), Some("settings"));
     let screen = draw(&mut a);
     // every section is listed down the left; Appearance is open first, and only its settings show
-    for s in ["Appearance", "Sessions", "Voice", "Caveman", "Watchdog", "Claude Code", "Integrations", "Updates"] {
+    for s in ["Appearance", "Sessions", "Voice", "Caveman", "Watchdog", "Claude Code", "bro mod", "Integrations", "Updates"] {
         assert!(screen.contains(s), "{s}: {screen}");
     }
     assert!(screen.contains("Summary screensaver") && !screen.contains("Auto-resume"), "{screen}");
@@ -3407,25 +3407,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     assert_eq!(a.svc.settings().watchdog.model, "fable");
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // wake-up budget
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // bro theme in Claude, first of the mod's rows
-    { let s = draw(&mut a); assert!(s.contains("bro theme in Claude") && s.contains("Session radar"), "{s}"); }
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(!a.svc.settings().claude_mod.theme);
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(a.svc.settings().claude_mod.theme);
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // the mod itself: off until you turn it on
-    assert_eq!(a.svc.settings().claude_mod.summary(), "theme only");
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(a.svc.settings().claude_mod.on);
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(!a.svc.settings().claude_mod.on && a.svc.settings().claude_mod.theme);
-    for _ in 0..4 {
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // theme voice, limits, radar, tools
-    }
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(!a.svc.settings().claude_mod.tools);
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // agent teams: on unless you turn them off
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // agent teams, first of Claude Code: on unless you turn them off
     assert!(a.svc.settings().claude_env.agent_teams());
     { let s = draw(&mut a); assert!(s.contains("AGENT TEAMS") && s.contains("Teammate model") && s.contains("none running"), "{s}"); }
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -3457,6 +3439,29 @@ fn settings_view_switches_presets_and_overrides_switches() {
     }
     key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
     assert_eq!(a.svc.settings().claude_env.summary(), "Quiet");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE); // tab: on to the bro mod, its switch first: off until you turn it on
+    { let s = draw(&mut a); assert!(s.contains("bro's mod for Claude Code") && s.contains("Load the mod") && !s.contains("Theme voice"), "{s}"); }
+    assert_eq!(a.svc.settings().claude_mod.summary(), "off");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().claude_mod.summary(), "on");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().claude_mod.on);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // question chime: on
+    { let s = draw(&mut a); assert!(s.contains("QUESTIONS") && s.contains("Question chime"), "{s}"); }
+    assert!(a.svc.settings().claude_mod.chime);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // question timer: off until you turn it on
+    assert!(!a.svc.settings().claude_mod.timer);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().claude_mod.timer);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // answer within: 30s
+    { let s = draw(&mut a); assert!(s.contains("‹ 30s ›"), "{s}"); }
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().claude_mod.timer_secs, 60);
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().claude_mod.timer_secs, 30);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // countdown ticks
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().claude_mod.ticks);
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE); // tab: on to Integrations, JustTools first; the demo never installs or looks for it
     { let s = draw(&mut a); assert!(s.contains("Tools your agents can call") && s.contains("not installed"), "{s}"); }
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // not installed: opens Quick Install with it ticked
@@ -4408,7 +4413,7 @@ fn settings_sections_open_from_the_left_or_say_where_they_sit() {
     let mut small = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, H)).unwrap();
     small.draw(|f| a.draw(f)).unwrap();
     let s = testkit::dump(small.backend().buffer());
-    assert!(s.contains("Updates  9 of 9") && !s.contains("SETTINGS"), "{s}");
+    assert!(s.contains("Updates  10 of 10") && !s.contains("SETTINGS"), "{s}");
 }
 
 fn tabs_on(a: &mut App) {

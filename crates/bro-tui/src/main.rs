@@ -45,6 +45,7 @@ mod services;
 mod sidebar;
 mod team_board;
 mod skin;
+mod skills_cmd;
 mod testkit;
 mod textarea;
 mod theme;
@@ -102,6 +103,11 @@ fn main() -> ExitCode {
                 if let Some((file, volume)) = bro_core::peon::parse_play(&args[2..]) {
                     let _ = bro_voice::sound::play_file(&file, volume);
                 }
+                return ExitCode::SUCCESS;
+            }
+            // `bro hook sound question|ticks …`: the Claude mod's question chime and countdown (no stdin)
+            if args.first().map(String::as_str) == Some("sound") {
+                let _ = bro_voice::cue::play(&args[1..]);
                 return ExitCode::SUCCESS;
             }
             let mut input = String::new();
@@ -175,6 +181,17 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("bro imagine: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(cli::Command::SkillsHelp) => {
+            print!("{}", skills_cmd::HELP);
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Command::Skills(cmd)) => match skills_cmd::run(cmd) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro skills: {e}");
                 ExitCode::FAILURE
             }
         },

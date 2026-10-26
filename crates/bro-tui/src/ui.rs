@@ -41,6 +41,8 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("proxy", "\u{F04E1}", "⇄"),
     ("bridge", "\u{F05A9}", "⌁"),
     ("rocket", "\u{F0463}", "»"),
+    ("mod", "\u{F0431}", "◆"),
+    ("skills", "\u{F0335}", "✦"),
     ("help", "\u{F02D7}", "?"),
     ("key", "\u{F0306}", "⌘"),
     ("settings", "\u{F0493}", "⚙"),

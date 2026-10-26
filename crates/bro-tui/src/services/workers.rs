@@ -15,6 +15,7 @@ pub(super) fn spawn_all(svc: &Services) {
     spawn_data(svc);
     svc.check_justtools();
     svc.spawn_update_checks();
+    svc.spawn_skill_syncs();
     let s = svc.settings();
     if s.proxy.enabled {
         spawn_proxy(svc);

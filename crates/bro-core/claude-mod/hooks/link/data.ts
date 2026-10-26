@@ -131,30 +131,8 @@ export function span(ms: number): string {
   return h % 24 === 0 ? `${d}d` : `${d}d ${h % 24}h`
 }
 
-/**
- * The radar's line: who waits on the user; undefined when nobody does. The
- * engine draws a plugin's status line as a warning (`⚠ bro: …`), so it is kept
- * for what needs the user now; finished sessions wait in the pane.
- */
-export function radarLine(list: readonly BroSession[]): string | undefined {
-  const needs = list.filter(one => !one.isSelf && one.state === 'needs')
-  if (needs.length === 0) {
-    return undefined
-  }
-  const [first] = needs
-  if (needs.length === 1 && first !== undefined) {
-    const why = first.detail === undefined ? '' : ` (${clip(first.detail, 48)})`
-    return `${first.title} needs you${why} · /bro`
-  }
-  return `${needs.length} sessions need you: ${names(needs.map(one => one.title))} · /bro`
-}
-
 /** Cuts `text` to `max` characters, an ellipsis standing for the rest. */
 export function clip(text: string, max: number): string {
   const chars = [...text]
   return chars.length <= max ? text : `${chars.slice(0, Math.max(1, max - 1)).join('').trimEnd()}…`
-}
-
-function names(list: readonly string[]): string {
-  return list.length <= 3 ? list.join(', ') : `${list.slice(0, 3).join(', ')} +${list.length - 3}`
 }

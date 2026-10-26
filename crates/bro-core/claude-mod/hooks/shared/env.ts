@@ -13,8 +13,8 @@ export type BroEnv = {
   /** Who serves the model: the login, a provider id, or `pool`. */
   backend?: string
   version?: string
-  /** Claude Code's configuration folder; bro writes the session's theme under it. */
-  configDir: string
+  /** The bro that launched the session: it plays the mod's sounds (`bro hook sound`). */
+  bin?: string
 }
 
 let known: Promise<BroEnv | null> | undefined
@@ -30,8 +30,6 @@ async function read($: EngineInterface): Promise<BroEnv | null> {
   if (sessionId === undefined) {
     return null
   }
-  const home = clean(await $.env.get('USERPROFILE')) ?? clean(await $.env.get('HOME')) ?? ''
-  const configDir = clean(await $.env.get('CLAUDE_CONFIG_DIR')) ?? join(home, '.claude')
   const bridge = clean(await $.env.get('BRO_BRIDGE_URL'))?.replace(/\/+$/, '')
 
   return {
@@ -41,19 +39,13 @@ async function read($: EngineInterface): Promise<BroEnv | null> {
     profile: clean(await $.env.get('BRO_PROFILE')),
     backend: clean(await $.env.get('BRO_BACKEND')),
     version: clean(await $.env.get('BRO_VERSION')),
-    configDir,
+    bin: clean(await $.env.get('BRO_BIN')),
   }
 }
 
 function clean(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
   return trimmed === undefined || trimmed === '' ? undefined : trimmed
-}
-
-/** Joins path parts with the separator the base already uses. */
-export function join(base: string, ...parts: string[]): string {
-  const sep = base.includes('\\') ? '\\' : '/'
-  return [base.replace(/[\\/]+$/, ''), ...parts].join(sep)
 }
 
 /** The last part of a path: a project's folder name. */

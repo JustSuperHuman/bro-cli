@@ -183,6 +183,8 @@ pub struct Settings {
     pub justtools: crate::justtools::JustToolsSettings,
     /// JustWatch integration: its skill in new Claude / Codex sessions.
     pub justwatch: crate::justwatch::JustWatchSettings,
+    /// Agent skills: bro's own `bro-open`, and the git repos bro watches for more.
+    pub skills: crate::skills::SkillSettings,
     /// Looking for new bro releases.
     pub updates: crate::self_update::UpdateSettings,
     /// Watchdogs: a fresh reviewer agent that hands an idle session its next task.
@@ -394,6 +396,7 @@ impl Default for Settings {
             peon: Default::default(),
             justtools: Default::default(),
             justwatch: Default::default(),
+            skills: Default::default(),
             updates: Default::default(),
             watchdog: Default::default(),
             setup_done: false,

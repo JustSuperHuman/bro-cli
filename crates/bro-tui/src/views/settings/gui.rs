@@ -90,7 +90,9 @@ fn glyph(s: Section) -> &'static str {
         Section::Caveman => "\u{F08B7}",
         Section::Watchdog => "\u{F0A43}",
         Section::Claude => "\u{F0674}",
+        Section::Mod => "\u{F0431}",
         Section::Integrations => "\u{F0463}",
+        Section::Skills => "\u{F0335}",
         Section::Sounds => "\u{F057E}",
         Section::Updates => "\u{F02DA}",
     }

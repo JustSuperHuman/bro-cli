@@ -87,13 +87,14 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
         }
         // the orchestrator drives bro through the bridge: start it when it's off and wait for it
         let bridge_url = if spec.orchestrator { Some(orchestrator_bridge(svc)?) } else { svc.bridge_local_url() };
-        let palette = svc.claude_palette();
         let mut ctx = {
             let st = svc.state();
             let claude_env = st.settings.claude_env.clone();
             let caveman = st.settings.caveman.clone();
             let justtools_skill = st.settings.justtools.skill;
             let justwatch_skill = st.settings.justwatch.skill;
+            let bro_open_off = !st.settings.skills.bro_open;
+            let skill_repos = st.settings.skills.repos.clone();
             let claude_mod = Some(st.settings.claude_mod.clone());
             // Claude sessions run bro as their peer hooks (see `bro_core::peers`)
             let bro_bin = std::env::current_exe().ok();
@@ -107,13 +108,14 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
                     caveman,
                     justtools_skill,
                     justwatch_skill,
+                    bro_open_off,
+                    skill_repos,
                     bridge_url,
                     claude_mod,
-                    palette,
                     bro_bin,
                     peon,
                 },
-                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, bridge_url, claude_mod, palette, bro_bin, peon, ..LaunchCtx::default() },
+                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, bro_open_off, skill_repos, bridge_url, claude_mod, bro_bin, peon, ..LaunchCtx::default() },
             }
         };
         let mut cmd = match guard("launch::build", || with_proxy_retry(svc, &mut ctx, |ctx| bro_core::launch::build(&spec, ctx))) {

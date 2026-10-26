@@ -2,10 +2,9 @@
 // first, each a press away; then each Claude login's limits.
 import type { ElementTable, EngineInterface, RenderSurface } from 'claude-code'
 
-import type { BroLimit, BroLook, BroSession } from '../../types'
+import type { BroLimit, BroSession } from '../../types'
 import { ctl } from '../shared/bridge'
 import type { BroEnv } from '../shared/env'
-import { ink } from '../shared/look'
 import { clip, span } from './data'
 
 type Table = ElementTable<RenderSurface>
@@ -28,7 +27,6 @@ const STATE_WORDS: Record<BroSession['state'], string> = {
 
 export type DashboardData = {
   env: BroEnv
-  look: BroLook | null
   sessions: readonly BroSession[]
   limits: readonly BroLimit[]
   isOnline: boolean
@@ -38,17 +36,12 @@ export type DashboardData = {
 
 export function dashboard($: EngineInterface, t: Table, d: DashboardData) {
   const { Box, Text } = t
-  const theme = d.look
-  const accent = ink(theme, 'accent')
   const who = d.env.profile ?? d.env.backend
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="row" justifyContent="space-between">
-        <Text wrap="truncate-end">
-          <Text color={accent} weight="bold">
-            {theme?.marker ?? '◆'} bro
-          </Text>
-          {theme !== null && <Text dimColor>{`  ${theme.label}`}</Text>}
+        <Text color="claude" weight="bold" wrap="truncate-end">
+          ◆ bro
         </Text>
         {who !== undefined && <Text dimColor>{who}</Text>}
       </Box>
@@ -73,7 +66,7 @@ function sessionList($: EngineInterface, t: Table, d: DashboardData) {
         return (
           <Box key={`row:${one.id}`} flexDirection="column">
             <Button key={`go:${one.id}`} plain onPress={() => void focus($, d.env, one)}>
-              <Text color={stateColor(d.look, one.state)}>{GLYPH[one.state]}</Text>
+              <Text color={stateColor(one.state)}>{GLYPH[one.state]}</Text>
               {` ${title}`}
               <Text dimColor>{`  ${state}`}</Text>
             </Button>
@@ -98,7 +91,7 @@ function limitList(t: Table, d: DashboardData) {
       {d.limits.map(one => (
         <Box key={`limit:${one.id}`} flexDirection={stacked ? 'column' : 'row'} columnGap={3}>
           <Box flexDirection="row" columnGap={1}>
-            <Text color={one.isSelf ? ink(d.look, 'accent') : undefined} wrap="truncate-end">
+            <Text color={one.isSelf ? 'claude' : undefined} wrap="truncate-end">
               {one.name.padEnd(nameWidth).slice(0, nameWidth)}
             </Text>
             {meter(t, d, '5h', one.fiveHour)}
@@ -122,29 +115,30 @@ function meter(t: Table, d: DashboardData, label: string, w: BroLimit['fiveHour'
   }
   const used = Math.max(0, Math.min(100, w.used))
   const filled = Math.round((used / 100) * BAR)
-  const color = used >= 85 ? ink(d.look, 'danger') : used >= 60 ? ink(d.look, 'warn') : ink(d.look, 'good')
+  const color = used >= 85 ? 'error' : used >= 60 ? 'warning' : 'success'
   const reset = w.resetsAt === undefined ? '' : `  ${span(w.resetsAt * 1000 - d.now)}`
   return (
     <Text>
       <Text dimColor>{label} </Text>
       <Text color={color}>{'━'.repeat(filled)}</Text>
-      <Text color={ink(d.look, 'frame')}>{'─'.repeat(BAR - filled)}</Text>
+      <Text color="subtle">{'─'.repeat(BAR - filled)}</Text>
       {` ${String(Math.round(used)).padStart(3)}%`}
       <Text dimColor>{reset}</Text>
     </Text>
   )
 }
 
-function stateColor(theme: BroLook | null, state: BroSession['state']): string {
+/** Claude Code's own colours, by their theme keys. */
+function stateColor(state: BroSession['state']): string {
   switch (state) {
     case 'needs':
-      return ink(theme, 'warn')
+      return 'warning'
     case 'working':
-      return ink(theme, 'accent')
+      return 'claude'
     case 'done':
-      return ink(theme, 'good')
+      return 'success'
     default:
-      return ink(theme, 'muted')
+      return 'inactive'
   }
 }
 

@@ -77,7 +77,7 @@ Running the install line again works too.
 - [Quick Install](docs/quick-install.md): `bro install` for Git, Node.js, the agents and more
 - [Gemini on your Google AI subscription](docs/gemini.md)
 - [Env files](docs/env-files.md): carry your API keys to a new machine
-- [Claude Code presets](docs/claude-env.md), [Claude in bro's theme and the bro mod](docs/claude-mod.md), [watchdogs](docs/watchdog.md), [caveman mode](docs/caveman.md), [sounds](docs/sounds.md)
+- [Claude Code presets](docs/claude-env.md), [the bro mod for Claude Code](docs/claude-mod.md), [watchdogs](docs/watchdog.md), [caveman mode](docs/caveman.md), [sounds](docs/sounds.md)
 
 ## License
 

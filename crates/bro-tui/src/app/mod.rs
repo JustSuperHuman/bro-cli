@@ -388,8 +388,6 @@ impl App {
             saver: vec![],
         };
         app.seed_projects();
-        // Claude Code wears the theme bro opens with (sessions still running from before recolour too)
-        app.svc.claude_theme(theme::claude_palette(&app.theme));
         let t2 = tx.clone();
         app._theme_watcher = theme::watch(move || {
             let _ = t2.send(Event::ThemeFilesChanged);
@@ -765,8 +763,6 @@ impl App {
     pub(crate) fn set_theme(&mut self, name: &str, save: bool) {
         self.theme = theme::get(name);
         crate::icons::retint(self.theme.is_light());
-        // Claude sessions recolour with it, previews included
-        self.svc.claude_theme(theme::claude_palette(&self.theme));
         if save {
             let mut s = self.svc.settings();
             s.theme = name.to_string();

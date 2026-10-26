@@ -10,6 +10,7 @@ pub mod justimagine;
 pub mod justpaste;
 pub mod justtools;
 pub mod justwatch;
+pub mod skills;
 pub mod updates;
 pub mod launch;
 mod workers;
@@ -126,6 +127,8 @@ pub struct State {
     pub bridge: BridgeState,
     pub justtools: justtools::JustToolsState,
     pub justimagine: justimagine::JustImagineState,
+    /// The watched skill repos.
+    pub skills: skills::SkillsState,
     pub updates: updates::UpdateState,
     /// Every session's watchdog as the bridge last reported it, by session id.
     pub watchdogs: HashMap<String, bro_bridge::WatchdogSnapshot>,
@@ -162,10 +165,6 @@ struct Inner {
     focused: Mutex<Option<String>>,
     /// Profiles with a login tab open that a watcher is polling until they read signed in.
     login_watch: Mutex<HashMap<String, Instant>>,
-    /// bro's theme on screen as Claude Code takes it: Claude launches write and select it.
-    claude_palette: Mutex<Option<bro_core::claude_theme::Palette>>,
-    /// The worker that writes it into every Claude config dir, so running sessions recolour.
-    claude_theme_tx: Mutex<Option<Sender<bro_core::claude_theme::Palette>>>,
     /// Agent teams running in sessions here (kept current by the UI loop), for the settings view.
     teams: Mutex<Vec<LiveTeam>>,
 }
@@ -280,6 +279,7 @@ pub fn fallback_settings() -> Settings {
         peon: Default::default(),
         justtools: Default::default(),
         justwatch: Default::default(),
+        skills: Default::default(),
         updates: Default::default(),
         watchdog: Default::default(),
         setup_done: false,
@@ -321,8 +321,6 @@ impl Services {
                 voice_gen: Default::default(),
                 focused: Mutex::new(None),
                 login_watch: Mutex::new(Default::default()),
-                claude_palette: Mutex::new(None),
-                claude_theme_tx: Mutex::new(None),
                 teams: Mutex::new(vec![]),
             }),
         }
@@ -335,6 +333,7 @@ impl Services {
             settings,
             justtools: Default::default(),
             justimagine: Default::default(),
+            skills: Default::default(),
             updates: Default::default(),
             config: None,
             profiles: Avail::Loading,
@@ -425,36 +424,6 @@ impl Services {
                 svc.send(Event::Toast(crate::alerts::Kind::Error, format!("couldn't save settings: {e}")));
             }
         });
-    }
-
-    /// bro's theme changed (or bro started): Claude launches take it from now on, and a worker writes it into
-    /// every Claude config dir, where Claude Code's watcher recolours the running sessions. A burst of previews
-    /// writes only the last.
-    pub fn claude_theme(&self, palette: bro_core::claude_theme::Palette) {
-        *self.inner.claude_palette.lock() = Some(palette.clone());
-        if self.is_demo() || !self.state().settings.claude_mod.theme {
-            return;
-        }
-        let mut tx = self.inner.claude_theme_tx.lock();
-        let worker = tx.get_or_insert_with(|| {
-            let (tx, rx) = std::sync::mpsc::channel::<bro_core::claude_theme::Palette>();
-            std::thread::spawn(move || {
-                while let Ok(mut latest) = rx.recv() {
-                    std::thread::sleep(std::time::Duration::from_millis(120));
-                    while let Ok(newer) = rx.try_recv() {
-                        latest = newer;
-                    }
-                    let _ = guard("claude_theme::write_everywhere", || bro_core::claude_theme::write_everywhere(&latest));
-                }
-            });
-            tx
-        });
-        let _ = worker.send(palette);
-    }
-
-    /// The theme Claude launches write and select (see [`Services::claude_theme`]).
-    pub fn claude_palette(&self) -> Option<bro_core::claude_theme::Palette> {
-        self.inner.claude_palette.lock().clone()
     }
 
     /// Project identity for a directory: cached; bro-core's `project_for` when available, else a local git-root

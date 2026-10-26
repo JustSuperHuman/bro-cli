@@ -3,8 +3,28 @@
 //!
 //! `bro-open` teaches the agent to show the user a file with `bro open`
 //! (docs/file-links.md section 6): the bridge broadcasts it to the TUI, the web
-//! client and the phone.
+//! client and the phone. It can be switched off ([`SkillSettings::bro_open`]); the Skills section of
+//! settings also keeps the git repos bro watches for more skills ([`crate::skill_repos`]).
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// `[skills]` in `~/.bro/v2.toml`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillSettings {
+    /// New Claude and Codex sessions get the `bro-open` skill.
+    pub bro_open: bool,
+    /// Git repos bro watches for skills, as [`crate::skill_repos::normalize`] keeps them ("owner/repo").
+    pub repos: Vec<String>,
+    /// Pull the watched repos when bro opens and every [`crate::skill_repos::SYNC_EVERY`].
+    pub auto_sync: bool,
+}
+
+impl Default for SkillSettings {
+    fn default() -> Self {
+        SkillSettings { bro_open: true, repos: vec![], auto_sync: true }
+    }
+}
 
 pub const BRO_OPEN_SKILL_NAME: &str = "bro-open";
 
@@ -35,6 +55,14 @@ pub fn write_bro_open_skill(home: &Path) -> std::io::Result<()> {
     crate::browser::write_if_changed(&bro_open_skill_path(home), BRO_OPEN_SKILL)
 }
 
+/// Takes bro's `bro-open` skill back out of `home` (a copy you changed is yours and stays).
+pub fn remove_bro_open_skill(home: &Path) {
+    let path = bro_open_skill_path(home);
+    if std::fs::read_to_string(&path).is_ok_and(|b| b == BRO_OPEN_SKILL) {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap_or(home));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,5 +77,12 @@ mod tests {
         std::fs::write(&path, "stale").unwrap();
         write_bro_open_skill(home.path()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), BRO_OPEN_SKILL);
+        remove_bro_open_skill(home.path());
+        assert!(!path.exists());
+        // a copy you changed stays
+        write_bro_open_skill(home.path()).unwrap();
+        std::fs::write(&path, "mine").unwrap();
+        remove_bro_open_skill(home.path());
+        assert!(path.exists());
     }
 }

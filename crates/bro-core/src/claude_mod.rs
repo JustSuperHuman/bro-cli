@@ -1,13 +1,11 @@
 //! bro's Claude Code mod (`crates/bro-core/claude-mod`): a plugin of function hooks bro loads into
-//! every Claude session it starts (`--plugin-dir`). `[claude_mod]` in `~/.bro/v2.toml`. Two halves:
+//! every Claude session it starts (`--plugin-dir`). `[claude_mod]` in `~/.bro/v2.toml`. Two parts:
 //!
-//! * **The look.** Claude Code wears bro's theme: bro writes it as a Claude Code theme and selects
-//!   it per launch ([`crate::claude_theme`], `theme` below), and the mod gives the spinner and the
-//!   turn line the theme's voice ("Forging…", "Forged for 12s" on Ember).
-//! * **The link.** The login and its limits at the end of the hint line, a status line when another
-//!   session waits on you, `/bro` (a pane of every session and limit; jump to one, rename this one),
-//!   and tools Claude can call: show you a file in bro's preview, ping your phone, check the other
-//!   sessions. It all goes through bro's bridge on loopback.
+//! * **The link.** `/bro`: a pane of every session and limit; jump to one, rename this one. It goes
+//!   through bro's bridge on loopback.
+//! * **The questions.** A chime when Claude asks you something, and with the timer on, a countdown above the
+//!   question that ticks for its last 15 seconds; at zero Claude goes with its best judgement. bro plays the
+//!   sounds itself (`bro hook sound`, `bro_voice::cue`), the same on every OS.
 //!
 //! The files are built into bro and written to `~/.bro/claude-mod/bro-<hash>/`: one folder per
 //! version, so a running session keeps the copy it started with and two bros never fight over one.
@@ -22,52 +20,54 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClaudeModSettings {
-    /// New Claude sessions load the mod. Off by default: you turn it on in Settings › Claude Code.
+    /// New Claude sessions load the mod. Off by default: you turn it on in Settings › bro mod.
     pub on: bool,
-    /// Claude Code takes bro's theme (its colours, live). Works with the mod off too.
-    pub theme: bool,
-    /// The spinner and the turn line speak in the theme's voice.
-    pub flair: bool,
-    /// The login and its limits at the end of the hint line.
-    pub hud: bool,
-    /// A status line when another session waits on you or has finished.
-    pub radar: bool,
-    /// Claude can show you files in bro's preview, ping your phone and check your other sessions.
-    pub tools: bool,
+    /// A chime when Claude asks you a question.
+    pub chime: bool,
+    /// Claude's questions wait [`Self::timer_secs`] for you, then Claude goes with its best judgement.
+    pub timer: bool,
+    /// How long a question waits while the timer is on; Settings steps through [`TIMER_CHOICES`].
+    pub timer_secs: u32,
+    /// The timer ticks for its last 15 seconds.
+    pub ticks: bool,
 }
+
+/// The question timer's lengths Settings offers, in seconds.
+pub const TIMER_CHOICES: [u32; 6] = [15, 30, 60, 120, 300, 600];
 
 impl Default for ClaudeModSettings {
     fn default() -> Self {
-        Self { on: false, theme: true, flair: true, hud: true, radar: true, tools: true }
+        Self { on: false, chime: true, timer: false, timer_secs: 30, ticks: true }
     }
 }
 
 impl ClaudeModSettings {
-    /// What a Claude launch's `--settings` file carries for the mod and the theme: Claude's
-    /// `theme` (when bro wrote one for this launch) and the mod's options.
-    pub fn launch_settings(&self, themed: bool) -> Map<String, Value> {
+    /// What a Claude launch's `--settings` file carries for the mod: its options, while it loads.
+    pub fn launch_settings(&self) -> Map<String, Value> {
         let mut out = Map::new();
-        if themed {
-            out.insert("theme".into(), Value::String(crate::claude_theme::SETTING.into()));
-        }
         if self.on {
-            let options = json!({ "flair": self.flair, "hud": self.hud, "radar": self.radar, "tools": self.tools });
+            let options = json!({
+                "chime": self.chime,
+                "timer": self.question_secs(),
+                "ticks": self.ticks,
+            });
             out.insert("pluginConfigs".into(), json!({ NAME: { "options": options } }));
         }
         out
     }
 
-    /// "on", "theme only" or "off", for the settings list.
+    /// How long a question waits for you, in seconds; 0 with the timer off.
+    pub fn question_secs(&self) -> u32 {
+        if self.timer { self.timer_secs.clamp(5, 3600) } else { 0 }
+    }
+
+    /// "on" or "off", for the settings list.
     pub fn summary(&self) -> &'static str {
-        match (self.on, self.theme) {
-            (true, _) => "on",
-            (false, true) => "theme only",
-            (false, false) => "off",
-        }
+        if self.on { "on" } else { "off" }
     }
 }
 
-/// The plugin's name: its tools are `mcp__bro__*`, its command `/bro`.
+/// The plugin's name, and its command: `/bro`.
 pub const NAME: &str = "bro";
 
 macro_rules! mod_files {
@@ -83,14 +83,11 @@ mod_files![
     "hooks/register.tsx",
     "hooks/shared/env.ts",
     "hooks/shared/bridge.ts",
-    "hooks/shared/look.ts",
-    "hooks/style/index.ts",
-    "hooks/style/words.ts",
     "hooks/link/index.tsx",
     "hooks/link/data.ts",
     "hooks/link/dashboard.tsx",
     "hooks/link/poll.ts",
-    "hooks/link/tools.ts",
+    "hooks/questions/index.tsx",
     "types/index.d.ts",
 ];
 
@@ -169,24 +166,40 @@ mod tests {
     }
 
     #[test]
-    fn off_by_default_apart_from_the_theme() {
+    fn off_by_default() {
         let s = ClaudeModSettings::default();
-        assert!(!s.on && s.theme);
-        assert_eq!(s.summary(), "theme only");
-        assert!(s.launch_settings(true).get("pluginConfigs").is_none());
+        assert!(!s.on);
+        assert_eq!(s.summary(), "off");
+        assert!(s.launch_settings().is_empty());
     }
 
     #[test]
-    fn launch_settings_pick_the_theme_and_pass_the_options() {
-        let mut s = ClaudeModSettings { on: true, radar: false, ..Default::default() };
-        let m = s.launch_settings(true);
-        assert_eq!(m["theme"], "custom:bro");
-        assert_eq!(m["pluginConfigs"]["bro"]["options"]["radar"], false);
-        assert_eq!(m["pluginConfigs"]["bro"]["options"]["tools"], true);
-        assert!(s.launch_settings(false).get("theme").is_none(), "no theme written: Claude keeps its own");
+    fn launch_settings_pass_the_options() {
+        let mut s = ClaudeModSettings { on: true, ticks: false, ..Default::default() };
+        let m = s.launch_settings();
+        assert_eq!(m["pluginConfigs"]["bro"]["options"]["ticks"], false);
+        assert_eq!(m["pluginConfigs"]["bro"]["options"]["chime"], true);
+        assert_eq!(m["pluginConfigs"]["bro"]["options"]["timer"], 0, "no timer until you turn it on");
+        assert_eq!(s.summary(), "on");
+        s.timer = true;
+        assert_eq!(s.launch_settings()["pluginConfigs"]["bro"]["options"]["timer"], 30);
+        s.timer_secs = 1;
+        assert_eq!(s.question_secs(), 5, "a hand-edited length stays one the mod takes");
         s.on = false;
-        assert!(s.launch_settings(true).get("pluginConfigs").is_none());
-        assert_eq!(s.summary(), "theme only");
+        assert!(s.launch_settings().is_empty());
+    }
+
+    /// Settings saved before the theme and the mod's other switches went still load.
+    #[test]
+    fn old_switches_are_ignored() {
+        let s: ClaudeModSettings = toml::from_str("on = true
+theme = false
+flair = false
+hud = false
+radar = false
+tools = false
+").unwrap();
+        assert_eq!(s, ClaudeModSettings { on: true, ..Default::default() });
     }
 
     #[test]
@@ -194,7 +207,7 @@ mod tests {
         let (_, manifest) = FILES.iter().find(|(p, _)| *p == ".claude-plugin/plugin.json").unwrap();
         let manifest: Value = serde_json::from_str(manifest).unwrap();
         let declared: Vec<&str> = manifest["userConfig"].as_object().unwrap().keys().map(String::as_str).collect();
-        let passed = ClaudeModSettings { on: true, ..Default::default() }.launch_settings(false);
+        let passed = ClaudeModSettings { on: true, ..Default::default() }.launch_settings();
         let passed: Vec<&str> = passed["pluginConfigs"]["bro"]["options"].as_object().unwrap().keys().map(String::as_str).collect();
         let (mut declared, mut passed) = (declared, passed);
         declared.sort_unstable();

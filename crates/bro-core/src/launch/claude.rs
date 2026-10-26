@@ -43,7 +43,10 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     if let Some(p) = account {
         let _ = crate::claude_shared::share_skills(&p.dir);
     }
-    let _ = crate::skills::write_bro_open_skill(&config_dir);
+    if !ctx.bro_open_off {
+        let _ = crate::skills::write_bro_open_skill(&config_dir);
+    }
+    crate::skill_repos::write_cached(&config_dir, &ctx.skill_repos);
     if ctx.justtools_skill {
         let _ = crate::justtools::write_skill(&config_dir);
     }
@@ -163,7 +166,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         }
     }
     args.extend(spec.extra_args.iter().cloned());
-    let mut extra_settings = bro_mod(&mut cmd, &mut args, ctx, &config_dir, &target_profile, &backend);
+    let mut extra_settings = bro_mod(&mut cmd, &mut args, ctx, &target_profile, &backend);
     if spec.orchestrator {
         orchestrator_args(&mut args, &config_dir, ctx)?;
     } else if let (Some(scope), Some(bin)) = (crate::peers::Scope::of(&ctx.claude_env), &ctx.bro_bin) {
@@ -223,13 +226,11 @@ fn orchestrator_args(args: &mut Vec<String>, config_dir: &Path, ctx: &LaunchCtx)
     Ok(())
 }
 
-/// bro's Claude Code mod and theme (see [`crate::claude_mod`]): the plugin folder, bro's theme written
-/// into this login's config dir, and what the mod reads about the launch. Returns the `--settings`
-/// entries they need. Best effort: a file bro can't write leaves Claude as it ships.
-fn bro_mod(cmd: &mut CommandSpec, args: &mut Vec<String>, ctx: &LaunchCtx, config_dir: &Path, profile: &str, backend: &str) -> Map<String, Value> {
+/// bro's Claude Code mod (see [`crate::claude_mod`]): the plugin folder and what the mod reads about the
+/// launch. Returns the `--settings` entries it needs. Best effort: a folder bro can't write leaves Claude as
+/// it ships.
+fn bro_mod(cmd: &mut CommandSpec, args: &mut Vec<String>, ctx: &LaunchCtx, profile: &str, backend: &str) -> Map<String, Value> {
     let Some(settings) = &ctx.claude_mod else { return Map::new() };
-    // written before Claude starts: it watches its themes folder only if the folder was there
-    let themed = settings.theme && ctx.palette.as_ref().is_some_and(|p| crate::claude_theme::write(config_dir, p).is_ok());
     if settings.on
         && let Ok(dir) = crate::claude_mod::install()
     {
@@ -239,7 +240,7 @@ fn bro_mod(cmd: &mut CommandSpec, args: &mut Vec<String>, ctx: &LaunchCtx, confi
     cmd.set_env("BRO_PROFILE", profile);
     cmd.set_env("BRO_BACKEND", backend);
     cmd.set_env("BRO_VERSION", env!("CARGO_PKG_VERSION"));
-    settings.launch_settings(themed)
+    settings.launch_settings()
 }
 
 /// What the backend itself lists for `model`: the provider's catalogue, a Gemini sign-in's, or the

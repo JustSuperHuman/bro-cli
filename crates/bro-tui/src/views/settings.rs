@@ -346,69 +346,81 @@ enum WatchOpt {
 
 const WATCH_OPTS: [WatchOpt; 5] = [WatchOpt::Prompt, WatchOpt::Wake, WatchOpt::Reviewer, WatchOpt::Model, WatchOpt::Budget];
 
-/// bro's Claude Code mod and theme (`[claude_mod]`, see [`bro_core::claude_mod`]).
+/// bro's Claude Code mod (`[claude_mod]`, see [`bro_core::claude_mod`]): a section of its own.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ModOpt {
-    Theme,
     On,
-    Flair,
-    Hud,
-    Radar,
-    Tools,
+    Chime,
+    Timer,
+    TimerSecs,
+    Ticks,
 }
 
-const MOD_OPTS: [ModOpt; 6] = [ModOpt::Theme, ModOpt::On, ModOpt::Flair, ModOpt::Hud, ModOpt::Radar, ModOpt::Tools];
+const MOD_OPTS: [ModOpt; 5] = [
+    ModOpt::On,
+    ModOpt::Chime,
+    ModOpt::Timer,
+    ModOpt::TimerSecs,
+    ModOpt::Ticks,
+];
 
 impl ModOpt {
     fn label(self) -> &'static str {
         match self {
-            ModOpt::Theme => "bro theme in Claude",
-            ModOpt::On => "bro mod",
-            ModOpt::Flair => "Theme voice",
-            ModOpt::Hud => "Limits in the hint line",
-            ModOpt::Radar => "Session radar",
-            ModOpt::Tools => "Tools for Claude",
+            ModOpt::On => "Load the mod",
+            ModOpt::Chime => "Question chime",
+            ModOpt::Timer => "Question timer",
+            ModOpt::TimerSecs => "Answer within",
+            ModOpt::Ticks => "Countdown ticks",
         }
     }
     fn help(self) -> &'static str {
         match self {
-            ModOpt::Theme => "Claude Code wears your bro theme, every colour, and follows along live as you switch or preview themes",
-            ModOpt::On => "Claude knows it runs in bro: /bro opens your sessions and limits in a pane, a press away from each one",
-            ModOpt::Flair => "the spinner and the turn line speak your theme: Forging… on Ember, Decrypting… on Matrix",
-            ModOpt::Hud => "your login, its 5-hour and weekly use and the context fill, at the end of Claude's hint line",
-            ModOpt::Radar => "a status line in Claude the moment another session waits on you or finishes",
-            ModOpt::Tools => "Claude can put a file in bro's preview, ping your phone and check your other sessions",
+            ModOpt::On => "new Claude sessions load bro's mod: /bro opens your sessions and limits in a pane · the questions need it",
+            ModOpt::Chime => "bro chimes when Claude asks you a question",
+            ModOpt::Timer => "a countdown above Claude's questions; at zero Claude goes with its best judgement",
+            ModOpt::TimerSecs => "how long a question waits for you while the timer is on",
+            ModOpt::Ticks => "a tick a second for the timer's last 15 seconds, firmer for the last five",
         }
     }
     fn get(self, m: &bro_core::claude_mod::ClaudeModSettings) -> bool {
         match self {
-            ModOpt::Theme => m.theme,
             ModOpt::On => m.on,
-            ModOpt::Flair => m.flair,
-            ModOpt::Hud => m.hud,
-            ModOpt::Radar => m.radar,
-            ModOpt::Tools => m.tools,
+            ModOpt::Chime => m.chime,
+            ModOpt::Timer | ModOpt::TimerSecs => m.timer,
+            ModOpt::Ticks => m.ticks,
         }
     }
     fn flip(self, m: &mut bro_core::claude_mod::ClaudeModSettings) {
         let v = match self {
-            ModOpt::Theme => &mut m.theme,
             ModOpt::On => &mut m.on,
-            ModOpt::Flair => &mut m.flair,
-            ModOpt::Hud => &mut m.hud,
-            ModOpt::Radar => &mut m.radar,
-            ModOpt::Tools => &mut m.tools,
+            ModOpt::Chime => &mut m.chime,
+            ModOpt::Timer => &mut m.timer,
+            ModOpt::Ticks => &mut m.ticks,
+            // a length, not a switch: stepped in `step`
+            ModOpt::TimerSecs => return,
         };
         *v = !*v;
     }
-    /// Takes effect: the theme on its own, the mod's parts only while the mod loads.
+    /// The heading it leads, inside the section.
+    fn heading(self) -> Option<&'static str> {
+        match self {
+            ModOpt::Chime => Some("questions"),
+            _ => None,
+        }
+    }
+    /// Takes effect: the questions only while the mod loads, the timer's own only with the timer on.
     fn live(self, m: &bro_core::claude_mod::ClaudeModSettings) -> bool {
-        matches!(self, ModOpt::Theme | ModOpt::On) || m.on
+        match self {
+            ModOpt::On => true,
+            ModOpt::TimerSecs | ModOpt::Ticks => m.on && m.timer,
+            _ => m.on,
+        }
     }
 }
 
 /// A selectable row, in the order the sections run: bro's own options (Appearance, then Sessions), caveman mode,
-/// watchdogs, bro's Claude mod, agent teams, the Claude preset and each other [`KNOBS`] switch, the integrations,
+/// watchdogs, agent teams, the Claude preset and each other [`KNOBS`] switch, bro's Claude mod, the integrations,
 /// then bro's updates.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
@@ -430,10 +442,10 @@ fn rows() -> Vec<Row> {
         .chain(VOICE_OPTS.map(Row::Voice))
         .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents)])
         .chain(WATCH_OPTS.map(Row::Watch))
-        .chain(MOD_OPTS.map(Row::Mod))
         .chain(knobs(true).map(Row::Knob))
         .chain([Row::Preset])
         .chain(knobs(false).map(Row::Knob))
+        .chain(MOD_OPTS.map(Row::Mod))
         .chain([Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
         .chain(bro_core::justpaste::supported().then_some(Row::Tool(ToolOpt::SmartPaste)))
@@ -490,12 +502,24 @@ enum Section {
     Caveman,
     Watchdog,
     Claude,
+    Mod,
     Integrations,
     Sounds,
     Updates,
 }
 
-const SECTIONS: [Section; 9] = [Section::Appearance, Section::Sessions, Section::Voice, Section::Caveman, Section::Watchdog, Section::Claude, Section::Integrations, Section::Sounds, Section::Updates];
+const SECTIONS: [Section; 10] = [
+    Section::Appearance,
+    Section::Sessions,
+    Section::Voice,
+    Section::Caveman,
+    Section::Watchdog,
+    Section::Claude,
+    Section::Mod,
+    Section::Integrations,
+    Section::Sounds,
+    Section::Updates,
+];
 
 impl Section {
     fn of(r: Row) -> Section {
@@ -505,7 +529,8 @@ impl Section {
             Row::Voice(_) => Section::Voice,
             Row::Cave(_) => Section::Caveman,
             Row::Watch(_) => Section::Watchdog,
-            Row::Mod(_) | Row::Preset | Row::Knob(_) => Section::Claude,
+            Row::Preset | Row::Knob(_) => Section::Claude,
+            Row::Mod(_) => Section::Mod,
             Row::Tool(ToolOpt::SoundsOn | ToolOpt::Sounds | ToolOpt::PeonPing) => Section::Sounds,
             Row::Tool(_) => Section::Integrations,
             Row::Update(_) => Section::Updates,
@@ -519,6 +544,7 @@ impl Section {
             Section::Caveman => "Caveman",
             Section::Watchdog => "Watchdog",
             Section::Claude => "Claude Code",
+            Section::Mod => "bro mod",
             Section::Integrations => "Integrations",
             Section::Sounds => "Sounds",
             Section::Updates => "Updates",
@@ -533,6 +559,7 @@ impl Section {
             Section::Caveman => "caveman",
             Section::Watchdog => "watchdog",
             Section::Claude => "claude",
+            Section::Mod => "mod",
             Section::Integrations => "rocket",
             Section::Sounds => "sound",
             Section::Updates => "history",
@@ -546,7 +573,8 @@ impl Section {
             Section::Voice => "Hold the key in any app, speak, let go: Hugh hears you and gets it done. bro keeps that key to itself while it runs.",
             Section::Caveman => "Terse replies with every fact kept, in new Claude, Codex and Pi sessions.",
             Section::Watchdog => "A fresh reviewer reads a session that went quiet and hands it its next task. Prefix w on a session starts one.",
-            Section::Claude => "How Claude Code looks and talks to bro, and the environment bro sets on every launch. New sessions pick it up.",
+            Section::Claude => "Agent teams, and the environment bro sets on every Claude launch. New sessions pick it up.",
+            Section::Mod => "bro's mod for Claude Code: your sessions and limits a keystroke away in /bro, and a chime and a clock on Claude's questions. New sessions pick it up.",
             Section::Integrations => "Tools your agents can call. bro installs them and tells you when GitHub has something newer.",
             Section::Sounds => "Voice lines when a session starts, finishes, fails or needs you, in Claude, Codex, Pi and omp. The sounds and packs are provided by PeonPing.",
             Section::Updates => "New bro releases from GitHub. Nothing installs until you say so.",
@@ -868,16 +896,11 @@ impl SettingsView {
                 }
             }
             Row::Cave(CaveOpt::Subagents) => s.caveman.subagents = !s.caveman.subagents,
-            Row::Mod(o) => {
-                o.flip(&mut s.claude_mod);
-                let theme_on = o == ModOpt::Theme && s.claude_mod.theme;
-                cx.svc.save_settings(s);
-                // on again: running sessions catch up with the theme now, not at the next switch
-                if theme_on {
-                    cx.svc.claude_theme(crate::theme::claude_palette(cx.theme));
-                }
-                return;
+            Row::Mod(ModOpt::TimerSecs) => {
+                let m = &mut s.claude_mod;
+                m.timer_secs = crate::watchdog::step_choice(&bro_core::claude_mod::TIMER_CHOICES, m.timer_secs, dir);
             }
+            Row::Mod(o) => o.flip(&mut s.claude_mod),
             Row::Watch(WatchOpt::Prompt) => return cx.act(Action::Run(Act::WatchdogPrompt)),
             Row::Watch(WatchOpt::Wake) => s.watchdog.idle_secs = crate::watchdog::step_choice(&crate::watchdog::IDLE_CHOICES, s.watchdog.idle_secs, dir),
             Row::Watch(WatchOpt::Budget) => s.watchdog.max_wakes = crate::watchdog::step_choice(&crate::watchdog::BUDGET_CHOICES, s.watchdog.max_wakes, dir),
@@ -907,6 +930,7 @@ impl SettingsView {
     fn reset(&self, cx: &mut Cx) {
         let mut s = cx.svc.settings();
         match self.row() {
+            Row::Mod(ModOpt::TimerSecs) => s.claude_mod.timer_secs = bro_core::claude_mod::ClaudeModSettings::default().timer_secs,
             Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Update(_) | Row::Mod(_) | Row::Voice(VoiceOpt::On | VoiceOpt::ApiKey) => return,
             Row::Voice(o) => {
                 match o {
@@ -1084,12 +1108,27 @@ impl SettingsView {
                     })
                     .collect()
             }
-            Section::Claude => {
+            Section::Mod => {
                 let m = &st.claude_mod;
-                let mut out = vec![Block::Sub("bro mod".into())];
-                out.extend(MOD_OPTS.iter().map(|&o| Block::Item(Item::new(Row::Mod(o), o.label(), switch(o.get(m), o.live(m), t), o.help()))));
+                let mut out = vec![];
+                for o in MOD_OPTS {
+                    if let Some(h) = o.heading() {
+                        out.push(Block::Sub(h.into()));
+                    }
+                    let value = match o {
+                        ModOpt::TimerSecs => {
+                            let style = if o.live(m) { fg(t.inline) } else { muted(t) };
+                            choice(crate::watchdog::human(u64::from(m.timer_secs)), style, t)
+                        }
+                        _ => switch(o.get(m), o.live(m), t),
+                    };
+                    out.push(Block::Item(Item::new(Row::Mod(o), o.label(), value, o.help())));
+                }
+                out
+            }
+            Section::Claude => {
                 let env = &st.claude_env;
-                out.push(Block::Sub(Group::Teams.label().into()));
+                let mut out = vec![Block::Sub(Group::Teams.label().into())];
                 let teams_on = env.agent_teams();
                 for k_i in knobs(true) {
                     let k = &KNOBS[k_i];
@@ -1379,6 +1418,10 @@ impl SettingsView {
                     n => Span::styled(format!("{label} +{n}"), fg(t.inline)),
                 }
             }
+            Section::Mod => match st.claude_mod.summary() {
+                "on" => Span::styled("on", fg(t.good)),
+                other => Span::styled(other, muted(t)),
+            },
             Section::Integrations => {
                 let (jt, ji) = (cx.svc.state().justtools.clone(), cx.svc.state().justimagine.clone());
                 match &jt.job {
@@ -1609,11 +1652,12 @@ mod tests {
         let n = n + VOICE_OPTS.len();
         assert_eq!(r[n], Row::Cave(CaveOpt::Mode));
         assert_eq!(r[n + 2], Row::Watch(WatchOpt::Prompt));
-        assert_eq!(r[n + 2 + WATCH_OPTS.len()], Row::Mod(ModOpt::Theme));
         let teams = knobs(true).count();
-        assert!(teams >= 1 && r[n + 2 + WATCH_OPTS.len() + MOD_OPTS.len()] == Row::Knob(0), "agent teams lead the Claude settings after the mod");
-        assert_eq!(r[n + 2 + WATCH_OPTS.len() + MOD_OPTS.len() + teams], Row::Preset);
-        let tools = n + 3 + WATCH_OPTS.len() + MOD_OPTS.len() + KNOBS.len();
+        assert!(teams >= 1 && r[n + 2 + WATCH_OPTS.len()] == Row::Knob(0), "agent teams lead the Claude settings");
+        assert_eq!(r[n + 2 + WATCH_OPTS.len() + teams], Row::Preset);
+        let mods = n + 3 + WATCH_OPTS.len() + KNOBS.len();
+        assert_eq!(r[mods], Row::Mod(ModOpt::On), "the mod's own section follows Claude Code's");
+        let tools = mods + MOD_OPTS.len();
         assert_eq!(r[tools], Row::Tool(ToolOpt::Install));
         assert_eq!(r[tools + 1], Row::Tool(ToolOpt::QuickInstall));
         let watch = usize::from(bro_core::justwatch::supported()) + usize::from(bro_core::justpaste::supported());
