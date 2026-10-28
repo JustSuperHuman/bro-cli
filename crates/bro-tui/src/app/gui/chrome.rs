@@ -41,6 +41,19 @@ pub fn session_mark(app: &App, id: PaneId, t: &super::kit::Tokens) -> Mark {
     }
 }
 
+/// The maker of the model a session runs, when it isn't its agent's own lab (Codex on Claude, Claude on Gemini):
+/// tucked into the corner of [`session_mark`] (see [`crate::maker`]).
+pub fn session_badge(app: &App, id: PaneId) -> Option<Mark> {
+    let m = &app.panes.get(&id)?.as_term_ref()?.meta;
+    if m.orchestrator {
+        return None;
+    }
+    crate::maker::badge(m.harness, m.profile.as_deref(), m.model.as_deref()).map(brand::maker)
+}
+
+/// A card turning between its terminal and its conversation fades the new face in this long (seconds).
+const FACE_FADE: f32 = 0.26;
+
 /// Where views and card backs were painted this frame (for the mouse).
 #[derive(Default)]
 pub struct Painted {
@@ -49,7 +62,7 @@ pub struct Painted {
     pub card_links: Vec<(Rect, PaneId, String)>,
 }
 
-pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, focused_window: bool) -> Painted {
+pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, focused_window: bool, media: &mut super::media::Media) -> Painted {
     let mut out = Painted::default();
     if layout.all_minimized {
         ui.label_in(layout.body, "All sessions minimized · show minimized in the sidebar", Style::new(size::BODY, weight::MEDIUM, ui.t.muted), Align::Center);
@@ -62,7 +75,7 @@ pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashM
     app.flips.retain(|id, flip| app.panes.contains_key(id) && (flip.back || flip.turning(now)));
     // the card with the keyboard last, so its edge stays whole where tiles share a line
     for b in layout.panes.iter().filter(|b| !b.focused).chain(layout.panes.iter().filter(|b| b.focused)) {
-        draw_card(app, ui, layout, b, panes, canvas, &pal, focused_window, &mut out);
+        draw_card(app, ui, layout, b, panes, canvas, &pal, focused_window, &mut out, media);
     }
     // where tiles share a line there's no gutter: the line itself is grabbed to move the edge (the mouse finds the
     // tile edge under it, as in a gutter)
@@ -105,7 +118,7 @@ fn draw_group(app: &App, ui: &mut Ui, g: &GroupBox) {
     put(ui, &mut x, &term.meta.project.name, st);
     put(ui, &mut x, "  ·  ", quiet);
     if x + 16.0 < end {
-        ui.mark(session_mark(app, id, t), Rect::new(x, lr.y, 14.0, lr.h), 12.0, None);
+        ui.mark_badged(session_mark(app, id, t), session_badge(app, id), Rect::new(x, lr.y, 14.0, lr.h), 12.0, None);
         x += 18.0;
     }
     put(ui, &mut x, &who, st);
@@ -116,7 +129,7 @@ fn draw_group(app: &App, ui: &mut Ui, g: &GroupBox) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, pal: &Palette, focused_window: bool, out: &mut Painted) {
+fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, pal: &Palette, focused_window: bool, out: &mut Painted, media: &mut super::media::Media) {
     let id = b.id;
     let Some(p) = app.panes.get(&id) else { return };
     let t = ui.t;
@@ -137,7 +150,8 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
     let flip = app.flips.get(&id).copied();
     let (back, cover) = flip.map(|f| f.face(Instant::now())).unwrap_or((false, 1.0));
     if flip.is_some_and(|f| f.turning(Instant::now())) {
-        ui.ticking = true;
+        // a turn is a transition: every frame until it lands
+        ui.anim.moving = true;
     }
     let shown = if cover < 0.999 {
         let w = (r.w * cover).max(2.0);
@@ -173,7 +187,7 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
     }
     ui.hline(shown.x, header.bottom(), shown.w, t.hairline);
     ui.hit_with(header, Action::Pane(id, PaneAct::Header), Cursor::Default);
-    draw_header(app, ui, b, header, accent, hover);
+    draw_header(app, ui, b, header, accent, hover, panes.get(&id).map(|st| &st.focus));
     // content
     let content = Rect { x: shown.x + 1.0, w: (shown.w - 2.0).max(0.0), ..b.content };
     if b.folded {
@@ -198,8 +212,29 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
         if rain && bd == crate::skin::Backdrop::Rain {
             super::backdrop::draw(ui, content, bd, ui.t.surface);
         }
-        if let Some(term) = app.panes.get_mut(&id).and_then(|p| p.as_term()) {
+        // turning between the terminal and the conversation (focus mode), the new face fades in
+        let focus_face = app.focus_view(id);
+        {
+            let st = panes.entry(id).or_default();
+            if st.face.is_some_and(|f| f != focus_face) {
+                st.face_at = Some(ui.now);
+            }
+            st.face = Some(focus_face);
+        }
+        if focus_face {
+            // focus mode: the conversation, the session running on under it at the card's size
+            let started = Instant::now();
+            if let Some(term) = app.panes.get_mut(&id).and_then(|p| p.as_term()) {
+                keep_sized(waker, ui, term, content);
+            }
+            let st = panes.entry(id).or_default();
+            st.drawn = Default::default();
+            super::focus::draw(app, ui, id, content, b.focused && focused_window, &mut st.focus, media);
+            app.perf.pane_rendered(id, started.elapsed());
+        } else if let Some(term) = app.panes.get_mut(&id).and_then(|p| p.as_term()) {
+            let started = Instant::now();
             draw_terminal(waker, ui, term, b, content, panes, pal, focused_window, accent);
+            app.perf.pane_rendered(id, started.elapsed());
         }
     } else if super::views::draw(app, ui, id, super::layout::inset(content, 6.0), b.focused) {
         // drawn natively by the view's own module
@@ -229,6 +264,18 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
     if cover < 0.6 {
         ui.top_fill(Rect { y: header.y, h: shown.h, ..shown }, 0.0, t.surface.with_alpha(0.45));
     }
+    if let Some(st) = panes.get_mut(&id)
+        && let Some(at) = st.face_at
+    {
+        let k = (ui.now.saturating_duration_since(at).as_secs_f32() / FACE_FADE).min(1.0);
+        if k < 1.0 {
+            ui.anim.moving = true;
+            let r = ui.px(content);
+            ui.scene.top_glass_quad(bro_gfx::Quad::new(r, t.surface.with_alpha((1.0 - k).powi(2))));
+        } else {
+            st.face_at = None;
+        }
+    }
     ui.unclip();
 }
 
@@ -257,7 +304,8 @@ fn app_waker(app: &App, id: PaneId) -> crate::pane::Waker {
 }
 
 /// The header: agent mark, title, who and where, then badges, status and buttons on the right.
-fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, hover: f32) {
+/// `view`: the card's focus view, when it has one (its header then says what the agent is doing).
+fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, hover: f32, view: Option<&super::focus::View>) {
     let id = b.id;
     let t = ui.t;
     let Some(p) = app.panes.get(&id) else { return };
@@ -286,6 +334,21 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
         }
         right = br.x - 2.0;
     }
+    // focus mode: this session's terminal, or its conversation again
+    if app.focus.on && r.w > 200.0 && p.as_term_ref().is_some_and(crate::app::focus::focusable) {
+        let br = Rect::new(right - 24.0, mid - 12.0, 24.0, 24.0);
+        let peek = app.focus.peek.contains(&id);
+        let glyph = if peek { "\u{F0369}" } else { "\u{F018D}" };
+        if show_buttons {
+            widgets::icon_button(ui, br, glyph, t.muted, Action::Focus(id, super::focus::TERMINAL));
+            if ui.hovered(br) {
+                widgets::tooltip(ui, br, if peek { "Back to the conversation" } else { "Show the terminal" });
+            }
+        } else {
+            ui.hit(br, Action::Focus(id, super::focus::TERMINAL));
+        }
+        right = br.x - 2.0;
+    }
     if app.tile_all && p.is_terminal() {
         let br = Rect::new(right - 24.0, mid - 12.0, 24.0, 24.0);
         let minimized = app.minimized.contains(&id);
@@ -299,9 +362,14 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
     }
     let time = app.start.elapsed().as_secs_f64();
     if let Some(term) = p.as_term_ref() {
-        // status: the indicator alone (spinner, alert); the header never says "done" (the sidebar and the tabs do)
-        let activity = p.activity();
-        if let Some(w) = status_pill(ui, Point::new(right, mid), activity, false, false) {
+        // status: the indicator alone (spinner, alert); the header never says "done" (the sidebar and the tabs do).
+        // In focus mode it says what the agent is doing in words, since the terminal that shows it is out of sight.
+        if app.focus_view(id) {
+            let room = (r.w * 0.36).clamp(120.0, 340.0);
+            if let Some(w) = super::focus::header_status(app, ui, id, view, Point::new(right - 4.0, mid), room) {
+                right -= w + 14.0;
+            }
+        } else if let Some(w) = status_pill(ui, Point::new(right, mid), p.activity(), false, false) {
             right -= w + 6.0;
         }
         // badges: watchdog, auto-resume, remote size, scrollback
@@ -330,6 +398,10 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
             let (rows, cols) = term.pty_size();
             badges.push((format!("⇲ {cols}×{rows} remote"), t.muted));
         }
+        // another bro window typed into it last: its size is that window's until you type here
+        if term.watching() {
+            badges.push(("⇄ watching · type to take over".to_string(), t.muted));
+        }
         if term.scroll_offset() > 0 {
             badges.push((format!("↑{}", term.scroll_offset()), t.inline));
         }
@@ -349,7 +421,7 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
         // left: mark, title, who, where
         let mark = Rect::new(x, mid - 9.0, 18.0, 18.0);
         let m = session_mark(app, id, t);
-        ui.mark(m, mark, 16.0, None);
+        ui.mark_badged(m, session_badge(app, id), mark, 16.0, None);
         x = mark.right() + 8.0;
         let avail = (right - x - 8.0).max(0.0);
         // the session's own title (yours, else the agent's) leads; without one, its login · model does. Inside a
@@ -473,6 +545,7 @@ fn view_icon(name: &str) -> &'static str {
         "bridge" => "\u{F05A9}",
         "rocket" => "\u{F0463}",
         "sound" => "\u{F057E}",
+        "skills" => "\u{F0431}",
         _ => "\u{F05AF}",
     }
 }
@@ -554,6 +627,17 @@ fn draw_terminal(waker: crate::pane::Waker, ui: &mut Ui, term: &mut crate::panes
     {
         let y = st.drawn.origin.y + row as f32 * st.drawn.cell_h;
         ui.round(Rect::new(area.x - 4.0, y, area.w + 8.0, st.drawn.cell_h), 4.0, accent.with_alpha(0.14));
+    }
+}
+
+/// A session in focus mode isn't drawn, but it still starts and keeps the size its card gives it (what it shows
+/// is read the same way, prompts and all).
+fn keep_sized(waker: crate::pane::Waker, ui: &Ui, term: &mut crate::panes::term::Term, content: Rect) {
+    let area = Rect::new(content.x + 10.0, content.y + 6.0, (content.w - 18.0).max(0.0), (content.h - 10.0).max(0.0));
+    let (rows, cols) = tdraw::fit(ui, area);
+    term.ensure_started(rows, cols, waker);
+    if term.started() {
+        term.resize(rows, cols);
     }
 }
 

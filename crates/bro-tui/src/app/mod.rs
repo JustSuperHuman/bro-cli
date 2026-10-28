@@ -10,10 +10,12 @@ mod alt_hints;
 mod commands;
 mod draw;
 mod files;
+pub(crate) mod focus;
 /// The desktop app (`bro gui`): this workspace drawn on the GPU.
 #[cfg(feature = "gui")]
 pub(crate) mod gui;
 mod history;
+pub(crate) mod hosting;
 mod input;
 pub(crate) mod insights;
 mod menu;
@@ -44,6 +46,9 @@ use ratatui::{
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
+
+/// The background bro stops after this long with no session running (unless bro starts at sign-in).
+const BACKGROUND_IDLE: Duration = Duration::from_secs(10 * 60);
 
 pub use overlays::Overlay;
 
@@ -97,6 +102,8 @@ pub(crate) enum SideHit {
     CloseProject(std::path::PathBuf, usize),
     /// the disclosure arrow beside the Claude usage total
     Fable,
+    /// the session counter over proxy and phone: every session
+    Sessions,
     Proxy,
     Bridge,
     /// the new-session strip's gear: the settings view
@@ -245,6 +252,8 @@ pub struct App {
     pub(crate) priority: Option<PaneId>,
     /// Sessions turned over (alt+double-click) or turning: the back says what each is working on
     pub(crate) flips: HashMap<PaneId, crate::card::Flip>,
+    /// Focus mode (the desktop app): agent sessions as their conversation, with a reply box each
+    pub(crate) focus: crate::focus::Focus,
     /// When alt went down on its own: key hints show once it's been held a moment
     pub(crate) alt_down: Option<Instant>,
     /// Whether the dev servers sessions mention are listening (checked off the UI thread)
@@ -272,6 +281,18 @@ pub struct App {
     pub(crate) orchestrator_pending: Option<Instant>,
     /// bro is shutting down: sessions closing now weren't closed by you (the orchestrator is kept for next time).
     quitting: bool,
+    /// Panes held open while the session server restarts, and how each comes back (see [`hosting`]).
+    comebacks: Vec<(PaneId, hosting::Comeback)>,
+    /// Another bro took over the session server: this one quits, leaving the sessions running.
+    pub(crate) taken_over: bool,
+    /// Sessions left running in the session server when bro quit.
+    pub(crate) left_running: usize,
+    /// Quitting handed the sessions to the background bro.
+    pub(crate) left_to_background: bool,
+    /// Sessions a server that stopped unasked left, while bro asks whether to bring them back.
+    lost: Vec<bro_host::SessionInfo>,
+    /// Hosted panes held open while the connection to the server is picked up again.
+    held: Vec<PaneId>,
     /// push-to-talk messages on their way to the orchestrator, and spoken requests awaiting its answer
     voice: voice::VoiceRoute,
     term_focused: bool,
@@ -375,12 +396,19 @@ impl App {
             watch: HashMap::new(),
             orchestrator_pending: None,
             quitting: false,
+            comebacks: vec![],
+            taken_over: false,
+            left_running: 0,
+            left_to_background: false,
+            lost: vec![],
+            held: vec![],
             voice: Default::default(),
             term_focused: true,
             opts,
             _theme_watcher: None,
             perf: Default::default(),
             flips: HashMap::new(),
+            focus: crate::focus::Focus::default(),
             alt_down: None,
             probe: if cfg!(test) { Default::default() } else { crate::devprobe::Probe::start(tx.clone()) },
             card_links: vec![],
@@ -605,6 +633,7 @@ impl App {
         let Some(from) = self.focused() else { return self.new_tab(p) };
         let dir = match place {
             Place::Tab => return self.new_tab(p),
+            Place::Behind => return self.open_quietly(p),
             Place::SplitRight => Dir::Right,
             Place::SplitDown => Dir::Down,
             Place::Split => {
@@ -763,6 +792,10 @@ impl App {
     pub(crate) fn set_theme(&mut self, name: &str, save: bool) {
         self.theme = theme::get(name);
         crate::icons::retint(self.theme.is_light());
+        // programs that ask their terminal its colours get the new ones (the desktop app says so itself)
+        if !crate::fonts::GUI.load(std::sync::atomic::Ordering::Relaxed) {
+            self.svc.set_answer_profile(crate::services::host::tui_profile(&self.theme));
+        }
         if save {
             let mut s = self.svc.settings();
             s.theme = name.to_string();
@@ -800,6 +833,7 @@ impl App {
                 Action::LaunchUsage(h, profile) => self.launch_usage(h, profile),
                 Action::GeminiSignIn => { self.sign_in_gemini(); }
                 Action::Run(a) => self.run_act(a),
+                Action::Preview(path) => self.preview_file(path),
             }
         }
     }
@@ -852,9 +886,46 @@ impl App {
         Ok(())
     }
 
+    /// The background bro's loop (`bro background`): this same workspace with no screen, handling everything a window
+    /// does with its sessions (their output, the phone bridge, auto-resume, watchdogs) until a window takes over, or
+    /// there's nothing left to stand in for: no session runs and bro doesn't start at sign-in.
+    pub fn run_headless(&mut self, rx: Receiver<Event>) {
+        // what a session the phone starts gets until a window sizes it
+        if self.body.width == 0 {
+            self.body = Rect::new(0, 0, 122, 42);
+        }
+        let mut idle_since: Option<Instant> = None;
+        loop {
+            let ev = match rx.recv_timeout(self.next_deadline()) {
+                Ok(e) => e,
+                Err(RecvTimeoutError::Timeout) => Event::Tick,
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            self.handle_timed(ev);
+            while let Ok(e) = rx.try_recv() {
+                self.handle_timed(e);
+            }
+            self.after_events();
+            if self.quit {
+                break;
+            }
+            let busy = self.panes.values().any(|p| p.as_term_ref().is_some_and(|t| t.hosted() && p.alive())) || !self.held.is_empty();
+            if busy {
+                idle_since = None;
+            } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= BACKGROUND_IDLE {
+                if !self.svc.host_resident() {
+                    break;
+                }
+                idle_since = None;
+            }
+        }
+        self.shutdown();
+    }
+
     /// Housekeeping after each batch of events.
     pub(crate) fn after_events(&mut self) {
         self.screensaver_step();
+        self.focus_settle_all();
         // the grown session snaps back once you work somewhere else
         if self.priority.is_some() && self.priority != self.focused() {
             self.priority = None;
@@ -872,6 +943,7 @@ impl App {
         self.tick_watchdogs();
         self.update_insights();
         self.publish_teams();
+        self.publish_projects();
         self.pump_voice();
         self.toasts.expire();
     }
@@ -895,14 +967,27 @@ impl App {
         self.last_focus = self.focused();
     }
 
-    /// Kill every session and stop the services.
+    /// End every session (hosted ones keep running in the session server) and stop the services.
     pub fn shutdown(&mut self) {
         self.quitting = true;
+        self.left_running = self.detach_hosted();
         let ids: Vec<PaneId> = self.panes.keys().copied().collect();
         for id in ids {
             self.close(id);
         }
+        // a server left with nothing to run stops: the next bro starts a fresh one (its own version). One that
+        // starts when you sign in stays, unless it runs an older bro. A viewer leaves it to the bro it watched.
+        if self.left_running == 0
+            && !self.taken_over
+            && crate::services::host::role() != bro_host::Role::Viewer
+            && let Some(h) = self.svc.host()
+            && (h.info().version != bro_core::self_update::CURRENT || !self.svc.host_resident())
+        {
+            h.shutdown(Duration::from_secs(1));
+        }
+        // the proxy and phone bridge stop and the connection goes first: the background bro takes them over
         self.svc.shutdown();
+        self.leave_to_background();
     }
 
     /// Sleep until the soonest thing that needs a redraw without an event.
@@ -1070,13 +1155,16 @@ impl App {
                 }
             }
             Event::Clipboard(id, got, key) => match got {
+                // focus mode's box shows a picture as itself: no word about paths
+                Some(paths) if self.focus_view(id) => self.focus_attach(id, paths.iter().map(|p| std::path::PathBuf::from(p.trim_matches('"'))).collect()),
                 Some(paths) => {
                     let text = crate::clip::paste_form(&paths);
                     self.with_pane(id, |p, cx| p.paste(&text, cx));
                     let what = if paths.len() == 1 && paths[0].contains("paste-") { "image".to_string() } else { format!("{} file{}", paths.len(), if paths.len() == 1 { "" } else { "s" }) };
                     self.toast(Kind::Info, format!("pasted {what} as a path · Claude Code and Codex attach it"));
                 }
-                // nothing image-like: the program gets its own key back
+                // nothing image-like: the program gets its own key back (focus mode's box has no use for it)
+                None if self.focus_view(id) => {}
                 None => {
                     self.with_pane(id, |p, cx| p.key(key, cx));
                 }
@@ -1100,6 +1188,7 @@ impl App {
             Event::FolderCreated(request, result) => self.project_folder_created(request, result),
             Event::Watchdog(u) => self.watchdog_event(u),
             Event::Voice(m) => self.voice_message(*m),
+            Event::Host(e) => self.host_event(e),
             Event::ThemeFilesChanged => {
                 if theme::is_custom(&self.theme.name) {
                     let name = self.theme.name.clone();
@@ -1144,6 +1233,9 @@ impl App {
             return;
         }
         if let Some(id) = self.focused() {
+            if self.focus_view(id) {
+                return self.focus_paste(id, s);
+            }
             self.with_pane(id, |p, cx| p.paste(s, cx));
         }
     }

@@ -60,14 +60,9 @@ impl Gui {
             None => false,
         };
         let shown = asked && can && styled;
-        // the system's title bar would sit in the bare material: bro draws its own on the window's glass (Windows,
-        // where the frame is the app's to lay out)
-        if let Some(w) = &self.window {
-            super::caption::set(w, shown && cfg!(windows));
-        }
         if asked && !shown && self.material_warned != Some(want.0) {
             self.material_warned = Some(want.0);
-            let why = if can { "Acrylic and Mica need Windows 11 · Glass works here" } else { "this graphics driver can't draw a see-through window" };
+            let why = if can { "Acrylic needs Windows 11 · Glass works here" } else { "this graphics driver can't draw a see-through window" };
             self.app.toast(crate::alerts::Kind::Info, format!("window stays solid: {why}"));
         }
         self.see_through = shown;
@@ -87,6 +82,8 @@ impl Gui {
         let maximized = old.is_maximized();
         let fullscreen = old.fullscreen();
         let Gfx { renderer, mut text, scene } = gfx;
+        // the HTML preview's web view belongs to the old window: the next frame makes one in the new
+        self.pages.reset();
         // the old window keeps its renderer until we know the new one starts
         let new = window::create(el, &self.prefs, true).map(Arc::new).and_then(|w| {
             if let Ok(p) = old.outer_position() {
@@ -138,7 +135,7 @@ mod tests {
     #[test]
     fn the_tint_is_the_whole_windows_alpha() {
         assert_eq!(alpha(Material::Solid, 30), 1.0, "solid ignores the tint");
-        for m in [Material::Acrylic, Material::Mica, Material::Glass] {
+        for m in [Material::Acrylic, Material::Glass] {
             for tint in bro_core::config::MATERIAL_TINTS {
                 assert!((alpha(m, tint) - tint as f32 / 100.0).abs() < 1e-6);
             }

@@ -1,7 +1,8 @@
 //! The desktop app, `bro gui`: the same workspace as the terminal UI — every session, view, overlay and
 //! background service of [`App`] — drawn on the GPU (bro-gfx on wgpu), with each terminal on an
 //! alacritty_terminal screen, and a media sidebar that shows the photos and videos agents make instead of
-//! handing them to another app.
+//! handing them to another app. HTML files preview as the page itself, in the system's web view
+//! ([`page`]).
 //!
 //! The workspace model is shared with the terminal UI: keys arrive as the same crossterm events (so every
 //! binding works), panes and overlays keep their state machines, and this module adds the window, the layout
@@ -11,6 +12,7 @@ pub(crate) mod actions;
 mod backdrop;
 mod caption;
 mod chrome;
+mod focus;
 mod hints;
 mod input;
 pub(crate) mod kit;
@@ -20,6 +22,7 @@ mod media;
 mod menu;
 mod mouse;
 mod overlays;
+mod page;
 mod prefs;
 mod script;
 mod sidebar;
@@ -46,11 +49,20 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
+/// What moves by the clock (a working agent's spinner, a pulse, a caret) draws at most this often, and so does
+/// output from a session on screen that doesn't have the keyboard. The session that has it, and whatever you do,
+/// draw at once: with a dozen agents busy, the window would otherwise redraw at the display's full rate all the time.
+const AMBIENT: Duration = Duration::from_millis(33);
+/// Output from a session that isn't on screen (only its sidebar row can change) draws at most this often.
+const OFFSCREEN: Duration = Duration::from_millis(250);
+
 /// Events from bro's own threads, carried into winit's loop.
 pub enum UserEvent {
     App(Event),
     /// something finished in the background (a decoded picture, a video frame): draw
     Wake,
+    /// the HTML preview's page said something
+    Page(page::Msg),
 }
 
 /// How `bro gui` was asked for.
@@ -96,6 +108,9 @@ pub fn launch(flag: Flag, demo: bool, new: bool, dir: Option<PathBuf>) -> anyhow
         if new {
             args.push("--new".into());
         }
+        if crate::services::host::role() == bro_host::Role::Viewer {
+            args.push("--view".into());
+        }
         args.push("--gui-child".into());
         if window::detach_from_console(&args) {
             return Ok(());
@@ -110,8 +125,10 @@ pub fn run(demo: bool, new: bool, dir: Option<PathBuf>) -> anyhow::Result<()> {
         Some(d) => crate::util::strip_verbatim(std::fs::canonicalize(&d).map_err(|_| anyhow::anyhow!("{} isn't a folder", d.display()))?),
         None => std::env::current_dir()?,
     };
+    // `--view`: another window on the bro that's running, watching (and typing into) its sessions
+    let viewer = !demo && crate::services::host::role() == bro_host::Role::Viewer;
     // already running? hand the folder over and get out of the way
-    if !demo && !new && crate::instance::hand_off(&dir).unwrap_or(false) {
+    if !demo && !new && !viewer && crate::instance::hand_off(&dir).unwrap_or(false) {
         return Ok(());
     }
     crate::services::guard::install_panic_hook();
@@ -127,22 +144,36 @@ pub fn run(demo: bool, new: bool, dir: Option<PathBuf>) -> anyhow::Result<()> {
     crate::panes::mirror::install(move || Arc::new(term::mirror::Mirror::new(env.clone())));
     // `--new` beside a bro that's already running: your real data, with a translating proxy started on demand.
     // The orchestrator, bridge, voice and hand-offs stay with that bro (a second orchestrator would resume the same session twice).
-    let guest = !demo && new && crate::instance::running();
+    let guest = !demo && !viewer && new && crate::instance::running();
+    // the answers to what sessions ask their terminal (the window refines them once its font is measured)
+    crate::services::host::set_profile(term::profile());
     let svc = if demo {
         Services::demo(settings, tx.clone())
+    } else if viewer {
+        Services::start_viewer(settings, tx.clone())
     } else if guest {
         Services::start_guest(settings, tx.clone())
     } else {
         Services::start(settings, tx.clone())
     };
-    let _instance = if demo || guest { None } else { crate::instance::serve(tx.clone()) };
+    if viewer && svc.host().is_none() {
+        anyhow::bail!("there's no session server to watch (is bro running, with Keep sessions running on?)");
+    }
+    let _instance = if demo || guest || viewer { None } else { crate::instance::serve(tx.clone()) };
     let mut app = App::new(svc, tx.clone(), Opts { demo, fixed_demo: false, load_recents: !demo });
-    app.guest = guest;
+    app.guest = guest || viewer;
+    if viewer {
+        app.persist = false;
+    }
     if !demo {
         app.start_in(dir);
-        if guest {
+        if viewer {
+            app.reattach_sessions();
+        } else if guest {
             app.toast(crate::alerts::Kind::Info, "another bro is running: it keeps the orchestrator and phone bridge; this window starts its own proxy when needed");
         } else {
+            // sessions the session server kept running while bro was closed
+            app.reattach_sessions();
             app.restore_orchestrator();
         }
     }
@@ -154,6 +185,8 @@ pub fn run(demo: bool, new: bool, dir: Option<PathBuf>) -> anyhow::Result<()> {
     {
         let proxy = proxy.clone();
         std::thread::Builder::new().name("bro-gui-events".into()).spawn(move || {
+            // every session's output reaches the window through here
+            crate::util::prioritize_thread(true);
             while let Ok(ev) = rx.recv() {
                 if proxy.send_event(UserEvent::App(ev)).is_err() {
                     break;
@@ -162,6 +195,8 @@ pub fn run(demo: bool, new: bool, dir: Option<PathBuf>) -> anyhow::Result<()> {
         })?;
     }
     let mut gui = Gui::new(app, proxy);
+    // the window's thread draws ahead of ordinary work: a busy machine slows it last
+    crate::util::prioritize_thread(true);
     event_loop.run_app(&mut gui)?;
     gui.shutdown();
     Ok(())
@@ -187,6 +222,11 @@ struct PaneState {
     links_pending: bool,
     /// fractional scroll from a touchpad, in lines
     scroll_acc: f32,
+    /// its conversation's layout and motion in focus mode
+    focus: focus::View,
+    /// which face it showed last frame (true: its conversation), and when that last changed (it fades in)
+    face: Option<bool>,
+    face_at: Option<Instant>,
 }
 
 /// A drag in progress.
@@ -232,10 +272,16 @@ pub struct Gui {
     /// when the links on screen were last looked for again without the screen changing (file paths that
     /// appeared or went away since, as the terminal UI finds them on every redraw)
     links_refreshed: Instant,
-    /// something changed since the last frame
+    /// something changed since the last frame: draw now
     dirty: bool,
-    /// draw again soon (animations, spinners)
+    /// something changed that can wait until then (output from sessions without the keyboard)
+    due: Option<Instant>,
+    /// a transition is under way (a fade, a card turning over): draw every frame until it settles
+    moving: bool,
+    /// something on screen moves by the clock (spinners, pulses, a caret): draw every [`AMBIENT`]
     ticking: bool,
+    /// when the last frame was drawn
+    drawn_at: Instant,
     focused_window: bool,
     tui: tui::TuiCanvas,
     /// where the open overlay was painted by the terminal UI's drawing (its clicks are translated to its cells)
@@ -270,10 +316,12 @@ pub struct Gui {
     swap_window: bool,
     /// the window swapped out, until its successor is on screen
     old_window: Option<Arc<Window>>,
+    /// the web view an HTML preview shows its page in
+    pages: page::Pages,
 }
 
 impl Gui {
-    fn new(app: App, proxy: EventLoopProxy<UserEvent>) -> Gui {
+    fn new(mut app: App, proxy: EventLoopProxy<UserEvent>) -> Gui {
         let tokens = Tokens::from_theme(&app.theme);
         let wake_proxy = proxy.clone();
         let mut media = media::Media::new(Arc::new(move || {
@@ -286,6 +334,10 @@ impl Gui {
         // ffmpeg plays what Windows can't: look where Quick Install puts it too
         std::thread::spawn(|| bro_media::set_search_dirs(bro_core::quick_install::search_dirs()));
         let prefs = prefs::Prefs::load(app.persist);
+        // focus mode as you left it
+        app.focus.on = prefs.focus;
+        // HTML previews show the page, where there's a web view to show it in
+        crate::file_view::set_pages(page::Pages::available());
         Gui {
             theme_key: theme_key(&app.theme),
             tokens,
@@ -311,7 +363,10 @@ impl Gui {
             minute: 0,
             links_refreshed: Instant::now(),
             dirty: true,
+            due: None,
+            moving: false,
             ticking: false,
+            drawn_at: Instant::now(),
             focused_window: true,
             tui: tui::TuiCanvas::default(),
             overlay_grid: None,
@@ -334,12 +389,20 @@ impl Gui {
             window_see_through: false,
             swap_window: false,
             old_window: None,
+            pages: page::Pages::new(proxy),
         }
     }
 
     fn shutdown(&mut self) {
         self.prefs.save(self.app.persist);
         self.app.shutdown();
+    }
+
+    /// What screens answer colour and size queries with: the theme's colours and the cell size, for the mirrors
+    /// here and for the session server (it answers for the sessions it holds).
+    fn update_term_env(&mut self, cell: (u16, u16)) {
+        term::update_env(&self.tokens, cell);
+        self.app.svc.set_answer_profile(term::profile());
     }
 
     /// Draw once this batch of events is handled: `about_to_wait` asks for the frame after the workspace's
@@ -397,7 +460,10 @@ impl Gui {
             Event::Clipboard(id, Some(paths), _) => {
                 let owner = media::owner(&self.app, *id);
                 for p in paths {
-                    self.media.add(PathBuf::from(p.trim_matches('"')), media::Source::Pasted, owner.clone(), None);
+                    let path = PathBuf::from(p.trim_matches('"'));
+                    // its thumbnail was made as it was read: up before the paste is drawn
+                    self.media.prime(&path);
+                    self.media.add(path, media::Source::Pasted, owner.clone(), None);
                 }
             }
             // a link to a program is never run from a click
@@ -423,11 +489,27 @@ impl Gui {
             self.dirty = true;
             return;
         }
-        self.app.perf.begin();
+        // output from a session without the keyboard rides along with the next frame (its pass starts with that frame)
+        let later = match &ev {
+            Event::Wake(w) => self.output_due(w.id),
+            _ => None,
+        };
+        if later.is_none() {
+            self.app.perf.begin();
+        }
         let mut perf = std::mem::take(&mut self.app.perf);
         perf.event(ev, |ev| self.app.handle(ev));
         self.app.perf = perf;
-        self.dirty = true;
+        match later {
+            Some(at) => self.due = Some(self.due.map_or(at, |d| d.min(at))),
+            None => self.dirty = true,
+        }
+    }
+
+    /// When output from pane `id` has to be on screen: None for at once (the session with the keyboard, or nothing
+    /// drawn for a while), else [`AMBIENT`] after the last frame ([`OFFSCREEN`] for a session not on screen).
+    fn output_due(&self, id: PaneId) -> Option<Instant> {
+        redraw_due(self.app.focused() == Some(id), self.layout.pane(id).is_some(), self.drawn_at, Instant::now())
     }
 
     /// The session in focus, for the media panel's scope.
@@ -463,7 +545,7 @@ impl Gui {
                     self.app_event(Event::OpenLink(uri));
                 }
             }
-            media::Ask::Reveal(path) => reveal(&path),
+            media::Ask::Reveal(path) => crate::panes::links::reveal(&path),
             media::Ask::Mention(path, pane) => {
                 let target = match pane {
                     Some(p) if self.app.panes.contains_key(&p) => p,
@@ -495,6 +577,15 @@ impl Gui {
     /// A key the window doesn't keep for itself: the media panel's while it has the keyboard, else the
     /// workspace's.
     fn key(&mut self, k: crossterm::event::KeyEvent) {
+        // an HTML preview's page scrolls for the scroll keys, as its source would
+        if let crate::app::Overlay::File(v) = &self.app.overlay
+            && v.page_shown
+            && let Some(js) = page::scroll_script(&k)
+        {
+            self.app.touched();
+            self.pages.run(&js);
+            return;
+        }
         if self.media.expanded && !self.app.overlay.is_open() {
             let focus = self.focused_owner();
             if let Some(ask) = self.media.key(&k, focus.as_ref()) {
@@ -548,6 +639,13 @@ impl Gui {
         if self.media.collect(&self.app) {
             self.dirty = true;
         }
+        // focus mode is remembered; what was written to sessions that closed goes with them
+        if self.app.focus.on != self.prefs.focus {
+            self.prefs.focus = self.app.focus.on;
+            self.prefs.save(self.app.persist);
+        }
+        let panes = &self.app.panes;
+        self.app.focus.retain(|id| panes.contains_key(&id));
         for r in crate::panes::mirror::take_requests() {
             match r {
                 crate::panes::mirror::Request::MediaPanel => {
@@ -570,7 +668,7 @@ impl Gui {
         }
         self.theme_key = key;
         self.tokens = self.make_tokens();
-        term::update_env(&self.tokens, self.font_cell());
+        self.update_term_env(self.font_cell());
         if let Some(w) = &self.window {
             let shown = match self.material {
                 Some((m, _)) if self.see_through => m,
@@ -600,34 +698,41 @@ impl Gui {
         if (px - self.font_px).abs() > 0.1 {
             self.font_px = px;
             let m = gfx.text.set_mono(px, self.prefs.line_height);
-            term::update_env(&self.tokens, (m.cell_w as u16, m.cell_h as u16));
+            self.update_term_env((m.cell_w as u16, m.cell_h as u16));
         }
     }
 
     // ------------------------------------------------------------------ frame
 
     fn frame(&mut self) {
+        // a frame for output that waited (see `app_event`) or for the clock is a pass of its own
+        self.app.perf.begin();
         let started = Instant::now();
-        self.frame_inner();
+        self.drawn_at = started;
+        self.due = None;
+        let gpu = self.frame_inner();
         let total = started.elapsed();
-        self.app.perf.drawn(total, total);
+        self.app.perf.drawn_gpu(total.saturating_sub(gpu), gpu);
         self.app.perf.finish();
     }
 
-    fn frame_inner(&mut self) {
-        let Some(window) = self.window.clone() else { return };
+    /// Draw the window; returns how long the GPU's part took (getting an image, handing the frame over).
+    fn frame_inner(&mut self) -> Duration {
+        let Some(window) = self.window.clone() else { return Duration::ZERO };
         if self.gfx.is_none() {
-            return;
+            return Duration::ZERO;
         }
         // minimised: no swapchain image comes, and each try would block the loop for wgpu's 1 s acquire timeout.
-        // Coming back resizes the window, which rebuilds the swapchain and draws.
+        // Coming back resizes the window, which rebuilds the swapchain and draws; until then nothing moves.
         if window.is_minimized() == Some(true) {
-            return;
+            self.ticking = false;
+            self.moving = false;
+            return Duration::ZERO;
         }
         self.theme_changed();
         self.sync_material();
         if self.gfx.is_none() {
-            return;
+            return Duration::ZERO;
         }
         self.sync_font();
         let size = window.inner_size();
@@ -667,18 +772,19 @@ impl Gui {
                 ticking: false,
                 screen: Rect::new(0.0, 0.0, w, h),
             };
-            // a see-through window wears bro's own title bar across the top (see `caption`): the rest sits under it
-            let top = if band { caption::HEIGHT } else { 0.0 };
-            let window_rect = Rect::new(0.0, top, w, (h - top).max(0.0));
-            let title_bar = band.then(|| (Rect::new(0.0, 0.0, w, top), window.is_maximized()));
-            let (grid, painted) = draw_all(&mut self.app, &mut ui, window_rect, title_bar, &mut self.layout, &mut self.panes, &mut self.tui, &mut self.sidebar, &self.prefs, self.focused_window, self.drag.as_ref(), self.alt_alone, &mut self.media);
+            // no title bar on Windows (see `caption`): everything starts at the top, the window's buttons at the
+            // end of the tab row
+            let window_rect = Rect::new(0.0, 0.0, w, h);
+            let buttons = band.then(|| window.is_maximized());
+            let (grid, painted) = draw_all(&mut self.app, &mut ui, window_rect, buttons, &mut self.layout, &mut self.panes, &mut self.tui, &mut self.sidebar, &self.prefs, self.focused_window, self.drag.as_ref(), self.alt_alone, &mut self.media);
             if self.app.overlay.is_open() || self.app.prefix_armed {
                 self.clipboard_menu = None;
             }
             if let Some(menu) = &self.clipboard_menu {
                 menu::draw_clipboard(menu, &mut ui, window_rect);
             }
-            self.ticking = ui.ticking || ui.anim.moving;
+            self.ticking = ui.ticking;
+            self.moving = ui.anim.moving;
             if !ui.text.overflow || attempts > 2 {
                 break (hits, grid, painted);
             }
@@ -729,13 +835,16 @@ impl Gui {
         // on Wayland the next redraw now waits for the compositor to want a frame: a window off screen (another
         // workspace, the screen off or locked) draws nothing, instead of waiting out a 1 s acquire every frame and
         // rebuilding the swapchain each time
+        let gpu_started = Instant::now();
         match gfx.renderer.render_with(&gfx.scene, &mut gfx.text, || window.pre_present_notify()) {
             Ok(()) => {}
             Err(bro_gfx::FrameError::Reconfigured) => self.dirty = true,
             Err(bro_gfx::FrameError::Skipped) => {}
         }
+        let gpu = gpu_started.elapsed();
         self.gfx = Some(gfx);
         self.update_hover();
+        self.sync_page(&window);
         if !self.first_frame_done {
             self.first_frame_done = true;
             window.set_visible(true);
@@ -744,8 +853,13 @@ impl Gui {
                 window.focus_window();
             }
         }
-        // input methods open their window at the focused terminal's cursor
+        // input methods open their window at the focused terminal's cursor (in focus mode, the reply box's caret)
         if let Some(id) = self.app.focused()
+            && let Some(c) = self.panes.get(&id).and_then(|st| st.focus.caret)
+            && self.app.focus_view(id)
+        {
+            window.set_ime_cursor_area(winit::dpi::LogicalPosition::new(c.x as f64, c.y as f64), winit::dpi::LogicalSize::new(c.w as f64, c.h as f64));
+        } else if let Some(id) = self.app.focused()
             && let Some(st) = self.panes.get(&id)
             && let Some((row, col)) = st.drawn.cursor
         {
@@ -763,13 +877,14 @@ impl Gui {
             self.title = title;
         }
         self.anim.sweep(now);
+        gpu
     }
 
     fn sync_font_with(&mut self, gfx: &mut Gfx) {
         let px = (self.prefs.font_size * self.scale).round();
         self.font_px = px;
         let m = gfx.text.set_mono(px, self.prefs.line_height);
-        term::update_env(&self.tokens, (m.cell_w as u16, m.cell_h as u16));
+        self.update_term_env((m.cell_w as u16, m.cell_h as u16));
     }
 
     /// Which layer the pointer is over, and the pointer shape for what's under it.
@@ -797,8 +912,16 @@ impl Gui {
     /// When to wake next with nothing happening.
     fn next_wake(&self) -> Duration {
         let mut d = self.app.next_deadline();
-        if self.ticking || self.shot_pending() {
+        if self.moving || self.shot_pending() {
             d = d.min(Duration::from_millis(16));
+        }
+        // the clock's next frame, and output waiting for a frame
+        let now = Instant::now();
+        if self.ticking {
+            d = d.min((self.drawn_at + AMBIENT).saturating_duration_since(now));
+        }
+        if let Some(at) = self.due {
+            d = d.min(at.saturating_duration_since(now));
         }
         if let Some(s) = self.script.wake() {
             d = d.min(s.max(Duration::from_millis(1)));
@@ -806,6 +929,9 @@ impl Gui {
         if self.prefs.media_open
             && let Some(at) = self.media.next_wake()
         {
+            d = d.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
+        }
+        if let Some(at) = self.pages.next_wake() {
             d = d.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
         }
         // the sidebar's clock turns over on the minute
@@ -840,6 +966,90 @@ impl Gui {
     fn shot_pending(&self) -> bool {
         !self.shot_taken && std::env::var_os("BRO_GUI_SCREENSHOT").is_some()
     }
+
+    /// Lay the web view over the HTML preview's card where this frame left room for the page, or hide it. A
+    /// system without a working web view shows HTML as source from then on.
+    fn sync_page(&mut self, window: &Window) {
+        let want = match &self.app.overlay {
+            crate::app::Overlay::File(v) => v.page.zip(v.path()).map(|(rect, path)| page::Want { path, roots: &v.roots, rect }),
+            _ => None,
+        };
+        match self.pages.sync(window, want, self.scale, self.tokens.light) {
+            Ok(shown) => {
+                if let crate::app::Overlay::File(v) = &mut self.app.overlay
+                    && v.page_shown != shown
+                {
+                    v.page_shown = shown;
+                    self.dirty = true;
+                }
+            }
+            Err(e) => {
+                crate::file_view::set_pages(false);
+                if let crate::app::Overlay::File(v) = &mut self.app.overlay {
+                    v.pages = false;
+                }
+                self.app.toast(crate::alerts::Kind::Error, format!("HTML shows as source: the web view didn't start · {e}"));
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// What the HTML preview's page said.
+    fn page_msg(&mut self, m: page::Msg) {
+        match m {
+            page::Msg::Ready(url) => {
+                if self.pages.ready(&url) {
+                    self.dirty = true;
+                }
+            }
+            page::Msg::Close => {
+                if matches!(self.app.overlay, crate::app::Overlay::File(_)) {
+                    self.app.file_view_outcome(crate::file_view::Outcome::Close);
+                }
+                self.dirty = true;
+            }
+            page::Msg::Open(url) => self.app_event(Event::OpenLink(url)),
+            page::Msg::Load(url) => self.pages.load(&url),
+        }
+    }
+}
+
+/// When a pane's output has to be on screen, the last frame having been drawn at `drawn_at`: None for at once (the
+/// session with the keyboard, or nothing drawn for a while), else [`AMBIENT`] after that frame ([`OFFSCREEN`] for a
+/// session not on screen).
+fn redraw_due(focused: bool, on_screen: bool, drawn_at: Instant, now: Instant) -> Option<Instant> {
+    if focused {
+        return None;
+    }
+    let at = drawn_at + if on_screen { AMBIENT } else { OFFSCREEN };
+    (at > now).then_some(at)
+}
+
+#[cfg(test)]
+mod redraw_tests {
+    use super::*;
+
+    #[test]
+    fn the_session_with_the_keyboard_draws_at_once() {
+        let now = Instant::now();
+        assert_eq!(redraw_due(true, true, now, now), None);
+        assert_eq!(redraw_due(true, false, now, now), None);
+    }
+
+    #[test]
+    fn other_sessions_ride_along_with_the_next_frame() {
+        let drawn = Instant::now();
+        let now = drawn + Duration::from_millis(5);
+        assert_eq!(redraw_due(false, true, drawn, now), Some(drawn + AMBIENT), "on screen: at most AMBIENT after the last frame");
+        assert_eq!(redraw_due(false, false, drawn, now), Some(drawn + OFFSCREEN), "off screen: only the sidebar can change");
+    }
+
+    #[test]
+    fn output_after_a_quiet_spell_draws_at_once() {
+        let drawn = Instant::now();
+        assert_eq!(redraw_due(false, true, drawn, drawn + AMBIENT + Duration::from_millis(1)), None);
+        assert_eq!(redraw_due(false, false, drawn, drawn + OFFSCREEN), None);
+    }
 }
 
 fn save_png(path: &str, w: u32, h: u32, rgba: &[u8]) {
@@ -852,28 +1062,6 @@ fn save_png(path: &str, w: u32, h: u32, rgba: &[u8]) {
     }
 }
 
-/// Show `path` in the file manager.
-fn reveal(path: &std::path::Path) {
-    let path = path.to_path_buf();
-    std::thread::spawn(move || {
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            let _ = std::process::Command::new("explorer.exe").raw_arg(format!("/select,\"{}\"", path.display())).spawn();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
-        }
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            if let Some(dir) = path.parent() {
-                let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
-            }
-        }
-    });
-}
-
 /// Changes when the theme's colours change (a custom theme file edited in place keeps its name).
 fn theme_key(t: &crate::theme::Theme) -> String {
     // every colour a theme file can set, so editing any of them restyles the window
@@ -883,14 +1071,14 @@ fn theme_key(t: &crate::theme::Theme) -> String {
     )
 }
 
-/// Draw one frame of everything: in `window`, under bro's own title bar when there is one (`title_bar`: its band,
-/// and whether the window is maximised).
+/// Draw one frame of everything in `window`, with the window's own buttons when it has no title bar (`buttons`:
+/// whether it's maximised).
 #[allow(clippy::too_many_arguments)]
 fn draw_all(
     app: &mut App,
     ui: &mut Ui,
     window: Rect,
-    title_bar: Option<(Rect, bool)>,
+    buttons: Option<bool>,
     layout: &mut layout::Layout,
     panes: &mut HashMap<PaneId, PaneState>,
     tui: &mut tui::TuiCanvas,
@@ -910,7 +1098,8 @@ fn draw_all(
         app.strip_sel = None;
     }
     let media_w = if prefs.media_open { prefs.media_width } else { 0.0 };
-    let (side_r, strip_r, media_r, body) = layout::frame(window, if sidebar_on { prefs.sidebar_width } else { 0.0 }, media_w, strip_on);
+    let buttons_w = if buttons.is_some() { caption::BUTTONS_W } else { 0.0 };
+    let (side_r, strip_r, media_r, body, caption_r) = layout::frame(window, if sidebar_on { prefs.sidebar_width } else { 0.0 }, media_w, strip_on, buttons_w);
     // the terminal UI's notion of where the sidebar is (squeezed = asked for but no room)
     app.side_area = if side_r.w > 0.0 { ratatui::layout::Rect { x: 0, y: 0, width: 1, height: 1 } } else { ratatui::layout::Rect::default() };
     app.strip = if strip_r.h > 0.0 { ratatui::layout::Rect { x: 0, y: 0, width: 1, height: 1 } } else { ratatui::layout::Rect::default() };
@@ -922,9 +1111,8 @@ fn draw_all(
     *layout = layout::Layout { window, sidebar: side_r, strip: strip_r, media: media_r, body, cell: (body.w / vcols, body.h / vrows), panes: boxes, groups, zoomed, grown, all_minimized };
     let _ = (drag, alt_alone);
 
-    // the theme's backdrop (or the rain setting's) behind everything, title bar included; a skin's gradient on the
-    // window
-    let whole = title_bar.map_or(window, |(band, _)| Rect::new(window.x, band.y, window.w, window.bottom() - band.y));
+    // the theme's backdrop (or the rain setting's) behind everything; a skin's gradient on the window
+    let whole = window;
     if let Some((top, bottom)) = app.theme.skin.fx.gradient {
         // as see-through as the window it paints
         let c = |c| kit::color(c, ui.t.bg, &ui.t.ansi).with_alpha(ui.t.window.a);
@@ -935,22 +1123,20 @@ fn draw_all(
     backdrop::draw(ui, whole, bd, ui.t.bg);
     // everything else above the backdrop (its glyphs would otherwise draw over this layer's panels)
     ui.layer();
-    // bro's own title bar, on the window's glass like everything under it
-    if let Some((band, maximized)) = title_bar {
-        let title = match app.focused().and_then(|id| app.panes.get(&id)) {
-            Some(p) => format!("{} — bro", p.title()),
-            None => "bro".to_string(),
-        };
-        caption::draw(ui, band, &title, focused_window, maximized);
-    }
 
     // the content layer the sessions sit on (WinUI's frame): a step up from the window, its top-left corner
-    // rounded where it meets the sidebar and the tab row
+    // rounded where it meets the sidebar and the tab row (or the window buttons' row)
     {
         let x = side_r.right();
-        let y = if strip_r.h > 0.0 { strip_r.bottom() } else { window.y };
+        let y = if strip_r.h > 0.0 {
+            strip_r.bottom()
+        } else if caption_r.h > 0.0 {
+            caption_r.bottom()
+        } else {
+            window.y
+        };
         let lr = Rect::new(x, y, (window.right() - x).max(0.0), (window.bottom() - y).max(0.0));
-        let corner = if side_r.w > 0.0 || strip_r.h > 0.0 { kit::radius::OVERLAY } else { 0.0 };
+        let corner = if side_r.w > 0.0 || strip_r.h > 0.0 || caption_r.h > 0.0 { kit::radius::OVERLAY } else { 0.0 };
         let corners = bro_gfx::Corners { tl: corner, tr: 0.0, br: 0.0, bl: 0.0 };
         ui.glass(lr, corners, ui.t.layer);
         if side_r.w > 0.0 {
@@ -966,16 +1152,19 @@ fn draw_all(
     if side_r.w > 0.0 {
         sidebar::draw(app, ui, side_r, side, focused_window, prefs.media_open, media.unseen);
     }
-    // project tabs
+    // project tabs, their line carried on under the window's buttons
     if strip_r.h > 0.0 {
         sidebar::draw_strip(app, ui, strip_r);
+        if caption_r.h > 0.0 {
+            ui.hline(caption_r.x, caption_r.bottom() - ui.hair(), caption_r.w, ui.t.stroke);
+        }
     }
     // sessions
     let mut painted = chrome::Painted::default();
     if app.tabs.is_empty() {
         welcome::draw(app, ui, Rect::new(body.x - layout::MARGIN, body.y - layout::MARGIN, body.w + 2.0 * layout::MARGIN, body.h + 2.0 * layout::MARGIN));
     } else {
-        painted = chrome::draw_panes(app, ui, layout, panes, tui, focused_window);
+        painted = chrome::draw_panes(app, ui, layout, panes, tui, focused_window, media);
         chrome::draw_edges(app, ui, layout);
     }
     // pictures and videos beside the sessions (video and animations only run while you can see them)
@@ -997,6 +1186,20 @@ fn draw_all(
         toasts::draw_late(app, ui, window);
     } else {
         hints::draw(app, ui, layout);
+    }
+    // the window's buttons over everything (they work under a dialog too), and where the window drags from: the
+    // sidebar's header and the tab row, wherever nothing clickable is
+    if let Some(maximized) = buttons
+        && caption_r.w > 0.0
+    {
+        ui.layer();
+        caption::draw(ui, caption_r, focused_window, maximized);
+        let row = Rect::new(side_r.right(), window.y, (caption_r.x - side_r.right()).max(0.0), caption_r.h);
+        let head = Rect::new(side_r.x, side_r.y, side_r.w, sidebar::HEAD_BOTTOM);
+        let drag = [row, head].into_iter().filter(|r| r.w > 0.0 && r.h > 0.0).collect();
+        caption::zones(caption_r, drag, ui.hits.iter().map(|h| h.rect));
+    } else {
+        caption::clear();
     }
     (grid, painted)
 }
@@ -1025,7 +1228,9 @@ impl ApplicationHandler<UserEvent> for Gui {
         self.window_see_through = see_through;
         match Renderer::with_options(w.clone(), size.width, size.height, bro_gfx::Options { vsync: true, transparent: see_through }) {
             Ok(renderer) => {
-                let mono = crate::fonts::get(self.app.svc.settings().font.as_deref().unwrap_or("jetbrains-mono")).or_else(|| crate::fonts::get("jetbrains-mono")).map(|f| f.data).unwrap_or(&[]);
+                let gpu = &renderer.adapter_info;
+                crate::perf::note(format!("window draws on {} ({:?})", gpu.name, gpu.backend));
+                let mono =crate::fonts::get(self.app.svc.settings().font.as_deref().unwrap_or("jetbrains-mono")).or_else(|| crate::fonts::get("jetbrains-mono")).map(|f| f.data).unwrap_or(&[]);
                 let mut text = Text::new(mono, crate::fonts::SYMBOLS.data, true);
                 text.set_antialias(window::text_antialias(renderer.subpixel_text() && !renderer.see_through()));
                 self.gfx = Some(Gfx { renderer, text, scene: Scene::new() });
@@ -1047,6 +1252,7 @@ impl ApplicationHandler<UserEvent> for Gui {
         match ev {
             UserEvent::App(ev) => self.app_event(ev),
             UserEvent::Wake => self.dirty = true,
+            UserEvent::Page(m) => self.page_msg(m),
         }
     }
 
@@ -1060,6 +1266,7 @@ impl ApplicationHandler<UserEvent> for Gui {
         if self.swap_window {
             self.swap_window(el);
         }
+        self.pages.idle();
         if self.gfx.is_some() && self.first_frame_done {
             script::step(self);
         }
@@ -1078,7 +1285,12 @@ impl ApplicationHandler<UserEvent> for Gui {
             el.exit();
             return;
         }
-        if (self.dirty || self.ticking || self.shot_pending())
+        // what waited for the clock (spinners, other sessions' output) is due
+        let now = Instant::now();
+        if self.due.is_some_and(|at| at <= now) || (self.ticking && now >= self.drawn_at + AMBIENT) {
+            self.dirty = true;
+        }
+        if (self.dirty || self.moving || self.shot_pending())
             && let Some(w) = &self.window
         {
             w.request_redraw();
@@ -1177,6 +1389,10 @@ impl ApplicationHandler<UserEvent> for Gui {
                 self.redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                // a click on the window, not in an HTML preview's page: the keys are bro's again
+                if state == ElementState::Pressed {
+                    self.pages.focus_window();
+                }
                 let Some(p) = self.pointer else { return };
                 match state {
                     // a click that wakes the summary screensaver does only that, as in the terminal UI
@@ -1221,6 +1437,7 @@ impl ApplicationHandler<UserEvent> for Gui {
     }
 
     fn exiting(&mut self, _el: &ActiveEventLoop) {
+        self.pages.reset();
         self.prefs.note_size(self.window.as_deref());
         // sessions and services stop after the loop (the bridge may take a few seconds): out of sight, not frozen
         if let Some(w) = &self.window {

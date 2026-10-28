@@ -18,7 +18,7 @@ pub struct Described {
 }
 
 /// Wrapper text Claude Code injects around slash commands, hook output and images.
-const CLAUDE_NOISE: [&str; 10] = [
+pub(crate) const CLAUDE_NOISE: [&str; 10] = [
     "<local-command-caveat>",
     "<command-name>",
     "<command-message>",
@@ -32,7 +32,7 @@ const CLAUDE_NOISE: [&str; 10] = [
 ];
 
 /// Text Codex injects around the conversation.
-const CODEX_NOISE: [&str; 11] = [
+pub(crate) const CODEX_NOISE: [&str; 11] = [
     "# AGENTS.md instructions",
     "<environment_context",
     "<user_instructions",
@@ -46,7 +46,7 @@ const CODEX_NOISE: [&str; 11] = [
     "<INSTRUCTIONS>",
 ];
 
-fn is_noise(s: &str, prefixes: &[&str]) -> bool {
+pub(crate) fn is_noise(s: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|p| s.starts_with(p))
 }
 
@@ -255,7 +255,7 @@ fn image_tags(s: &str) -> Vec<(usize, usize)> {
     out
 }
 
-fn strip_images(s: &str) -> String {
+pub(crate) fn strip_images(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last = 0;
     for (a, b) in image_tags(s) {

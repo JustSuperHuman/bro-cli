@@ -9,7 +9,7 @@
 //! on a row selects it while a click on the selected row steps it (the terminal UI's mouse). The wheel scrolls the
 //! page and the selection follows it, so it always stays in view.
 
-use super::{Block, BroOpt, CaveOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, live_mode, rows, team_knob};
+use super::{Block, BroOpt, CaveOpt, HostOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, SkillOpt, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, live_mode, rows, team_knob};
 use bro_core::config::Material;
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::brand::{self, Mark};
@@ -42,6 +42,8 @@ const DEC: usize = 200;
 const INC: usize = 300;
 /// `RESET + i`: back to the preset / bro's default.
 const RESET: usize = 400;
+/// `PRESS + i`: the button beside a ‹ value › (what enter does there: the voice key's "Set key").
+const PRESS: usize = 500;
 /// `PICK + i * 16 + j`: option `j` of a segmented setting `i`.
 const PICK: usize = 1000;
 
@@ -86,6 +88,7 @@ fn glyph(s: Section) -> &'static str {
     match s {
         Section::Appearance => "\u{F03D8}",
         Section::Sessions => "\u{F018D}",
+        Section::Server => "\u{F048B}",
         Section::Voice => "\u{F036C}",
         Section::Caveman => "\u{F08B7}",
         Section::Watchdog => "\u{F0A43}",
@@ -242,6 +245,10 @@ pub(crate) fn draw(v: &mut SettingsView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
     // the keys, quietly
     if hints_h > 0.0 {
         let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
+        if v.row() == Row::Voice(VoiceOpt::Key) && bro_voice::Voice::can_capture_hotkey() {
+            hints.truncate(2);
+            hints.extend([("enter", "press the key"), ("←/→", "pick one")]);
+        }
         match v.row() {
             r if team_knob(r) => hints.push(("r", "bro's default")),
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
@@ -275,7 +282,7 @@ pub(crate) fn click(v: &mut SettingsView, n: usize, _p: Point, _mods: KeyModifie
         // the terminal UI's mouse: a click selects, a click on the selected setting changes it
         n if (ROW..DEC).contains(&n) && n - ROW <= last => {
             if n - ROW == v.sel {
-                v.step(1, cx);
+                v.press(cx);
             }
             v.sel = n - ROW;
         }
@@ -287,9 +294,13 @@ pub(crate) fn click(v: &mut SettingsView, n: usize, _p: Point, _mods: KeyModifie
             v.sel = n - INC;
             v.step(1, cx);
         }
-        n if (RESET..PICK).contains(&n) && n - RESET <= last => {
+        n if (RESET..PRESS).contains(&n) && n - RESET <= last => {
             v.sel = n - RESET;
             v.reset(cx);
+        }
+        n if (PRESS..PICK).contains(&n) && n - PRESS <= last => {
+            v.sel = n - PRESS;
+            v.press(cx);
         }
         n if n >= PICK && (n - PICK) / 16 <= last => pick(v, (n - PICK) / 16, (n - PICK) % 16, cx),
         _ => {}
@@ -312,14 +323,21 @@ pub(crate) fn wheel(_v: &mut SettingsView, n: Option<usize>, down: bool, cx: &mu
     });
 }
 
-/// What the terminal UI's render does before it draws: look for JustTools and JustImagine once, follow a
+/// What the terminal UI's render does before it draws: look for JustTools, JustImagine and the skill repos' clones
+/// once, follow a
 /// JustImagine update running in a tab, and say whether a job's spinner needs ticks (`tick_every`).
 fn prepare(v: &mut SettingsView, cx: &mut Cx) {
+    super::note_settings(&cx.svc.settings());
     if !v.tools_checked {
         v.tools_checked = true;
         cx.svc.check_justtools();
         cx.svc.check_justimagine(true);
     }
+    if !v.skills_loaded {
+        v.skills_loaded = true;
+        cx.svc.load_skill_repos();
+    }
+    v.skills_busy = cx.svc.state().skills.busy();
     // an update running in a tab: look again until the checkout moves
     if let Some((started, from)) = v.imagine_update.clone() {
         let moved = cx.svc.state().justimagine.installed.as_ref().is_some_and(|f| f.commit != from);
@@ -429,8 +447,8 @@ enum Ctl {
     /// a few choices side by side; `current` None when the value is off the list; `mark` the logo of whose
     /// choices they are
     Seg { options: Vec<String>, current: Option<usize>, ink: Ink, value: String, mark: Option<Mark> },
-    /// ‹ value ›; `mark` the logo of the login it names
-    Step { value: String, ink: Ink, mono: bool, mark: Option<Mark> },
+    /// ‹ value ›; `mark` the logo of the login it names; `press` a button after it doing what enter does
+    Step { value: String, ink: Ink, mono: bool, mark: Option<Mark>, press: Option<&'static str> },
     /// a value enter acts on ("graphite ›", "open ›")
     Link { value: String, ink: Ink },
     /// what something is at (a version, "checking…"), and a button doing what enter does
@@ -493,8 +511,8 @@ fn login_mark(id: &str, cx: &Cx) -> Option<Mark> {
     Some(brand::harness(h))
 }
 
-/// The button beside JustTools, JustImagine, Smart Paste or bro's version: what enter would do there (see
-/// `SettingsView::tool`, `imagine` and `step`), None while it would do nothing or a look is under way.
+/// The button beside JustTools, JustImagine, Smart Paste, a watched repo, JustImagine's skills or bro's version: what
+/// enter would do there (see `SettingsView::tool`, `imagine`, `skill` and `step`), None while it would do nothing or a look is under way.
 fn button(v: &SettingsView, row: Row, cx: &Cx) -> Option<(&'static str, widgets::Kind)> {
     use widgets::Kind::{Primary, Secondary};
     let jt = cx.svc.state().justtools.clone();
@@ -521,14 +539,24 @@ fn button(v: &SettingsView, row: Row, cx: &Cx) -> Option<(&'static str, widgets:
                 Some(_) => Some((if ji.error.is_some() { "Try again" } else { "Check" }, Secondary)),
             }
         }
-        Row::Voice(VoiceOpt::Key) if bro_voice::Voice::can_capture_hotkey() => {
-            cx.svc.state().voice.capturing.is_none().then_some(("Set key", Secondary))
-        }
+        Row::Skill(SkillOpt::Imagine) => match cx.svc.state().skills.imagine {
+            Some(true) => Some(("Write again", Secondary)),
+            Some(false) => Some(("Install", Primary)),
+            None => None,
+        },
         Row::Voice(VoiceOpt::ApiKey) => {
             let vs = cx.svc.state().voice.clone();
             match vs.key_found {
                 Some(false) => Some(("Look again", Primary)),
                 _ => Some(("Check", Secondary)),
+            }
+        }
+        Row::Host(HostOpt::Restart) => {
+            let hs = cx.svc.state().host.clone();
+            match () {
+                _ if hs.restarting.is_some() => None,
+                _ if hs.server.is_some() => Some(("Restart", Secondary)),
+                _ => Some(("Start", Primary)),
             }
         }
         Row::Update(UpdOpt::Version) => {
@@ -555,13 +583,16 @@ fn control(v: &SettingsView, it: &Item, ui: &Ui, st: &Settings, cx: &Cx) -> Ctl 
     };
     let switch = || Ctl::Switch { on: text.starts_with('●'), live: it.value.first().is_some_and(|s| s.style.fg == Some(cx.theme.good)) };
     let seg = |options: Vec<String>, mark: Option<Mark>| Ctl::Seg { options, current: option(it.row, st), ink: vink.value(t), value: value.clone(), mark };
-    let step = |mark: Option<Mark>| Ctl::Step { value: value.clone(), ink: vink.value(t), mono: false, mark };
+    let step = |mark: Option<Mark>| Ctl::Step { value: value.clone(), ink: vink.value(t), mono: false, mark, press: None };
     match it.row {
         Row::Bro(BroOpt::Theme) => Ctl::Link { value, ink: vink.value(t) },
-        Row::Bro(BroOpt::Font) => Ctl::Step { value, ink: vink.value(t), mono: true, mark: None },
+        Row::Bro(BroOpt::Font) => Ctl::Step { value, ink: vink.value(t), mono: true, mark: None, press: None },
         Row::Watch(WatchOpt::Reviewer) => step(login_mark(&value, cx)),
         Row::Bro(BroOpt::Screensaver | BroOpt::Tint) | Row::Watch(WatchOpt::Wake | WatchOpt::Budget) | Row::Preset | Row::Voice(VoiceOpt::Speaker) => step(None),
-        Row::Voice(VoiceOpt::Key) if !bro_voice::Voice::can_capture_hotkey() => step(None),
+        // ‹ key › to pick one, and "Set key" to press it (a spinner meanwhile, below)
+        Row::Voice(VoiceOpt::Key) if spinning(&value).is_none() => {
+            Ctl::Step { value: value.clone(), ink: vink.value(t), mono: false, mark: None, press: bro_voice::Voice::can_capture_hotkey().then_some("Set key") }
+        }
         Row::Voice(VoiceOpt::Mode) => seg(vec!["out loud".into(), "as text".into()], None),
         Row::Bro(BroOpt::Material) => seg(Material::ALL.iter().map(|m| m.id().to_string()).collect(), None),
         Row::Bro(BroOpt::Rain) => seg(RAIN.iter().map(|r| rain_label(*r).to_string()).collect(), None),
@@ -571,7 +602,7 @@ fn control(v: &SettingsView, it: &Item, ui: &Ui, st: &Settings, cx: &Cx) -> Ctl 
         // agent teams: a switch, as the terminal UI draws it
         Row::Knob(k) if KNOBS[k].id == bro_core::claude_env::AGENT_TEAMS => switch(),
         Row::Knob(k) => seg(KNOBS[k].options.iter().map(|o| o.label.to_string()).collect(), None),
-        Row::Watch(WatchOpt::Prompt) | Row::Tool(ToolOpt::QuickInstall | ToolOpt::Sounds | ToolOpt::PeonPing) => Ctl::Link { value, ink: vink.value(t) },
+        Row::Watch(WatchOpt::Prompt) | Row::Tool(ToolOpt::QuickInstall | ToolOpt::Sounds | ToolOpt::PeonPing) | Row::Skill(SkillOpt::Manage) => Ctl::Link { value, ink: vink.value(t) },
         Row::Tool(ToolOpt::SoundsOn) => Ctl::Switch { on: text.starts_with('●'), live: true },
         _ if text.starts_with('●') || text.starts_with('○') => switch(),
         row => {
@@ -758,7 +789,7 @@ fn lay_item(v: &SettingsView, ui: &mut Ui, it: Item, w: f32, y: f32, all: &[Row]
     if let Ctl::Seg { value, ink, mark, .. } = &ctl
         && inner - ctl_w - GAP < 200.0
     {
-        ctl = Ctl::Step { value: value.clone(), ink: *ink, mono: false, mark: *mark };
+        ctl = Ctl::Step { value: value.clone(), ink: *ink, mono: false, mark: *mark, press: None };
         ctl_w = ctl_width(ui, &ctl);
     }
     let text_w = (inner - ctl_w - GAP - if reset.is_some() { 36.0 } else { 0.0 }).max(140.0);
@@ -977,9 +1008,10 @@ fn ctl_width(ui: &mut Ui, c: &Ctl) -> f32 {
         }
         Ctl::Seg { options, mark, .. } => 4.0 + options.iter().map(|o| seg_w(ui, o)).sum::<f32>() + if mark.is_some() { MARK_W } else { 0.0 },
         // a long value (a reviewer's login) is cut rather than crowding the help out
-        Ctl::Step { value, ink, mono, mark } => {
+        Ctl::Step { value, ink, mono, mark, press } => {
             let m = if mark.is_some() { MARK + 6.0 } else { 0.0 };
-            (value_w(ui, value, *ink, *mono).min(220.0) + m + 80.0).max(150.0)
+            let b = press.map_or(0.0, |label| 12.0 + widgets::button_width(ui, label).max(88.0));
+            (value_w(ui, value, *ink, *mono).min(220.0) + m + 80.0).max(150.0) + b
         }
         Ctl::Link { value, ink } => value_w(ui, value, *ink, false).max(48.0) + 12.0 + 8.0 + 16.0 + 8.0,
         Ctl::Status { value, ink, spin, button } => {
@@ -1035,7 +1067,13 @@ fn ctl(ui: &mut Ui, r: Rect, c: &Ctl, i: usize, id: PaneId, progress: bool) {
                 x += c.w;
             }
         }
-        Ctl::Step { value, ink, mono, mark } => {
+        Ctl::Step { value, ink, mono, mark, press } => {
+            let mut r = r;
+            if let Some(label) = press {
+                let bw = widgets::button_width(ui, label).max(88.0);
+                widgets::button(ui, Rect::new(r.right() - bw, r.y, bw, r.h), label, widgets::Kind::Secondary, act(PRESS + i));
+                r.w -= bw + 12.0;
+            }
             let hot = ui.hover_amount(("settings-step-box", id, i), r);
             widgets::control(ui, r, t.control.mix(t.control_hover, hot));
             let l = Rect::new(r.x + 4.0, r.y + 4.0, 24.0, r.h - 8.0);
@@ -1262,9 +1300,11 @@ mod tests {
         let st = svc.settings();
         let all = rows();
         with_ui(|ui| {
-            let page = lay_out(&v, ui, Section::Integrations, 5, 700.0, true, &all, &st, &cx);
+            // the skill sits under Skills, JustTools itself under Integrations
+            let page = lay_out(&v, ui, Section::Skills, 8, 700.0, true, &all, &st, &cx);
             let skill = laid(&page, Row::Tool(ToolOpt::Skill));
             assert!(matches!(&skill.ctl, Ctl::Status { value, spin: true, .. } if value == "adding"));
+            let page = lay_out(&v, ui, Section::Integrations, 7, 700.0, true, &all, &st, &cx);
             let tools = laid(&page, Row::Tool(ToolOpt::Install));
             assert!(!tools.progress && matches!(&tools.ctl, Ctl::Status { spin: false, .. }));
         });

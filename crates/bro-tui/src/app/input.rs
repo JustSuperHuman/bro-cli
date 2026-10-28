@@ -21,10 +21,20 @@ impl App {
         if !self.prefix_armed && paste_key {
             let request = std::time::Instant::now();
             self.clipboard_request = Some(request);
+            // focus mode's box takes a picture too (a screenshot): text first, else the image
+            let focus = self.focused().filter(|id| !self.overlay.is_open() && !self.side_focus && self.renaming.is_none() && self.focus_view(*id));
             if !cfg!(test) {
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(Event::ClipboardText(request, crate::clip::grab_text()));
+                    let text = crate::clip::grab_text();
+                    if text.is_none()
+                        && let Some(id) = focus
+                        && let Some(paths) = crate::clip::grab_image()
+                    {
+                        let _ = tx.send(Event::Clipboard(id, Some(paths), k));
+                        return;
+                    }
+                    let _ = tx.send(Event::ClipboardText(request, text));
                 });
             }
             return;
@@ -76,7 +86,8 @@ impl App {
                 self.with_pane(id, |p, cx| p.key(k, cx));
                 return;
             }
-        if let Some(a) = self.keymap.direct(&k) {
+        // focus mode is the window's: in the terminal UI its key stays the program's (alt+f moves a word on)
+        if let Some(a) = self.keymap.direct(&k).filter(|a| *a != crate::keymap::Act::Focus || crate::panes::mirror::active()) {
             self.run_act(a);
             return;
         }
@@ -95,6 +106,10 @@ impl App {
         // typing into a card that's turned over turns it face up: you see where the keys land
         if self.flips.get(&id).is_some_and(|f| f.back) {
             self.flip_pane(id);
+        }
+        // focus mode: the keys write a reply (and answer the choice on screen)
+        if self.focus_view(id) {
+            return self.focus_key(id, k);
         }
         let used = self.with_pane(id, |p, cx| p.key(k, cx)).unwrap_or(false);
         let terminal = self.panes.get(&id).is_some_and(|p| p.is_terminal());

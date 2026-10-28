@@ -1,22 +1,66 @@
-//! A title bar of bro's own while the window is see-through (Windows). The system draws its caption in the bare
-//! material, with none of the theme over it, so it stood apart from the window under it; with this one the whole
-//! window is one sheet: the title and the minimise, maximise and close buttons sit on the same glass as the rest.
-//! The system still does the work: dragging, snapping, double-click to maximise, the window menu, the resize
-//! edges, and Snap Layouts over the maximise button (it's reported to Windows as one).
+//! No title bar (Windows): the sidebar runs to the top of the window, and the minimise, maximise and close
+//! buttons sit at the right end of the tab row. The system still does the work: dragging by the empty parts of
+//! the sidebar's header and the tab row, snapping, double-click to maximise, the window menu, the resize edges,
+//! and Snap Layouts over the maximise button (it's reported to Windows as one).
 //!
-//! The band is the top [`HEIGHT`] px of the client area: `WM_NCCALCSIZE` gives the old caption's room to the
-//! client, `WM_NCHITTEST` hands the band and its buttons back to the system as caption and caption buttons.
+//! `WM_NCCALCSIZE` gives the old caption's room ([`HEIGHT`] px) to the client; `WM_NCHITTEST` hands the buttons
+//! and the drag areas the last frame published ([`zones`]) back to the system as caption buttons and caption.
 //! Pointer and presses over the buttons then arrive as non-client messages, kept in [`HOVER`] and [`PRESS`] for
 //! the drawing.
 
-use super::kit::{Style, Ui, size, weight};
-use bro_gfx::text::Align;
-use bro_gfx::{Color, Rect};
+use super::kit::Ui;
+use bro_gfx::{Color, Point, Rect};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-/// The band's height and each button's width, logical px (Windows 11's caption).
+/// The system caption's height (the room handed to the client) and each button's width, logical px (Windows
+/// 11's caption).
 pub const HEIGHT: f32 = 32.0;
 pub const BUTTON_W: f32 = 46.0;
+/// The three buttons side by side.
+pub const BUTTONS_W: f32 = 3.0 * BUTTON_W;
+
+/// Where the last frame put the buttons and the drag areas, logical px.
+struct Zones {
+    buttons: Option<Rect>,
+    drag: Vec<Rect>,
+    /// what's clickable inside the drag areas (stays the app's)
+    holes: Vec<Rect>,
+}
+
+static ZONES: Mutex<Zones> = Mutex::new(Zones { buttons: None, drag: Vec::new(), holes: Vec::new() });
+
+/// Publish this frame's buttons and drag areas. A hit that covers a whole drag area is a background (the
+/// sidebar's wheel, an overlay's scrim) and leaves it draggable; a smaller one over it is a control and isn't.
+pub fn zones(buttons: Rect, drag: Vec<Rect>, hits: impl Iterator<Item = Rect>) {
+    let covers = |h: &Rect, d: &Rect| h.x <= d.x && h.y <= d.y && h.right() >= d.right() && h.bottom() >= d.bottom();
+    let holes = hits.filter(|h| drag.iter().any(|d| h.intersects(d) && !covers(h, d))).collect();
+    *ZONES.lock().unwrap_or_else(|e| e.into_inner()) = Zones { buttons: Some(buttons), drag, holes };
+}
+
+/// The window has its title bar back (full screen, or not Windows): nothing of bro's to hit.
+pub fn clear() {
+    *ZONES.lock().unwrap_or_else(|e| e.into_inner()) = Zones { buttons: None, drag: Vec::new(), holes: Vec::new() };
+}
+
+/// Where the window's buttons end, logical px from the top (0 with none): what drops in from the top right
+/// starts below.
+pub fn bottom() -> f32 {
+    ZONES.lock().unwrap_or_else(|e| e.into_inner()).buttons.map_or(0.0, |b| b.bottom())
+}
+
+/// What's at `p` (logical px): 1 minimise, 2 maximise, 3 close, 4 a drag area, 0 the app's.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn at(p: Point) -> u8 {
+    let z = ZONES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(b) = z.buttons.filter(|b| b.contains(p)) {
+        return 1 + ((p.x - b.x) / BUTTON_W).clamp(0.0, 2.0) as u8;
+    }
+    if z.drag.iter().any(|d| d.contains(p)) && !z.holes.iter().any(|h| h.contains(p)) {
+        return 4;
+    }
+    0
+}
 
 /// The window wears this title bar instead of the system's.
 static ON: AtomicBool = AtomicBool::new(false);
@@ -25,45 +69,30 @@ static HOVER: AtomicU8 = AtomicU8::new(0);
 /// The button held down (same numbering).
 static PRESS: AtomicU8 = AtomicU8::new(0);
 
-/// bro draws the window's title bar now.
+/// The window wears bro's buttons, no title bar.
 pub fn on() -> bool {
     ON.load(Ordering::Relaxed)
 }
 
-/// Wear bro's title bar (see-through window) or the system's, and have Windows lay the frame out again.
-pub fn set(window: &winit::window::Window, on: bool) {
-    if ON.swap(on, Ordering::Relaxed) == on {
-        return;
-    }
-    HOVER.store(0, Ordering::Relaxed);
-    PRESS.store(0, Ordering::Relaxed);
-    #[cfg(windows)]
-    win::frame_changed(window);
-    #[cfg(not(windows))]
-    let _ = window;
-}
-
-/// Watch `hwnd`'s non-client messages (the window's handle, once it exists).
+/// Watch `hwnd`'s non-client messages (the window's handle, once it exists) and trade its title bar for bro's buttons.
 #[cfg(windows)]
 pub fn install(hwnd: isize) {
+    ON.store(true, Ordering::Relaxed);
     win::install(hwnd);
 }
 
-/// Draw the title bar across `band`: the window's title, then minimise, maximise (or restore) and close. No fill:
-/// it's the window's own glass.
-pub fn draw(ui: &mut Ui, band: Rect, title: &str, focused: bool, maximized: bool) {
+/// Draw minimise, maximise (or restore) and close across `band` ([`BUTTONS_W`] wide). No fill: they sit on the
+/// window's own glass.
+pub fn draw(ui: &mut Ui, band: Rect, focused: bool, maximized: bool) {
     let t = ui.t;
     let hover = HOVER.load(Ordering::Relaxed);
     let press = PRESS.load(Ordering::Relaxed);
-    // the window's own glass stays bare; an inactive window's title steps back, as Windows' does
+    // an inactive window's buttons step back, as Windows' do
     let ink = if focused { t.text } else { t.faint };
-    let buttons = 3.0 * BUTTON_W;
-    let st = Style::new(size::SMALL, weight::REGULAR, ink);
-    ui.label_in(Rect::new(band.x + 14.0, band.y, (band.w - buttons - 28.0).max(0.0), band.h), title, st, Align::Left);
     // minimise, maximise / restore, close: Windows 11's sizes, VS Code's codicons
     let glyphs = [(1u8, "\u{EABA}"), (2, if maximized { "\u{EABB}" } else { "\u{EAB9}" }), (3, "\u{EAB8}")];
     for (i, (id, glyph)) in glyphs.into_iter().enumerate() {
-        let r = Rect::new(band.right() - buttons + i as f32 * BUTTON_W, band.y, BUTTON_W, band.h);
+        let r = Rect::new(band.x + i as f32 * BUTTON_W, band.y, BUTTON_W, band.h);
         let lit = hover == id;
         let held = press == id && lit;
         let close = id == 3;
@@ -85,7 +114,8 @@ pub fn draw(ui: &mut Ui, band: Rect, title: &str, focused: bool, maximized: bool
 
 #[cfg(windows)]
 mod win {
-    use super::{BUTTON_W, HEIGHT, HOVER, ON, PRESS};
+    use super::{HOVER, ON, PRESS};
+    use bro_gfx::Point;
     use std::sync::atomic::Ordering;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient};
@@ -97,22 +127,12 @@ mod win {
         SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CYFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
         SWP_NOZORDER, SetWindowPos, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND, WS_CAPTION,
     };
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
     pub fn install(hwnd: isize) {
         // SAFETY: the window is ours and outlives the subclass (it's removed with the window).
         unsafe {
             SetWindowSubclass(hwnd as HWND, Some(proc), 2, 0);
-        }
-    }
-
-    /// Have Windows ask for the frame again (`WM_NCCALCSIZE`) now that it's laid out differently.
-    pub fn frame_changed(window: &winit::window::Window) {
-        let Ok(handle) = window.window_handle() else { return };
-        let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
-        // SAFETY: our own window; nothing moves or resizes, the frame is recalculated.
-        unsafe {
-            SetWindowPos(h.hwnd.get() as HWND, std::ptr::null_mut(), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+            // the frame was laid out before the subclass: once more, through it
+            SetWindowPos(hwnd as HWND, std::ptr::null_mut(), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
         }
     }
 
@@ -169,9 +189,6 @@ mod win {
                     let mut pt = POINT { x: (lparam & 0xFFFF) as i16 as i32, y: ((lparam >> 16) & 0xFFFF) as i16 as i32 };
                     ScreenToClient(hwnd, &mut pt);
                     let (scale, fx, fy) = metrics(hwnd);
-                    if pt.y >= (HEIGHT * scale).round() as i32 {
-                        return HTCLIENT as LRESULT;
-                    }
                     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                     GetClientRect(hwnd, &mut rc);
                     // the top edge resizes, as the system's frame did there
@@ -184,16 +201,12 @@ mod win {
                             HTTOP
                         } as LRESULT;
                     }
-                    let bw = (BUTTON_W * scale).round() as i32;
-                    let from_right = rc.right - pt.x;
-                    (if from_right <= bw {
-                        HTCLOSE
-                    } else if from_right <= 2 * bw {
-                        HTMAXBUTTON
-                    } else if from_right <= 3 * bw {
-                        HTMINBUTTON
-                    } else {
-                        HTCAPTION
+                    (match super::at(Point::new(pt.x as f32 / scale, pt.y as f32 / scale)) {
+                        1 => HTMINBUTTON,
+                        2 => HTMAXBUTTON,
+                        3 => HTCLOSE,
+                        4 => HTCAPTION,
+                        _ => HTCLIENT,
                     }) as LRESULT
                 }
                 WM_NCMOUSEMOVE => {

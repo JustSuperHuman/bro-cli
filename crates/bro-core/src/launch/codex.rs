@@ -205,7 +205,29 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             provider = wire_proxy(&mut cmd, up, spec, ctx)?;
             up.clone()
         }
+        Target::Logins(false) => {
+            // Proxy mode: Codex stays signed in with ChatGPT as this login and keeps its own `openai`
+            // provider (its /model list, plan, limits, web search, compaction); only that provider's
+            // address moves to bro-proxy, which sends each request as the login with the most left.
+            // Ending in /backend-api/codex keeps the backend's own routes on.
+            let route = proxy_route(super::LOGINS_CODEX, None, ctx)?;
+            provider = vec![
+                "-c".into(),
+                format!("openai_base_url={}", toml_str(&format!("{}/backend-api/codex", route.base))),
+                // its bodies stay readable to the proxy (zstd is only for the trip over the internet)
+                "-c".into(),
+                "features.enable_request_compression=false".into(),
+            ];
+            cmd.route = Some(route.request);
+            String::new()
+        }
+        Target::Logins(true) => {
+            // Codex on Claude models, through the shared Claude logins
+            provider = wire_proxy(&mut cmd, super::LOGINS_CLAUDE, spec, ctx)?;
+            "claude logins".into()
+        }
     };
+    cmd.store = Some(target_profile.clone());
 
     let mut args = Vec::new();
     if let Some(resume) = &spec.resume {

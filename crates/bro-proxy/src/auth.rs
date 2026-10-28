@@ -2,6 +2,9 @@
 //!
 //! - No token configured: only loopback peers are served (any key accepted).
 //! - Token configured: `x-api-key` or `Authorization: Bearer` must match; any peer.
+//! - Proxy mode's routes (`ClaudeLogins` / `CodexLogins`): the route's unguessable id is the key,
+//!   from loopback peers. Claude Code and Codex keep their own sign-in there and send its token,
+//!   not the proxy's (Codex can't add a header of its own to its `openai` provider).
 
 use crate::Dialect;
 use crate::errors::{ErrorKind, ProxyError};
@@ -36,6 +39,11 @@ pub(crate) fn presented_key(headers: &HeaderMap) -> Option<&str> {
                         .or_else(|| v.strip_prefix("bearer "))
                 })
         })
+}
+
+/// The route id in `/r/{id}/…`.
+pub(crate) fn route_of(path: &str) -> Option<&str> {
+    path.strip_prefix("/r/")?.split('/').next().filter(|id| !id.is_empty())
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -84,6 +92,10 @@ pub(crate) async fn middleware(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0);
     let path = req.uri().path().to_string();
+    let loopback = peer.is_none_or(|p| p.ip().is_loopback());
+    if loopback && route_of(&path).and_then(|id| state.route(id)).is_some_and(|r| r.upstream.family().is_some()) {
+        return next.run(req).await;
+    }
     match check(state.token.as_deref(), peer, req.headers(), &path) {
         Ok(()) => next.run(req).await,
         Err(e) => {

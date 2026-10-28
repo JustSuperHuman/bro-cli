@@ -27,6 +27,8 @@ tokio-stream.workspace = true
 dirs.workspace = true
 chrono.workspace = true
 llmtrim-core.workspace = true
+memchr.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+base64.workspace = true

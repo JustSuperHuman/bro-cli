@@ -42,7 +42,8 @@ fn paint(app: &App, ui: &mut Ui, window: Rect) {
         ui.set_layer(prev);
         return;
     }
-    let mut y = window.y + 14.0;
+    // under the window's buttons
+    let mut y = window.y.max(super::caption::bottom()) + 14.0;
     for (i, toast) in app.toasts.items.iter().rev().enumerate() {
         let (icon, c) = match toast.kind {
             Kind::Error => ("\u{F0159}", t.danger),

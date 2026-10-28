@@ -6,6 +6,8 @@ use crate::alerts::Kind;
 use crate::pane::Event;
 use bro_core::config::Config;
 use bro_core::sessions::ListOpts;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
@@ -17,14 +19,17 @@ pub(super) fn spawn_all(svc: &Services) {
     svc.spawn_update_checks();
     svc.spawn_skill_syncs();
     let s = svc.settings();
-    if s.proxy.enabled {
+    if s.proxy.starts() {
         spawn_proxy(svc);
     } else {
         svc.update(|st| st.proxy.status = Avail::Unavailable("turned off in settings".into()));
     }
     if s.bridge.enabled {
         spawn_bridge(svc);
-        spawn_voice(svc);
+        // push-to-talk needs a window to talk to
+        if super::host::role() != bro_host::Role::Background {
+            spawn_voice(svc);
+        }
     } else {
         svc.update(|st| st.bridge.status = Avail::Unavailable("turned off in settings".into()));
     }
@@ -342,7 +347,6 @@ fn gemini_profile_for_event(st: &super::State, event: &bro_proxy::ProxyEvent) ->
 
 /// Start the translating proxy on its own runtime thread.
 pub(super) fn spawn_proxy(svc: &Services) {
-    use std::sync::atomic::Ordering;
     if svc.is_demo() || svc.inner.proxy.lock().is_some()
         || svc.inner.proxy_starting.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err()
     { return; }
@@ -352,7 +356,7 @@ pub(super) fn spawn_proxy(svc: &Services) {
     if let Err(error) = std::thread::Builder::new().name("bro-proxy-start".into()).spawn(move || {
         let svc = worker;
         let s = svc.settings().proxy;
-        let token = uuid::Uuid::new_v4().simple().to_string();
+        let token = svc.proxy_token();
         let cfg = bro_proxy::ProxyConfig { bind: "127.0.0.1".into(), port: if svc.inner.guest { 0 } else { s.port }, token: Some(token.clone()) };
         let opts = bro_proxy::ProxyOptions { trim: s.trim, trim_level: bro_proxy::TrimLevel::parse(&s.trim_level), ..Default::default() };
         match guard_res("proxy::start", || bro_proxy::ProxyHandle::start_with(cfg, opts)) {
@@ -402,6 +406,15 @@ pub(super) fn spawn_proxy(svc: &Services) {
                         Some(pool) => svc.update(|st| st.proxy.pool = pool),
                         None => break,
                     }
+                    // proxy mode's logins, while it is on or its sessions still run
+                    let shared = svc.settings().proxy.shared || svc.state().proxy.routes.iter().any(|r| r.upstream.family().is_some());
+                    let logins = if shared {
+                        let read = |f| svc.with_proxy("proxy::logins_status", |p| p.logins_status(f)).unwrap_or_default();
+                        [bro_proxy::LoginFamily::Claude, bro_proxy::LoginFamily::Codex].into_iter().flat_map(read).collect()
+                    } else {
+                        vec![]
+                    };
+                    svc.update(|st| st.proxy.logins = logins);
                     std::thread::sleep(Duration::from_secs(5));
                 }
             }
@@ -462,10 +475,13 @@ pub(super) fn spawn_voice(svc: &Services) {
         let v_svc = svc.clone();
         // the pane in focus when the key went down is the one the words are for
         let spoken_to = parking_lot::Mutex::new(None::<String>);
+        let summon = Summon::new(bro_voice::Voice::hotkey_is_modifier(&hotkey), Duration::from_millis(cfg.min_ms.into()));
         let started = guard_res("voice::start", || {
             bro_voice::Voice::start(
                 cfg,
                 Box::new(move |ev| match ev {
+                    bro_voice::VoiceEvent::Pressed => summon.pressed(),
+                    bro_voice::VoiceEvent::Released => summon.released(),
                     bro_voice::VoiceEvent::Listening => {
                         *spoken_to.lock() = v_svc.focused_session();
                         v_svc.send(Event::Toast(Kind::Info, if live { "listening…" } else { "listening… release to send to the orchestrator" }.into()));
@@ -502,6 +518,39 @@ pub(super) fn spawn_voice(svc: &Services) {
             }
         }
     });
+}
+
+/// Brings bro forward when the voice key goes down. A modifier key (Right Win, Alt, Ctrl, Shift) may be the
+/// start of a chord for the app in front (Win+E, Ctrl+C), so for those bro waits until the press is a hold.
+struct Summon {
+    modifier: bool,
+    hold: Duration,
+    /// bumped on every press and release: a wait that sees it move was a tap or a chord
+    press: Arc<AtomicU64>,
+}
+
+impl Summon {
+    fn new(modifier: bool, hold: Duration) -> Summon {
+        Summon { modifier, hold, press: Arc::default() }
+    }
+
+    fn pressed(&self) {
+        let n = self.press.fetch_add(1, Ordering::AcqRel) + 1;
+        let (press, wait) = (self.press.clone(), self.modifier.then_some(self.hold));
+        std::thread::spawn(move || {
+            if let Some(wait) = wait {
+                std::thread::sleep(wait);
+                if press.load(Ordering::Acquire) != n {
+                    return;
+                }
+            }
+            crate::instance::bring_self_to_front();
+        });
+    }
+
+    fn released(&self) {
+        self.press.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 /// Start the bridge host and its status poller.

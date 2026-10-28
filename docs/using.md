@@ -12,6 +12,40 @@ Select a profile and choose **Remove** to delete its local login, settings and
 saved sessions after confirmation. Bro protects the machine's default logins
 (`claude:local` and `codex:local`) from removal.
 
+## Proxy mode
+
+With several Claude or ChatGPT subscriptions you don't have to pick one per session. Turn on **Proxy mode**
+(Settings › Sessions, `s` in the proxy view, or "proxy mode" in the palette) and you only pick the agent. Every
+signed-in login of its kind shares the work:
+
+- **Each conversation stays on one login.** Its prompt cache lives there, so moving it would cost you a full-price
+  rebuild. Subagents stay with the session that started them.
+- **New conversations go to the login with the most left.** bro reads that from the rate-limit headers on each
+  login's last response, and from its usage meters until a login has served one.
+- **A login at its limit hands off.** When a login hits its limit, bro rests it until it resets and sends the same
+  request to the next login, before your agent has seen a byte. Only when every login is out does the agent see a
+  limit: its own message, with the reset of whichever login comes back first.
+
+Claude Code and Codex look and work exactly as they do on their own. They stay signed in as one of your logins (the
+machine's own when it's signed in, otherwise the first other one; a session you resume keeps the login it already
+lives in). `/model`, the model lists, plans, `/status`, effort levels, web search and compaction are all theirs.
+Only the address their requests go to changes: bro's proxy takes each request and sends it as the login with the
+most room. Claude Code is told the proxy is Anthropic's own API (`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`).
+Codex keeps its built-in OpenAI provider with `openai_base_url` set to the proxy.
+
+Two differences remain, both from the harnesses themselves:
+
+- Codex's `/model` menu shows a red line noting that its OpenAI base URL is changed. Picking models works as
+  usual: the list is the one your own login gets.
+- Claude Code's Remote Control isn't available while `ANTHROPIC_BASE_URL` points elsewhere. bro's phone bridge
+  still reaches the session.
+
+Pi and omp keep their own login. In the launcher they can also run on all your Claude or all your ChatGPT logins.
+The same rows let Claude Code run on your ChatGPT logins and Codex on your Claude ones. The proxy view lists each
+shared login: ready or back at its reset, how much of its 5-hour and weekly windows it has used, and how many
+conversations it carries. Add or sign out a login in Profiles and it joins or leaves within seconds, with no
+restart. Turning proxy mode off changes new sessions only.
+
 ## Session menu and reload
 
 Right-click a session's title bar, or press **Ctrl+Space**, to open the
@@ -67,8 +101,10 @@ change. bro picks up each save as you make it.
 ## Everything it does
 
 - **Runs your agents in panes** — split, zoom, and switch between live sessions, grouped by project.
+- **Keeps them running when bro closes** — sessions run in bro's session server, a background process of its own, so closing bro's window, a crash or an update doesn't end them: the next bro (terminal or desktop app) picks them up with their screens, names and history, and proxied sessions get their route back. Quitting says how many are still running; with none left the server stops too. While no window is open, a background bro carries on with them: the phone bridge, the translating proxy, auto-resume and watchdogs keep working (Keep working while bro is closed, in Settings › Session server); the window you open next takes over from it. If the server itself stops without being asked to (a crash, or the computer shutting down), bro brings its sessions back: at once into the panes of a bro that's open, or, after a restart, when you say yes as bro opens. Claude and Codex resume their conversations; shells start fresh. What it keeps on disk for that (`~/.bro/v2-host-sessions.json`, readable by you alone) holds no keys: their environment stays in memory.
+- **More than one window** — `bro --view` opens another window on the bro that's running, showing its sessions live: type into one and it's yours (its size follows the window you typed in; the other shows ⇄ watching). Over SSH beside the desktop app, `bro` opens this way by itself. What you launch from it runs in the bro it watches, with that bro's proxy and phone bridge. Settings › Session server shows it and restarts it (its sessions end; Claude and Codex sessions come back in their panes, resuming their conversations, and shells start fresh). Turn off Keep sessions running there to have new sessions run inside bro and end with it, as before. Start at sign-in (also `bro host install` / `bro host uninstall`) starts the background bro (and the server) when you sign in, so your phone reaches bro even before you open it, and keeps them running instead of stopping 10 minutes after bro closes with nothing left: a startup app on Windows (Task Manager › Startup apps lists it), a LaunchAgent on macOS, a systemd user unit on Linux, for your user only and without admin. It isn't a system service on purpose: one would run outside your desktop, where sessions couldn't open a browser to log in, show windows or reach your credential store, and a reboot ends every session anyway. `bro host status` lists what it runs, who drives it and whether it starts at sign-in, and `bro host stop` ends it (and the background bro with it). The server answers what programs ask their terminal (device attributes, colours, the kitty keyboard flags) the way the desktop app does, once, whichever windows watch. A second bro started with `--new` keeps its own sessions.
 - **Shows who needs you** — each agent is marked working, blocked, done or idle.
-- **Switches accounts** — multiple Claude and Codex profiles, with usage meters for each.
+- **Switches accounts** — multiple Claude and Codex profiles, with usage meters for each. Or turn on [proxy mode](#proxy-mode) and stop choosing: every signed-in login shares the work, and a login at its limit hands off to the next.
 - **Resumes anything** — pick up a past session, or fork it into another profile.
 - **Mixes models** — a built-in proxy lets Claude Code run on OpenAI-format models, and Codex / Pi / omp run on Claude.
 - **Reaches your phone** — a built-in bridge lets the Just Terminal mobile and web clients connect.
@@ -80,4 +116,5 @@ change. bro picks up each save as you make it.
 - **The desktop app** — `bro gui` opens the same workspace in its own window: terminals drawn on the GPU, every row, tab and button clickable, and the pictures and videos your agents make, open or send you shown in a panel beside your sessions instead of another app. See [docs/gui.md](docs/gui.md).
 - **The bro mod for Claude Code** — off by default, in Settings › bro mod: `/bro` for your sessions and limits, a chime when Claude asks you something and an optional timer on its questions. See [docs/claude-mod.md](claude-mod.md).
 - **Caveman mode** — terse replies that keep every technical fact ([Caveman](https://github.com/JuliusBrussee/caveman) rules: caveman, ultracave or megacave) for new Claude, Codex and Pi sessions. Turn it on in Settings or the palette ("caveman"); ⛏ in the sidebar and on each session's header shows it. Nothing to install. See [docs/caveman.md](caveman.md).
+- **Skills** — The Skills view (`skills` in the palette, or Settings › Skills › Manage skills) shows every skill your agents have, grouped by where each came from (bro's own, a repo bro watches, Skill Issue, Codex's built-ins, yours) with the agents that get it: Claude, Codex, `~/.agents`, Pi, omp. Each sidebar project has a page of its own: its `.claude/skills`, `.codex/skills` and `.agents/skills`, then the skills every project gets, so you see exactly what an agent working there has. `enter` opens a skill's SKILL.md in bro's preview, `o` shows its folder, `/` searches, `tab` goes to the next page, and `m` (or a right-click, or a row's ⋯) opens a skill's menu with everything that can be done with it. **Add repo** (`a`) watches a git repo: paste `https://github.com/t3dotgg/tstack`, `owner/repo` or any git URL (or run `bro skills add t3dotgg/tstack`) and its page lists every folder with a `SKILL.md` at the repo's root, one folder down or under its `skills/` (or, in a repo with none there, under `.claude/skills/`, `.agents/skills/` or `plugins/*/skills/`). Watching installs nothing: tick the skills you want (`space`, or their boxes) and install them together everywhere (`i`: every Claude and Codex home, so every project) or into one project (`p`: its `.claude/skills` and `.agents/skills`), or use a row's Install. bro pulls the repos when it opens and every 6 hours (Settings › Skills › Keep them in sync) and keeps what you installed in step: a skill that leaves its repo leaves too, and a skill of yours with the same name is never replaced. A repo's page pulls it now (`r`) or stops watching it (`w`: keep what you installed from it, or disable that too). **Removing a skill disables it** (`d`, or Disable in its menu): every copy of it moves out of your agents' reach into `~/.bro/disabled-skills/<name>`, with a note of where each was, and the **Disabled** page enables it again (`e`: each copy goes back where it was) or deletes it for good (`x`, asked once more). bro's own skills are switched off instead, and Codex keeps its own. **Discover** features Theo's [tstack](https://github.com/t3dotgg/tstack) and browses [Skill Issue](https://skill-issue.in), 300+ agent skills ranked by what actually gets used: its domain tabs (`←`/`→` or `1`–`9`), its ranking or most clicked (`s`), a search (`/`), and `enter` installs one, asking where (`i` installs it everywhere straight away, `p` into a project). bro watches just that skill's folder in its repo (`owner/repo#skill`), so it stays in step, and `d` disables it. bro's own skills (`bro-open`, JustTools', JustWatch's, JustImagine's) have their switches on the bro page and in Settings › Skills. From a shell: `bro skills installed [--project <dir>]`, `bro skills install t3dotgg/tstack council full-send [--project <dir>]`, `bro skills disable <skill>`, `bro skills enable <skill>`, `bro skills disabled`, `bro skills search react --domain frontend`, then `bro skills install <id>`.
 - **Sounds** — PeonPing voice lines when a session starts, finishes, fails or needs you, in Claude Code, Codex, Pi and omp. Settings › Integrations › Sounds (or "sounds" in the palette): pick a pack, preview and install from the registry, choose which moments speak. Shares peon-ping's config and packs when it's installed. See [docs/sounds.md](sounds.md).

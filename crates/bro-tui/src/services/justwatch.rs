@@ -24,6 +24,7 @@ impl Services {
             self.set_justwatch_skill(false);
             std::thread::spawn(move || {
                 let _ = guard("justwatch::remove_skill_everywhere", justwatch::remove_skill_everywhere);
+                svc.rescan_skills();
                 svc.wake();
             });
             return;

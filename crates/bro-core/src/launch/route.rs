@@ -32,11 +32,21 @@ pub enum UpstreamTarget {
     ClaudePool { config_dirs: Vec<PathBuf> },
     /// Gemini on Cloud Code Assist with a Google AI subscription sign-in (`bro gemini login`)
     GeminiCodeAssist { creds_file: PathBuf },
+    /// Proxy mode: every signed-in Claude login (the proxy reads who is signed in as it goes)
+    ClaudeLogins,
+    /// Proxy mode: every Codex login signed in with ChatGPT
+    CodexLogins,
 }
 
-/// Resolve an upstream string ("pool", "claude:<p>", "codex:<p>" or a provider id; an
-/// optional model picks a new-api relay's per-model endpoint).
+/// Resolve an upstream string ("pool", "logins:claude", "claude:<p>", "codex:<p>" or a provider id;
+/// an optional model picks a new-api relay's per-model endpoint).
 pub fn resolve_upstream(upstream: &str, model: Option<&str>, cfg: &Config) -> anyhow::Result<UpstreamTarget> {
+    if upstream == super::LOGINS_CLAUDE {
+        return Ok(UpstreamTarget::ClaudeLogins);
+    }
+    if upstream == super::LOGINS_CODEX {
+        return Ok(UpstreamTarget::CodexLogins);
+    }
     if upstream == "pool" {
         let dirs: Vec<PathBuf> = profiles::list_claude()
             .into_iter()

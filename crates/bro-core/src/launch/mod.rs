@@ -9,6 +9,12 @@
 //! | claude | `CLAUDE_CONFIG_DIR` | `ANTHROPIC_BASE_URL` direct | bro-proxy | bro-proxy |
 //! | codex | `CODEX_HOME` | Responses URL direct if it has one, else bro-proxy | `-c model_providers.bro` direct | bro-proxy (`wire_api=responses`) |
 //! | pi / omp | the harness's own | models.json / models.yml direct | direct | bro-proxy (anthropic-messages) |
+//!
+//! Proxy mode ([`LaunchCtx::shared_logins`]): a launch on a login (its own, another family's, or
+//! the pool) runs on every signed-in login of that family instead (`logins:claude` /
+//! `logins:codex`). Claude Code and Codex stay signed in as one login, so they are themselves as
+//! ever (their own `/model` lists, plans and limits); only their requests go to bro-proxy, which
+//! sends each one as the login with the most usage left.
 mod claude;
 mod codex;
 mod pi;
@@ -98,6 +104,9 @@ pub struct LaunchCtx {
     pub bro_bin: Option<PathBuf>,
     /// PeonPing sounds (`Settings::peon`): which harnesses run `bro hook peon` (needs `bro_bin`).
     pub peon: crate::peon::PeonSettings,
+    /// Proxy mode (`ProxySettings::shared`): launches on a login run on all signed-in logins of its
+    /// family, through bro-proxy (see the module docs).
+    pub shared_logins: bool,
 }
 
 impl LaunchCtx {
@@ -105,6 +114,24 @@ impl LaunchCtx {
     fn routes_native(&self) -> bool {
         self.route_native && self.proxy_base.as_deref().is_some_and(|b| !b.is_empty())
     }
+}
+
+/// Upstream id of proxy mode's shared Claude logins.
+pub const LOGINS_CLAUDE: &str = "logins:claude";
+/// Upstream id of proxy mode's shared Codex (ChatGPT) logins.
+pub const LOGINS_CODEX: &str = "logins:codex";
+
+/// The shared logins of the Claude family (`true`) or the Codex one.
+pub fn logins_upstream(claude: bool) -> &'static str {
+    if claude { LOGINS_CLAUDE } else { LOGINS_CODEX }
+}
+
+/// Id of the route proxy-mode sessions share (one per family, and per model for a harness running
+/// on the other family's logins). It is the route's key (Claude Code and Codex keep their own sign-in
+/// and can't send the proxy's), so it comes from the proxy's token: unguessable, and the same in the
+/// next window, whose proxy gets the token back from the session server.
+pub fn logins_route_id(token: &str, upstream: &str, model: Option<&str>) -> String {
+    format!("k{}", crate::util::short_hash(&format!("{token}\u{0}{upstream}\u{0}{}", model.unwrap_or("")), 24))
 }
 
 /// A proxy route the caller must register with bro-proxy before spawning.
@@ -134,6 +161,9 @@ pub struct CommandSpec {
     /// The caveman level this launch got, for the session's badge (None: off, or the harness
     /// can't take it).
     pub caveman: Option<crate::caveman::Level>,
+    /// The login whose folder the session runs in, where its transcript is written ("claude:work").
+    /// None for harnesses that keep theirs elsewhere (Pi, omp).
+    pub store: Option<String>,
 }
 
 impl CommandSpec {
@@ -160,6 +190,8 @@ enum Target {
     Provider(Box<Provider>, Option<String>),
     /// Through bro-proxy: "pool", "claude:<p>", "codex:<p>" or a provider id
     Upstream(String),
+    /// Proxy mode: every signed-in login of the Claude family (`true`) or the Codex one
+    Logins(bool),
 }
 
 /// Resolved inputs shared by the per-harness builders.
@@ -181,10 +213,12 @@ fn get_profile(id: &str) -> anyhow::Result<Profile> {
     profiles::get(id).ok_or_else(|| anyhow!("unknown profile {id:?}"))
 }
 
-fn resolve(spec: &LaunchSpec) -> anyhow::Result<Resolved> {
+fn resolve(spec: &LaunchSpec, shared: bool) -> anyhow::Result<Resolved> {
     let mut profile = spec.profile_id.as_deref().filter(|s| !s.is_empty()).map(get_profile).transpose()?;
     let provider_id = spec.provider_id.as_deref().filter(|s| !s.is_empty());
     let target = match provider_id {
+        Some(LOGINS_CLAUDE) => Target::Logins(true),
+        Some(LOGINS_CODEX) => Target::Logins(false),
         Some("pool") => Target::Upstream("pool".into()),
         Some(id) if id.starts_with("claude:") || id.starts_with("codex:") => {
             let login = get_profile(id)?;
@@ -209,7 +243,47 @@ fn resolve(spec: &LaunchSpec) -> anyhow::Result<Resolved> {
             _ => Target::Login,
         },
     };
+    let target = if shared { share(spec.harness, target, profile.as_ref()) } else { target };
+    if let Target::Logins(claude) = target {
+        let all = if claude { profiles::list_claude() } else { profiles::list_codex() };
+        let members = profiles::subscription_logins_in(&all, claude);
+        if members.is_empty() {
+            let who = if claude { "Claude" } else { "Codex (signed in with ChatGPT)" };
+            bail!("proxy mode shares your signed-in {who} logins, and none is signed in: add one in profiles (alt+o)");
+        }
+        // Running on its own family's logins, the harness is signed in as one of them: the login the
+        // launch names (it holds the conversation being resumed), else the machine's own.
+        if matches!((spec.harness, claude), (Harness::Claude, true) | (Harness::Codex, false)) {
+            let signed_in = |p: &&Profile| p.authenticated && family_matches(spec.harness, p) && p.plan.as_deref() != Some("api");
+            let named = profile.as_ref().filter(signed_in).cloned();
+            profile = named.or_else(|| members.first().map(|p| (*p).clone()));
+        }
+    }
     Ok(Resolved { harness: spec.harness, profile, target })
+}
+
+/// Proxy mode's take on a target: anything that runs on a login runs on all of that family's logins.
+fn share(harness: Harness, target: Target, profile: Option<&Profile>) -> Target {
+    let family = |id: &str| if id == "pool" || id.starts_with("claude:") { Some(true) } else if id.starts_with("codex:") { Some(false) } else { None };
+    match target {
+        Target::Login => match harness {
+            Harness::Claude => Target::Logins(true),
+            Harness::Codex => Target::Logins(false),
+            // Pi and omp keep the login they're configured with
+            Harness::Pi | Harness::Omp => Target::Login,
+        },
+        Target::Upstream(up) => match family(&up) {
+            Some(claude) => Target::Logins(claude),
+            None => Target::Upstream(up),
+        },
+        // "Claude's own backend": the Claude logins, for whichever harness asked
+        Target::Provider(p, key) if p.mode == ProviderMode::Native => match harness {
+            Harness::Claude | Harness::Codex => Target::Logins(true),
+            Harness::Pi | Harness::Omp if profile.is_some_and(|p| p.is_claude()) => Target::Logins(true),
+            Harness::Pi | Harness::Omp => Target::Provider(p, key),
+        },
+        other => other,
+    }
 }
 
 /// Proxy wiring for one launch.
@@ -240,10 +314,13 @@ fn proxy_route(upstream: &str, model: Option<&str>, ctx: &LaunchCtx) -> anyhow::
         .as_deref()
         .filter(|b| !b.is_empty())
         .ok_or_else(|| ProxyRequired(upstream.to_string()))?;
-    let id = route_id(upstream, model);
+    let token = ctx.proxy_token.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| "bro".into());
+    let shared = upstream == LOGINS_CLAUDE || upstream == LOGINS_CODEX;
+    let id = if shared { logins_route_id(&token, upstream, model) } else { route_id(upstream, model) };
     let anthropic_upstream = upstream == "pool"
+        || upstream == LOGINS_CLAUDE
         || upstream.starts_with("claude:")
-        || (!upstream.starts_with("codex:") && {
+        || (!upstream.starts_with("codex:") && !shared && {
             let cfg = crate::config::Config::load().unwrap_or_default();
             crate::providers::find(&crate::providers::load(&cfg), upstream)
                 .is_some_and(|p| matches!(p.for_model(model).mode, ProviderMode::Native | ProviderMode::Anthropic))
@@ -251,7 +328,7 @@ fn proxy_route(upstream: &str, model: Option<&str>, ctx: &LaunchCtx) -> anyhow::
     Ok(ProxyRoute {
         request: RouteRequest { route_id: id.clone(), upstream: upstream.to_string(), model: model.map(str::to_string) },
         base: format!("{}/r/{id}", base.trim_end_matches('/')),
-        token: ctx.proxy_token.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| "bro".into()),
+        token,
         anthropic_upstream,
     })
 }
@@ -297,7 +374,7 @@ pub fn build(spec: &LaunchSpec, ctx: &LaunchCtx) -> anyhow::Result<CommandSpec> 
     } else {
         spec
     };
-    let r = resolve(spec)?;
+    let r = resolve(spec, ctx.shared_logins)?;
     let mut out = match r.harness {
         Harness::Claude => claude::build(spec, ctx, &r),
         Harness::Codex => codex::build(spec, ctx, &r),

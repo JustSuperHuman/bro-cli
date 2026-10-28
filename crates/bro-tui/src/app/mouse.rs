@@ -250,6 +250,7 @@ impl App {
                         SideHit::LaunchUsage(h, profile) => self.launch_usage(h, profile),
                         SideHit::UsageToggle => self.toggle_usage_details(),
                         SideHit::Stats => self.open_view("stats"),
+                        SideHit::Sessions => self.show_every_session(),
                         SideHit::Proxy => self.open_view("proxy"),
                         SideHit::Bridge => self.open_view("bridge"),
                         SideHit::Settings => self.open_view("settings"),

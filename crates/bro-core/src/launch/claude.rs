@@ -8,7 +8,12 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 /// Vars that would point Claude Code at some other backend than the one chosen.
-const BACKEND_VARS: [&str; 4] = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_DISABLE_1M_CONTEXT"];
+const BACKEND_VARS: [&str; 5] = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_DISABLE_1M_CONTEXT", FIRST_PARTY];
+
+/// Claude Code treats `ANTHROPIC_BASE_URL` as Anthropic's own API (tool search, betas, fast mode and
+/// the rest as on api.anthropic.com). Proxy mode sets it: its route is Anthropic's API under another
+/// address, signed in with your logins.
+const FIRST_PARTY: &str = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL";
 
 /// Claude Code's model slots. On a third-party backend every slot is pinned to the chosen
 /// model, so its background (haiku) and subagent requests don't ask for Claude models the
@@ -111,7 +116,26 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             backend = up.clone();
             proxied_anthropic = wire_proxy(&mut cmd, up, spec, ctx)?;
         }
+        Target::Logins(true) => {
+            // Proxy mode: Claude Code stays signed in as this login, so it is Claude Code as ever (its
+            // own /model list, plan, limits and features); only its requests go to bro-proxy, which
+            // sends each one as the signed-in Claude login with the most usage left.
+            third_party = false;
+            who = String::new();
+            backend = super::LOGINS_CLAUDE.into();
+            let route = proxy_route(super::LOGINS_CLAUDE, None, ctx)?;
+            cmd.set_env("ANTHROPIC_BASE_URL", route.base.clone());
+            cmd.set_env(FIRST_PARTY, "1");
+            cmd.route = Some(route.request);
+        }
+        Target::Logins(false) => {
+            // Claude Code on GPT models, through the shared Codex logins
+            who = "codex logins".into();
+            backend = super::LOGINS_CODEX.into();
+            proxied_anthropic = wire_proxy(&mut cmd, super::LOGINS_CODEX, spec, ctx)?;
+        }
     }
+    cmd.store = Some(target_profile.clone());
 
     if third_party && let Some(m) = spec.model.as_deref().filter(|m| !m.is_empty()) {
         for var in MODEL_VARS {
@@ -166,7 +190,12 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         }
     }
     args.extend(spec.extra_args.iter().cloned());
-    let mut extra_settings = bro_mod(&mut cmd, &mut args, ctx, &target_profile, &backend);
+    // the mod names the login a session runs on; in proxy mode that's all of them
+    let (mod_profile, mod_backend) = match r.target {
+        Target::Logins(true) => ("", "all logins"),
+        _ => (target_profile.as_str(), backend.as_str()),
+    };
+    let mut extra_settings = bro_mod(&mut cmd, &mut args, ctx, mod_profile, mod_backend);
     if spec.orchestrator {
         orchestrator_args(&mut args, &config_dir, ctx)?;
     } else if let (Some(scope), Some(bin)) = (crate::peers::Scope::of(&ctx.claude_env), &ctx.bro_bin) {
@@ -250,15 +279,19 @@ fn listed_limits(target: &Target, model: &str) -> Option<crate::catalogue::Limit
         let cfg = crate::config::Config::load().unwrap_or_default();
         crate::providers::find(&crate::providers::load(&cfg), id).and_then(|p| p.model(model).map(Into::into))
     };
+    let codex_listed = |dir: &Path| {
+        crate::catalogue::codex_models(dir)
+            .into_iter()
+            .find(|m| m.id == model)
+            .map(|m| crate::catalogue::Limits { context: m.context, max_output: None })
+    };
     match target {
-        Target::Login => None,
+        Target::Login | Target::Logins(true) => None,
+        Target::Logins(false) => crate::profiles::subscription_logins(false).first().and_then(|p| codex_listed(&p.dir)),
         Target::Provider(p, _) => p.model(model).map(Into::into),
         Target::Upstream(id) if crate::profiles::is_gemini_id(id) => provider("gemini"),
         Target::Upstream(id) => match crate::profiles::get(id) {
-            Some(login) if login.is_codex() => crate::catalogue::codex_models(&login.dir)
-                .into_iter()
-                .find(|m| m.id == model)
-                .map(|m| crate::catalogue::Limits { context: m.context, max_output: None }),
+            Some(login) if login.is_codex() => codex_listed(&login.dir),
             Some(_) => None,
             None => provider(id),
         },

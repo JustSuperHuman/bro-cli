@@ -187,6 +187,8 @@ pub struct Settings {
     pub skills: crate::skills::SkillSettings,
     /// Looking for new bro releases.
     pub updates: crate::self_update::UpdateSettings,
+    /// bro's session server: sessions run in a background process and keep running when bro's window closes.
+    pub server: ServerSettings,
     /// Watchdogs: a fresh reviewer agent that hands an idle session its next task.
     pub watchdog: WatchdogSettings,
     /// The setup guide (install an agent, add a login) was dismissed: it no longer opens by itself at startup.
@@ -212,6 +214,24 @@ pub struct BridgeSettings {
     /// How long the minimum is kept after the last remote viewer leaves, so a phone that
     /// briefly backgrounds the app doesn't make the session resize back and forth.
     pub remote_min_grace_secs: u64,
+}
+
+/// bro's session server (`bro host`, see the bro-host crate).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerSettings {
+    /// New sessions run in the session server, so they keep running when bro closes and come back when it opens.
+    /// Off: they run inside bro and end with it, as before.
+    pub keep_sessions: bool,
+    /// When bro closes with sessions still running, a background bro carries on with them: the phone bridge, the
+    /// translating proxy, auto-resume and watchdogs keep working until a window opens again.
+    pub keep_working: bool,
+}
+
+impl Default for ServerSettings {
+    fn default() -> Self {
+        Self { keep_sessions: true, keep_working: true }
+    }
 }
 
 /// Agent insights (why a pane waits, recaps, files it touched or sent).
@@ -296,25 +316,23 @@ pub struct VoiceSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Material {
-    /// the theme's colours, edge to edge
+    /// the theme's colours, edge to edge ("mica", once a choice, looked the same and reads as this)
     #[default]
+    #[serde(alias = "mica")]
     Solid,
     /// the desktop behind the window, frosted (Windows 11's Acrylic; a blur elsewhere)
     Acrylic,
-    /// a soft wash of the wallpaper's colours (Windows 11's Mica)
-    Mica,
     /// see-through, no frost
     Glass,
 }
 
 impl Material {
-    pub const ALL: [Material; 4] = [Material::Solid, Material::Acrylic, Material::Mica, Material::Glass];
+    pub const ALL: [Material; 3] = [Material::Solid, Material::Acrylic, Material::Glass];
 
     pub fn id(self) -> &'static str {
         match self {
             Material::Solid => "solid",
             Material::Acrylic => "acrylic",
-            Material::Mica => "mica",
             Material::Glass => "glass",
         }
     }
@@ -357,12 +375,22 @@ pub struct ProxySettings {
     /// "safe" (terminal-noise normalization of tool output only) or "lossless" (also llmtrim's
     /// lossless preset: JSON minify, columnar arrays, exact-duplicate lines).
     pub trim_level: String,
+    /// Proxy mode: sessions don't pick a login. Every signed-in login of an agent's family serves
+    /// its sessions through bro-proxy, so their usage is shared: each conversation stays on the
+    /// login that took it, new ones go to the login with the most left, and a limit moves the work
+    /// to the next one. Claude Code and Codex stay signed in, so they look and work as ever.
+    pub shared: bool,
 }
 
 impl ProxySettings {
     /// Native launches should go through the proxy (trim on and routing allowed).
     pub fn routes_native(&self) -> bool {
         self.enabled && self.trim && self.trim_route_native
+    }
+
+    /// The proxy should run from the start: it's on, or proxy mode's sessions need it.
+    pub fn starts(&self) -> bool {
+        self.enabled || self.shared
     }
 }
 
@@ -398,6 +426,7 @@ impl Default for Settings {
             justwatch: Default::default(),
             skills: Default::default(),
             updates: Default::default(),
+            server: Default::default(),
             watchdog: Default::default(),
             setup_done: false,
             keys: BTreeMap::new(),
@@ -425,7 +454,7 @@ impl Default for BridgeSettings {
 }
 impl Default for ProxySettings {
     fn default() -> Self {
-        Self { enabled: true, port: 3458, trim: false, trim_route_native: true, trim_level: "safe".into() }
+        Self { enabled: true, port: 3458, trim: false, trim_route_native: true, trim_level: "safe".into(), shared: false }
     }
 }
 
@@ -600,6 +629,8 @@ mod tests {
         let m: Settings = toml::from_str("material = \"acrylic\"\nmaterial_tint = 45").unwrap();
         assert_eq!((m.material, m.material_tint), (Material::Acrylic, 45));
         assert!(toml::to_string(&m).unwrap().contains("material = \"acrylic\""));
+        let m: Settings = toml::from_str("material = \"mica\"").unwrap();
+        assert_eq!(m.material, Material::Solid, "mica is gone: it looked solid, so it reads as solid");
         assert!(Material::ALL.iter().all(|x| x.see_through() == (*x != Material::Solid)));
         assert_eq!(back.theme, "dark");
         assert_eq!(back.sidebar_width, Some(58));

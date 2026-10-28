@@ -711,6 +711,11 @@ impl AgentFacts {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return;
         };
+        self.ingest_value(&v);
+    }
+
+    /// Ingest one record already parsed (the line's JSON).
+    pub fn ingest_value(&mut self, v: &Value) {
         let snapshot = self.fingerprint();
         if let Some(ts) = v
             .get("timestamp")
@@ -721,8 +726,8 @@ impl AgentFacts {
             self.last_activity_ms = Some(ts);
         }
         match self.harness {
-            Harness::Claude => self.claude(&v),
-            Harness::Codex => self.codex(&v),
+            Harness::Claude => self.claude(v),
+            Harness::Codex => self.codex(v),
             _ => {}
         }
         if self.fingerprint() != snapshot {

@@ -6,6 +6,7 @@
 
 pub mod chatgpt;
 pub mod gemini;
+pub mod logins;
 pub mod oauth;
 pub mod pool;
 
@@ -43,6 +44,8 @@ pub(crate) struct UpstreamCall {
     pub translated: bool,
     /// Pre-fetched ChatGPT credentials (decided before translation)
     pub codex_auth: Option<CodexAuth>,
+    /// The body's `metadata.user_id` (Anthropic): proxy mode names the serving login's account in it
+    pub user_id: Option<String>,
 }
 
 impl UpstreamCall {
@@ -55,6 +58,7 @@ impl UpstreamCall {
             session_key: None,
             translated: false,
             codex_auth: None,
+            user_id: None,
         }
     }
 }
@@ -65,6 +69,8 @@ pub(crate) struct UpstreamResponse {
     pub body: ByteStream,
     /// Pool account that served the request
     pub account: Option<String>,
+    /// The counters that account's request goes into (proxy mode)
+    pub counter: Option<crate::events::Counter>,
 }
 
 impl UpstreamResponse {
@@ -219,6 +225,7 @@ pub(crate) async fn finish(
         headers,
         body,
         account,
+        counter: None,
     })
 }
 
@@ -278,6 +285,8 @@ pub(crate) async fn send(
         }
         Upstream::ClaudeOAuth { config_dir } => oauth::send(state, config_dir, call, None).await,
         Upstream::ClaudePool { config_dirs } => pool::send(state, config_dirs, call).await,
+        Upstream::ClaudeLogins => logins::send(state, crate::LoginFamily::Claude, call).await,
+        Upstream::CodexLogins => logins::send(state, crate::LoginFamily::Codex, call).await,
         Upstream::ChatGptCodex { codex_home } => chatgpt::send(state, codex_home, call).await,
         Upstream::GeminiCodeAssist { creds_file } => gemini::send(state, creds_file, call).await,
     }

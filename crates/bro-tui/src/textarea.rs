@@ -273,13 +273,18 @@ impl TextArea {
     }
 
     /// Byte offset of the cursor (the desktop app draws its caret).
-    #[cfg(feature = "gui")]
     pub(crate) fn cursor(&self) -> usize {
         self.cur
     }
 
+    /// Replace the text, keeping the cursor at byte `at` (back to a character boundary).
+    pub(crate) fn set_text_at(&mut self, text: &str, at: usize) {
+        self.text = clean(text, true);
+        self.goal = None;
+        self.set_cursor(at);
+    }
+
     /// Put the cursor at byte `at` (a click in the desktop app), back to a character boundary.
-    #[cfg(feature = "gui")]
     pub(crate) fn set_cursor(&mut self, at: usize) {
         let mut at = at.min(self.text.len());
         while !self.text.is_char_boundary(at) {

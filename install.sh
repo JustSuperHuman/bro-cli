@@ -6,6 +6,8 @@
 # Env: BRO_VERSION (tag, default latest), BRO_INSTALL_DIR (default: the folder of the bro on PATH,
 #      else ~/.local/bin),
 #      BRO_TOOLS (Quick Install too, e.g. "justtools git node claude", "recommended", "all" or "none";
+#      default: ask on a fresh install, skip on an update),
+#      BRO_STARTUP ("yes": start bro in the background when you sign in, for your user only; "no": don't;
 #      default: ask on a fresh install, skip on an update).
 set -eu
 
@@ -105,6 +107,23 @@ if "$dir/bro" --help 2>/dev/null | grep -q 'bro install'; then
     echo
     "$dir/bro" install </dev/tty || true
   fi
+fi
+# Offer to start bro in the background when you sign in (a LaunchAgent or systemd user unit: no sudo) on a
+# fresh install; releases before `bro host install` skip this.
+if "$dir/bro" --help 2>/dev/null | grep -q 'bro host .*install'; then
+  startup=$(printf '%s' "${BRO_STARTUP:-}" | tr 'A-Z' 'a-z')
+  if [ -z "$startup" ] && [ -z "$update" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    {
+      echo
+      echo "bro keeps your sessions running while its window is closed, with the phone bridge and auto-resume"
+      echo "going in the background. It can also start that way when you sign in (for your user only, no sudo)."
+      printf 'Start it when you sign in? [y/N] '
+    } >/dev/tty
+    read -r startup </dev/tty || startup=
+  fi
+  case "$startup" in
+    y|yes|1|true|on) "$dir/bro" host install || true ;;
+  esac
 fi
 [ -n "$update" ] && exit 0
 case ":$PATH:" in

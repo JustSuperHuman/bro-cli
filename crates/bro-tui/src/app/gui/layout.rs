@@ -16,6 +16,8 @@ pub const MARGIN: f32 = 8.0;
 pub const GAP: f32 = 8.0;
 pub const HEADER: f32 = 34.0;
 pub const STRIP: f32 = 40.0;
+/// The row the window's buttons sit in when there are no project tabs to share it.
+pub const CAPTION_ROW: f32 = 32.0;
 /// Below this window width the sidebar hides (the terminal UI's 72 columns).
 pub const SIDEBAR_MIN_WINDOW: f32 = 640.0;
 
@@ -141,17 +143,26 @@ impl Layout {
     }
 }
 
-/// The areas around the body. `sidebar_w` and `media_w` are 0 when hidden.
-pub fn frame(window: Rect, sidebar_w: f32, media_w: f32, strip: bool) -> (Rect, Rect, Rect, Rect) {
+/// The areas around the body: (sidebar, strip, media, body, caption). `sidebar_w` and `media_w` are 0 when hidden.
+/// `buttons` > 0 is a window with no title bar: a row across the top right of the sidebar ends in that much room
+/// for the window's buttons (`caption`, over the media panel too), holding the project tabs when they're on or
+/// standing empty, [`CAPTION_ROW`] tall, when they're not.
+pub fn frame(window: Rect, sidebar_w: f32, media_w: f32, strip: bool, buttons: f32) -> (Rect, Rect, Rect, Rect, Rect) {
     let side_w = if window.w >= SIDEBAR_MIN_WINDOW { sidebar_w.min(window.w * 0.5) } else { 0.0 };
     let (sidebar, rest) = window.split_left(side_w);
+    let (row, rest) = if buttons > 0.0 { rest.split_top(if strip { STRIP } else { CAPTION_ROW }) } else { (Rect { h: 0.0, ..rest }, rest) };
+    let (row, caption) = row.split_right(buttons.min(row.w));
     // the sessions keep at least 360 px; a panel squeezed under 240 px hides instead
     let media_w = media_w.min((rest.w - 360.0).max(0.0));
     let media_w = if media_w < 240.0 { 0.0 } else { media_w };
     let (main, media) = rest.split_right(media_w);
-    let (strip, body) = if strip { main.split_top(STRIP) } else { (Rect { h: 0.0, ..main }, main) };
+    let (strip, body) = match (strip, buttons > 0.0) {
+        (true, true) => (row, main),
+        (true, false) => main.split_top(STRIP),
+        (false, _) => (Rect { h: 0.0, ..main }, main),
+    };
     let body = Rect::new(body.x + MARGIN, body.y + if strip.h > 0.0 { 0.0 } else { MARGIN }, (body.w - 2.0 * MARGIN).max(0.0), (body.h - if strip.h > 0.0 { MARGIN } else { 2.0 * MARGIN }).max(0.0));
-    (sidebar, strip, media, body)
+    (sidebar, strip, media, body, caption)
 }
 
 /// Lay the sessions out in `body` (logical px) with virtual cells of `cell` px, writing the workspace's

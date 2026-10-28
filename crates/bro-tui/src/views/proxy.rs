@@ -1,5 +1,5 @@
-//! Proxy view: where the proxy listens, the routes launches registered, and the live request log (status,
-//! tokens, latency colour-coded).
+//! Proxy view: where the proxy listens, request compression and proxy mode, the routes launches registered,
+//! proxy mode's logins, and the live request log (status, tokens, latency colour-coded).
 
 /// Drawn by the desktop app (`bro gui`).
 #[cfg(feature = "gui")]
@@ -57,6 +57,8 @@ pub fn upstream_label(u: &Upstream) -> String {
         Upstream::Anthropic { base_url, .. } => format!("messages · {}", host(base_url)),
         Upstream::ClaudeOAuth { config_dir } => format!("claude oauth · {}", config_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
         Upstream::ClaudePool { config_dirs } => format!("claude pool · {} accounts", config_dirs.len()),
+        Upstream::ClaudeLogins => "all your claude logins".into(),
+        Upstream::CodexLogins => "all your chatgpt logins".into(),
         Upstream::GeminiCodeAssist { .. } => "gemini · google ai subscription".into(),
     }
 }
@@ -87,6 +89,29 @@ fn trim_line<'a>(s: &bro_core::config::ProxySettings, events: impl Iterator<Item
     let routed = if s.trim_route_native { "native logins launched from now on go through the proxy" } else { "proxied launches only" };
     label.push(Span::styled(format!("   ~{} tokens saved in {n} requests (estimate) · {routed}", tokens(Some(saved))), muted(t)));
     label
+}
+
+/// "proxy mode  on · new sessions share 3 Claude and 2 ChatGPT logins" (or how to turn it on).
+fn shared_line(s: &bro_core::config::ProxySettings, members: (usize, usize), t: &Theme) -> Vec<Span<'static>> {
+    let mut line = vec![Span::styled("  proxy mode   ", muted(t))];
+    if !s.shared {
+        line.push(Span::styled("off", muted(t)));
+        line.push(Span::styled("   s pools your signed-in logins per agent: no login to pick, and a spent one hands off to the next", muted(t)));
+        return line;
+    }
+    line.push(Span::styled("on", fg(t.good).add_modifier(Modifier::BOLD)));
+    line.push(Span::styled(format!("   new sessions share {} · a spent one hands off to the next", members_text(members.0, members.1)), muted(t)));
+    line
+}
+
+/// "3 Claude and 2 ChatGPT logins": who proxy mode shares (the desktop app's view says it the same way).
+pub fn members_text(claude: usize, codex: usize) -> String {
+    let n = |k: usize, who: &str| (k > 0).then(|| format!("{k} {who}"));
+    let parts: Vec<String> = [n(claude, "Claude"), n(codex, "ChatGPT")].into_iter().flatten().collect();
+    match parts.len() {
+        0 => "no signed-in logins yet".into(),
+        _ => format!("{} login{}", parts.join(" and "), if claude + codex == 1 { "" } else { "s" }),
+    }
 }
 
 fn status_style(e: &ProxyEvent, t: &Theme) -> Style {
@@ -122,7 +147,7 @@ impl Pane for ProxyView {
         let t = cx.theme;
         let st = cx.svc.state();
         let p = &st.proxy;
-        let area = ui::hint_line(f, area, &[("j/k", "scroll log"), ("g", "newest"), ("c", "compression on/off")], t);
+        let area = ui::hint_line(f, area, &[("j/k", "scroll log"), ("g", "newest"), ("c", "compression on/off"), ("s", "proxy mode on/off")], t);
         let row = |y: u16| Rect { y, height: 1, ..area };
         let mut y = area.y;
         let head = match &p.status {
@@ -138,6 +163,9 @@ impl Pane for ProxyView {
         ui::line(f, row(y), head);
         y += 1;
         ui::line(f, row(y), trim_line(&st.settings.proxy, p.events.iter(), t));
+        y += 1;
+        let members = st.profiles.ready().map_or((0, 0), |ps| (bro_core::profiles::subscription_logins_in(ps, true).len(), bro_core::profiles::subscription_logins_in(ps, false).len()));
+        ui::line(f, row(y), shared_line(&st.settings.proxy, members, t));
         y += 2;
         ui::rule(f, row(y), "routes", t);
         y += 1;
@@ -154,6 +182,28 @@ impl Pane for ProxyView {
                 Span::styled(model, fg(t.inline)),
             ]);
             y += 1;
+        }
+        if !p.logins.is_empty() {
+            y += 1;
+            ui::rule(f, row(y), "shared logins", t);
+            y += 1;
+            let now = crate::util::now_ms();
+            for a in p.logins.iter().take(8) {
+                let cooling = a.cooling_until_ms.filter(|t| *t > now);
+                let (dot, dc, state) = match cooling {
+                    Some(until) => ("◌", t.inline, format!("back in {}", crate::util::countdown((until - now) / 1000))),
+                    None => ("●", t.good, "ready".to_string()),
+                };
+                let pct = |p: Option<f32>| p.map_or("—".to_string(), |p| format!("{}%", p.round() as i64));
+                ui::line(f, row(y), vec![
+                    Span::styled(format!("  {dot} "), fg(dc)),
+                    Span::styled(ui::pad(&a.id, 18), ui::bold()),
+                    Span::styled(ui::pad(&state, 16), fg(dc)),
+                    Span::styled(format!("5h {:>4}  wk {:>4}  {:>3} conv  {:>4} req", pct(a.five_hour_pct), pct(a.weekly_pct), a.conversations, a.usage.window_requests), muted(t)),
+                    Span::styled(a.usage.last_error.as_deref().map(|e| format!("   {e}")).unwrap_or_default(), fg(t.danger)),
+                ]);
+                y += 1;
+            }
         }
         if !p.pool.is_empty() {
             y += 1;
@@ -213,6 +263,7 @@ impl Pane for ProxyView {
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         match key.code {
             KeyCode::Char('c') => cx.svc.set_trim(!cx.svc.settings().proxy.trim),
+            KeyCode::Char('s') => cx.svc.set_shared(!cx.svc.settings().proxy.shared),
             KeyCode::Char('j') | KeyCode::Down => self.scroll += 1,
             KeyCode::Char('k') | KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
@@ -240,7 +291,11 @@ mod tests {
         assert_eq!(tokens(Some(2_500_000)), "2.5M");
         assert_eq!(tokens(None), "—");
         assert_eq!(upstream_label(&Upstream::OpenAiChat { base_url: "https://api.x.ai/v1".into(), api_key: None }), "chat · api.x.ai");
+        assert_eq!(upstream_label(&Upstream::CodexLogins), "all your chatgpt logins");
         assert_eq!(hms(0).len(), 8);
+        assert_eq!(members_text(3, 2), "3 Claude and 2 ChatGPT logins");
+        assert_eq!(members_text(0, 1), "1 ChatGPT login");
+        assert_eq!(members_text(0, 0), "no signed-in logins yet");
     }
 
     #[test]

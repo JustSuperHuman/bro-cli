@@ -11,6 +11,9 @@
 //!
 //! A windows-subsystem program, so launching it never flashes a console of its own.
 //!
+//! `bro-app --background` starts the background bro (`bro background`, which starts the session server) the same
+//! way: what Windows runs when you sign in, once bro is set to start then.
+//!
 //! Every way in is tried in turn until one works: a terminal alias can outlive the app it pointed to (a dev
 //! build removed, a package re-registered), and a launcher that starts but exits with an error within a few
 //! seconds didn't open anything, so bro-app moves on to the next one rather than leaving you with nothing.
@@ -29,6 +32,9 @@ const ICON: &[u8] = include_bytes!("../../assets/bro.ico");
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--background"] {
+        return background();
+    }
     match args.iter().position(|a| a == "--terminal") {
         Some(i) => {
             args.remove(i);
@@ -51,6 +57,28 @@ fn desktop(args: Vec<String>) {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    if cmd.spawn().is_err() {
+        std::process::exit(1);
+    }
+}
+
+/// The background bro (`bro-app --background`, what Windows starts when you sign in): `bro background` from the bro
+/// beside this launcher, with a hidden console for its sessions' programs to share, standing in your home folder.
+fn background() {
+    let name = exe("bro");
+    let bro = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(&name))).filter(|p| p.is_file()).unwrap_or_else(find_bro);
+    let mut cmd = Command::new(bro);
+    cmd.arg("background").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    if let Some(home) = dirs::home_dir() {
+        cmd.current_dir(home);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
     if cmd.spawn().is_err() {
         std::process::exit(1);

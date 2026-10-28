@@ -17,7 +17,7 @@ const MAX_DEPTH: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum SlashCommandSource {
+pub enum SlashCommandSource {
     Builtin,
     Project,
     User,
@@ -25,7 +25,7 @@ pub(crate) enum SlashCommandSource {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SlashCommand {
+pub struct SlashCommand {
     /// Without the leading slash, e.g. "compact" or "review:security".
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40,64 +40,107 @@ type Builtin = (&'static str, &'static str, Option<&'static str>);
 
 const CLAUDE_BUILTINS: &[Builtin] = &[
     ("add-dir", "Add another working directory", Some("<path>")),
-    ("agents", "Manage subagents", None),
-    ("bug", "Report a bug to Anthropic", None),
-    ("clear", "Clear the conversation history", None),
-    (
-        "compact",
-        "Summarise the conversation to free context",
-        Some("[focus]"),
-    ),
-    ("config", "Open the config panel", None),
+    ("advisor", "Let Claude consult a stronger model at key moments", None),
+    ("autocompact", "Set how full the context gets before it summarizes", Some("[auto|<tokens>]")),
+    ("background", "Send this session to the background", Some("[prompt]")),
+    ("branch", "Branch the conversation from here", Some("[name]")),
+    ("btw", "Ask a quick side question without interrupting", Some("[question]")),
+    ("cd", "Move this session to another folder", Some("<path>")),
+    ("clear", "Start fresh (this conversation stays resumable)", Some("[name]")),
+    ("code-review", "Review the current changes for bugs", Some("[level]")),
+    ("color", "Set the prompt bar's colour", None),
+    ("compact", "Summarise the conversation to free context", Some("[focus]")),
+    ("config", "Open the settings", Some("[key=value]")),
     ("context", "Show what is using the context window", None),
-    ("cost", "Show token usage and cost", None),
+    ("copy", "Copy Claude's last response", Some("[n]")),
+    ("diff", "Show the changes made in this session", None),
     ("doctor", "Check the health of this installation", None),
-    ("export", "Export the conversation", None),
+    ("effort", "Set how hard Claude thinks", Some("[low|medium|high|xhigh|max]")),
+    ("exit", "Quit Claude Code", None),
+    ("export", "Export the conversation", Some("[filename]")),
+    ("fast", "Turn fast mode on or off", None),
+    ("feedback", "Send feedback or report a bug", Some("[report]")),
+    ("fork", "Start a background agent with this conversation", Some("<directive>")),
+    ("goal", "Set a goal Claude checks before it stops", Some("[condition|clear]")),
     ("help", "List commands and shortcuts", None),
-    ("hooks", "Manage hook configuration", None),
-    ("ide", "Connect to an IDE", None),
+    ("hooks", "View hook configuration", None),
+    ("ide", "Connect to an IDE", Some("[open]")),
     ("init", "Create or refresh CLAUDE.md", None),
-    ("mcp", "Manage MCP servers", None),
+    ("insights", "A report on your Claude Code sessions", None),
+    ("keybindings", "Open your keyboard shortcuts file", None),
+    ("login", "Sign in to Anthropic", None),
+    ("logout", "Sign out of Anthropic", None),
+    ("loop", "Run a prompt or command on an interval", Some("[interval] <prompt>")),
+    ("loops", "List, create and delete loops", None),
+    ("mcp", "Manage MCP servers", Some("[reconnect|enable|disable]")),
     ("memory", "Edit the memory files", None),
     ("model", "Change the model", Some("[model]")),
-    ("output-style", "Change the output style", None),
-    ("permissions", "Manage tool permissions", None),
-    ("pr-comments", "Fetch comments from a pull request", None),
+    ("output-style", "Change the output style", Some("[style]")),
+    ("permissions", "Manage tool permission rules", None),
+    ("plan", "Plan mode, or this session's plan", Some("[open|<description>]")),
+    ("plugin", "Manage plugins", None),
+    ("recap", "A one-line recap of the session", None),
     ("release-notes", "Show what changed in Claude Code", None),
+    ("reload-plugins", "Activate plugin changes", None),
+    ("reload-skills", "Pick up skills changed on disk", None),
+    ("rename", "Rename the conversation", Some("[name]")),
     ("resume", "Resume an earlier conversation", None),
-    ("review", "Review a pull request", Some("[pr]")),
     ("rewind", "Rewind the conversation or the code", None),
-    (
-        "security-review",
-        "Review the changes for vulnerabilities",
-        None,
-    ),
-    ("status", "Show version, account and connectivity", None),
+    ("schedule", "Schedule an agent to run later or on a timer", None),
+    ("security-review", "Review the changes for vulnerabilities", None),
+    ("simplify", "Clean up the changed code", None),
+    ("skills", "List the skills Claude can use", None),
+    ("status", "Show version, model, account and connectivity", None),
     ("statusline", "Configure the status line", None),
-    ("todos", "Show the current todo list", None),
-    ("usage", "Show plan usage limits", None),
-    ("vim", "Toggle vim editing mode", None),
+    ("subtask", "Send a subagent off with your context", Some("<task>")),
+    ("tasks", "See what's running in the background", None),
+    ("theme", "Change the theme", None),
+    ("usage", "Show cost, plan usage and activity", None),
+    ("version", "Show this session's version", None),
+    ("workflows", "Browse running and finished workflows", None),
 ];
 
 const CODEX_BUILTINS: &[Builtin] = &[
-    ("new", "Start a new chat", None),
-    ("init", "Create an AGENTS.md for this repo", None),
-    (
-        "compact",
-        "Summarise the conversation to free context",
-        None,
-    ),
+    ("apps", "Manage apps", None),
+    ("cd", "Change the working directory", Some("<path>")),
+    ("clear", "Clear the terminal and start a new chat", None),
+    ("compact", "Summarise the conversation to free context", None),
+    ("copy", "Copy the last response", None),
     ("diff", "Show the git diff, including untracked files", None),
-    ("mention", "Mention a file", Some("<file>")),
-    ("status", "Show session configuration and token usage", None),
-    ("model", "Choose the model and reasoning effort", None),
-    ("approvals", "Choose what Codex can do without asking", None),
-    ("review", "Review the current changes", None),
-    ("undo", "Undo the last Codex edit", None),
-    ("mcp", "List the configured MCP tools", None),
+    ("experimental", "Turn experimental features on or off", None),
+    ("export", "Export the conversation as markdown", None),
+    ("feedback", "Send logs to the maintainers", None),
+    ("fork", "Fork the current chat", None),
+    ("goal", "Set or view the goal for a long task", Some("[goal]")),
+    ("hooks", "View and manage lifecycle hooks", None),
+    ("init", "Create an AGENTS.md for this repo", None),
     ("logout", "Log out of Codex", None),
+    ("mcp", "List the configured MCP tools", Some("[verbose|login <name>]")),
+    ("memories", "Configure memory use", None),
+    ("mention", "Mention a file", Some("<file>")),
+    ("model", "Choose the model and reasoning effort", Some("[model] [--reasoning=<level>]")),
+    ("new", "Start a new chat", None),
+    ("permissions", "Choose what Codex can do without asking", None),
+    ("plan", "Switch to Plan mode", None),
+    ("plugins", "Browse plugins", None),
+    ("ps", "List background terminals", None),
     ("quit", "Exit Codex", None),
+    ("rename", "Rename the current thread", Some("[name]")),
+    ("resume", "Resume a saved chat", None),
+    ("review", "Review the current changes", None),
+    ("settings", "Configure Codex preferences", None),
+    ("side", "Start a side conversation", None),
+    ("skills", "Use skills to improve how Codex works", None),
+    ("status", "Show session configuration and token usage", None),
+    ("statusline", "Configure the status line", None),
+    ("theme", "Choose a syntax highlighting theme", None),
+    ("usage", "Show account usage", None),
 ];
+
+/// The commands `agent` itself takes, without looking in any folder (nothing is read).
+pub fn builtin_slash_commands(agent: &str) -> Vec<SlashCommand> {
+    builtins_for(agent)
+}
 
 fn builtins_for(agent: &str) -> Vec<SlashCommand> {
     let table = match agent {
@@ -296,7 +339,7 @@ fn collect(agent: &str, cwd: &str, home: Option<&Path>) -> Vec<SlashCommand> {
 
 /// The agent's built-ins plus the project's and user's own command files,
 /// cached briefly per agent + directory. Blocking: call off the async runtime.
-pub(crate) fn list_slash_commands(agent: &str, cwd: &str) -> Vec<SlashCommand> {
+pub fn list_slash_commands(agent: &str, cwd: &str) -> Vec<SlashCommand> {
     type Cache = Mutex<HashMap<String, (Instant, Vec<SlashCommand>)>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -406,7 +449,7 @@ mod tests {
                 .iter()
                 .any(|c| c.name == "triage" && c.source == SlashCommandSource::Project)
         );
-        assert!(commands.iter().any(|c| c.name == "approvals"));
+        assert!(commands.iter().any(|c| c.name == "permissions"));
         assert!(!commands.iter().any(|c| c.name == "vim"));
     }
 }

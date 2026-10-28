@@ -6,6 +6,7 @@
 
 pub mod demo;
 pub mod guard;
+pub mod host;
 pub mod justimagine;
 pub mod justpaste;
 pub mod justtools;
@@ -85,6 +86,9 @@ pub struct ProxyState {
     pub events: VecDeque<ProxyEvent>,
     /// Claude pool accounts as the proxy sees them (availability, cooldowns, 5h window counts)
     pub pool: Vec<bro_proxy::PoolAccountStatus>,
+    /// Proxy mode's logins, Claude's then Codex's, as the proxy sees them (meters from their
+    /// responses, cooldowns, conversations kept on each)
+    pub logins: Vec<bro_proxy::LoginStatus>,
     pub enabled: bool,
 }
 
@@ -133,6 +137,8 @@ pub struct State {
     /// Every session's watchdog as the bridge last reported it, by session id.
     pub watchdogs: HashMap<String, bro_bridge::WatchdogSnapshot>,
     pub voice: VoiceState,
+    /// The session server.
+    pub host: host::HostState,
     /// Things that didn't work at startup, shown once as toasts and in the views.
     pub issues: Vec<String>,
 }
@@ -167,6 +173,18 @@ struct Inner {
     login_watch: Mutex<HashMap<String, Instant>>,
     /// Agent teams running in sessions here (kept current by the UI loop), for the settings view.
     teams: Mutex<Vec<LiveTeam>>,
+    /// The sidebar's projects (kept current by the UI loop while the Skills view is open), whose own skills it lists.
+    sidebar_projects: Mutex<Vec<KnownProject>>,
+    /// The session server this window drives (see [`host`]).
+    host: RwLock<Option<bro_host::Client>>,
+}
+
+/// A project as the sidebar lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KnownProject {
+    pub key: String,
+    pub name: String,
+    pub root: PathBuf,
 }
 
 /// An agent team running in one of bro's Claude sessions.
@@ -195,6 +213,15 @@ pub struct VoiceState {
 
 /// How long "press the key you want" waits.
 const CAPTURE_FOR: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A line in `~/.bro/voice.log`, beside bro-voice's own trace.
+fn voice_log(line: &str) {
+    use std::io::Write;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis())).unwrap_or_default();
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(crate::util::bro_dir().join("voice.log")) {
+        let _ = writeln!(file, "{stamp} {line}");
+    }
+}
 
 /// Words spoken with push-to-talk, on their way to the orchestrator session.
 #[derive(Clone, Debug)]
@@ -281,6 +308,7 @@ pub fn fallback_settings() -> Settings {
         justwatch: Default::default(),
         skills: Default::default(),
         updates: Default::default(),
+        server: Default::default(),
         watchdog: Default::default(),
         setup_done: false,
         keys: BTreeMap::new(),
@@ -322,13 +350,15 @@ impl Services {
                 focused: Mutex::new(None),
                 login_watch: Mutex::new(Default::default()),
                 teams: Mutex::new(vec![]),
+                sidebar_projects: Mutex::new(vec![]),
+                host: RwLock::new(None),
             }),
         }
     }
 
     fn empty_state(settings: Settings) -> State {
         State {
-            proxy: ProxyState { status: Avail::Loading, routes: vec![], events: VecDeque::new(), pool: vec![], enabled: settings.proxy.enabled },
+            proxy: ProxyState { status: Avail::Loading, routes: vec![], events: VecDeque::new(), pool: vec![], logins: vec![], enabled: settings.proxy.enabled },
             bridge: BridgeState { status: Avail::Loading, qr: None, enabled: settings.bridge.enabled, projects: vec![] },
             settings,
             justtools: Default::default(),
@@ -345,6 +375,7 @@ impl Services {
             picks: (None, None),
             watchdogs: HashMap::new(),
             voice: VoiceState::default(),
+            host: Default::default(),
             issues: vec![],
         }
     }
@@ -353,7 +384,20 @@ impl Services {
     /// background threads. Returns immediately.
     pub fn start(settings: Settings, tx: Sender<Event>) -> Services {
         let svc = Services::with_state(Services::empty_state(settings), tx, false, false);
+        // before anything launches: sessions a past window left come back into this one
+        svc.connect_host();
         workers::spawn_all(&svc);
+        svc
+    }
+
+    /// A viewer beside a bro that's already running (the terminal UI over SSH beside the desktop app, or
+    /// `bro --view`): your real data, watching and typing into that bro's sessions. Launches go to that bro, which
+    /// keeps the proxy, phone bridge and automation; with no bro driving the server, this one launches its own.
+    pub fn start_viewer(settings: Settings, tx: Sender<Event>) -> Services {
+        host::set_role(bro_host::Role::Viewer);
+        let svc = Services::with_state(Services::empty_state(settings), tx, false, true);
+        svc.connect_host();
+        workers::spawn_guest(&svc);
         svc
     }
 
@@ -462,8 +506,27 @@ impl Services {
         }
     }
 
-    /// Build + spawn a session (see [`launch`]).
+    /// Build + spawn a session (see [`launch`]). A viewer asks the bro it watches to launch it instead (its proxy,
+    /// phone bridge and automation are there), and shows it once it starts.
     pub fn launch(&self, req: LaunchRequest) {
+        if host::role() == bro_host::Role::Viewer
+            && req.stage.is_none()
+            && req.reply.is_none()
+            && req.into.is_none()
+            && req.find_live.is_none()
+            && let Some(h) = self.host().filter(|h| h.peers().primary.is_some())
+        {
+            let launch = crate::app::hosting::RelayedLaunch { spec: req.spec, name: req.name, remember: req.remember };
+            if let Ok(body) = serde_json::to_value(crate::app::hosting::Relayed { launch: Some(launch) }) {
+                h.relay(body);
+            }
+            return;
+        }
+        self.launch_here(req);
+    }
+
+    /// Build + spawn a session in this bro.
+    pub fn launch_here(&self, req: LaunchRequest) {
         let svc = self.clone();
         std::thread::spawn(move || launch::run(&svc, req));
     }
@@ -717,6 +780,19 @@ impl Services {
         self.inner.teams.lock().clone()
     }
 
+    /// The UI loop reports the sidebar's projects, in its order. True when they changed.
+    pub(crate) fn set_projects(&self, projects: Vec<KnownProject>) -> bool {
+        let mut known = self.inner.sidebar_projects.lock();
+        let changed = *known != projects;
+        *known = projects;
+        changed
+    }
+
+    /// The sidebar's projects, in its order (as last reported while the Skills view was open).
+    pub fn projects(&self) -> Vec<KnownProject> {
+        self.inner.sidebar_projects.lock().clone()
+    }
+
     pub(crate) fn focused_session(&self) -> Option<String> {
         self.inner.focused.lock().clone()
     }
@@ -806,24 +882,84 @@ impl Services {
         if self.state().voice.capturing.is_some() {
             return;
         }
-        self.update(|st| st.voice.capturing = Some(Instant::now()));
+        let started = Instant::now();
+        self.update(|st| st.voice.capturing = Some(started));
         let svc = self.clone();
         std::thread::spawn(move || {
             let got = guard_res("voice::capture_hotkey", || bro_voice::Voice::capture_hotkey(CAPTURE_FOR));
-            svc.update(|st| st.voice.capturing = None);
+            let seen = bro_voice::Voice::capture_seen();
+            // bro's own window may have taken the key already (`voice_key_pressed_here`)
+            let mine = svc.end_capture(started);
+            let line = match &got {
+                _ if !mine => "ended by the window".to_string(),
+                Ok(Some(name)) => format!("got {name}"),
+                Ok(None) => format!("nothing after {:.1} s ({seen} key events reached the hook)", started.elapsed().as_secs_f32()),
+                Err(e) => e.clone(),
+            };
+            svc.trace_voice(&format!("capture: {line}"));
+            if !mine {
+                return;
+            }
             match got {
-                Ok(Some(name)) => {
-                    let label = bro_voice::Voice::hotkey_label(&name);
-                    let mut s = svc.settings();
-                    s.voice.hotkey = Some(name);
-                    svc.save_settings(s);
-                    svc.restart_voice();
-                    svc.send(Event::Toast(crate::alerts::Kind::Info, format!("push-to-talk is on {label} now")));
-                }
-                Ok(None) => svc.send(Event::Toast(crate::alerts::Kind::Info, "voice key unchanged".into())),
+                Ok(Some(name)) => svc.set_voice_hotkey(name),
+                // the whole wait went by: the key never reached bro (a remapper or an admin window can keep it away)
+                Ok(None) if started.elapsed() + std::time::Duration::from_secs(1) >= CAPTURE_FOR => svc.send(Event::Toast(
+                    crate::alerts::Kind::Info,
+                    format!("no key reached bro, so it's still {} · the ‹ › arrows pick one without pressing it", svc.voice_key_label()),
+                )),
+                Ok(None) => svc.send(Event::Toast(crate::alerts::Kind::Info, format!("still {}", svc.voice_key_label()))),
                 Err(e) => svc.send(Event::Toast(crate::alerts::Kind::Error, e.to_string())),
             }
         });
+    }
+
+    /// A key that reached bro's own window while "press the key you want" waits: the global hook missed it
+    /// (Windows drops one that answers late, as on a busy startup), so it's the key. None: Esc, keep the one there is.
+    pub(crate) fn voice_key_pressed_here(&self, name: Option<String>) {
+        let Some(started) = self.state().voice.capturing else { return };
+        if !self.end_capture(started) {
+            return;
+        }
+        bro_voice::Voice::cancel_capture();
+        self.trace_voice(&format!("capture: the window got {} (the hook missed it)", name.as_deref().unwrap_or("esc")));
+        match name {
+            Some(name) => self.set_voice_hotkey(name),
+            None => self.send(Event::Toast(crate::alerts::Kind::Info, format!("still {}", self.voice_key_label()))),
+        }
+    }
+
+    /// Whether the capture that started at `started` was still waiting (it isn't any more).
+    fn end_capture(&self, started: Instant) -> bool {
+        let mut mine = false;
+        self.update(|st| {
+            if st.voice.capturing == Some(started) {
+                st.voice.capturing = None;
+                mine = true;
+            }
+        });
+        mine
+    }
+
+    /// Push-to-talk on `name` from now on.
+    fn set_voice_hotkey(&self, name: String) {
+        let label = bro_voice::Voice::hotkey_label(&name);
+        let mut s = self.settings();
+        s.voice.hotkey = Some(name);
+        self.save_settings(s);
+        self.restart_voice();
+        self.send(Event::Toast(crate::alerts::Kind::Info, format!("push-to-talk is on {label} now")));
+    }
+
+    /// The push-to-talk key as people say it.
+    fn voice_key_label(&self) -> String {
+        bro_voice::Voice::hotkey_label(self.settings().voice.hotkey.as_deref().unwrap_or(bro_voice::default_hotkey()))
+    }
+
+    /// A line in `~/.bro/voice.log` (not from the demo).
+    fn trace_voice(&self, line: &str) {
+        if !self.is_demo() {
+            voice_log(line);
+        }
     }
 
     /// Keep the push-to-talk listener alive (None stops it).
@@ -953,6 +1089,17 @@ impl Services {
         self.with_proxy("proxy::set_trim", |p| p.set_trim(on, level));
     }
 
+    /// Proxy mode on or off (saved): new sessions share every signed-in login of their agent through the proxy,
+    /// which starts now if it isn't running. Sessions already running keep the login they started on.
+    pub fn set_shared(&self, on: bool) {
+        let mut s = self.settings();
+        s.proxy.shared = on;
+        self.save_settings(s);
+        if on && !self.is_demo() && !self.inner.guest {
+            workers::spawn_proxy(self);
+        }
+    }
+
     /// Turn the bridge on or off (saved to settings).
     pub fn set_bridge_enabled(&self, on: bool) {
         let mut s = self.settings();
@@ -984,6 +1131,9 @@ impl Services {
         if let Some(b) = self.inner.bridge.write().take() {
             let _ = guard("bridge::shutdown", || b.shutdown());
         }
+        // last: once the proxy and bridge let go of their ports, a window or background bro taking over can start
+        // them again (the server waits for this connection to close before letting it in)
+        self.inner.host.write().take();
     }
 
     pub(crate) fn set_usage_kick(&self, k: Sender<()>) {

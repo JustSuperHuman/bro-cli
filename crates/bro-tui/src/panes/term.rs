@@ -1,10 +1,18 @@
 //! A real terminal in a pane: an agent CLI or shell on a pseudo-terminal (ConPTY / Unix pty), parsed by vt100
 //! and drawn cell by cell. Ported from z4-oriel with: lazy spawn at the real pane size, the DSR reply written
 //! without holding the parser lock, output teed to the bridge, OSC titles, and session metadata for the sidebar.
+//!
+//! The pseudo-terminal is bro's own ([`Live::Local`]) or held by bro's session server ([`Live::Remote`], see
+//! [`bro_host`]): the same bytes arrive either way and are parsed and drawn here, so the terminal UI and the
+//! desktop app treat both alike. A hosted session keeps running when bro closes ([`Term::detach`]); the next bro
+//! picks it up again with [`Term::reattach`].
 
 #[cfg(all(test, windows))]
 #[path = "process_tests.rs"]
 mod process_tests;
+#[cfg(test)]
+#[path = "host_tests.rs"]
+mod host_tests;
 
 use super::keys::{encode_key, encode_mouse};
 use crate::pane::{Activity, Cx, Pane, Waker};
@@ -14,6 +22,7 @@ use bro_core::Harness;
 use bro_core::projects::ProjectKey;
 use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::{
     Frame,
@@ -80,7 +89,7 @@ pub fn orchestrator_project(cwd: &std::path::Path) -> ProjectKey {
 }
 
 /// What to run.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Spawn {
     pub program: String,
     pub args: Vec<String>,
@@ -88,16 +97,26 @@ pub struct Spawn {
     pub env_remove: Vec<String>,
 }
 
-/// vt100 callbacks: remember the program's window title.
+/// vt100 callbacks: remember the program's window title, and answer what the program asks its terminal (see
+/// [`bro_host::answer`]: for a session bro runs itself; the session server answers for one it holds).
 #[derive(Default)]
 pub struct Cb {
     pub title: Option<String>,
+    pub answers: bro_host::answer::Answers,
 }
 
 impl vt100::Callbacks for Cb {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
         let t = String::from_utf8_lossy(title).trim().to_string();
         self.title = (!t.is_empty()).then_some(t);
+    }
+
+    fn unhandled_csi(&mut self, screen: &mut vt100::Screen, i1: Option<u8>, i2: Option<u8>, params: &[&[u16]], c: char) {
+        self.answers.csi(screen, i1, i2, params, c);
+    }
+
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        self.answers.osc(params);
     }
 }
 
@@ -125,19 +144,93 @@ impl ProgramState {
     }
 }
 
-struct Live {
-    tree: bro_core::proc_tree::ProcessTree,
-    master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+/// The running program's pseudo-terminal: bro's own, or one the session server holds.
+enum Live {
+    Local { tree: bro_core::proc_tree::ProcessTree, master: Box<dyn MasterPty + Send>, child: Box<dyn Child + Send + Sync> },
+    Remote(bro_host::Remote),
+}
+
+impl Live {
+    fn pid(&self) -> Option<u32> {
+        match self {
+            Live::Local { child, .. } => child.process_id(),
+            Live::Remote(r) => r.pid(),
+        }
+    }
+
+    fn resize(&self, rows: u16, cols: u16) {
+        match self {
+            Live::Local { master, .. } => {
+                let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            }
+            Live::Remote(r) => r.resize(rows, cols),
+        }
+    }
+
+    /// End the program and everything it started (a hosted session is also forgotten by the server).
+    fn kill(&mut self) {
+        match self {
+            Live::Local { tree, child, .. } => {
+                tree.terminate();
+                let _ = child.kill();
+            }
+            Live::Remote(r) => r.close(),
+        }
+    }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        match self {
+            Live::Local { child, .. } => child.try_wait().ok().flatten().map(|s| s.exit_code() as i32),
+            Live::Remote(r) => r.exit_code(),
+        }
+    }
+
+    /// The program exited: end what it left running (the server does this for a hosted one).
+    fn end_tree(&mut self) {
+        if let Live::Local { tree, .. } = self {
+            tree.terminate();
+        }
+    }
 }
 
 impl Drop for Live {
     fn drop(&mut self) {
         // End descendants before closing ConPTY: inherited output handles can hold its close open.
-        self.tree.terminate();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // A hosted session isn't ended here: the pane decides (closing it ends it, quitting bro leaves it running).
+        if let Live::Local { tree, child, .. } = self {
+            tree.terminate();
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
+}
+
+/// What the session server keeps beside a hosted session, so the next bro can show it again as it was: the
+/// pane's metadata and launch. In the server's memory only (the environment can hold keys).
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    sid: String,
+    harness: Option<Harness>,
+    profile: Option<String>,
+    store: Option<String>,
+    model: Option<String>,
+    label: String,
+    name: Option<String>,
+    renamed: bool,
+    cwd: PathBuf,
+    project: ProjectKey,
+    /// unix ms
+    started_ms: u64,
+    route_id: Option<String>,
+    /// the proxy route it talks through, added again when it comes back (the next bro's proxy starts without it)
+    route: Option<bro_proxy::Route>,
+    cleanup: Vec<PathBuf>,
+    orchestrator: bool,
+    spawn: Spawn,
+    launch_spec: Option<bro_core::launch::LaunchSpec>,
+    /// The agent's conversation (Claude / Codex), so it resumes exactly that one if it has to come back.
+    #[serde(default)]
+    agent_session: Option<String>,
 }
 
 /// The terminal pane.
@@ -210,12 +303,29 @@ pub struct Term {
     typed: u64,
     /// Auto-resume typed its prompt: press enter at this time (a separate write, so it isn't read as a paste).
     enter_at: Option<Instant>,
+    /// What goes to the program in turns, each at its time: a message's pieces (the agent reads a picture's path
+    /// before the next piece arrives), a command and then its Enter.
+    outbox: std::collections::VecDeque<(Instant, Vec<u8>)>,
     /// When auto-approve last answered a prompt (one answer per prompt while the screen catches up).
     approved_at: Option<Instant>,
     /// A resume waiting its turn: shows a loader until the real session takes this pane.
     pub queued: Option<Queued>,
     /// The desktop app's copy of the screen (see [`super::mirror`]); None in the terminal UI.
     mirror: Option<Arc<dyn super::mirror::ScreenMirror>>,
+    /// A session the server already runs, picked up at the first render (see [`Term::reattach`]).
+    attach: Option<bro_host::SessionInfo>,
+    /// Quitting bro left this hosted session running: dropping the pane doesn't end it.
+    detached: bool,
+    /// What the server was last told about this pane (see [`Saved`]), to send again only when it changes.
+    saved_sig: Option<u64>,
+    /// The proxy route a reattached session came back with.
+    saved_route: Option<bro_proxy::Route>,
+    /// The agent conversation a reattached session came back with (until its insights find it again).
+    saved_agent: Option<String>,
+    /// A hosted session's size, as the server last said (it follows whoever controls the session).
+    remote_size: Arc<Mutex<Option<(u16, u16)>>>,
+    /// The size this pane last asked the server for.
+    wanted: (u16, u16),
 }
 
 /// Where a queued resume stands (the app keeps it current).
@@ -286,9 +396,17 @@ impl Term {
             resume: Default::default(),
             typed: 0,
             enter_at: None,
+            outbox: Default::default(),
             approved_at: None,
             queued: None,
             mirror,
+            attach: None,
+            detached: false,
+            saved_sig: None,
+            saved_route: None,
+            saved_agent: None,
+            remote_size: Arc::new(Mutex::new(None)),
+            wanted: (0, 0),
         }
     }
 
@@ -348,15 +466,305 @@ impl Term {
         if self.live.is_some() || self.error.is_some() {
             return;
         }
-        let Some(spawn) = self.spawn.take() else { return };
         let (rows, cols) = (rows.max(2), cols.max(10));
+        if let Some(info) = self.attach.take() {
+            if let Err(e) = self.start_attached(info, rows, cols, waker) {
+                self.error = Some(e);
+            }
+            return;
+        }
+        let Some(spawn) = self.spawn.take() else { return };
         if let Err(e) = self.start(&spawn, rows, cols, waker) {
             self.error = Some(e);
         }
     }
 
     fn start(&mut self, s: &Spawn, rows: u16, cols: u16, waker: Waker) -> Result<(), String> {
+        let cmd = self.command(s);
+        let (live, writer, reader): (Live, Box<dyn Write + Send>, Box<dyn Read + Send>) = match self.svc.hosting() {
+            Some(host) => {
+                let argv = cmd.get_argv();
+                let req = bro_host::SpawnRequest {
+                    id: self.meta.sid.clone(),
+                    program: argv.first().map(|a| a.to_string_lossy().to_string()).unwrap_or_default(),
+                    args: argv.iter().skip(1).map(|a| a.to_string_lossy().to_string()).collect(),
+                    cwd: cmd.get_cwd().map(PathBuf::from).unwrap_or_else(|| self.meta.cwd.clone()),
+                    env: cmd.iter_full_env_as_str().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                    rows,
+                    cols,
+                    blob: self.saved(s).unwrap_or_default(),
+                    keep: self.kept(s).unwrap_or_default(),
+                };
+                let mut remote = host.spawn(req).map_err(|e| format!("couldn't start {}: {e}", s.program))?;
+                let reader = remote.take_reader_with(self.follow_resizes()).ok_or("the session server gave no output")?;
+                let writer = remote.writer();
+                *self.remote_size.lock() = Some((rows, cols));
+                self.wanted = (rows, cols);
+                (Live::Remote(remote), writer, reader)
+            }
+            None => {
+                let (live, writer, reader) = Self::start_local(cmd, s, rows, cols)?;
+                (live, Box::new(super::writer::Writer::new(writer).map_err(|e| format!("pty input worker: {e}"))?), reader)
+            }
+        };
+        let pid = live.pid();
+        let remote = matches!(live, Live::Remote(_));
+        *self.writer.lock() = Some(writer);
+        self.parser.lock().screen_mut().set_size(rows, cols);
+        if let Some(m) = &self.mirror {
+            m.resize(rows, cols);
+        }
+        self.size = (rows, cols);
+        self.base = (rows, cols);
+        self.live = Some(live);
+        if remote {
+            self.saved_sig = Some(self.saved_sig());
+        }
+        self.svc.bridge_register(self.bridge_meta(s, pid));
+        self.launch = Some(s.clone());
+        if let Some(spec) = self.bind_spec(s, pid)
+            && !self.svc.is_demo()
+        {
+            self.insights = Some(super::insights::Insights::start(spec, waker.clone()));
+        }
+        self.start_reader(reader, waker, remote);
+        Ok(())
+    }
+
+    /// For a hosted session's reader: the screens take each size the server announces, exactly where it changed.
+    fn follow_resizes(&self) -> impl FnMut(u16, u16) + Send + 'static {
+        let (parser, mirror, size) = (self.parser.clone(), self.mirror.clone(), self.remote_size.clone());
+        move |rows, cols| {
+            parser.lock().screen_mut().set_size(rows, cols);
+            if let Some(m) = &mirror {
+                m.resize(rows, cols);
+            }
+            *size.lock() = Some((rows, cols));
+        }
+    }
+
+    /// Who answers what the program asks its terminal: the server for a session it holds; here, everything in the
+    /// terminal UI, only the cursor where the desktop app's emulator answers the rest.
+    fn set_answers(&self, remote: bool) {
+        use bro_host::answer::Mode;
+        let mut p = self.parser.lock();
+        let a = &mut p.callbacks_mut().answers;
+        a.mode = match (remote, self.mirror.is_some()) {
+            (true, _) => Mode::Off,
+            (false, true) => Mode::CursorOnly,
+            (false, false) => Mode::All,
+        };
+        a.profile = crate::services::host::answer_profile();
+    }
+
+    /// Pick up a session the server already runs: its snapshot rebuilds the screen, then output streams as for
+    /// one bro started itself. The pty keeps its size until the pane is drawn in a tile (a hidden pane started
+    /// now would otherwise squeeze the agent into a placeholder size).
+    fn start_attached(&mut self, info: bro_host::SessionInfo, _rows: u16, _cols: u16, waker: Waker) -> Result<(), String> {
+        let host = self.svc.host().ok_or("the session server isn't connected")?;
+        let s = self.launch.clone().unwrap_or_default();
+        let mut remote = host.attach(&info);
+        let reader = remote.take_reader_with(self.follow_resizes()).ok_or("the session server gave no output")?;
+        *self.writer.lock() = Some(remote.writer());
+        let pid = remote.pid();
+        self.live = Some(Live::Remote(remote));
+        // ask for this pane's size at its first draw
+        self.wanted = (0, 0);
+        self.saved_sig = Some(self.saved_sig());
+        self.svc.bridge_register(self.bridge_meta(&s, pid));
+        if let Some(spec) = self.bind_spec(&s, pid)
+            && !self.svc.is_demo()
+        {
+            self.insights = Some(super::insights::Insights::start(spec, waker.clone()));
+        }
+        self.start_reader(reader, waker, true);
+        Ok(())
+    }
+
+    /// A pane for a session the server runs (left by a bro that closed): its own metadata and launch, as the
+    /// server kept them. None when the server holds something this bro can't read.
+    pub fn reattach(info: &bro_host::SessionInfo, svc: Services) -> Option<Term> {
+        let mut t = Term::from_saved(info, svc)?;
+        t.attach = Some(info.clone());
+        Some(t)
+    }
+
+    /// A pane as `info`'s metadata describes it, not yet picked up: for a session the server runs
+    /// ([`Term::reattach`]), or one a server that stopped unasked left to bring back (its `keep`).
+    pub fn from_saved(info: &bro_host::SessionInfo, svc: Services) -> Option<Term> {
+        let saved: Saved = serde_json::from_value(info.blob.clone()).ok()?;
+        let age = Duration::from_millis((crate::util::now_ms().max(0) as u64).saturating_sub(saved.started_ms));
+        let meta = Meta {
+            sid: saved.sid,
+            harness: saved.harness,
+            profile: saved.profile,
+            store: saved.store,
+            model: saved.model,
+            label: saved.label,
+            name: saved.name,
+            renamed: saved.renamed,
+            cwd: saved.cwd,
+            project: saved.project,
+            started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+            route_id: saved.route_id,
+            cleanup: saved.cleanup,
+            orchestrator: saved.orchestrator,
+        };
+        let mut t = Term::new(meta, saved.spawn.clone(), svc);
+        t.spawn = None;
+        t.launch = Some(saved.spawn);
+        t.launch_spec = saved.launch_spec;
+        t.saved_route = saved.route;
+        t.saved_agent = saved.agent_session;
+        // the snapshot is cut at the server's size: take it at that size (the server resizes it to whoever controls it)
+        let (rows, cols) = (info.rows.max(2), info.cols.max(10));
+        t.parser.lock().screen_mut().set_size(rows, cols);
+        if let Some(m) = &t.mirror {
+            m.resize(rows, cols);
+        }
+        t.size = (rows, cols);
+        t.base = (rows, cols);
+        *t.remote_size.lock() = Some((rows, cols));
+        Some(t)
+    }
+
+    /// Another client renamed this session: take its name and label (and don't send them back).
+    pub fn apply_blob(&mut self, blob: &serde_json::Value) {
+        let Ok(saved) = serde_json::from_value::<Saved>(blob.clone()) else { return };
+        self.meta.name = saved.name;
+        self.meta.renamed = saved.renamed;
+        self.meta.label = saved.label;
+        if self.saved_sig.is_some() {
+            self.saved_sig = Some(self.saved_sig());
+        }
+    }
+
+    /// Another client controls this hosted session: its size is theirs until you type into it.
+    pub fn watching(&self) -> bool {
+        matches!(&self.live, Some(Live::Remote(r)) if !r.controlling())
+    }
+
+    /// The hosted session's id on the server (its pane's session id).
+    pub fn host_id(&self) -> Option<&str> {
+        match &self.live {
+            Some(Live::Remote(r)) => Some(r.id()),
+            _ => self.attach.as_ref().map(|a| a.id.as_str()),
+        }
+    }
+
+    /// The session runs in the session server (or will, once this pane picks it up).
+    pub fn hosted(&self) -> bool {
+        matches!(self.live, Some(Live::Remote(_))) || self.attach.is_some()
+    }
+
+    /// Leave a hosted session running as bro closes: dropping this pane won't end it.
+    pub fn detach(&mut self) {
+        self.detached = true;
+        if let Some(i) = &self.insights {
+            i.stop();
+        }
+        if let Some(Live::Remote(r)) = &self.live {
+            r.forget();
+        }
+    }
+
+    /// The proxy route a reattached session talks through (the app adds it to this bro's proxy again).
+    pub fn saved_route(&self) -> Option<&bro_proxy::Route> {
+        self.saved_route.as_ref()
+    }
+
+    /// What the server keeps for this pane (see [`Saved`]).
+    fn saved(&self, s: &Spawn) -> Option<serde_json::Value> {
+        let m = &self.meta;
+        let route = m.route_id.as_ref().and_then(|id| self.svc.state().proxy.routes.iter().find(|r| &r.id == id).cloned()).or_else(|| self.saved_route.clone());
+        let started = std::time::SystemTime::now().checked_sub(m.started.elapsed()).unwrap_or_else(std::time::SystemTime::now);
+        let saved = Saved {
+            sid: m.sid.clone(),
+            harness: m.harness,
+            profile: m.profile.clone(),
+            store: m.store.clone(),
+            model: m.model.clone(),
+            label: m.label.clone(),
+            name: m.name.clone(),
+            renamed: m.renamed,
+            cwd: m.cwd.clone(),
+            project: m.project.clone(),
+            started_ms: started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+            route_id: m.route_id.clone(),
+            route,
+            cleanup: m.cleanup.clone(),
+            orchestrator: m.orchestrator,
+            spawn: s.clone(),
+            launch_spec: self.launch_spec.clone(),
+            agent_session: self.agent_session(),
+        };
+        serde_json::to_value(saved).ok()
+    }
+
+    /// What the server writes to disk to bring this pane back if it stops unasked: [`Saved`] without its secrets
+    /// (the environment and the proxy route can hold keys; a comeback builds them again).
+    fn kept(&self, s: &Spawn) -> Option<serde_json::Value> {
+        let mut v = self.saved(s)?;
+        v["spawn"]["env"] = serde_json::Value::Array(vec![]);
+        v["route"] = serde_json::Value::Null;
+        Some(v)
+    }
+
+    /// The agent conversation this pane holds, as its insights found it (or as it came back).
+    pub(crate) fn agent_session(&self) -> Option<String> {
+        self.insights.as_ref().and_then(|i| i.session_id()).or_else(|| self.saved_agent.clone())
+    }
+
+    /// A fingerprint of what can change in [`Saved`] while the session runs (renames, a reload's staged files).
+    fn saved_sig(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let m = &self.meta;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&m.name, m.renamed, &m.label, &m.route_id, &m.cleanup, &m.model, &m.profile, &m.store, self.agent_session()).hash(&mut h);
+        h.finish()
+    }
+
+    /// Tell the server about a rename (or anything else in [`Saved`] that moved).
+    fn sync_saved(&mut self) {
+        if !matches!(self.live, Some(Live::Remote(_))) || self.detached {
+            return;
+        }
+        let sig = self.saved_sig();
+        if self.saved_sig == Some(sig) {
+            return;
+        }
+        self.saved_sig = Some(sig);
+        let s = self.launch.clone().unwrap_or_default();
+        if let (Some(Live::Remote(r)), Some(blob)) = (&self.live, self.saved(&s)) {
+            r.set_blob(blob, self.kept(&s).unwrap_or_default());
+        }
+    }
+
+    /// Start `cmd` on a pseudo-terminal of bro's own.
+    #[allow(clippy::type_complexity)]
+    fn start_local(mut cmd: CommandBuilder, s: &Spawn, rows: u16, cols: u16) -> Result<(Live, Box<dyn Write + Send>, Box<dyn Read + Send>), String> {
         let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("couldn't open a pty: {e}"))?;
+        let tree = bro_core::proc_tree::ProcessTree::new().map_err(|e| format!("session process owner: {e}"))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: tree owns this job until after spawn_command returns, including error paths.
+            unsafe { cmd.set_windows_job_handle(tree.job_handle().as_raw_handle()) };
+        }
+        let child = pair.slave.spawn_command(cmd).map_err(|e| format!("couldn't start {}: {e:#}", s.program))?;
+        drop(pair.slave);
+        let pid = child.process_id();
+        let mut live = Live::Local { tree, master: pair.master, child };
+        let Live::Local { tree, master, .. } = &mut live else { unreachable!() };
+        tree.watch_pty(pid.ok_or("the session has no process id")?).map_err(|e| format!("session exit watcher: {e}"))?;
+        // Keep ownership local through every fallible setup step, so failures also end the child.
+        let writer = master.take_writer().map_err(|e| format!("pty writer: {e}"))?;
+        let reader = master.try_clone_reader().map_err(|e| format!("pty reader: {e}"))?;
+        Ok((live, writer, reader))
+    }
+
+    /// The program, its arguments and environment, as bro starts every session.
+    fn command(&self, s: &Spawn) -> CommandBuilder {
         let (prog, pre) = resolve(&s.program);
         let mut cmd = CommandBuilder::new(&prog);
         cmd.args(&pre);
@@ -386,38 +794,7 @@ impl Term {
         for (k, v) in &s.env {
             cmd.env(k, v);
         }
-        let tree = bro_core::proc_tree::ProcessTree::new().map_err(|e| format!("session process owner: {e}"))?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            // SAFETY: tree owns this job until after spawn_command returns, including error paths.
-            unsafe { cmd.set_windows_job_handle(tree.job_handle().as_raw_handle()) };
-        }
-        let child = pair.slave.spawn_command(cmd).map_err(|e| format!("couldn't start {}: {e:#}", s.program))?;
-        drop(pair.slave);
-        let pid = child.process_id();
-        let mut live = Live { tree, master: pair.master, child };
-        live.tree.watch_pty(pid.ok_or("the session has no process id")?).map_err(|e| format!("session exit watcher: {e}"))?;
-        // Keep ownership local through every fallible setup step, so failures also end the child.
-        let writer = live.master.take_writer().map_err(|e| format!("pty writer: {e}"))?;
-        let reader = live.master.try_clone_reader().map_err(|e| format!("pty reader: {e}"))?;
-        *self.writer.lock() = Some(Box::new(super::writer::Writer::new(writer).map_err(|e| format!("pty input worker: {e}"))?));
-        self.parser.lock().screen_mut().set_size(rows, cols);
-        if let Some(m) = &self.mirror {
-            m.resize(rows, cols);
-        }
-        self.size = (rows, cols);
-        self.base = (rows, cols);
-        self.live = Some(live);
-        self.svc.bridge_register(self.bridge_meta(s, pid));
-        self.launch = Some(s.clone());
-        if let Some(spec) = self.bind_spec(s, pid)
-            && !self.svc.is_demo()
-        {
-            self.insights = Some(super::insights::Insights::start(spec, waker.clone()));
-        }
-        self.start_reader(reader, waker);
-        Ok(())
+        cmd
     }
 
     /// How to find this pane's transcript (Claude / Codex only).
@@ -461,6 +838,18 @@ impl Term {
     /// `bro --demo`: this session leads `team`.
     pub fn set_demo_team(&mut self, team: bro_core::agent_teams::Team) {
         self.insights = Some(super::insights::Insights::fixed_team(team));
+    }
+
+    /// `bro --demo`: what this session's transcript says (`jsonl`), its facts and its conversation; a team set
+    /// before stays.
+    pub fn set_demo_transcript(&mut self, jsonl: &str) {
+        let Some(h) = self.meta.harness else { return };
+        let team = self.team();
+        let insights = super::insights::Insights::fixed_transcript(h, jsonl);
+        if let Some(team) = team {
+            insights.set_team(Some((*team).clone()));
+        }
+        self.insights = Some(insights);
     }
 
     /// The agent team this Claude session leads, as Claude Code last wrote it (see [`super::insights::Snapshot::team`]).
@@ -520,11 +909,14 @@ impl Term {
     pub fn reregister(&self) {
         if let Some(l) = &self.live {
             let s = Spawn { program: self.meta.harness.map(|h| h.label().to_string()).unwrap_or_else(|| "shell".into()), ..Spawn::default() };
-            self.svc.bridge_register(self.bridge_meta(&s, l.child.process_id()));
+            self.svc.bridge_register(self.bridge_meta(&s, l.pid()));
         }
     }
 
-    fn start_reader(&mut self, mut reader: Box<dyn Read + Send>, waker: Waker) {
+    /// Read the program's output on a thread: into the parser (and the desktop app's mirror), to the bridge.
+    /// `remote`: the session server holds the session and answers what its program asks (here, nothing is).
+    fn start_reader(&mut self, mut reader: Box<dyn Read + Send>, waker: Waker, remote: bool) {
+        self.set_answers(remote);
         let parser = self.parser.clone();
         let program_state = self.program_state.clone();
         let writer = self.writer.clone();
@@ -535,39 +927,50 @@ impl Term {
         let mirror = self.mirror.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 16384];
+            // the session with the keyboard reads ahead of the others (looked up now and then, not every chunk)
+            let (mut ahead, mut looked) = (false, None::<Instant>);
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        if looked.is_none_or(|t| t.elapsed() >= Duration::from_millis(100)) {
+                            looked = Some(Instant::now());
+                            let focused = svc.focused_session().as_deref() == Some(sid.as_str());
+                            if focused != ahead {
+                                ahead = focused;
+                                crate::util::prioritize_thread(ahead);
+                            }
+                        }
                         let data = &buf[..n];
+                        // what the program asked its terminal (ConPTY asks where the cursor is, and waits)
                         let reply = {
                             let mut p = parser.lock();
                             p.process(data);
                             *program_state.lock() = ProgramState::of(&p);
-                            // Device Status Report: ConPTY asks where the cursor is and waits for the answer
-                            contains(data, b"\x1b[6n").then(|| {
-                                let (r, c) = p.screen().cursor_position();
-                                format!("\x1b[{};{}R", r + 1, c + 1)
-                            })
+                            p.callbacks_mut().answers.take()
                         }; // parser lock released before writing the reply
-                        if let Some(reply) = reply
-                            && let Some(w) = writer.lock().as_mut() {
-                                let _ = w.write_all(reply.as_bytes());
-                                let _ = w.flush();
-                            }
-                        // the desktop app's screen, and the answers to what the program asked it
+                        if !reply.is_empty()
+                            && let Some(w) = writer.lock().as_mut()
+                        {
+                            let _ = w.write_all(&reply);
+                            let _ = w.flush();
+                        }
+                        // the desktop app's screen, and its answers to what the program asked (the server gives
+                        // them for a session it holds: once, whoever watches)
                         if let Some(m) = &mirror {
                             let answers = m.feed(data);
-                            if !answers.is_empty()
+                            if !remote
+                                && !answers.is_empty()
                                 && let Some(w) = writer.lock().as_mut()
                             {
                                 let _ = w.write_all(&answers);
                                 let _ = w.flush();
                             }
                         }
-                        svc.bridge_output(&sid, data);
+                        // the screens are current: draw before the phone bridge (one lock for every session) has it
                         last_output.store(born.elapsed().as_millis() as u64, Ordering::Relaxed);
                         waker.wake();
+                        svc.bridge_output(&sid, data);
                     }
                 }
             }
@@ -596,10 +999,80 @@ impl Term {
         self.enter_at = Some(Instant::now() + Duration::from_millis(300));
     }
 
-    /// Type a slash command key by key, let the program's command menu settle on it, then Enter.
+    /// A message you wrote (focus mode's reply box): typed as one paste with its line breaks kept when the
+    /// program takes pastes, then Enter a moment later. It counts as your typing, as keys do.
+    pub fn send_message(&mut self, text: &str) {
+        self.typed += 1;
+        self.scroll = 0;
+        if !self.program_state.lock().bracketed_paste {
+            return self.submit(text);
+        }
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.write(format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", "")).as_bytes());
+        self.enter_at = Some(Instant::now() + Duration::from_millis(300));
+    }
+
+    /// Type a slash command key by key, let the program's command menu settle on it, then Enter. A command after
+    /// one still on its way waits for it.
     pub fn type_command(&mut self, command: &str) {
-        self.write(command.as_bytes());
-        self.enter_at = Some(Instant::now() + Duration::from_millis(400));
+        let at = self.outbox.back().map_or_else(Instant::now, |(t, _)| *t + Duration::from_millis(150));
+        self.outbox.push_back((at, command.as_bytes().to_vec()));
+        self.outbox.push_back((at + Duration::from_millis(400), b"\r".to_vec()));
+        self.send_due();
+    }
+
+    /// A message with pictures in it (focus mode): each piece of text and each picture's path as a paste of its
+    /// own, in order, a moment apart, so the agent takes each picture in where it was (a path pasted alone is how
+    /// Claude Code and Codex take a picture), then Enter once it has read the last. Counts as your typing.
+    pub fn send_parts(&mut self, parts: &[crate::focus::Part]) {
+        use crate::focus::Part;
+        self.typed += 1;
+        self.scroll = 0;
+        let bracketed = self.program_state.lock().bracketed_paste;
+        let mut at = self.outbox.back().map_or_else(Instant::now, |(t, _)| *t + Duration::from_millis(150));
+        for part in parts {
+            let (text, wait) = match part {
+                Part::Text(t) => (t.replace("\r\n", "\n").replace('\r', "\n"), 80),
+                Part::Picture(p) => (crate::clip::paste_form(&[p.to_string_lossy().into_owned()]), 500),
+            };
+            if text.is_empty() {
+                continue;
+            }
+            let bytes = if bracketed { format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", "")) } else { text.replace('\n', " ") };
+            self.outbox.push_back((at, bytes.into_bytes()));
+            at += Duration::from_millis(wait);
+        }
+        self.outbox.push_back((at + Duration::from_millis(250), b"\r".to_vec()));
+        self.send_due();
+    }
+
+    /// Write what's waiting in the outbox whose time has come.
+    fn send_due(&mut self) {
+        let now = Instant::now();
+        while self.outbox.front().is_some_and(|(at, _)| *at <= now) {
+            if let Some((_, bytes)) = self.outbox.pop_front() {
+                self.write(&bytes);
+            }
+        }
+    }
+
+    /// Tests: everything waiting in the outbox, now.
+    #[cfg(test)]
+    pub fn flush_outbox(&mut self) {
+        while let Some((_, bytes)) = self.outbox.pop_front() {
+            self.write(&bytes);
+        }
+    }
+
+    /// The agent's config folder as bro started it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), when it set one.
+    pub fn config_home(&self) -> Option<PathBuf> {
+        let var = match self.meta.harness? {
+            Harness::Claude => "CLAUDE_CONFIG_DIR",
+            Harness::Codex => "CODEX_HOME",
+            _ => return None,
+        };
+        let s = self.launch.as_ref().or(self.spawn.as_ref())?;
+        s.env.iter().find(|(k, _)| k == var).map(|(_, v)| PathBuf::from(v)).filter(|p| !p.as_os_str().is_empty())
     }
 
     /// Write to the program on bro's own behalf.
@@ -677,30 +1150,65 @@ impl Term {
         *self.program_state.lock() = ProgramState::of(&parser);
     }
 
+    /// Tests: take the size the server last announced, as a poll does.
+    #[cfg(test)]
+    pub(crate) fn poll_size_for_test(&mut self) {
+        self.follow_remote_size();
+    }
+
+    /// Tests: who answers the program's queries, as starting a session sets it.
+    #[cfg(test)]
+    pub(crate) fn set_answers_for_test(&self, remote: bool) {
+        self.set_answers(remote);
+    }
+
     #[cfg(test)]
     pub(crate) fn parser_for_test(&self) -> Arc<Mutex<Parser>> {
         self.parser.clone()
     }
 
-    /// The pty is bigger than its local size because a remote client watches (or did within the grace).
+    /// The pty is bigger than its local size because a remote client watches (or did within the grace). Not while
+    /// another bro window controls a hosted session: its size is that window's (see [`Term::watching`]).
     pub fn remote_grown(&self) -> bool {
-        self.size.0 > self.base.0 || self.size.1 > self.base.1
+        !self.watching() && (self.size.0 > self.base.0 || self.size.1 > self.base.1)
     }
 
     /// Resize the pty and the parser (no-op if unchanged).
     fn set_pty_size(&mut self, rows: u16, cols: u16) {
-        if (rows, cols) == self.size || rows == 0 || cols == 0 {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        // the server sizes a session it holds, to whoever controls it: ask for this size, and let the screens
+        // follow what it says (in line with the output: see `follow_resizes`)
+        if let Some(Live::Remote(r)) = &self.live {
+            if (rows, cols) != self.wanted {
+                self.wanted = (rows, cols);
+                r.resize(rows, cols);
+            }
+            self.follow_remote_size();
+            return;
+        }
+        if (rows, cols) == self.size {
             return;
         }
         self.size = (rows, cols);
         if let Some(l) = &self.live {
-            let _ = l.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            l.resize(rows, cols);
         }
         self.parser.lock().screen_mut().set_size(rows, cols);
         if let Some(m) = &self.mirror {
             m.resize(rows, cols);
         }
         self.svc.bridge_resize(&self.meta.sid, cols, rows);
+    }
+
+    /// A hosted session's size is what the server last said: the tile shows it as it shows a pty grown for a phone.
+    fn follow_remote_size(&mut self) {
+        let Some(size) = *self.remote_size.lock() else { return };
+        if size != self.size {
+            self.size = size;
+            self.svc.bridge_resize(&self.meta.sid, size.1, size.0);
+        }
     }
 
     /// The desktop app's copy of the screen.
@@ -761,6 +1269,13 @@ impl Term {
         p.screen().rows(0, cols).collect()
     }
 
+    /// [`Term::screen_rows`] unless the output reader holds the screen right now (a frame never waits on it).
+    pub fn try_screen_rows(&self) -> Option<Vec<String>> {
+        let p = self.parser.try_lock()?;
+        let (_, cols) = p.screen().size();
+        Some(p.screen().rows(0, cols).collect())
+    }
+
     /// (rows, cols) of the pty.
     #[cfg(test)]
     pub fn size(&self) -> (u16, u16) {
@@ -770,21 +1285,29 @@ impl Term {
     /// Kill the program and everything owned by its session (bridge kill, close, quit).
     pub fn kill(&mut self) {
         self.closed.store(true, Ordering::SeqCst);
+        if self.detached {
+            return;
+        }
         if let Some(l) = &mut self.live {
-            l.tree.terminate();
-            let _ = l.child.kill();
+            l.kill();
+        }
+        // closed before this pane picked it up: end it on the server all the same
+        if let Some(info) = self.attach.take()
+            && let Some(h) = self.svc.host()
+        {
+            h.close(&info.id);
         }
     }
 
     /// Exit code, once exited.
     pub fn exit_code(&mut self) -> Option<i32> {
         if self.exit_status.is_none() {
-            self.exit_status = self.live.as_mut().and_then(|l| l.child.try_wait().ok().flatten()).map(|s| s.exit_code() as i32);
+            self.exit_status = self.live.as_mut().and_then(|l| l.exit_code());
             if self.exit_status.is_some()
                 && let Some(live) = &mut self.live
             {
                 self.closed.store(true, Ordering::SeqCst);
-                live.tree.terminate();
+                live.end_tree();
             }
         }
         self.exit_status
@@ -1010,10 +1533,6 @@ pub(crate) fn resolve(program: &str) -> (String, Vec<String>) {
     (path, vec![])
 }
 
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
-}
-
 /// A session colour in the current theme: default fg/bg follow a painted theme background, the 16 ANSI colours
 /// come from its palette, ANSI white text is darkened on light themes, and on painted dark themes the greys CLIs
 /// shade with lean toward the theme's own background and text.
@@ -1091,6 +1610,7 @@ impl Pane for Term {
     fn header(&self, t: &Theme, time: f64) -> (Line<'static>, Option<Line<'static>>) {
         let brand = crate::ui::harness_color(self.meta.harness, t);
         let mut spans = vec![Span::raw(" "), Span::styled(format!("{} ", crate::ui::harness_glyph(self.meta.harness)), Style::default().fg(brand))];
+        spans.extend(crate::ui::model_badge(self.meta.harness, self.meta.profile.as_deref(), self.meta.model.as_deref(), t));
         if let Some(n) = self.display_title() {
             spans.push(Span::styled(format!("{n}  "), Style::default().add_modifier(Modifier::BOLD)));
         }
@@ -1106,6 +1626,10 @@ impl Pane for Term {
         if self.remote_grown() {
             // the tile shows the bottom-left of a bigger screen while a phone / web client watches
             right.push(Span::styled(format!(" ⇲ {}×{} remote ", self.size.1, self.size.0), Style::default().fg(t.muted)));
+        }
+        if self.watching() {
+            // another bro window typed into it last: its size is that window's until you type here
+            right.push(Span::styled(" ⇄ watching · type to take over ".to_string(), Style::default().fg(t.muted)));
         }
         if let Some(note) = self.resume_note() {
             right.push(Span::styled(format!(" {note} "), Style::default().fg(t.inline)));
@@ -1130,7 +1654,8 @@ impl Pane for Term {
         true
     }
     fn alive(&self) -> bool {
-        !self.exited.load(Ordering::SeqCst)
+        // a reload keeps the pane while its new session starts (a session server restart ends the old one first)
+        !self.exited.load(Ordering::SeqCst) || self.reloading
     }
     fn activity(&self) -> Option<Activity> {
         if self.queued.is_some() {
@@ -1159,6 +1684,10 @@ impl Pane for Term {
     fn tick_every(&self) -> Option<Duration> {
         // Watch every running process, including hidden shell tabs. ConPTY may keep its
         // output pipe open after the child exits, so EOF alone cannot drive tab cleanup.
+        // A message going in piece by piece is watched closely, so each goes at its time.
+        if !self.outbox.is_empty() {
+            return Some(Duration::from_millis(60));
+        }
         (self.agent || self.live.is_some()).then_some(Duration::from_millis(400))
     }
     fn poll(&mut self, cx: &mut Cx) {
@@ -1169,9 +1698,19 @@ impl Pane for Term {
             self.exited.store(true, Ordering::SeqCst);
             return;
         }
+        self.send_due();
         // hidden panes are never rendered: start and end the remote minimum from here too
         if self.sized() {
             self.apply_size();
+        }
+        self.follow_remote_size();
+        // the theme changed: the answers to what the program asks follow it (never waiting on the output worker)
+        let profile = crate::services::host::answer_profile();
+        if let Some(mut p) = self.parser.try_lock() {
+            let a = &mut p.callbacks_mut().answers;
+            if !Arc::ptr_eq(&a.profile, &profile) {
+                a.profile = profile;
+            }
         }
         if self.last_scan.elapsed() < Duration::from_millis(200) {
             return;
@@ -1180,6 +1719,7 @@ impl Pane for Term {
         self.scan();
         self.auto_approve(cx);
         self.auto_resume(cx);
+        self.sync_saved();
         // shells title their window with their own exe path — that's noise, keep bro's name for them
         let title = Some(self.display_name());
         if title.is_some() && title != self.title_sent {

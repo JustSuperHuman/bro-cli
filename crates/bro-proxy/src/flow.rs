@@ -76,8 +76,10 @@ async fn run(
     body: &Bytes,
     slot: &mut Option<Recorder>,
 ) -> Result<Response, ProxyError> {
-    let json: Value = serde_json::from_slice(body)
-        .map_err(|e| ProxyError::invalid(format!("request body is not valid JSON: {e}")))?;
+    let json: Value = serde_json::from_slice(body).map_err(|e| match headers.get(http::header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()) {
+        Some(enc) if !enc.eq_ignore_ascii_case("identity") => ProxyError::invalid(format!("bro-proxy can't read a compressed request body (content-encoding: {enc}); send it uncompressed")),
+        _ => ProxyError::invalid(format!("request body is not valid JSON: {e}")),
+    })?;
     if !json.is_object() {
         return Err(ProxyError::invalid("request body must be a JSON object"));
     }
@@ -102,7 +104,8 @@ async fn run(
         Upstream::ChatGptCodex { codex_home } => Some(state.codex_auth(codex_home, false).await?),
         _ => None,
     };
-    let chatgpt = codex_auth.as_ref().is_some_and(chatgpt::is_chatgpt_login);
+    // proxy mode's Codex logins are all ChatGPT subscriptions
+    let chatgpt = codex_auth.as_ref().is_some_and(chatgpt::is_chatgpt_login) || matches!(route.upstream, Upstream::CodexLogins);
     let ctx = Ctx {
         state,
         route,
@@ -195,12 +198,14 @@ async fn passthrough(
         }
         Dialect::Anthropic | Dialect::Gemini => {}
     }
-    let session_key = session_of(inbound, &json);
+    let shared = route.upstream.family().is_some();
+    let session_key = if shared { conversation_key(inbound, &json, headers) } else { session_of(inbound, &json) };
     let call = UpstreamCall {
         endpoint: endpoint_for(inbound),
         body: Some(Bytes::from(serde_json::to_vec(&json).unwrap_or_default())),
         stream: upstream_stream,
-        client_headers: if inbound == Dialect::Anthropic {
+        // Codex's own headers (originator, version, its session and turn metadata) go with it in proxy mode
+        client_headers: if inbound == Dialect::Anthropic || matches!(route.upstream, Upstream::CodexLogins) {
             upstream::forwardable_client_headers(headers)
         } else {
             HeaderMap::new()
@@ -208,6 +213,7 @@ async fn passthrough(
         session_key,
         translated: false,
         codex_auth,
+        user_id: json.pointer("/metadata/user_id").and_then(Value::as_str).filter(|_| inbound == Dialect::Anthropic).map(str::to_string),
     };
     let resp = upstream::send(state, route, &call).await?;
     if let Some(c) = trim {
@@ -216,6 +222,7 @@ async fn passthrough(
     let account = resp.account.clone();
     if let Some(rec) = slot.as_mut() {
         rec.set_account(account.clone());
+        rec.set_counter(resp.counter.clone());
     }
     if collect {
         let v = pipeline::collect_responses_stream(resp.body).await?;
@@ -223,14 +230,16 @@ async fn passthrough(
         finish_json(rec, inbound, &v);
         return Ok(json_response(StatusCode::OK, &v, account.as_deref()));
     }
+    // proxy mode: the harness reads every header its backend sends (limits, request ids, Codex's x-codex-*)
+    let out_headers = |h: &HeaderMap| if shared { crate::errors::relay_headers(h) } else { passthrough_headers(h) };
     if stream && resp.is_sse() {
         let rec = slot.take().expect("recorder");
-        let headers = passthrough_headers(&resp.headers);
+        let headers = out_headers(&resp.headers);
         let body = pipeline::passthrough_body(resp.body, inbound, rec);
         return Ok(sse_response(body, account.as_deref(), headers));
     }
     let status = resp.status;
-    let headers = passthrough_headers(&resp.headers);
+    let headers = out_headers(&resp.headers);
     let bytes = upstream::read_all(resp.body).await?;
     let rec = slot.take().expect("recorder");
     match serde_json::from_slice::<Value>(&bytes) {
@@ -248,6 +257,30 @@ fn finish_json(mut rec: Recorder, dialect: Dialect, v: &Value) {
         rec.set_usage(&u);
     }
     rec.finish(200, None);
+}
+
+/// Which conversation a request belongs to, so proxy mode keeps it on one login (its prompt cache
+/// lives there). Claude Code's `metadata.user_id` is JSON naming its session and, for a subagent,
+/// the parent's; Codex names a subagent's parent thread in `x-codex-parent-thread-id` and its own in
+/// `prompt_cache_key`. Subagents stay with their parent.
+pub(crate) fn conversation_key(dialect: Dialect, v: &Value, headers: &HeaderMap) -> Option<String> {
+    let nonempty = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    match dialect {
+        Dialect::Anthropic => {
+            let uid = v.pointer("/metadata/user_id").and_then(Value::as_str)?;
+            if let Ok(Value::Object(o)) = serde_json::from_str::<Value>(uid) {
+                let id = |k: &str| nonempty(o.get(k).and_then(Value::as_str));
+                return id("parent_session_id").or_else(|| id("session_id")).or_else(|| Some(uid.to_string()));
+            }
+            nonempty(uid.rsplit_once("_session_").map(|(_, s)| s)).or_else(|| Some(uid.to_string()))
+        }
+        Dialect::Responses => nonempty(headers.get("x-codex-parent-thread-id").and_then(|h| h.to_str().ok()))
+            .or_else(|| nonempty(v.get("prompt_cache_key").and_then(Value::as_str)))
+            .or_else(|| nonempty(headers.get("session_id").and_then(|h| h.to_str().ok())))
+            .or_else(|| nonempty(v.get("user").and_then(Value::as_str))),
+        Dialect::Chat => nonempty(v.get("user").and_then(Value::as_str)),
+        Dialect::Gemini => None,
+    }
 }
 
 fn session_of(dialect: Dialect, v: &Value) -> Option<String> {
@@ -284,7 +317,7 @@ async fn translated(
     let up = route.upstream.dialect();
     let claude_oauth = matches!(
         route.upstream,
-        Upstream::ClaudeOAuth { .. } | Upstream::ClaudePool { .. }
+        Upstream::ClaudeOAuth { .. } | Upstream::ClaudePool { .. } | Upstream::ClaudeLogins
     );
     let base = match &route.upstream {
         Upstream::OpenAiChat { base_url, .. } | Upstream::OpenAiResponses { base_url, .. } => {
@@ -378,6 +411,7 @@ async fn translated(
         session_key: session,
         translated: inbound != Dialect::Anthropic,
         codex_auth,
+        user_id: None,
     };
     let resp = upstream::send(state, route, &call).await?;
     if let Some(c) = trim {
@@ -386,6 +420,7 @@ async fn translated(
     let account = resp.account.clone();
     if let Some(rec) = slot.as_mut() {
         rec.set_account(account.clone());
+        rec.set_counter(resp.counter.clone());
     }
 
     // 3. upstream → inbound

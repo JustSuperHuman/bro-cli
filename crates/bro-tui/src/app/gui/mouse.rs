@@ -206,6 +206,13 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
             focus(&mut g.app, id);
             super::views::click(&mut g.app, id, n, p, m, count);
         }
+        // a right-click: the menu of what's under it, in the views that have one
+        Some(Action::View(id, n)) if cb == CButton::Right => {
+            focus(&mut g.app, id);
+            super::views::context(&mut g.app, id, n, p);
+        }
+        Some(Action::Focus(id, n)) if cb == CButton::Left => super::focus::click(g, id, n, p, count),
+        Some(Action::Focus(id, _)) => focus(&mut g.app, id),
         Some(Action::Pane(id, act)) => pane_press(g, id, act, p, cb, m, count),
         // a blank spot on the sidebar takes the keyboard there
         _ if on_side => {
@@ -280,6 +287,7 @@ fn side_click(g: &mut Gui, hit: SideHit, cb: CButton, m: KeyModifiers) {
         SideHit::LaunchUsage(h, profile) => app.launch_usage(h, profile),
         SideHit::UsageToggle => app.toggle_usage_details(),
         SideHit::Stats => app.open_view("stats"),
+        SideHit::Sessions => app.show_every_session(),
         SideHit::Proxy => app.open_view("proxy"),
         SideHit::Bridge => app.open_view("bridge"),
         SideHit::Settings => app.open_view("settings"),
@@ -809,6 +817,7 @@ pub fn wheel(g: &mut Gui, p: Point, _dx: f32, dy: f32) {
     }
     match hit {
         Some(Action::Side(SideHit::Strip(_))) => g.app.strip_wheel(down),
+        Some(Action::Focus(id, _)) => super::focus::wheel(g, id, dy),
         Some(Action::Pane(id, _)) => pane_wheel(g, id, p, dy, m),
         Some(Action::Media(n)) => g.media.wheel(n, p, dy),
         Some(Action::View(id, n)) => {
@@ -878,6 +887,14 @@ pub fn type_text(g: &mut Gui, text: &str) {
     // you're here (the summary screensaver turns back); what you composed still lands, as a paste does
     g.app.touched();
     let to_terminal = !g.app.overlay.is_open() && g.app.renaming.is_none() && !g.app.side_focus && !g.app.prefix_armed;
+    // a session in focus mode: into its reply box
+    if to_terminal
+        && let Some(id) = g.app.focused()
+        && g.app.focus_view(id)
+    {
+        g.app.focus_paste(id, text);
+        return;
+    }
     if to_terminal
         && let Some(id) = g.app.focused()
         && let Some(t) = g.app.panes.get_mut(&id).and_then(|p| p.as_term())
@@ -898,6 +915,14 @@ pub fn dropped(g: &mut Gui, path: std::path::PathBuf) {
         if g.media.items.iter().any(|it| it.path == path) {
             g.show_media(&path);
         }
+    }
+    // into a reply box in focus mode: a picture as a thumbnail, another file as its path
+    if !g.app.overlay.is_open()
+        && let Some(id) = g.app.focused()
+        && g.app.focus_view(id)
+    {
+        g.app.focus_attach(id, vec![path]);
+        return;
     }
     // a space after it, so a second file dropped next isn't glued on
     let text = crate::clip::paste_form(&[path.to_string_lossy().to_string()]);

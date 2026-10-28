@@ -3,7 +3,9 @@
 //! The low-level hook feeds every non-self-injected key event through
 //! [`Machine::on_key`] and gets back whether to swallow it, what to tell the
 //! worker, and which keystrokes to re-inject (sent from the hook thread's
-//! message loop, never from inside the hook proc).
+//! message loop, never from inside the hook proc). While the hotkey is held the
+//! hook thread also calls [`Machine::tick`], which ends a press whose release
+//! never reached the hook, so talking can't stay on.
 //!
 //! With `swallow`, a solo Windows-key press belongs to voice even when it is
 //! shorter than `min_ms`: its release is masked instead of replayed to Start.
@@ -66,11 +68,17 @@ pub struct Outcome {
     pub inject: Vec<Stroke>,
 }
 
+/// A held hotkey that autorepeated and then went quiet this long has been let go
+/// without the hook seeing it (Windows drops a hook that answers late, and an
+/// elevated window's keys never reach one). Repeats come every 33-400 ms.
+pub const STALE_MS: u32 = 1500;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Idle,
-    /// Talking; `since` is the down timestamp.
-    Held { since: u32 },
+    /// Talking; `since` is the down timestamp, `last` the latest sign the key is
+    /// still down (the down or an autorepeat), `repeats` whether it repeated.
+    Held { since: u32, last: u32, repeats: bool },
     /// The hotkey is part of a chord; everything passes until it is released.
     Passthrough,
 }
@@ -113,14 +121,17 @@ impl Machine {
                     if os.modifier_down {
                         self.state = State::Passthrough;
                     } else {
-                        self.state = State::Held { since: ev.time };
+                        self.state = State::Held { since: ev.time, last: ev.time, repeats: false };
                         out.signal = Some(Signal::Down);
                         out.swallow = self.swallow;
                     }
                 }
                 // Autorepeat while talking.
-                (State::Held { .. }, true) => out.swallow = self.swallow,
-                (State::Held { since }, false) => {
+                (State::Held { since, .. }, true) => {
+                    self.state = State::Held { since, last: ev.time, repeats: true };
+                    out.swallow = self.swallow;
+                }
+                (State::Held { since, .. }, false) => {
                     self.state = State::Idle;
                     let held_ms = ev.time.wrapping_sub(since);
                     let long = held_ms >= self.min_ms;
@@ -168,6 +179,32 @@ impl Machine {
             }
         }
         out
+    }
+
+    /// A press is being talked into.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn held(&self) -> bool {
+        matches!(self.state, State::Held { .. })
+    }
+
+    /// Called every so often while [`Machine::held`] (`now` on the event clock):
+    /// the `Up` of a press whose key autorepeated and then went quiet for
+    /// [`STALE_MS`], as its lost release would have said. A key that never
+    /// repeated (a remapper's bare down) can't be told from one still held, so
+    /// it waits for its release; so does one the OS itself sees down.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn tick(&mut self, now: u32, os: KeyState) -> Option<Signal> {
+        let State::Held { since, last, repeats } = self.state else { return None };
+        if os.hotkey_down {
+            self.state = State::Held { since, last: now, repeats };
+            return None;
+        }
+        // signed: a `now` a little behind `last` is not a wrap-around
+        if !repeats || (now.wrapping_sub(last) as i32) < STALE_MS as i32 {
+            return None;
+        }
+        self.state = State::Idle;
+        Some(Signal::Up { held_ms: last.wrapping_sub(since) })
     }
 }
 
@@ -288,5 +325,67 @@ mod tests {
         assert!(!m.vetoes(VK_MENU_R));
         assert!(m.vetoes(crate::hotkey::VK_SHIFT_L));
         assert!(Machine::new(VK_WIN_R, true, 300).vetoes(VK_CONTROL_L));
+    }
+
+    #[test]
+    fn a_held_key_gone_quiet_is_released() {
+        let mut m = Machine::new(VK_F13, true, 300);
+        assert_eq!(m.on_key(key(VK_F13, true, 1000), free()).signal, Some(Signal::Down));
+        // it autorepeats, then its release never reaches the hook
+        for t in [1500, 1533, 1566, 2000] {
+            assert_eq!(m.on_key(key(VK_F13, true, t), free()), Outcome { swallow: true, signal: None, inject: vec![] });
+        }
+        assert_eq!(m.tick(2500, free()), None);
+        assert_eq!(m.tick(2000 + STALE_MS - 1, free()), None);
+        assert!(m.held());
+        assert_eq!(m.tick(2000 + STALE_MS, free()), Some(Signal::Up { held_ms: 1000 }));
+        assert!(!m.held());
+        assert_eq!(m.tick(9000, free()), None);
+        // the release turning up late changes nothing, and the next press talks again
+        assert_eq!(m.on_key(key(VK_F13, false, 9000), free()), Outcome::default());
+        assert_eq!(m.on_key(key(VK_F13, true, 10_000), free()).signal, Some(Signal::Down));
+    }
+
+    #[test]
+    fn a_key_that_never_repeated_waits_for_its_release() {
+        let mut m = Machine::new(VK_F13, true, 300);
+        m.on_key(key(VK_F13, true, 0), free());
+        assert_eq!(m.tick(60_000, free()), None);
+        assert!(m.held());
+        assert_eq!(m.on_key(key(VK_F13, false, 61_000), free()).signal, Some(Signal::Up { held_ms: 61_000 }));
+    }
+
+    #[test]
+    fn a_key_windows_sees_down_is_still_held() {
+        // repeats the hook missed went to Windows instead: the key is down
+        let mut m = Machine::new(VK_WIN_R, true, 300);
+        m.on_key(key(VK_WIN_R, true, 0), free());
+        m.on_key(key(VK_WIN_R, true, 500), free());
+        assert_eq!(m.tick(5000, KeyState { hotkey_down: true, ..free() }), None);
+        // once Windows has it up too, the quiet counts from there
+        assert_eq!(m.tick(5000 + STALE_MS - 1, free()), None);
+        assert_eq!(m.tick(5000 + STALE_MS, free()), Some(Signal::Up { held_ms: 5000 }));
+    }
+
+    #[test]
+    fn quiet_is_timed_across_the_clock_wrap_and_never_backwards() {
+        let mut m = Machine::new(VK_F13, true, 300);
+        m.on_key(key(VK_F13, true, u32::MAX - 600), free());
+        m.on_key(key(VK_F13, true, u32::MAX - 100), free());
+        // a tick stamped just before the last repeat is no reason to stop
+        assert_eq!(m.tick(u32::MAX - 200, free()), None);
+        assert_eq!(m.tick(STALE_MS - 102, free()), None);
+        assert_eq!(m.tick(STALE_MS - 101, free()), Some(Signal::Up { held_ms: 500 }));
+    }
+
+    #[test]
+    fn only_a_held_press_is_timed_out() {
+        // a chord's hotkey passes through; Windows tracks it, not voice
+        let mut m = Machine::new(VK_WIN_R, true, 300);
+        m.on_key(key(VK_WIN_R, true, 0), free());
+        m.on_key(key(VK_WIN_R, true, 500), free());
+        assert_eq!(m.on_key(key(E, true, 600), free()).signal, Some(Signal::Combo));
+        assert!(!m.held());
+        assert_eq!(m.tick(60_000, free()), None);
     }
 }

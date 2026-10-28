@@ -299,6 +299,15 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             cmd.route = Some(route.request);
             (Some(prov), Some(token), up.clone())
         }
+        // proxy mode: all your Claude or Codex logins, presented to them as their own CLI
+        Target::Logins(claude) => {
+            let up = super::logins_upstream(*claude);
+            let route = proxy_route(up, model, ctx)?;
+            let prov = proxy_provider(up, &route.base, model);
+            let token = route.token.clone();
+            cmd.route = Some(route.request);
+            (Some(prov), Some(token), if *claude { "claude logins" } else { "codex logins" }.into())
+        }
     };
 
     let mut args = Vec::new();

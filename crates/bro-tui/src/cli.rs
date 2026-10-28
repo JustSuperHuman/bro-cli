@@ -31,6 +31,12 @@ pub enum Command {
     /// `bro skills [add | remove | sync] [repo]` — the git repos bro watches for agent skills.
     Skills(crate::skills_cmd::SkillsCmd),
     SkillsHelp,
+    /// `bro host [status | stop | install | uninstall]` — bro's session server (bro starts it itself; no argument
+    /// runs it here; install starts it when you sign in).
+    Host(crate::host_cmd::HostCmd),
+    /// `bro background` — the background bro: carries on with the sessions while no window is open (a quitting bro
+    /// starts it, and so does signing in when bro starts then).
+    Background,
     /// `bro gemini login | status | logout` — the Google sign-in behind the `gemini` provider.
     Gemini(crate::gemini_cmd::GeminiCmd),
     GeminiHelp,
@@ -50,6 +56,9 @@ usage
   bro-cli          the same workspace as a terminal UI (also: bro --tui); takes the same
                    folder and flags
   bro --new        a separate bro even when one is running
+  bro --view       another window on the bro that's running: its sessions, live, to watch and
+                   type into (typing into one takes it over); over SSH beside the desktop app,
+                   bro opens this way by itself
   bro --demo       open with realistic fake data (screenshots; touches no accounts)
   bro gui [folder] the desktop app, even where bro would pick the terminal UI
   bro proxy <upstream> [-m model] [--small-model m] [--port n]
@@ -64,7 +73,7 @@ usage
   bro update [--check]
                    install the newest bro release over this one (--check: only look)
   bro install [tools… | recommended | agents | all] [--force]
-                   Quick Install: JustTools, JustPaste, JustWatch, Git, Node.js, Bun, Python, .NET 9/10/11,
+                   Quick Install: JustTools, JustPaste, JustWatch, JustBrowseMCP, Git, Node.js, Bun, Python, .NET 9/10/11,
                    Claude Code, Codex, Pi, omp… (no names: pick from a list)
   bro --env <file|url> [--save] [command]
                    load API keys and settings from an env file (encrypted ones ask for a
@@ -81,6 +90,10 @@ usage
   bro skills [add | remove | sync] [repo]
                    agent skills from git repos bro watches (e.g. bro skills add t3dotgg/tstack):
                    every skill in them goes into your Claude and Codex homes and stays in step
+  bro host [status | stop | install | uninstall]
+                   the session server that keeps your sessions running while bro is closed
+                   (bro starts it itself; stop ends its sessions; install starts bro in the
+                   background when you sign in, for your user only)
   bro imagine      open your JustImagine gallery in the browser, signed in, and refresh the
                    generate-images, -video and -voice skills for your agents
   bro --version    print the version
@@ -127,6 +140,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
     if args.first().map(String::as_str) == Some("skills") {
         return crate::skills_cmd::parse(&args[1..]).map(|a| a.map_or(Command::SkillsHelp, Command::Skills));
+    }
+    if args.first().map(String::as_str) == Some("background") && args.len() == 1 {
+        return Ok(Command::Background);
+    }
+    if args.first().map(String::as_str) == Some("host") {
+        return crate::host_cmd::parse(&args[1..]).map(Command::Host);
     }
     if args.first().map(String::as_str) == Some("gemini") {
         return crate::gemini_cmd::parse(&args[1..]).map(|a| a.map_or(Command::GeminiHelp, Command::Gemini));

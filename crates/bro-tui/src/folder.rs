@@ -229,7 +229,7 @@ fn complete(parent: &Path, partial: &str) -> Vec<PathBuf> {
 }
 
 /// `C:\Users\me\code` → `~\code` so completions stay short to type.
-fn shorten_home(p: &Path) -> String {
+pub(crate) fn shorten_home(p: &Path) -> String {
     if let Some(h) = dirs::home_dir()
         && let Ok(rest) = p.strip_prefix(&h)
     {

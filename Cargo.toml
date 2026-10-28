@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bro-core", "crates/bro-proxy", "crates/bro-bridge", "crates/bro-tui", "crates/bro-voice", "crates/bro-gfx", "crates/bro-media"]
+members = ["crates/bro-core", "crates/bro-proxy", "crates/bro-bridge", "crates/bro-host", "crates/bro-tui", "crates/bro-voice", "crates/bro-gfx", "crates/bro-media"]
 exclude = ["vendor/vt100", "vendor/portable-pty"]
 
 # Preserve OSC 8 link targets on cells while scrolling and redrawing terminal panes.
@@ -9,7 +9,7 @@ vt100 = { path = "vendor/vt100" }
 portable-pty = { path = "vendor/portable-pty" }
 
 [workspace.package]
-version = "2.1.11"
+version = "2.1.15"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -18,6 +18,7 @@ publish = false
 bro-core = { path = "crates/bro-core" }
 bro-proxy = { path = "crates/bro-proxy" }
 bro-bridge = { path = "crates/bro-bridge" }
+bro-host = { path = "crates/bro-host" }
 bro-voice = { path = "crates/bro-voice" }
 
 # shared

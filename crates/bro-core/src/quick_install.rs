@@ -1,4 +1,4 @@
-//! Quick Install: the tools a coding machine wants (JustTools first, JustPaste and JustWatch on Windows, JustImagine, then Git, Node.js, Bun, Python,
+//! Quick Install: the tools a coding machine wants (JustTools first, JustPaste and JustWatch on Windows, JustImagine, JustBrowseMCP, then Git, Node.js, Bun, Python,
 //! the .NET SDKs, the agent CLIs and a few utilities), which of them are already here, and how to
 //! install the rest on this OS.
 //!
@@ -23,6 +23,8 @@ pub enum Tool {
     JustWatch,
     /// runs as a service; needs Git and Node.js
     JustImagine,
+    /// your browser as an MCP server; needs Node.js, and the extension is loaded by hand once
+    JustBrowse,
     Git,
     GitHubCli,
     Node,
@@ -69,11 +71,12 @@ impl Group {
 
 impl Tool {
     /// Every tool, in list order, which is install order except for [Tool::install_rank].
-    pub const ALL: [Tool; 23] = [
+    pub const ALL: [Tool; 24] = [
         Tool::JustTools,
         Tool::JustPaste,
         Tool::JustWatch,
         Tool::JustImagine,
+        Tool::JustBrowse,
         Tool::Git,
         Tool::GitHubCli,
         Tool::Node,
@@ -102,6 +105,7 @@ impl Tool {
             Tool::JustPaste => "justpaste",
             Tool::JustWatch => "justwatch",
             Tool::JustImagine => "justimagine",
+            Tool::JustBrowse => "justbrowse",
             Tool::Git => "git",
             Tool::GitHubCli => "gh",
             Tool::Node => "node",
@@ -129,6 +133,7 @@ impl Tool {
             "just-paste" | "paste" | "smart-paste" | "smartpaste" => Some(Tool::JustPaste),
             "just-watch" | "watch" => Some(Tool::JustWatch),
             "just-imagine" | "imagine" => Some(Tool::JustImagine),
+            "just-browse" | "justbrowsemcp" | "browse" | "browser" | "browser-mcp" | "chrome-mcp" | "mcp-chrome" => Some(Tool::JustBrowse),
             "github-cli" | "github" => Some(Tool::GitHubCli),
             "nodejs" | "node.js" | "npm" => Some(Tool::Node),
             "python3" | "py" => Some(Tool::Python),
@@ -163,6 +168,7 @@ impl Tool {
             Tool::JustPaste => "JustPaste",
             Tool::JustWatch => "JustWatch",
             Tool::JustImagine => "JustImagine",
+            Tool::JustBrowse => "JustBrowseMCP",
             Tool::Git => "Git",
             Tool::GitHubCli => "GitHub CLI",
             Tool::Node => "Node.js LTS",
@@ -191,6 +197,7 @@ impl Tool {
             Tool::JustPaste => "Ctrl+V in Explorer saves copied images, downloads copied links, clones repos; file copies stay Windows'",
             Tool::JustWatch => "tray app that keeps your dev servers running; agents restart them and read their logs",
             Tool::JustImagine => "your own image, video, song and voice studio, always on in the background; agents generate through its API",
+            Tool::JustBrowse => "agents drive your own signed-in Chrome or Edge over MCP, each session in tabs of its own, without stealing focus",
             Tool::Git => "version control; agents expect it",
             Tool::GitHubCli => "issues, pull requests and releases from the terminal",
             Tool::Node => "JavaScript runtime and npm; Codex and Pi install with it",
@@ -215,7 +222,7 @@ impl Tool {
 
     pub fn group(self) -> Group {
         match self {
-            Tool::JustTools | Tool::JustPaste | Tool::JustWatch | Tool::JustImagine => Group::Main,
+            Tool::JustTools | Tool::JustPaste | Tool::JustWatch | Tool::JustImagine | Tool::JustBrowse => Group::Main,
             Tool::Git | Tool::GitHubCli => Group::Essentials,
             Tool::Node | Tool::Bun | Tool::Python | Tool::Uv | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => Group::Runtimes,
             Tool::Agent(_) => Group::Agents,
@@ -238,10 +245,14 @@ impl Tool {
         Tool::ALL.into_iter().filter(|t| t.supported()).collect()
     }
 
-    /// Where it goes in install order: its place in [`Tool::ALL`], except JustImagine, which comes
-    /// after Git and Node.js because it installs with them.
+    /// Where it goes in install order: its place in [`Tool::ALL`], except JustImagine and JustBrowseMCP, which
+    /// come after Git and Node.js because they install with them.
     pub fn install_rank(self) -> usize {
-        if self == Tool::JustImagine { Tool::ALL.len() } else { Tool::ALL.iter().position(|t| *t == self).unwrap_or(Tool::ALL.len()) }
+        match self {
+            Tool::JustImagine => Tool::ALL.len(),
+            Tool::JustBrowse => Tool::ALL.len() + 1,
+            _ => Tool::ALL.iter().position(|t| *t == self).unwrap_or(Tool::ALL.len()),
+        }
     }
 
     /// Ticked by default when it's missing.
@@ -280,7 +291,7 @@ impl Tool {
             Tool::Tailscale => &["tailscale"],
             Tool::PowerToys => &["PowerToys"],
             Tool::ShareX => &["ShareX"],
-            Tool::JustTools | Tool::JustPaste | Tool::JustWatch | Tool::JustImagine | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => &[],
+            Tool::JustTools | Tool::JustPaste | Tool::JustWatch | Tool::JustImagine | Tool::JustBrowse | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => &[],
         }
     }
 }
@@ -466,6 +477,9 @@ pub fn detect() -> Status {
     if let Some(found) = crate::justimagine::installed() {
         status.insert(Tool::JustImagine, found.describe());
     }
+    if let Some(found) = crate::justbrowse::installed() {
+        status.insert(Tool::JustBrowse, found.version.unwrap_or_else(|| "installed".into()));
+    }
     let sdks = dotnet_sdks(&dirs);
     for tool in Tool::ALL {
         if let Some(want) = tool.dotnet_major() {
@@ -636,6 +650,13 @@ pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
             _ => Err("JustWatch is a Windows app".into()),
         };
     }
+    if tool == Tool::JustBrowse {
+        // its own installer: the newest release, checked against its SHA-256
+        return Ok(vec![match os {
+            Os::Windows { .. } => powershell(crate::justbrowse::installer_command()),
+            _ => sh(crate::justbrowse::installer_command()),
+        }]);
+    }
     if matches!(tool, Tool::ShareX | Tool::PowerToys) && !matches!(os, Os::Windows { .. }) {
         return Err(format!("{} is a Windows app", tool.name()));
     }
@@ -759,6 +780,7 @@ pub fn how(tool: Tool, os: &Os) -> String {
         Tool::JustWatch => format!("{} · then its skill for new sessions", crate::justwatch::installer_command()),
         Tool::ShareX if matches!(os, Os::Windows { .. }) => "the newest setup-x64.exe from github.com/JustSuperHuman/ShareX releases, run elevated (/SILENT)".into(),
         Tool::JustImagine => crate::justimagine::how(),
+        Tool::JustBrowse => format!("{} · the extension, its native bridge (npm), the justbrowse-browser skill and the MCP server for Claude Code and Codex; then Load unpacked once", crate::justbrowse::installer_command()),
         Tool::Agent(h) => match crate::agent_install::plan(h) {
             Ok(steps) => steps.iter().map(|s| s.display.as_str()).collect::<Vec<_>>().join(" && "),
             Err(e) => e,
@@ -794,6 +816,9 @@ pub fn install(tool: Tool, mut say: impl FnMut(&str)) -> Result<(), String> {
 
 /// After an install: what to do before the tool can be used, if anything.
 pub fn after_install(tool: Tool) -> Option<String> {
+    if tool == Tool::JustBrowse {
+        return Some(crate::justbrowse::after_install());
+    }
     if tool == Tool::Tailscale {
         return Some(if cfg!(target_os = "linux") { "sign in: sudo tailscale up".into() } else { "sign in from the Tailscale app (tray / menu bar)".into() });
     }

@@ -7,6 +7,7 @@
 //! Descriptions are cached per harness in `~/.bro/*-v2.cache.json` (v1's entry format,
 //! separate files so v1 and v2 don't prune each other's entries — see [`cache`]).
 mod cache;
+pub mod conversation;
 pub mod describe;
 pub mod live;
 mod messages;

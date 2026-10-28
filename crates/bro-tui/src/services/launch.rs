@@ -99,6 +99,7 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
             // Claude sessions run bro as their peer hooks (see `bro_core::peers`)
             let bro_bin = std::env::current_exe().ok();
             let peon = st.settings.peon.clone();
+            let shared_logins = st.settings.proxy.shared;
             match st.proxy.status.ready() {
                 Some(p) => LaunchCtx {
                     proxy_base: Some(p.base.clone()),
@@ -114,8 +115,9 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
                     claude_mod,
                     bro_bin,
                     peon,
+                    shared_logins,
                 },
-                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, bro_open_off, skill_repos, bridge_url, claude_mod, bro_bin, peon, ..LaunchCtx::default() },
+                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, bro_open_off, skill_repos, bridge_url, claude_mod, bro_bin, peon, shared_logins, ..LaunchCtx::default() },
             }
         };
         let mut cmd = match guard("launch::build", || with_proxy_retry(svc, &mut ctx, |ctx| bro_core::launch::build(&spec, ctx))) {
@@ -210,7 +212,15 @@ pub fn label_for(spec: &LaunchSpec) -> String {
         parts.insert(0, "orchestrator".into());
     }
     if let Some(p) = spec.provider_id.as_deref().or(spec.profile_id.as_deref()) {
-        parts.push(if p.starts_with("gemini-sub:") { "Gemini subscription".into() } else if let Some(name) = p.strip_prefix("gemini:") { format!("Gemini/{name}") } else { p.split(':').next_back().unwrap_or(p).to_string() });
+        parts.push(match p {
+            bro_core::launch::LOGINS_CLAUDE => "claude logins".into(),
+            bro_core::launch::LOGINS_CODEX => "codex logins".into(),
+            p if p.starts_with("gemini-sub:") => "Gemini subscription".into(),
+            p => match p.strip_prefix("gemini:") {
+                Some(name) => format!("Gemini/{name}"),
+                None => p.split(':').next_back().unwrap_or(p).to_string(),
+            },
+        });
     }
     if let Some(m) = &spec.model {
         parts.push(short_model(m));
@@ -244,11 +254,18 @@ pub fn to_proxy(t: UpstreamTarget) -> Upstream {
         UpstreamTarget::ClaudeOAuth { config_dir } => Upstream::ClaudeOAuth { config_dir },
         UpstreamTarget::ClaudePool { config_dirs } => Upstream::ClaudePool { config_dirs },
         UpstreamTarget::GeminiCodeAssist { creds_file } => Upstream::GeminiCodeAssist { creds_file },
+        UpstreamTarget::ClaudeLogins => Upstream::ClaudeLogins,
+        UpstreamTarget::CodexLogins => Upstream::CodexLogins,
     }
 }
 
 /// Local stand-in for `resolve_upstream`: a provider id, "pool", "codex:<p>" or "claude:<p>".
 pub fn map_upstream(upstream: &str, st: &State) -> Result<Upstream, String> {
+    match upstream {
+        bro_core::launch::LOGINS_CLAUDE => return Ok(Upstream::ClaudeLogins),
+        bro_core::launch::LOGINS_CODEX => return Ok(Upstream::CodexLogins),
+        _ => {}
+    }
     let profiles: &[Profile] = st.profiles.ready().map(Vec::as_slice).unwrap_or(&[]);
     if upstream == "pool" {
         let config_dirs: Vec<PathBuf> = profiles.iter().filter(|p| p.kind == ProfileKind::ClaudeAccount && p.authenticated).map(|p| p.dir.clone()).collect();
@@ -339,7 +356,7 @@ pub fn fallback_command(spec: &LaunchSpec, st: &State) -> Result<CommandSpec, St
         _ => {}
     }
     args.extend(spec.extra_args.iter().cloned());
-    Ok(CommandSpec { program: h.label().into(), args, env, env_remove: vec![], cwd: spec.cwd.clone(), label: label_for(spec), route: None, cleanup: vec![], caveman: None })
+    Ok(CommandSpec { program: h.label().into(), args, env, env_remove: vec![], cwd: spec.cwd.clone(), label: label_for(spec), route: None, cleanup: vec![], caveman: None, store: None })
 }
 
 #[cfg(test)]

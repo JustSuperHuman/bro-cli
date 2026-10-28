@@ -2,6 +2,7 @@
 //! blocks (usage — Claude / Codex totals or every profile — proxy, bridge).
 
 use super::{App, SideHit};
+use crate::pane::Activity;
 use crate::panes::term::status_look;
 use crate::services::Avail;
 use crate::sidebar::Row;
@@ -68,6 +69,52 @@ pub(super) struct UsageLine {
     pub(super) resets_at: Option<i64>,
     /// the Claude total with a Fable line folded under it: Some(open)
     pub(super) fable: Option<bool>,
+}
+
+/// The session counter over proxy and phone: every session running, and how many of them are working, waiting on
+/// you or finished unseen (the rest are idle), as the list's own statuses add up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Tally {
+    pub(super) total: usize,
+    pub(super) working: usize,
+    pub(super) blocked: usize,
+    pub(super) done: usize,
+}
+
+/// A status the counter shows on its own (idle sessions only count in the total).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Status {
+    Working,
+    NeedsYou,
+    Done,
+}
+
+impl Status {
+    /// The session rows' word for it.
+    pub(super) fn word(self) -> &'static str {
+        match self {
+            Status::Working => "working",
+            Status::NeedsYou => "needs you",
+            Status::Done => "done",
+        }
+    }
+}
+
+impl Tally {
+    /// The statuses there are, with how many, in the order the project tabs show them.
+    pub(super) fn statuses(&self) -> impl Iterator<Item = (Status, usize)> {
+        [(Status::Working, self.working), (Status::NeedsYou, self.blocked), (Status::Done, self.done)].into_iter().filter(|(_, n)| *n > 0)
+    }
+
+    /// All of it in words: "1 working · 1 needs you · 1 done · 2 idle".
+    pub(super) fn words(&self) -> String {
+        let idle = self.total.saturating_sub(self.working + self.blocked + self.done);
+        let mut parts: Vec<String> = self.statuses().map(|(s, n)| format!("{n} {}", s.word())).collect();
+        if idle > 0 {
+            parts.push(format!("{idle} idle"));
+        }
+        parts.join(" · ")
+    }
 }
 
 impl App {
@@ -347,8 +394,12 @@ impl App {
                     Span::styled(num, if is_focus { fg(color).add_modifier(Modifier::BOLD) } else { muted(t) }),
                     Span::styled(format!(" {dot} "), fg(dot_c).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{} ", ui::harness_glyph(info.harness)), fg(brand)),
-                    Span::styled(primary, primary_style),
                 ];
+                // the maker of the model it runs, when that isn't the agent's own lab
+                let badge = ui::model_badge(info.harness, info.profile.as_deref(), info.model.as_deref(), t);
+                let badged = badge.is_some();
+                left.extend(badge);
+                left.push(Span::styled(primary, primary_style));
                 if !secondary.is_empty() {
                     left.push(Span::styled(format!("  {secondary}"), muted(t)));
                 }
@@ -356,10 +407,11 @@ impl App {
                 ui::line_lr(f, Rect { height: 1, ..r }, left, right);
                 // why it waits / what it did, under the name
                 if let Some(note) = info.note.as_deref().filter(|_| r.height > 1) {
-                    const INDENT: usize = 7;
+                    // under the name, past the badge when there is one
+                    let indent = if badged { 9 } else { 7 };
                     let style = if note.starts_with('⏸') { fg(crate::theme::mix(t.danger, t.muted, 0.45)) } else { muted(t) };
-                    let text = ui::fit(note, w.saturating_sub(INDENT + 1));
-                    ui::line(f, Rect { y: r.y + 1, height: 1, ..r }, vec![Span::styled(bar, bar_style), Span::raw(" ".repeat(INDENT - 1)), Span::styled(text, style)]);
+                    let text = ui::fit(note, w.saturating_sub(indent + 1));
+                    ui::line(f, Rect { y: r.y + 1, height: 1, ..r }, vec![Span::styled(bar, bar_style), Span::raw(" ".repeat(indent - 1)), Span::styled(text, style)]);
                 }
                 // the team it leads, under that
                 if let Some(team) = info.team.as_deref() {
@@ -427,6 +479,21 @@ impl App {
         }
     }
 
+    /// Every running session, added up by the status its row shows (the session counter).
+    pub(super) fn session_tally(&self) -> Tally {
+        let mut n = Tally::default();
+        for (id, p) in self.panes.iter().filter(|(_, p)| p.is_terminal()) {
+            n.total += 1;
+            match p.activity() {
+                Some(Activity::Working) => n.working += 1,
+                Some(Activity::Blocked) => n.blocked += 1,
+                Some(Activity::Idle) if self.done.contains(id) => n.done += 1,
+                _ => {}
+            }
+        }
+        n
+    }
+
     /// The usage block's lines: the Claude and Codex totals (v1's Usage box), or one line per profile.
     pub(super) fn usage_lines(&self) -> Vec<UsageLine> {
         let st = self.svc.state();
@@ -444,6 +511,15 @@ impl App {
             UsageLine { harness: Some(bro_core::Harness::Claude), profile: Some(p.id.clone()), label, h5: None, wk: None, approx: false, note: Some(note), resets_at: None, fable: None }
         }).collect();
         let signed_in: Vec<_> = profiles.iter().filter(|p| p.authenticated && !p.is_gemini()).collect();
+        // proxy mode runs each family on its subscription logins together (the launcher's one row for them)
+        let shared = st.settings.proxy.shared;
+        let family = |claude: bool| -> Vec<&bro_core::profiles::Profile> {
+            if shared {
+                bro_core::profiles::subscription_logins_in(profiles, claude)
+            } else {
+                signed_in.iter().copied().filter(|p| p.is_claude() == claude).collect()
+            }
+        };
         let state_of = |id: &str| match st.usage.get(id) {
             Some(e) => match (&e.usage, &e.error) {
                 (Some(u), _) => LoginUsage::Ready(u),
@@ -452,28 +528,41 @@ impl App {
             },
             None => LoginUsage::Loading,
         };
-        if !self.usage_expanded {
-            let total = |claude: bool| -> Option<UsageLine> {
-                let family: Vec<_> = signed_in.iter().filter(|p| p.is_claude() == claude).collect();
-                if family.is_empty() {
-                    return None;
-                }
-                let s: AppSummary = bro_core::usage::app_summary(family.iter().map(|p| (**p, state_of(&p.id))));
-                // the soonest any of them gets room back
-                let resets_at = family.iter().filter_map(|p| st.usage.get(&p.id).and_then(|e| e.usage.as_ref()).and_then(|u| tight_reset(p, u))).min();
-                let note = if s.h5.is_none() && s.wk.is_none() {
-                    Some(if s.loading > 0 { "…".to_string() } else { "unavailable".to_string() })
-                } else if s.unavailable > 0 {
-                    Some(format!("{}✗", s.unavailable))
-                } else {
-                    None
-                };
-                let h = if claude { bro_core::Harness::Claude } else { bro_core::Harness::Codex };
-                Some(UsageLine { harness: Some(h), profile: None, label: h.label().into(), h5: s.h5, wk: s.wk, approx: s.h5_estimated, note, resets_at, fable: None })
+        let total = |claude: bool| -> Option<UsageLine> {
+            let family = family(claude);
+            if family.is_empty() {
+                return None;
+            }
+            let s: AppSummary = bro_core::usage::app_summary(family.iter().map(|p| (*p, state_of(&p.id))));
+            // the soonest any of them gets room back
+            let resets_at = family.iter().filter_map(|p| st.usage.get(&p.id).and_then(|e| e.usage.as_ref()).and_then(|u| tight_reset(p, u))).min();
+            let note = if s.h5.is_none() && s.wk.is_none() {
+                Some(if s.loading > 0 { "…".to_string() } else { "unavailable".to_string() })
+            } else if s.unavailable > 0 {
+                Some(format!("{}✗", s.unavailable))
+            } else {
+                None
             };
+            let h = if claude { bro_core::Harness::Claude } else { bro_core::Harness::Codex };
+            Some(UsageLine { harness: Some(h), profile: None, label: h.label().into(), h5: s.h5, wk: s.wk, approx: s.h5_estimated, note, resets_at, fable: None })
+        };
+        let login = |p: &bro_core::profiles::Profile| -> UsageLine {
+            let h = if p.is_codex() { bro_core::Harness::Codex } else { bro_core::Harness::Claude };
+            let e = st.usage.get(&p.id);
+            let (h5, wk, approx, resets_at, note) = match e.and_then(|e| e.usage.as_ref()) {
+                Some(u) => {
+                    let d = bro_core::usage::headroom_detail(p, u);
+                    (d.h5, d.wk, d.h5_estimated, tight_reset(p, u), None)
+                }
+                None if e.is_some_and(|e| e.error.is_some()) => (None, None, false, None, Some("unavailable".to_string())),
+                None => (None, None, false, None, Some("…".to_string())),
+            };
+            UsageLine { harness: Some(h), profile: Some(p.id.clone()), label: p.name.clone(), h5, wk, approx, note, resets_at, fable: None }
+        };
+        if !self.usage_expanded {
             let mut v: Vec<UsageLine> = [total(true), total(false)].into_iter().flatten().collect();
             // Fable has its own allowance: show it under Claude when any account has it
-            let claude: Vec<_> = signed_in.iter().filter(|p| p.is_claude()).map(|p| (*p, state_of(&p.id))).collect();
+            let claude: Vec<_> = family(true).into_iter().map(|p| (p, state_of(&p.id))).collect();
             let s = bro_core::usage::app_summary(claude);
             if s.fable_wk.is_some() {
                 // The separate disclosure arrow reveals the allowance; the row launches Claude.
@@ -487,30 +576,25 @@ impl App {
             v.extend(gemini);
             return v;
         }
-        signed_in
-            .iter()
-            .map(|p| {
-                let h = if p.is_codex() { bro_core::Harness::Codex } else { bro_core::Harness::Claude };
-                let e = st.usage.get(&p.id);
-                let (h5, wk, approx, resets_at, note) = match e.and_then(|e| e.usage.as_ref()) {
-                    Some(u) => {
-                        let d = bro_core::usage::headroom_detail(p, u);
-                        (d.h5, d.wk, d.h5_estimated, tight_reset(p, u), None)
-                    }
-                    None if e.is_some_and(|e| e.error.is_some()) => (None, None, false, None, Some("unavailable".to_string())),
-                    None => (None, None, false, None, Some("…".to_string())),
-                };
-                UsageLine { harness: Some(h), profile: Some(p.id.clone()), label: p.name.clone(), h5, wk, approx, note, resets_at, fable: None }
-            })
-            .chain(gemini)
-            .collect()
+        if shared {
+            // no login to pick: each family's line starts a session on all of them, their meters folded under it
+            // as the Fable line is (a click there opens the usage view)
+            return [true, false]
+                .into_iter()
+                .flat_map(|claude| total(claude).into_iter().chain(family(claude).into_iter().map(|p| UsageLine { harness: None, ..login(p) })))
+                .chain(gemini)
+                .collect();
+        }
+        signed_in.iter().map(|p| login(p)).chain(gemini).collect()
     }
 
     fn draw_footer(&mut self, f: &mut Frame, area: Rect, usage: &[UsageLine], t: &Theme) {
         let mut y = area.y;
         let row = |y: u16| Rect { y, height: 1, ..area };
         let now = crate::util::now_secs();
-        if area.height > 2 && !usage.is_empty() {
+        let status_rows = if self.usage_expanded { STATUS_ROWS } else { 0 };
+        // (a footer of only the status rows has no header)
+        if area.height > status_rows.max(2) && !usage.is_empty() {
             // header: "▸ usage left ⓘ ───  5h  wk" — click to switch totals ⇄ every profile; ⓘ opens the stats
             let head = row(y);
             let arrow = if self.usage_expanded { "▾" } else { "▸" };
@@ -529,7 +613,6 @@ impl App {
             y += 1;
             let name_w = usage.iter().map(|u| ui::width(&u.label)).max().unwrap_or(6).clamp(5, 10);
             let meter_n = (area.width as usize).saturating_sub(name_w + 3 + 12).clamp(0, 8);
-            let status_rows = if self.usage_expanded { 2 } else { 0 };
             for u in usage {
                 if y + status_rows >= area.bottom() {
                     break;
@@ -593,14 +676,20 @@ impl App {
                 y += 1;
             }
         }
-        // proxy + phone bridge, pinned to the bottom, in plain words (click either for details) —
+        // the session counter, proxy and phone bridge, pinned to the bottom, in plain words (click any for more) —
         // only with the usage block expanded
         if !self.usage_expanded {
             return;
         }
+        let label = |icon: &str, name: &str| Span::styled(format!("{} {:<8}", ui::icon(icon), name), muted(t));
+        // no light of its own (its place keeps the long label clear): the count lines up with what the lights below say
+        let sr = row(area.bottom() - 3);
+        let mut sessions = vec![label("term", "sessions"), Span::raw("  ")];
+        let room = (sr.width as usize).saturating_sub(spans_width(&sessions));
+        sessions.extend(session_spans(self.session_tally(), room, t, self.start.elapsed().as_secs_f64()));
+        ui::line(f, sr, sessions);
         let st = self.svc.state();
         let pr = row(area.bottom() - 2);
-        let label = |icon: &str, name: &str| Span::styled(format!("{} {:<8}", ui::icon(icon), name), muted(t));
         let proxy = match &st.proxy.status {
             Avail::Ready(i) => {
                 let n = st.proxy.routes.len();
@@ -635,9 +724,54 @@ impl App {
         };
         ui::line(f, br, bridge);
         drop(st);
+        self.side_hits.push((sr, SideHit::Sessions));
         self.side_hits.push((pr, SideHit::Proxy));
         self.side_hits.push((br, SideHit::Bridge));
     }
+}
+
+/// The status rows at the footer's foot while usage is expanded: sessions, proxy, phone.
+const STATUS_ROWS: u16 = 3;
+
+/// The session counter after its label, in `room` columns: "5 running" and what they're doing, in words while they
+/// fit ("· 1 working · 1 needs you"), else as the project tabs' shapes with their counts ("· ◐1 ●1 ✓1"), then
+/// without "running".
+fn session_spans(n: Tally, room: usize, t: &Theme, time: f64) -> Vec<Span<'static>> {
+    if n.total == 0 {
+        return vec![Span::styled("none running", muted(t))];
+    }
+    let look = |s: Status| match s {
+        Status::Working => (["◐", "◓", "◑", "◒"][(time * 6.0) as usize % 4], t.accent),
+        Status::NeedsYou => ("●", t.danger),
+        Status::Done => ("✓", t.good),
+    };
+    let count = |running: bool| {
+        let mut v = vec![Span::styled(n.total.to_string(), fg(t.shine).add_modifier(Modifier::BOLD))];
+        if running {
+            v.push(Span::styled(" running", fg(t.shine)));
+        }
+        v
+    };
+    let mut words = count(true);
+    for (s, k) in n.statuses() {
+        words.extend([Span::styled(" ·", muted(t)), Span::styled(format!(" {k} {}", s.word()), fg(look(s).1))]);
+    }
+    let shapes = |running: bool| {
+        let mut v = count(running);
+        if n.statuses().next().is_some() {
+            v.push(Span::styled(" ·", muted(t)));
+        }
+        for (s, k) in n.statuses() {
+            let (glyph, c) = look(s);
+            v.push(Span::styled(format!(" {glyph}{k}"), fg(c).add_modifier(Modifier::BOLD)));
+        }
+        v
+    };
+    [words, shapes(true)].into_iter().find(|v| spans_width(v) <= room).unwrap_or_else(|| shapes(false))
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| ui::width(&s.content)).sum()
 }
 
 /// A right-aligned "% left" figure, 4 columns + an optional ≈.
@@ -648,9 +782,9 @@ fn figure(v: Option<f64>, approx: bool, t: &Theme) -> Vec<Span<'static>> {
     }
 }
 
-/// Footer rows: header + usage lines (+ proxy + bridge when expanded), or less when space is short.
+/// Footer rows: header + usage lines (+ sessions, proxy and bridge when expanded), or less when space is short.
 fn footer_height(usage: u16, expanded: bool, avail: u16) -> u16 {
-    let status = if expanded { 2 } else { 0 };
+    let status = if expanded { STATUS_ROWS } else { 0 };
     let full = if usage > 0 { 1 + usage + status } else { status };
     if avail >= full + 8 {
         full
@@ -755,5 +889,28 @@ fn current_tint(t: &Theme) -> ratatui::style::Color {
         crate::theme::mix(t.accent, t.bg, 0.9)
     } else {
         crate::theme::mix(t.accent, t.deep(), 0.84)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_session_counter_says_as_much_as_fits() {
+        let t = crate::theme::get("graphite");
+        let n = Tally { total: 5, working: 1, blocked: 1, done: 1 };
+        assert_eq!(text(&session_spans(n, 60, &t, 0.0)), "5 running · 1 working · 1 needs you · 1 done");
+        // short of room, the project tabs' shapes (they read without colour too), then the count alone with them
+        assert_eq!(text(&session_spans(n, 24, &t, 0.0)), "5 running · ◐1 ●1 ✓1");
+        assert_eq!(text(&session_spans(n, 12, &t, 0.0)), "5 · ◐1 ●1 ✓1");
+        // idle sessions only count in the total
+        assert_eq!(text(&session_spans(Tally { total: 2, ..Tally::default() }, 24, &t, 0.0)), "2 running");
+        assert_eq!(text(&session_spans(Tally::default(), 24, &t, 0.0)), "none running");
+        assert_eq!(n.words(), "1 working · 1 needs you · 1 done · 2 idle");
     }
 }

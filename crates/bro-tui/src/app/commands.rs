@@ -55,6 +55,7 @@ impl App {
                 }
             }
             Act::FlipAll => self.flip_all(),
+            Act::Focus => self.toggle_focus_mode(),
             Act::FocusLeft => self.move_focus(-1, 0),
             Act::FocusRight => self.move_focus(1, 0),
             Act::FocusUp => self.move_focus(0, -1),
@@ -130,6 +131,7 @@ impl App {
             Act::Settings => self.open_view("settings"),
             Act::QuickInstall => self.open_view("quick-install"),
             Act::Sounds => self.open_view("sounds"),
+            Act::Skills => self.open_view("skills"),
             Act::Setup => self.open_view("setup"),
             Act::Proxy => self.open_view("proxy"),
             Act::Bridge => self.open_view("bridge"),
@@ -153,6 +155,11 @@ impl App {
                 let on = !self.svc.settings().proxy.trim;
                 self.svc.set_trim(on);
                 self.toast(Kind::Info, if on { "request compression on (new sessions go through bro-proxy)" } else { "request compression off" });
+            }
+            Act::ToggleProxyMode => {
+                let on = !self.svc.settings().proxy.shared;
+                self.svc.set_shared(on);
+                self.toast(Kind::Info, if on { "proxy mode on: new sessions share all your signed-in logins, and a limit moves the work to the next one" } else { "proxy mode off: new sessions run on the login you pick" });
             }
             Act::ToggleAutoResume => {
                 let mut s = self.svc.settings();
@@ -210,8 +217,11 @@ impl App {
                 self.svc.refresh_usage();
                 self.toast(Kind::Usage, "refreshing usage…");
             }
+            Act::RestartServer => self.ask_restart_server(),
             Act::Quit => {
-                let live = self.panes.values().filter(|p| p.is_terminal()).count();
+                // sessions in the session server keep running: closing bro doesn't end them
+                let keep = self.svc.host().is_some() && self.svc.settings().server.keep_sessions;
+                let live = self.panes.values().filter(|p| p.is_terminal() && !(keep && p.as_term_ref().is_some_and(|t| t.hosted()))).count();
                 if live == 0 {
                     self.quit = true;
                 } else {
@@ -387,6 +397,11 @@ impl App {
         };
         self.svc.refresh_usage();
         let l = self.session_launcher(self.preferred_dir(), Place::Tab).with_harness(h);
+        self.launch_or_choose(l);
+    }
+
+    /// Run what the launcher has selected straight away, or open it when that still needs a decision.
+    fn launch_or_choose(&mut self, l: Launcher) {
         match l.quick_spec() {
             Some(spec) => {
                 self.launch_spec(spec, Place::Tab);
@@ -424,9 +439,17 @@ impl App {
         }
     }
 
-    /// Usage totals use quick-launch defaults; account rows always use that exact login.
+    /// Usage totals use quick-launch defaults; account rows always use that exact login. Proxy mode has no login
+    /// to pick: a family's total, or one of its logins, starts on all of that family's logins (the launcher's row).
     pub(crate) fn launch_usage(&mut self, h: bro_core::Harness, profile: Option<String>) {
         self.follow_focus();
+        if let Some(claude) = self.pooled_family(h, profile.as_deref())
+            && let Some(l) = self.session_launcher(self.preferred_dir(), Place::Tab).with_harness(h).with_shared(claude)
+        {
+            self.svc.refresh_usage();
+            self.launch_or_choose(l);
+            return;
+        }
         let Some(profile) = profile else {
             self.quick_launch(Some(h));
             return;
@@ -445,12 +468,24 @@ impl App {
             self.overlay = Overlay::Launcher(Box::new(launcher));
             return;
         }
-        match launcher.quick_spec() {
-            Some(spec) => {
-                self.launch_spec(spec, Place::Tab);
-                self.leave_sidebar();
-            }
-            None => self.overlay = Overlay::Launcher(Box::new(launcher)),
+        self.launch_or_choose(launcher);
+    }
+
+    /// In proxy mode, the family a usage row's launch shares: its login's, else its harness's own (Claude
+    /// `true`, Codex `false`). None outside proxy mode and for rows that aren't a Claude or Codex login.
+    fn pooled_family(&self, h: bro_core::Harness, profile: Option<&str>) -> Option<bool> {
+        if !self.svc.state().settings.proxy.shared {
+            return None;
+        }
+        match profile {
+            Some(p) if p.starts_with("claude:") => Some(true),
+            Some(p) if p.starts_with("codex:") => Some(false),
+            Some(_) => None,
+            None => match h {
+                bro_core::Harness::Claude => Some(true),
+                bro_core::Harness::Codex => Some(false),
+                bro_core::Harness::Pi | bro_core::Harness::Omp => None,
+            },
         }
     }
 

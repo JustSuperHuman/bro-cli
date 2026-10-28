@@ -561,17 +561,24 @@ fn launches_install_the_bro_open_skill_in_the_harness_home() {
 #[test]
 fn bro_open_off_and_watched_repo_skills_reach_the_harness_home() {
     let _sb = setup();
-    // a watched repo bro already cloned
+    // a watched repo bro already cloned, one of its skills installed everywhere (in ~/.claude), the other not
     let repo = "t3dotgg/tstack";
     let clone = crate::skill_repos::cache_dir(repo);
     std::fs::create_dir_all(clone.join(".git")).unwrap();
-    std::fs::create_dir_all(clone.join("skills").join("council")).unwrap();
-    std::fs::write(clone.join("skills").join("council").join("SKILL.md"), "---\nname: council\n---\n").unwrap();
+    for name in ["council", "full-send"] {
+        std::fs::create_dir_all(clone.join("skills").join(name)).unwrap();
+        std::fs::write(clone.join("skills").join(name).join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
+    }
+    let installed = crate::paths::claude_local_dir().join("skills").join("council");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(installed.join("SKILL.md"), "---\nname: council\n---\n").unwrap();
+    std::fs::write(installed.join(".bro-managed"), format!("written by bro from {repo}; …\n")).unwrap();
     let ctx = LaunchCtx { bro_open_off: true, skill_repos: vec![repo.into()], ..ctx() };
     let c = build(&spec(Harness::Codex, Some("codex:smol"), None, None), &ctx).unwrap();
     let codex_home = Path::new(env(&c, "CODEX_HOME").unwrap());
     assert!(!crate::skills::bro_open_skill_path(codex_home).exists());
     assert!(codex_home.join("skills").join("council").join("SKILL.md").is_file());
+    assert!(!codex_home.join("skills").join("full-send").exists(), "watched but not installed: it stays out");
     let c = build(&spec(Harness::Claude, Some("claude:work"), None, None), &ctx).unwrap();
     let claude_home = Path::new(env(&c, "CLAUDE_CONFIG_DIR").unwrap());
     assert!(!crate::skills::bro_open_skill_path(claude_home).exists());
@@ -1007,4 +1014,295 @@ fn a_login_running_peon_ping_itself_gets_no_second_copy() {
     // the other account still gets bro's
     let s = settings_of(&build(&spec(Harness::Claude, Some("claude:other"), None, None), &peon_ctx()).unwrap());
     assert!(s["hooks"]["Stop"].as_array().unwrap().iter().any(|g| g["hooks"][0]["args"] == json!(["hook", "peon", "claude"])));
+}
+
+/// npm's own `cmd-shim` for a global package (what `npm i -g @openai/codex` writes).
+#[cfg(windows)]
+const NPM_SHIM: &str = r#"@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\node.exe" (
+  SET "_prog=%dp0%\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*
+"#;
+
+/// An npm global dir (spaces and `&` in its path) holding a codex shim whose script is `js`.
+#[cfg(windows)]
+fn npm_codex(sb: &Sandbox, js: &str) -> (PathBuf, PathBuf) {
+    let npm = sb.home().join("npm global & co");
+    let script = npm.join(r"node_modules\@openai\codex\bin\codex.js");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, js).unwrap();
+    std::fs::write(npm.join("codex.cmd"), NPM_SHIM.replace('\n', "\r\n")).unwrap();
+    (npm, script)
+}
+
+#[cfg(windows)]
+fn set_path(dirs: &[&Path]) {
+    // SAFETY: the sandbox holds the env lock and restores PATH.
+    unsafe { std::env::set_var("PATH", std::env::join_paths(dirs).unwrap()) };
+}
+
+#[cfg(windows)]
+#[test]
+fn npm_shims_run_node_directly_and_other_shims_keep_cmd_exe() {
+    let sb = setup();
+    let (npm, script) = npm_codex(&sb, "");
+    let node_dir = sb.home().join("node");
+    std::fs::create_dir_all(&node_dir).unwrap();
+    std::fs::write(node_dir.join("node.exe"), "").unwrap();
+    set_path(&[&npm, &node_dir]);
+    let c = build(&spec(Harness::Codex, None, None, None), &ctx()).unwrap();
+    assert!(crate::util::same_path(Path::new(&c.program), &node_dir.join("node.exe")), "{}", c.program);
+    assert!(crate::util::same_path(Path::new(&c.args[0]), &script));
+    assert_eq!(&c.args[1..], ["--no-daemon"]);
+
+    // a node.exe beside the shim wins, as in the shim itself
+    std::fs::write(npm.join("node.exe"), "").unwrap();
+    assert!(crate::util::same_path(Path::new(&program_and_args("codex", vec![]).0), &npm.join("node.exe")));
+    std::fs::remove_file(npm.join("node.exe")).unwrap();
+
+    let through_cmd = || program_and_args("codex", vec!["x".into()]);
+    // `node` only as another shim
+    std::fs::rename(node_dir.join("node.exe"), node_dir.join("node.cmd")).unwrap();
+    assert_eq!(through_cmd().0, "cmd.exe");
+    std::fs::rename(node_dir.join("node.cmd"), node_dir.join("node.exe")).unwrap();
+    // node flags from the script's shebang
+    let flags = NPM_SHIM.replace("\"%_prog%\"  \"", "\"%_prog%\" --no-warnings \"");
+    std::fs::write(npm.join("codex.cmd"), flags).unwrap();
+    assert_eq!(through_cmd().0, "cmd.exe");
+    // a hand-written wrapper ending in npm's line but running something else as `_prog`
+    let custom = NPM_SHIM.replace(r#"SET "_prog=node""#, r#"SET "_prog=python""#);
+    std::fs::write(npm.join("codex.cmd"), custom).unwrap();
+    assert_eq!(through_cmd().0, "cmd.exe");
+    let custom = format!("@ECHO off\r\nSET \"_prog=%~dp0\\tool.exe\"\r\nCALL setup.cmd\r\n{}", NPM_SHIM.lines().last().unwrap());
+    std::fs::write(npm.join("codex.cmd"), custom).unwrap();
+    assert_eq!(through_cmd().0, "cmd.exe");
+    // a non-JS target
+    std::fs::write(npm.join("codex.cmd"), NPM_SHIM.replace(r"bin\codex.js", r"bin\codex.sh")).unwrap();
+    assert_eq!(through_cmd().0, "cmd.exe");
+    // a script that isn't there
+    std::fs::write(npm.join("codex.cmd"), NPM_SHIM).unwrap();
+    std::fs::remove_file(&script).unwrap();
+    let (program, args) = through_cmd();
+    assert_eq!(program, "cmd.exe");
+    assert!(args[1].to_lowercase().ends_with("codex.cmd") && args[2] == "x", "{args:?}");
+}
+
+/// The resolved npm codex launch, spawned for real in a PTY with a script that records its argv:
+/// every argument bro builds (peon's `-c` hooks carry `<`, `>`, `&`, quotes) arrives byte for byte,
+/// with exactly one `--no-daemon` whether or not the user passed one, and literals after `--` kept.
+/// Uses the machine's Node, and is skipped without one.
+#[cfg(windows)]
+#[test]
+fn npm_codex_receives_every_argument_through_a_pty() {
+    use portable_pty::CommandBuilder;
+    let node = std::env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join(r"nodejs\node.exe")).filter(|p| p.is_file());
+    let Some(node) = node else {
+        eprintln!("skipped: no Node at %ProgramFiles%\\nodejs");
+        return;
+    };
+    let sb = setup();
+    let (npm, script) =
+        npm_codex(&sb, "require('fs').writeFileSync(process.env.BRO_ARGV_OUT, JSON.stringify(process.argv.slice(2)))");
+    set_path(&[&npm, node.parent().unwrap()]);
+    let out = sb.home().join("argv.json");
+    let weird = r#"<a & b | c > d> "q" 'p' %PATH% ^! \"x\\ trailing\"#;
+    let bro_bin = sb.home().join(r"Program Files (x86)\bro & co\bro.exe");
+
+    let extras: [Vec<String>; 3] =
+        [vec![], vec!["--no-daemon".into()], vec!["--".into(), "--no-daemon".into(), weird.into(), String::new()]];
+    for sounds in [true, false] {
+        for extra in &extras {
+            let lx = LaunchCtx { bro_bin: Some(bro_bin.clone()), peon: crate::peon::PeonSettings { on: sounds, ..Default::default() }, ..ctx() };
+            let mut s = spec(Harness::Codex, None, None, Some(weird));
+            s.extra_args = extra.clone();
+            let c = build(&s, &lx).unwrap();
+            assert!(crate::util::same_path(Path::new(&c.program), &node), "{}", c.program);
+            assert!(crate::util::same_path(Path::new(&c.args[0]), &script));
+            let args = &c.args[1..];
+            assert!(args.iter().any(|a| a.contains('<')));
+            assert_eq!(args.iter().any(|a| a.starts_with("hooks.state=")), sounds, "{args:?}");
+            let options = args.iter().take_while(|a| *a != "--");
+            assert_eq!(options.filter(|a| *a == "--no-daemon").count(), 1, "{args:?}");
+            assert!(args.ends_with(extra));
+
+            let _ = std::fs::remove_file(&out);
+            let mut cmd = CommandBuilder::new(&c.program);
+            cmd.args(&c.args);
+            cmd.cwd(sb.home());
+            for (k, v) in &c.env {
+                cmd.env(k, v);
+            }
+            cmd.env("BRO_ARGV_OUT", &out);
+            let status = run_in_pty(cmd);
+            assert!(matches!(status, Some(ref s) if s.success()), "sounds {sounds}, {extra:?}: {status:?}");
+            let got: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+            assert_eq!(got, args, "sounds {sounds}, {extra:?}");
+        }
+    }
+}
+
+/// Run `cmd` in a ConPTY, answering its startup cursor query (`ESC[6n`) like a terminal would.
+/// None when it hasn't exited within 30s; it is killed then.
+#[cfg(windows)]
+fn run_in_pty(cmd: portable_pty::CommandBuilder) -> Option<portable_pty::ExitStatus> {
+    use portable_pty::{PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+    let pair = native_pty_system().openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }).unwrap();
+    let mut writer = pair.master.take_writer().unwrap();
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    // detached: a reader still blocked after the child is gone must not hang the test
+    std::thread::spawn(move || {
+        let (mut buf, mut tail) = ([0u8; 8192], Vec::new());
+        while let Ok(n @ 1..) = reader.read(&mut buf) {
+            tail.extend_from_slice(&buf[..n]);
+            for _ in 0..tail.windows(4).filter(|w| *w == b"\x1b[6n").count() {
+                let _ = writer.write_all(b"\x1b[1;1R").and_then(|_| writer.flush());
+            }
+            tail.drain(..tail.len().saturating_sub(3));
+        }
+    });
+    let mut child = pair.slave.spawn_command(cmd).unwrap();
+    drop(pair.slave);
+    let until = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break Some(s);
+        }
+        if Instant::now() > until {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    drop(pair.master);
+    status
+}
+
+// ------------------------------------------------------------------ proxy mode
+
+fn shared_ctx() -> LaunchCtx {
+    LaunchCtx { shared_logins: true, ..ctx() }
+}
+
+/// A Codex profile signed in with ChatGPT.
+fn chatgpt_login(name: &str) {
+    let dir = crate::paths::codex_profiles_dir().join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{"access_token":"h.p.s","refresh_token":"r","account_id":"acct"}}"#).unwrap();
+}
+
+fn route_of(c: &CommandSpec) -> &RouteRequest {
+    c.route.as_ref().expect("goes through the proxy")
+}
+
+#[test]
+fn proxy_mode_claude_stays_signed_in_and_sends_its_requests_to_the_shared_route() {
+    let _sb = setup();
+    let c = build(&spec(Harness::Claude, None, None, Some("opus")), &shared_ctx()).unwrap();
+    // ~/.claude isn't signed in here: the first signed-in account holds the session
+    assert!(env(&c, "CLAUDE_CONFIG_DIR").unwrap().ends_with("other"), "{:?}", env(&c, "CLAUDE_CONFIG_DIR"));
+    assert_eq!(c.store.as_deref(), Some("claude:other"));
+    let id = logins_route_id("tok", LOGINS_CLAUDE, None);
+    assert!(id.starts_with('k') && id.len() == 25, "unguessable: {id}");
+    assert_eq!(env(&c, "ANTHROPIC_BASE_URL"), Some(format!("{PROXY}/r/{id}").as_str()));
+    assert_eq!(env(&c, "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"), Some("1"), "Anthropic's own API to Claude Code");
+    for k in ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"] {
+        assert!(env(&c, k).is_none() && removes(&c, k), "{k}: it signs in as its own login");
+    }
+    for k in claude::MODEL_VARS {
+        assert!(env(&c, k).is_none(), "{k}: /model picks as ever");
+    }
+    assert!(has_seq(&c.args, &["--model", "opus"]));
+    assert_eq!(c.label, "claude · opus");
+    let r = route_of(&c);
+    assert_eq!((r.route_id.as_str(), r.upstream.as_str(), r.model.as_deref()), (id.as_str(), LOGINS_CLAUDE, None));
+    assert!(matches!(resolve_upstream(&r.upstream, None, &crate::config::Config::default()).unwrap(), UpstreamTarget::ClaudeLogins));
+
+    // a launch naming a login runs signed in as it (its conversations live there), on the same route
+    let named = build(&spec(Harness::Claude, Some("claude:work"), None, None), &shared_ctx()).unwrap();
+    assert!(env(&named, "CLAUDE_CONFIG_DIR").unwrap().ends_with("work"));
+    assert_eq!(route_of(&named).route_id, id);
+    // the pool and Claude's native provider are the shared logins too
+    for provider in ["pool", "anthropic"] {
+        let p = build(&spec(Harness::Claude, None, Some(provider), None), &shared_ctx()).unwrap();
+        assert_eq!(route_of(&p).upstream, LOGINS_CLAUDE, "{provider}");
+    }
+    // off, a login is just that login
+    let off = build(&spec(Harness::Claude, Some("claude:work"), None, None), &ctx()).unwrap();
+    assert!(off.route.is_none() && env(&off, "ANTHROPIC_BASE_URL").is_none());
+    // without the proxy the host starts one and builds again
+    assert!(build(&spec(Harness::Claude, None, None, None), &LaunchCtx { shared_logins: true, ..LaunchCtx::default() }).unwrap_err().is::<ProxyRequired>());
+}
+
+#[test]
+fn proxy_mode_codex_keeps_chatgpt_and_its_own_openai_provider() {
+    let _sb = setup();
+    chatgpt_login("team");
+    let c = build(&spec(Harness::Codex, None, None, Some("gpt-5.5")), &shared_ctx()).unwrap();
+    assert!(env(&c, "CODEX_HOME").unwrap().ends_with("team"), "the ChatGPT login holds the session");
+    assert_eq!(c.store.as_deref(), Some("codex:team"));
+    let id = logins_route_id("tok", LOGINS_CODEX, None);
+    let base = format!("openai_base_url=\"{PROXY}/r/{id}/backend-api/codex\"");
+    assert!(has_seq(&c.args, &["-c", base.as_str()]), "{:?}", c.args);
+    assert!(has_seq(&c.args, &["-c", "features.enable_request_compression=false"]));
+    assert!(!c.args.iter().any(|a| a.starts_with("model_provider")), "Codex keeps its own openai provider: {:?}", c.args);
+    assert!(env(&c, codex::CODEX_KEY_ENV).is_none(), "it signs in with ChatGPT, not a key");
+    assert!(has_seq(&c.args, &["--model", "gpt-5.5"]));
+    assert_eq!(c.label, "codex · gpt-5.5");
+    assert_eq!(route_of(&c).upstream, LOGINS_CODEX);
+    assert!(matches!(resolve_upstream(LOGINS_CODEX, None, &crate::config::Config::default()).unwrap(), UpstreamTarget::CodexLogins));
+}
+
+#[test]
+fn proxy_mode_needs_a_signed_in_login_and_skips_api_keys() {
+    let sb = setup();
+    // codex:smol has no login and ~/.codex only an API key: nothing to share
+    std::fs::create_dir_all(sb.home().join(".codex")).unwrap();
+    std::fs::write(sb.home().join(".codex").join("auth.json"), r#"{"OPENAI_API_KEY":"sk-1","tokens":null}"#).unwrap();
+    let e = build(&spec(Harness::Codex, None, None, None), &shared_ctx()).unwrap_err();
+    assert!(format!("{e:#}").contains("signed-in Codex"), "{e:#}");
+    chatgpt_login("team");
+    assert!(env(&build(&spec(Harness::Codex, Some("codex:local"), None, None), &shared_ctx()).unwrap(), "CODEX_HOME").unwrap().ends_with("team"), "an API-key login can't hold a shared session");
+}
+
+#[test]
+fn proxy_mode_shares_logins_across_families_and_with_pi() {
+    let _sb = setup();
+    chatgpt_login("team");
+    // Claude Code on GPT, through the shared Codex logins
+    let c = build(&spec(Harness::Claude, Some("codex:team"), None, Some("gpt-5.5")), &shared_ctx()).unwrap();
+    let r = route_of(&c);
+    assert_eq!((r.upstream.as_str(), r.model.as_deref()), (LOGINS_CODEX, Some("gpt-5.5")));
+    assert_eq!(r.route_id, logins_route_id("tok", LOGINS_CODEX, Some("gpt-5.5")), "its own route: the model maps Claude's aliases");
+    assert_eq!(env(&c, "ANTHROPIC_AUTH_TOKEN"), Some("tok"));
+    assert_eq!(env(&c, "ANTHROPIC_MODEL"), Some("gpt-5.5"));
+    // Codex on Claude, through the shared Claude logins
+    let x = build(&spec(Harness::Codex, Some("claude:work"), None, Some("claude-opus-4-8")), &shared_ctx()).unwrap();
+    assert_eq!(route_of(&x).upstream, LOGINS_CLAUDE);
+    // the shared logins are a choice of their own when proxy mode is off
+    let pick = build(&spec(Harness::Claude, None, Some(LOGINS_CLAUDE), None), &ctx()).unwrap();
+    assert_eq!(env(&pick, "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"), Some("1"));
+    // Pi on them, presented by the proxy as Claude Code
+    let pi = build(&spec(Harness::Pi, None, Some(LOGINS_CLAUDE), Some("claude-sonnet-5")), &shared_ctx()).unwrap();
+    assert_eq!(route_of(&pi).upstream, LOGINS_CLAUDE);
+    assert_eq!(env(&pi, crate::launch::pi::PI_KEY_ENV), Some("tok"));
+    assert!(has_seq(&pi.args, &["--provider", "bro-proxy-logins-claude", "--model", "claude-sonnet-5"]), "{:?}", pi.args);
+    assert_eq!(pi.label, "pi · claude logins · claude-sonnet-5");
+    // Pi's own login stays its own
+    assert!(build(&spec(Harness::Pi, None, None, None), &shared_ctx()).unwrap().route.is_none());
 }

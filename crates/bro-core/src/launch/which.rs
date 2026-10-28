@@ -57,14 +57,62 @@ pub fn which(program: &str) -> Option<PathBuf> {
     path_dirs.iter().chain(extra_bin_dirs().iter()).filter(|d| !d.as_os_str().is_empty()).find_map(|d| candidates(d))
 }
 
+/// npm's `cmd-shim` for a Node bin, up to the script path (`"%dp0%\<script>" %*` follows).
+const NPM_NODE_SHIM: &str = r#"@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\node.exe" (
+  SET "_prog=%dp0%\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\"#;
+
+/// The `(node, script)` an npm `cmd-shim` for a Node bin runs: the `node.exe` beside the shim,
+/// else `node.exe` on PATH. The shim must be exactly npm's template with only the script path
+/// varying; anything else (another generator's shim, node flags, a hand-written wrapper, a
+/// `node` that is itself a shim) is None and keeps running through cmd.exe.
+fn npm_shim(shim: &Path) -> Option<(PathBuf, PathBuf)> {
+    let text = std::fs::read_to_string(shim).ok().filter(|t| t.len() < 16 * 1024)?;
+    let text = text.replace("\r\n", "\n");
+    let (rel, tail) = text.strip_prefix(NPM_NODE_SHIM)?.split_once('"')?;
+    let js = Path::new(rel).extension().map(|e| e.to_string_lossy().to_lowercase());
+    if tail.trim_end() != " %*" || rel.contains(['%', '\n']) || !matches!(js.as_deref(), Some("js" | "cjs" | "mjs")) {
+        return None;
+    }
+    let dir = shim.parent()?;
+    let script = Some(dir.join(rel)).filter(|p| p.is_file())?;
+    let beside = dir.join("node.exe");
+    let node = if beside.is_file() { beside } else { which("node")? };
+    node.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")).then_some((node, script))
+}
+
 /// `(program, args)` ready for a PTY: the resolved executable, or on Windows
 /// `cmd.exe /c <shim> args…` for `.cmd`/`.bat` shims (which can't be exec'd directly).
+/// An npm shim runs its node and script directly instead: cmd.exe re-parses the command
+/// line, so `<`, `>`, `&`, `|` inside a quoted argument (codex's `-c` hook overrides) would
+/// reach it as redirections.
 /// An unresolvable name is returned as-is so the spawn error names it.
 pub fn program_and_args(name: &str, args: Vec<String>) -> (String, Vec<String>) {
     let Some(path) = which(name) else { return (name.to_string(), args) };
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let path_s = path.to_string_lossy().into_owned();
-    if cfg!(windows) && (ext == "cmd" || ext == "bat") {
+    if cfg!(windows)
+        && ext == "cmd"
+        && let Some((node, script)) = npm_shim(&path)
+    {
+        let mut full = vec![script.to_string_lossy().into_owned()];
+        full.extend(args);
+        (node.to_string_lossy().into_owned(), full)
+    } else if cfg!(windows) && (ext == "cmd" || ext == "bat") {
         let mut full = vec!["/c".to_string(), path_s];
         full.extend(args);
         ("cmd.exe".to_string(), full)

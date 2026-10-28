@@ -100,6 +100,12 @@ fn draw_tips(app: &App, ui: &mut Ui, layout: &Layout) {
                     list.push((k, what));
                 }
             }
+            // an agent's conversation, or its terminal again
+            if app.panes.get(&b.id).and_then(|p| p.as_term_ref()).is_some_and(crate::app::focus::focusable)
+                && let Some(k) = alt_key(app, Act::Focus)
+            {
+                list.push((k, if app.focus_view(b.id) { "terminal" } else { "focus" }));
+            }
         }
         tips(ui, Point::new(b.card.x + b.card.w / 2.0, b.card.bottom() - 30.0), &list, b.card.w - 24.0);
     }
@@ -122,6 +128,7 @@ fn draw_tips(app: &App, ui: &mut Ui, layout: &Layout) {
             }
             SideHit::Usage => Act::Usage,
             SideHit::Stats => Act::Stats,
+            SideHit::Sessions => Act::ShowTab(0),
             SideHit::Proxy => Act::Proxy,
             SideHit::Bridge => Act::Bridge,
             SideHit::Settings => Act::Settings,

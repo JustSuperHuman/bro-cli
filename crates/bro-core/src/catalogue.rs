@@ -201,6 +201,106 @@ pub fn codex_models(codex_home: &Path) -> Vec<ModelRow> {
         .collect()
 }
 
+/// A thinking level a model offers: its id as the agent takes it ("xhigh") and what it's for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Level {
+    pub id: String,
+    pub detail: Option<String>,
+}
+
+/// A model a running session can switch to, with the thinking levels it offers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelChoice {
+    /// as the agent takes it (`/model <id>`)
+    pub id: String,
+    pub name: String,
+    pub detail: Option<String>,
+    /// lightest first
+    pub levels: Vec<Level>,
+    /// the level it starts on
+    pub default_level: Option<String>,
+}
+
+/// Claude Code's thinking levels (`/effort <level>`), lightest first.
+const CLAUDE_LEVELS: [(&str, &str); 5] = [
+    ("low", "Quick answers, light reasoning"),
+    ("medium", "Balanced, for everyday work"),
+    ("high", "Thorough, for complex problems"),
+    ("xhigh", "Deeper still, short of the most"),
+    ("max", "The deepest reasoning, and the slowest"),
+];
+
+/// The models Claude Code's own /model picker offers, in its order (`/model <id>` takes these ids).
+pub fn claude_choices() -> Vec<ModelChoice> {
+    const MODELS: [(&str, &str, &str, &str); 4] = [
+        ("claude-opus-5-5", "Opus 5.5", "For complex work and everyday tasks", "medium"),
+        ("claude-sonnet-5-5", "Sonnet 5.5", "Most efficient for simpler tasks", "medium"),
+        ("claude-fable-5-1", "Fable 5.1", "For your toughest challenges", "high"),
+        ("claude-haiku-5-5", "Haiku 5.5", "Fastest for quick answers", "medium"),
+    ];
+    MODELS
+        .iter()
+        .map(|(id, name, detail, default)| ModelChoice {
+            id: id.to_string(),
+            name: name.to_string(),
+            detail: Some(detail.to_string()),
+            levels: CLAUDE_LEVELS.iter().map(|(l, d)| Level { id: l.to_string(), detail: Some(d.to_string()) }).collect(),
+            default_level: Some(default.to_string()),
+        })
+        .collect()
+}
+
+/// The models a Codex login can switch to, each with its thinking levels: Codex's own `models_cache.json`
+/// (listed ones), else a small static list.
+pub fn codex_choices(codex_home: &Path) -> Vec<ModelChoice> {
+    let listed: Vec<ModelChoice> = read_json(&codex_home.join("models_cache.json"))
+        .and_then(|v| v.get("models").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| m.get("visibility").and_then(Value::as_str).is_none_or(|v| v == "list"))
+        .filter_map(|m| {
+            let id = m.get("slug").or_else(|| m.get("id")).and_then(Value::as_str)?.to_string();
+            let levels = m
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|l| match l {
+                            Value::String(s) => Some(Level { id: s.clone(), detail: None }),
+                            _ => Some(Level { id: l.get("effort")?.as_str()?.to_string(), detail: l.get("description").and_then(Value::as_str).map(str::to_string) }),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(ModelChoice {
+                name: m.get("display_name").and_then(Value::as_str).unwrap_or(&id).to_string(),
+                detail: m.get("description").and_then(Value::as_str).filter(|d| !d.is_empty()).map(str::to_string),
+                levels,
+                default_level: m.get("default_reasoning_level").and_then(Value::as_str).map(str::to_string),
+                id,
+            })
+        })
+        .collect();
+    if !listed.is_empty() {
+        return listed;
+    }
+    codex_default_choices()
+}
+
+/// Codex's usual models, for a login that hasn't listed its own yet.
+pub fn codex_default_choices() -> Vec<ModelChoice> {
+    [("gpt-5.5", "GPT-5.5"), ("gpt-5.2-codex", "GPT-5.2 Codex"), ("gpt-5.2", "GPT-5.2")]
+        .iter()
+        .map(|(id, name)| ModelChoice {
+            id: id.to_string(),
+            name: name.to_string(),
+            detail: None,
+            levels: ["low", "medium", "high", "xhigh"].iter().map(|l| Level { id: l.to_string(), detail: None }).collect(),
+            default_level: Some("medium".into()),
+        })
+        .collect()
+}
+
 /// A provider's models: the live catalogue for OpenRouter (when cached), else models.json.
 pub fn provider_models(p: &Provider) -> Vec<ModelRow> {
     if p.id == "openrouter"
@@ -281,5 +381,23 @@ mod tests {
         let m = codex_models(dir.path());
         assert_eq!(m.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gpt-6-astra"]);
         assert_eq!(m[0].name, "GPT-6 Astra");
+    }
+
+    #[test]
+    fn models_to_switch_to_know_their_thinking_levels() {
+        let claude = claude_choices();
+        assert_eq!(claude[0].id, "claude-opus-5-5");
+        assert_eq!(claude[0].levels.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["low", "medium", "high", "xhigh", "max"]);
+        let dir = tempfile::tempdir().unwrap();
+        assert!(codex_choices(dir.path()).iter().all(|m| !m.levels.is_empty()), "the static list has levels too");
+        std::fs::write(
+            dir.path().join("models_cache.json"),
+            r#"{"models":[{"slug":"gpt-6-astra","display_name":"GPT-6 Astra","description":"Deep work","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low","description":"Fast"},{"effort":"ultra","description":"All of it"}]},{"slug":"hidden","visibility":"hide"}]}"#,
+        )
+        .unwrap();
+        let m = codex_choices(dir.path());
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].name.as_str(), m[0].detail.as_deref(), m[0].default_level.as_deref()), ("GPT-6 Astra", Some("Deep work"), Some("medium")));
+        assert_eq!(m[0].levels, [Level { id: "low".into(), detail: Some("Fast".into()) }, Level { id: "ultra".into(), detail: Some("All of it".into()) }]);
     }
 }

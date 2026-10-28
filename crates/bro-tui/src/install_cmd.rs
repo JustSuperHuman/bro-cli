@@ -1,4 +1,4 @@
-//! `bro install [tools…] [--force] [--wait]` — Quick Install from the command line: JustTools, JustPaste, JustWatch, JustImagine, Git,
+//! `bro install [tools…] [--force] [--wait]` — Quick Install from the command line: JustTools, JustPaste, JustWatch, JustImagine, JustBrowseMCP, Git,
 //! Node.js, Bun, Python, the .NET SDKs, the agent CLIs bro launches and a few utilities. With no
 //! tools named it lists them and asks which to install (Enter: the recommended ones that are missing).
 
@@ -18,7 +18,7 @@ pub struct InstallArgs {
     pub wait: bool,
 }
 
-pub const HELP: &str = "bro install — Quick Install: JustTools, JustImagine, Git, Node.js, Bun, .NET, the coding agents and more
+pub const HELP: &str = "bro install — Quick Install: JustTools, JustImagine, JustBrowseMCP, Git, Node.js, Bun, .NET, the coding agents and more
 
 usage
   bro install                     list everything and pick what to install
@@ -35,6 +35,8 @@ tools
   justwatch  JustWatch: keeps your dev servers running, plus its agent skill (Windows)
   justimagine  JustImagine: image, video, song and voice studio as a background service
              (needs git and node; --force pulls the newest commits and restarts it)
+  justbrowse JustBrowseMCP: agents drive your own signed-in Chrome or Edge over MCP; the
+             extension, its bridge, its agent skill and the MCP server (needs node)
   git        Git                        gh        GitHub CLI
   node       Node.js LTS                bun       Bun
   python     Python 3                   uv        uv (Python packages)

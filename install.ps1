@@ -5,6 +5,8 @@
 # Env: BRO_VERSION (tag, default latest), BRO_INSTALL_DIR (default: the folder of the bro on PATH,
 #      else %LOCALAPPDATA%\Programs\bro),
 #      BRO_TOOLS (Quick Install too, e.g. "justtools git node claude", "recommended", "all" or "none";
+#      default: ask on a fresh install, skip on an update),
+#      BRO_STARTUP ("yes": start bro in the background when you sign in, for your user only; "no": don't;
 #      default: ask on a fresh install, skip on an update).
 # Wrapped in a script block so `irm | iex` leaves the caller's session untouched.
 & {
@@ -104,6 +106,18 @@
             Write-Host ""
             & $bro install
         }
+    }
+    # Offer to start bro in the background when you sign in (a startup app for your user: no admin) on a fresh
+    # install; releases before `bro host install` skip this.
+    if ("$(& $bro --help)" -match 'bro host .*install') {
+        $startup = "$env:BRO_STARTUP".Trim().ToLower()
+        if (-not $startup -and -not $update -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+            Write-Host ""
+            Write-Host "bro keeps your sessions running while its window is closed, with the phone bridge and auto-resume"
+            Write-Host "going in the background. It can also start that way when you sign in (for your user only, no admin)."
+            $startup = Read-Host "Start it when you sign in? [y/N]"
+        }
+        if ($startup -match '^\s*(y|yes|1|true|on)\s*$') { & $bro host install }
     }
     if (-not $update) { Write-Host "Run: bro (the desktop app) or bro-cli (in the terminal)" }
 }

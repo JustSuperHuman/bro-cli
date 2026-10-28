@@ -48,6 +48,11 @@ pub struct AccountUsage {
 }
 
 impl AccountUsage {
+    /// Cooling down after a rate limit right now.
+    pub fn is_cooling(&self) -> bool {
+        self.cooling(now_ms())
+    }
+
     fn roll(&mut self, now: i64) {
         if self.window_start == 0 || now - self.window_start >= WINDOW_MS {
             self.window_start = now;
@@ -223,6 +228,45 @@ impl PoolManager {
             .insert(session.to_string(), account.to_string());
     }
 
+    /// Rest an account until `until` (unix ms), saying why: new requests skip it and its conversations
+    /// move to another account.
+    pub fn rest(&self, name: &str, until: i64, why: &str) {
+        let msg = crate::util::truncate(why, 500).to_string();
+        self.update(name, |u| {
+            u.rate_limited_until = Some(until);
+            u.last_error = Some(msg);
+        });
+        self.inner.lock().affinity.retain(|_, v| v != name);
+    }
+
+    /// The account a conversation is kept on, if any.
+    pub fn affinity(&self, session: &str) -> Option<String> {
+        self.inner.lock().affinity.get(session).cloned()
+    }
+
+    /// How many conversations are kept on `account`.
+    pub fn conversations(&self, account: &str) -> usize {
+        self.inner.lock().affinity.values().filter(|a| *a == account).count()
+    }
+
+    /// Current counters (window rolled) of several accounts, from one read of the file.
+    pub fn usages(&self, names: &[&str]) -> Vec<AccountUsage> {
+        let now = now_ms();
+        let doc = self.load();
+        names.iter().map(|n| Self::usage_of(&doc, n, now)).collect()
+    }
+
+    /// The next of several tied accounts, taking turns.
+    pub fn take_turn(&self, n: usize) -> usize {
+        if n == 0 {
+            return 0;
+        }
+        let mut inner = self.inner.lock();
+        let i = inner.rr % n;
+        inner.rr = (inner.rr + 1) % n;
+        i
+    }
+
     pub fn record_success(&self, name: &str, usage: Option<&Usage>) {
         let (i, o) = usage
             .map(|u| (crate::translate::total_input(u), u.output_tokens))
@@ -390,6 +434,7 @@ async fn try_account(
             headers,
             body,
             account: None,
+            counter: None,
         }));
     }
 
@@ -435,6 +480,7 @@ async fn try_account(
         headers,
         body,
         account: None,
+        counter: None,
     }))
 }
 

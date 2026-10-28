@@ -6,6 +6,9 @@
 ; Build: ISCC /DAppVersion=2.0.22 /DBinDir=<folder with bro.exe, bro-app.exe, bro-cli.cmd, README.md, LICENSE> ^
 ;             /DOutputName=bro-v2.0.22-x86_64-pc-windows-msvc-setup /O<out dir> packaging\windows\bro.iss
 ;
+; It can also start bro in the background when you sign in (`bro host install`: a startup app for your user, no
+; admin); the uninstaller stops the session server (and the background bro with it) and removes that.
+;
 ; Updating over a running bro works: the running executables are renamed to *.old first (Windows lets a running
 ; file be renamed, not replaced) and bro deletes them the next time it starts, like install.ps1 does.
 
@@ -54,6 +57,7 @@ RestartApplications=no
 [Tasks]
 Name: "addtopath"; Description: "Add bro to my PATH, so ""bro"" and ""bro-cli"" work in any terminal"
 Name: "desktopicon"; Description: "Put a bro shortcut on my desktop"; Flags: unchecked
+Name: "startup"; Description: "Start bro in the background when I sign in, so it's always running (your phone can reach it, and sessions keep going while bro is closed)"; Flags: unchecked
 
 [Files]
 Source: "{#BinDir}\bro.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -67,7 +71,16 @@ Name: "{autoprograms}\bro"; Filename: "{app}\bro-app.exe"; WorkingDir: "{%USERPR
 Name: "{autodesktop}\bro"; Filename: "{app}\bro-app.exe"; WorkingDir: "{%USERPROFILE}"; Comment: "Open bro, the workspace for your coding agents"; Tasks: desktopicon
 
 [Run]
+; the startup task: on when ticked; off when unticked on the page (which shows what's set now, see CurPageChanged).
+; A silent update never turns it off: it doesn't show the page, and you may have turned it on in bro since.
+Filename: "{app}\bro.exe"; Parameters: "host install"; StatusMsg: "Adding bro to your startup apps..."; Flags: runhidden runasoriginaluser; Tasks: startup
+Filename: "{app}\bro.exe"; Parameters: "host uninstall"; Flags: runhidden runasoriginaluser; Tasks: not startup; Check: not WizardSilent
 Filename: "{app}\bro-app.exe"; Description: "Open bro now"; WorkingDir: "{%USERPROFILE}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+; the server runs bro.exe: stop it (ending its sessions) so the files can go
+Filename: "{app}\bro.exe"; Parameters: "host stop"; Flags: runhidden; RunOnceId: "StopSessionServer"
+Filename: "{app}\bro.exe"; Parameters: "host uninstall"; Flags: runhidden; RunOnceId: "RemoveSessionServerStartup"
 
 [UninstallDelete]
 Type: files; Name: "{app}\*.old"
@@ -75,6 +88,25 @@ Type: files; Name: "{app}\*.old"
 [Code]
 const
   EnvKey = 'Environment';
+  RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+  { the startup app `bro host install` adds }
+  HostValue = 'bro session server';
+
+var
+  TasksShown: Boolean;
+
+{ The startup task shows what is set now (bro's settings change it too), not what the last setup chose. }
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpSelectTasks) and not TasksShown then
+  begin
+    TasksShown := True;
+    if RegValueExists(HKCU, RunKey, HostValue) then
+      WizardSelectTasks('startup')
+    else
+      WizardSelectTasks('!startup');
+  end;
+end;
 
 { The user PATH, split on ';' and compared case-insensitively. }
 function PathHas(Paths, Dir: string): Boolean;

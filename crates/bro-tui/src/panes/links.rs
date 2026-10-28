@@ -169,6 +169,28 @@ pub fn runs_when_opened(path: &Path) -> bool {
     }
 }
 
+/// Show `path` in the file manager.
+pub fn reveal(path: &Path) {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("explorer.exe").raw_arg(format!("/select,\"{}\"", path.display())).spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            if let Some(dir) = path.parent() {
+                let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+            }
+        }
+    });
+}
+
 /// Called on a worker after a deliberate click. The target is passed as data, never to a shell. A local
 /// program (see [`runs_when_opened`]) is refused: opening one would run it.
 pub fn open(raw: &str) -> Result<(), String> {

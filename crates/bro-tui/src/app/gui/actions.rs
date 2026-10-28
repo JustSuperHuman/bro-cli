@@ -30,6 +30,8 @@ pub enum Action {
     Clipboard(bool),
     /// A view pane's target `n`.
     View(PaneId, usize),
+    /// Target `n` of a session's focus view (its conversation, reply box, choice).
+    Focus(PaneId, usize),
     /// The media panel's target `n`.
     Media(usize),
     /// The media panel's resize edge.

@@ -56,6 +56,8 @@ pub enum Event {
     Watchdog(bro_bridge::WatchdogUpdate),
     /// Push-to-talk: words for the orchestrator session.
     Voice(Box<crate::services::VoiceMsg>),
+    /// The session server went away, another window took it over, or a restart finished.
+    Host(crate::services::host::HostEvent),
 }
 
 /// Where a new pane goes.
@@ -68,6 +70,8 @@ pub enum Place {
     /// a new tab
     #[default]
     Tab,
+    /// a new tab behind the one you're in (a session another bro window asked for)
+    Behind,
 }
 
 
@@ -84,6 +88,8 @@ pub enum Action {
     GeminiSignIn,
     /// Run an app action (the settings view's theme picker and toggles).
     Run(crate::keymap::Act),
+    /// Show a file in bro's file preview (a skill's SKILL.md).
+    Preview(std::path::PathBuf),
 }
 
 /// Agent activity scraped from the screen.

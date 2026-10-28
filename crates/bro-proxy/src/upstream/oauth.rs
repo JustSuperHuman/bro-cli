@@ -30,11 +30,17 @@ pub(crate) fn merge_betas(existing: Option<&str>, add: &[&str]) -> String {
 }
 
 pub(crate) fn oauth_headers(call: &UpstreamCall, token: &str) -> HeaderMap {
+    oauth_headers_as(call, token, call.translated)
+}
+
+/// [`oauth_headers`], presenting the request as Claude Code when `as_claude_code` (subscription
+/// tokens serve Claude Code only; translated requests and other clients need its identity).
+pub(crate) fn oauth_headers_as(call: &UpstreamCall, token: &str, as_claude_code: bool) -> HeaderMap {
     let mut h = anthropic_headers(call);
     h.remove("x-api-key");
     set(&mut h, "authorization", &format!("Bearer {token}"));
     let mut add = vec![OAUTH_BETA];
-    if call.translated {
+    if as_claude_code {
         add.insert(0, CLAUDE_CODE_BETA);
         set(&mut h, "user-agent", CLAUDE_CLI_UA);
         set(&mut h, "x-app", "cli");

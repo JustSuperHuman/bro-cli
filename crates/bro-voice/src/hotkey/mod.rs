@@ -40,6 +40,8 @@ pub const VK_F13: u32 = 0x7C;
 /// Unassigned VK used to "mask" a Win/Alt release so it doesn't open Start or
 /// activate a menu bar (the AutoHotkey trick).
 pub const VK_MASK: u32 = 0xE8;
+/// `dwExtraInfo` marker on keystrokes we inject ("BROV"); the hooks let them through untouched.
+pub const SENTINEL: usize = 0x4252_4F56;
 
 /// Modifiers checked when the hotkey goes down: if any is already held the press
 /// belongs to a chord (Ctrl+Win, ...) and is passed through untouched.
@@ -162,8 +164,21 @@ pub fn capture(timeout: std::time::Duration) -> anyhow::Result<Option<u32>> {
     }
 }
 
+/// End a waiting [`capture`] as if nothing was pressed.
+pub fn cancel_capture() {
+    #[cfg(windows)]
+    windows::cancel_capture();
+}
+
+/// Key events the last [`capture`] saw (0 after a wait: none reached it).
+pub fn capture_seen() -> u32 {
+    #[cfg(windows)]
+    return windows::capture_seen();
+    #[cfg(not(windows))]
+    0
+}
+
 /// The canonical code of a modifier key (either side), for chord detection.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn is_modifier(vk: u32) -> bool {
     MODIFIERS.contains(&vk)
 }

@@ -107,6 +107,16 @@ enum Thumb {
     Failed,
 }
 
+/// A thumbnail as [`Media::thumb`] has it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Thumbnail {
+    Loading,
+    /// its texture and size in pixels
+    Ready(ImageId, u32, u32),
+    /// not a picture, or it couldn't be read
+    Failed,
+}
+
 enum View {
     None,
     Loading(PathBuf),
@@ -179,6 +189,8 @@ pub struct Media {
     /// new items since the panel was last looked at
     pub unseen: usize,
     thumbs: HashMap<PathBuf, (Thumb, Option<SystemTime>)>,
+    /// thumbnails made as their pictures were pasted, to put up next frame
+    primed: Vec<(PathBuf, Rgba)>,
     view: View,
     loader: Loader,
     /// 1 = fit; above zooms in around `pan`
@@ -263,6 +275,7 @@ impl Media {
             expanded: false,
             unseen: 0,
             thumbs: HashMap::new(),
+            primed: vec![],
             view: View::None,
             loader: Loader::new(wake.clone()),
             zoom: 1.0,
@@ -376,6 +389,39 @@ impl Media {
                 (self.zoom, self.pan) = (zoom, pan);
             }
         }
+    }
+
+    /// A thumbnail of the picture or video at `path`, for drawing elsewhere (focus mode's pictures): asked for the
+    /// first time it's wanted, decoded off the window's thread, shared with the gallery.
+    pub fn thumb(&mut self, path: &Path) -> Thumbnail {
+        match self.thumbs.get(path) {
+            None => {
+                if self.prime(path) {
+                    return Thumbnail::Loading;
+                }
+                if matches!(bro_media::kind_of(path), MediaKind::Image | MediaKind::Video) {
+                    self.thumbs.insert(path.to_path_buf(), (Thumb::Loading, None));
+                    self.loader.ask(Job::Thumb(path.to_path_buf()));
+                    Thumbnail::Loading
+                } else {
+                    self.thumbs.insert(path.to_path_buf(), (Thumb::Failed, None));
+                    Thumbnail::Failed
+                }
+            }
+            Some((Thumb::Ready(id, w, h), _)) => Thumbnail::Ready(*id, *w, *h),
+            Some((Thumb::Loading, _)) => Thumbnail::Loading,
+            Some((Thumb::Failed, _)) => Thumbnail::Failed,
+        }
+    }
+
+    /// A picture just pasted: the thumbnail made from its pixels as it was read off the clipboard, put up before
+    /// the next frame is drawn (nothing is decoded again). False when there isn't one.
+    pub fn prime(&mut self, path: &Path) -> bool {
+        let Some(p) = crate::clip::take_preview(path) else { return false };
+        self.primed.push((path.to_path_buf(), Rgba { w: p.w, h: p.h, px: p.px }));
+        self.thumbs.insert(path.to_path_buf(), (Thumb::Loading, None));
+        (self.wake)();
+        true
     }
 
     /// Show `path` large (loading it).
@@ -493,6 +539,13 @@ impl Media {
     pub fn prepare(&mut self, r: &mut Renderer) {
         for id in self.free.drain(..) {
             r.remove_image(id);
+        }
+        for (p, img) in std::mem::take(&mut self.primed) {
+            let id = r.create_image(img.w, img.h, &img.px);
+            let m = mtime(&p);
+            if let Some((Thumb::Ready(old, ..), _)) = self.thumbs.insert(p, (Thumb::Ready(id, img.w, img.h), m)) {
+                r.remove_image(old);
+            }
         }
         while let Ok(done) = self.loader.done.try_recv() {
             match done {

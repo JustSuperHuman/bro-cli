@@ -267,6 +267,9 @@ pub(crate) mod test_env {
         "CLAUDE_PEON_DIR",
         "BRO_PEON_REGISTRY",
         "BRO_PEON_RAW",
+        "BRO_SKILL_REPOS_DIR",
+        "BRO_SKILL_MARKET_URL",
+        "JUSTBROWSE_DIR",
     ];
 
     /// Holds the global env lock and a tempdir acting as `$HOME`; restores the
@@ -303,6 +306,7 @@ pub(crate) mod test_env {
             std::env::set_var("CLAUDE_POOL_DIR", home.join(".claude-max-pool"));
             std::env::set_var("BRO_CODEX_PROFILES_DIR", home.join(".bro").join("codex-profiles"));
             std::env::set_var("BRO_MODELS_URL", "http://127.0.0.1:9/never");
+            std::env::set_var("BRO_SKILL_MARKET_URL", "http://127.0.0.1:9/never");
             // Executables resolve only inside the sandbox (tests drop fake shims here).
             std::env::set_var("PATH", home.join("bin"));
         }

@@ -1,10 +1,46 @@
 //! Error model and per-dialect error bodies.
 
 use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
 use http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use crate::Dialect;
+
+/// An upstream's error response as it arrived.
+#[derive(Debug)]
+pub struct RawResponse {
+    /// What the upstream speaks: only clients of the same dialect get it verbatim
+    pub dialect: Dialect,
+    pub status: u16,
+    pub headers: HeaderMap,
+    pub body: Bytes,
+}
+
+/// Hop-by-hop headers a relayed response doesn't carry over.
+pub(crate) const HOP_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "content-length",
+    "te",
+    "trailer",
+    "upgrade",
+    "proxy-authenticate",
+    "proxy-authorization",
+];
+
+/// An upstream response's headers minus the hop-by-hop ones.
+pub(crate) fn relay_headers(h: &HeaderMap) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    for (k, v) in h {
+        if !HOP_HEADERS.contains(&k.as_str()) {
+            out.append(k.clone(), v.clone());
+        }
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -101,6 +137,9 @@ pub struct ProxyError {
     pub message: String,
     /// Upstream `retry-after`, forwarded to the client
     pub retry_after: Option<String>,
+    /// The upstream's own response, which clients of its dialect get as it came (proxy mode: the
+    /// harness reads its limit headers and error body itself)
+    pub raw: Option<Arc<RawResponse>>,
 }
 
 impl std::fmt::Display for ProxyError {
@@ -124,7 +163,13 @@ impl ProxyError {
             kind,
             message: message.into(),
             retry_after: None,
+            raw: None,
         }
+    }
+    /// Keep the upstream's response, for clients that speak `dialect`.
+    pub fn with_raw(mut self, dialect: Dialect, status: u16, headers: &HeaderMap, body: Bytes) -> Self {
+        self.raw = Some(Arc::new(RawResponse { dialect, status, headers: headers.clone(), body }));
+        self
     }
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::InvalidRequest, message)
@@ -193,6 +238,7 @@ impl ProxyError {
             kind,
             message,
             retry_after,
+            raw: None,
         }
     }
 
@@ -258,6 +304,12 @@ impl ProxyError {
     }
 
     pub fn into_response(self, dialect: Dialect) -> Response {
+        if let Some(raw) = self.raw.as_ref().filter(|r| r.dialect == dialect) {
+            let status = StatusCode::from_u16(raw.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let mut resp = (status, raw.body.clone()).into_response();
+            *resp.headers_mut() = relay_headers(&raw.headers);
+            return resp;
+        }
         let status =
             StatusCode::from_u16(self.status_for(dialect)).unwrap_or(StatusCode::BAD_GATEWAY);
         let mut resp = (status, axum::Json(self.body_for(dialect))).into_response();

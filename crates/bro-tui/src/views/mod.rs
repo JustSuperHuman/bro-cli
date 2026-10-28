@@ -1,9 +1,10 @@
-//! The service views, opened as panes (alt+u usage, alt+o profiles, alt+y proxy, alt+g bridge, prefix S stats, prefix A settings, prefix e setup, quick install and sounds from settings or the palette).
+//! The service views, opened as panes (alt+u usage, alt+o profiles, alt+y proxy, alt+g bridge, prefix S stats, prefix A settings, prefix e setup, quick install, sounds and skills from settings or the palette).
 
 pub mod settings;
 pub mod setup;
 pub mod quick_install;
 pub mod sounds;
+pub mod skills;
 pub mod bridge;
 pub mod profiles;
 pub mod proxy;
@@ -23,6 +24,7 @@ pub fn open(name: &str) -> Option<Box<dyn Pane>> {
         "settings" => Box::new(settings::SettingsView::new()),
         "quick-install" => Box::new(quick_install::QuickInstallView::new()),
         "sounds" => Box::new(sounds::SoundsView::new()),
+        "skills" => Box::new(skills::SkillsView::new()),
         "setup" => Box::new(setup::SetupView::new()),
         _ => return None,
     })

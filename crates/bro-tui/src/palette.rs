@@ -22,7 +22,7 @@ pub enum Cmd {
     ClaudePreset(String),
     /// Caveman mode for new sessions: a level, or None for off.
     Caveman(Option<bro_core::caveman::Level>),
-    /// The desktop app's window: solid, acrylic, mica or glass.
+    /// The desktop app's window: solid, acrylic or glass.
     Material(bro_core::config::Material),
     Recent(usize),
     /// Tile one project's sessions (its key), or every session (None).
@@ -67,6 +67,7 @@ fn icon_for(a: Act) -> &'static str {
         Bridge => "bridge",
         Settings | QuickInstall => "settings",
         Sounds => "sound",
+        Skills => "skills",
         Setup => "rocket",
         Themes => "theme",
         Help => "help",
@@ -146,7 +147,6 @@ impl Palette {
         let blurb = |m: Material| match m {
             Material::Solid => "the theme's colours, edge to edge",
             Material::Acrylic => "your desktop behind bro, frosted",
-            Material::Mica => "a soft wash of your wallpaper's colours",
             Material::Glass => "see-through, nothing frosted",
         };
         let items = Material::ALL.into_iter().map(|m| Item {

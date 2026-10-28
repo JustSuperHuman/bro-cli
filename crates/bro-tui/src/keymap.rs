@@ -28,6 +28,9 @@ pub enum Act {
     Flip,
     /// Turn every session on screen over, or all face up again.
     FlipAll,
+    /// Focus mode (the desktop app): agent sessions as their conversation in big clean type, with a reply box,
+    /// instead of their terminal; again: the terminals.
+    Focus,
     FocusLeft,
     FocusRight,
     FocusUp,
@@ -66,6 +69,8 @@ pub enum Act {
     QuickInstall,
     /// Sounds: PeonPing voice lines when sessions start, finish or need you, and the pack browser.
     Sounds,
+    /// Skills: the Skill Issue marketplace to search and install agent skills from.
+    Skills,
     /// The setup guide: install an agent, add a login, launch.
     Setup,
     Help,
@@ -74,6 +79,8 @@ pub enum Act {
     ToggleIcons,
     /// Request compression (llmtrim) in bro-proxy on/off.
     ToggleTrim,
+    /// Proxy mode on/off: new sessions share every signed-in login of their agent.
+    ToggleProxyMode,
     /// Retry agents that stop on an API error, on / off.
     ToggleAutoResume,
     /// Caveman mode (terse replies) for new sessions, on / off.
@@ -100,6 +107,8 @@ pub enum Act {
     WatchdogPrompt,
     /// The desktop app's media panel (the pictures and videos beside the sessions), show / hide.
     Media,
+    /// Replace bro's session server with a fresh one (its sessions end; agents come back resumed).
+    RestartServer,
     Quit,
 }
 
@@ -134,9 +143,9 @@ impl Act {
         v.extend((1..=9).map(Jump));
         v.extend((0..=9).map(ShowTab));
         v.extend([LastTab, NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
-        v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Sounds, Setup, RefreshUsage, Media]);
-        v.extend([Palette, Help, Themes, ToggleIcons, ToggleProjectTabs, ToggleAutoResume, ToggleCaveman, Quit]);
+        v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, Focus, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
+        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleProxyMode, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Sounds, Skills, Setup, RefreshUsage, Media]);
+        v.extend([Palette, Help, Themes, ToggleIcons, ToggleProjectTabs, ToggleAutoResume, ToggleCaveman, RestartServer, Quit]);
         v
     }
 
@@ -162,6 +171,7 @@ impl Act {
             TileAll => "tile_all".into(),
             Flip => "flip".into(),
             FlipAll => "flip_all".into(),
+            Focus => "focus_mode".into(),
             FocusLeft => "focus_left".into(),
             FocusRight => "focus_right".into(),
             FocusUp => "focus_up".into(),
@@ -188,12 +198,14 @@ impl Act {
             Settings => "settings".into(),
             QuickInstall => "quick_install".into(),
             Sounds => "sounds".into(),
+            Skills => "skills".into(),
             Setup => "setup".into(),
             Help => "help".into(),
             Rename => "rename".into(),
             Themes => "themes".into(),
             ToggleIcons => "toggle_icons".into(),
             ToggleTrim => "toggle_trim".into(),
+            ToggleProxyMode => "toggle_proxy_mode".into(),
             ToggleAutoResume => "toggle_auto_resume".into(),
             ToggleCaveman => "toggle_caveman".into(),
             RefreshUsage => "refresh_usage".into(),
@@ -210,6 +222,7 @@ impl Act {
             Watchdog => "watchdog".into(),
             WatchdogPrompt => "watchdog_prompt".into(),
             Media => "media".into(),
+            RestartServer => "restart_server".into(),
             Quit => "quit".into(),
         }
     }
@@ -241,6 +254,7 @@ impl Act {
             TileAll => "tile all sessions / return to the focused session".into(),
             Flip => "turn the focused session over: its task, plan, latest word and files / face up".into(),
             FlipAll => "turn every session on screen over / all face up".into(),
+            Focus => "focus mode: agent sessions as their conversation in big type, with a reply box (desktop app) / the terminals".into(),
             FocusLeft => "focus the pane to the left".into(),
             FocusRight => "focus the pane to the right".into(),
             FocusUp => "focus the pane above".into(),
@@ -267,12 +281,14 @@ impl Act {
             Settings => "settings: bro options and Claude Code privacy, updates and long-run presets".into(),
             QuickInstall => "quick install: JustTools, Git, Node.js, Bun, Python, .NET and the coding agents".into(),
             Sounds => "sounds: PeonPing voice lines when a session starts, finishes or needs you · browse sound packs".into(),
+            Skills => "skills: every skill your agents have, by source and by project; watch repos; find more on Skill Issue".into(),
             Setup => "setup guide: install Claude Code / Codex, add your logins, launch".into(),
             Help => "keys and help".into(),
             Rename => "rename the focused session".into(),
             Themes => "pick a theme (live preview)".into(),
             ToggleIcons => "toggle nerd font icons".into(),
             ToggleTrim => "compress requests (llmtrim) on / off".into(),
+            ToggleProxyMode => "proxy mode on / off: new sessions share all your logins".into(),
             ToggleAutoResume => "auto-resume agents after API errors on / off".into(),
             ToggleCaveman => "caveman mode on / off: terse replies in new sessions".into(),
             RefreshUsage => "refresh usage now".into(),
@@ -289,6 +305,7 @@ impl Act {
             Watchdog => "watchdog: keep this session working through your milestones while you're away".into(),
             WatchdogPrompt => "watchdog prompt: edit what every reviewer is told".into(),
             Media => "media panel: the pictures and videos your agents open, send or make (desktop app)".into(),
+            RestartServer => "session server: restart it (its sessions end; Claude and Codex come back resumed)".into(),
             Quit => "quit bro".into(),
         }
     }
@@ -298,9 +315,9 @@ impl Act {
         match self {
             NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Reload | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Team | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | ShowTab(_) | LastTab | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
-            Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Sounds | Setup | RefreshUsage | Media => Group::Views,
-            Palette | Help | Themes | ToggleIcons | ToggleProjectTabs | ToggleAutoResume | ToggleCaveman | Quit => Group::App,
+            Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | Focus | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
+            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleProxyMode | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Sounds | Skills | Setup | RefreshUsage | Media => Group::Views,
+            Palette | Help | Themes | ToggleIcons | ToggleProjectTabs | ToggleAutoResume | ToggleCaveman | RestartServer | Quit => Group::App,
         }
     }
 
@@ -319,6 +336,7 @@ impl Act {
             TileAll => vec!["alt+shift+t"],
             Flip => vec!["alt+i"],
             FlipAll => vec!["alt+I"],
+            Focus => vec!["alt+f"],
             FocusLeft => vec!["alt+left"],
             FocusRight => vec!["alt+right"],
             FocusUp => vec!["alt+up"],
@@ -417,7 +435,7 @@ impl Act {
             QuickInstall => vec!["I"],
             Setup => vec!["e"],
             Media => vec!["m"],
-            Split | ShowTab(_) | ToggleProjectTabs | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder | Sounds => vec![],
+            Split | Focus | ShowTab(_) | ToggleProjectTabs | ToggleProxyMode | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder | Sounds | Skills | RestartServer => vec![],
         }
     }
 }

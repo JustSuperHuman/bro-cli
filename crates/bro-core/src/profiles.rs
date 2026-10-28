@@ -150,6 +150,31 @@ pub fn list() -> Vec<Profile> {
     all
 }
 
+/// Proxy mode's members among `all`: the signed-in subscription logins of one family (Claude, or
+/// Codex signed in with ChatGPT: an API-key login isn't a subscription), one per account (two folders
+/// signed in as the same account count once), in list order: the machine's own login first.
+pub fn subscription_logins_in(all: &[Profile], claude: bool) -> Vec<&Profile> {
+    let mut seen = std::collections::HashSet::new();
+    all.iter()
+        .filter(|p| if claude { p.is_claude() } else { p.is_codex() && p.plan.as_deref() != Some("api") })
+        .filter(|p| p.authenticated)
+        .filter(|p| p.identity.as_deref().is_none_or(|i| seen.insert(i.to_string())))
+        .collect()
+}
+
+/// [`subscription_logins_in`] over the logins on disk.
+pub fn subscription_logins(claude: bool) -> Vec<Profile> {
+    let all = if claude { list_claude() } else { list_codex() };
+    subscription_logins_in(&all, claude).into_iter().cloned().collect()
+}
+
+/// The login a proxy-mode session runs as when it names none of its own: the machine's own login
+/// when it's signed in, else the first other one. Its folder holds the session's settings and
+/// transcript; the requests go to whichever login has the most usage left.
+pub fn shared_home_in(all: &[Profile], claude: bool) -> Option<&Profile> {
+    subscription_logins_in(all, claude).into_iter().next()
+}
+
 /// Split "claude:work" into its family and name.
 pub fn parse_id(id: &str) -> Option<(ProfileKind, &str)> {
     let (family, name) = id.split_once(':')?;

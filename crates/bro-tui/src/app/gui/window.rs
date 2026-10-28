@@ -56,14 +56,14 @@ fn icon() -> Option<winit::window::Icon> {
 }
 
 /// Dress the window for the theme and its material: the native title bar in the theme's background (Windows 11),
-/// dark or light to match, and what the system draws behind a see-through window (Acrylic, Mica, a blur, or
-/// nothing for clear glass). False when the system can't do the material asked for (Acrylic and Mica before
+/// dark or light to match, and what the system draws behind a see-through window (Acrylic, a blur, or
+/// nothing for clear glass). False when the system can't do the material asked for (Acrylic before
 /// Windows 11): the window is drawn solid then.
 pub fn style(window: &Window, bg: Color, light: bool, material: Material) -> bool {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Graphics::Dwm::{
-            DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_COLOR_DEFAULT,
+            DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_COLOR_DEFAULT,
             DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmEnableBlurBehindWindow, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
         };
         use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject};
@@ -75,7 +75,6 @@ pub fn style(window: &Window, bg: Color, light: bool, material: Material) -> boo
         let see_through = material.see_through();
         let backdrop = match material {
             Material::Acrylic => DWMSBT_TRANSIENTWINDOW,
-            Material::Mica => DWMSBT_MAINWINDOW,
             Material::Solid | Material::Glass => DWMSBT_NONE,
         };
         let [r, g, b, _] = bg.with_alpha(1.0).to_rgba8();
@@ -85,7 +84,7 @@ pub fn style(window: &Window, bg: Color, light: bool, material: Material) -> boo
             // SAFETY: an attribute of our own window with a correctly sized value.
             unsafe { DwmSetWindowAttribute(hwnd, attr as u32, v as *const u32 as *const _, 4) >= 0 }
         };
-        // dark or light chrome, and the dark or light flavour of Acrylic and Mica
+        // dark or light chrome, and the dark or light flavour of Acrylic
         set(DWMWA_USE_IMMERSIVE_DARK_MODE, &(dark as u32));
         // Windows 11 22H2 and later draw a backdrop; earlier ones turn the attribute down
         let drawn = set(DWMWA_SYSTEMBACKDROP_TYPE, &(backdrop as u32));
@@ -121,7 +120,7 @@ pub fn style(window: &Window, bg: Color, light: bool, material: Material) -> boo
         window.set_theme(Some(if light { winit::window::Theme::Light } else { winit::window::Theme::Dark }));
         window.set_transparent(material.see_through());
         // macOS and KDE blur what's behind; elsewhere it's clear
-        window.set_blur(matches!(material, Material::Acrylic | Material::Mica));
+        window.set_blur(matches!(material, Material::Acrylic));
         true
     }
 }

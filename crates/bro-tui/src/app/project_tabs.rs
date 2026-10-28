@@ -139,6 +139,16 @@ impl App {
         }
     }
 
+    /// The session counter under usage: every session, tiled (All); a lone one on its own; with none, the launcher.
+    pub(crate) fn show_every_session(&mut self) {
+        let mut ids = self.panes.iter().filter(|(_, p)| p.is_terminal()).map(|(id, _)| *id);
+        match (ids.next(), ids.next()) {
+            (None, _) => self.open_launcher(None, Place::Tab),
+            (Some(id), None) => self.go_session(id),
+            _ => self.show_tab(StripTab::All),
+        }
+    }
+
     /// A click (or ⏎) on a tab. All again goes back to the session you're on, like the tile-all shortcut.
     pub(crate) fn click_tab(&mut self, tab: StripTab) {
         if tab == StripTab::All && self.showing_tab() == Some(StripTab::All) {

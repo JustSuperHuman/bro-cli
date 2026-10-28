@@ -58,6 +58,8 @@ Running the install line again works too.
 ## What it does
 
 - **Runs your agents side by side**: split, zoom and switch between live sessions, grouped by project.
+- **Keeps them running when bro closes**: sessions live in bro's session server and come back in the next bro,
+  terminal or desktop app.
 - **Shows who needs you**: each agent is marked working, waiting on you or done.
 - **Shows pictures and videos** your agents open or make, right beside the session.
 - **Switches accounts**: several Claude and Codex logins, with usage left for each.

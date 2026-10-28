@@ -101,7 +101,8 @@ impl App {
             sid: uuid::Uuid::new_v4().to_string(),
             harness: Some(spec.harness),
             profile: spec.provider_id.clone().or(spec.profile_id.clone()),
-            store: transcript_store(&spec),
+            // where the launch put it (proxy mode picks the login a session runs as)
+            store: cmd.store.clone().or_else(|| transcript_store(&spec)),
             model: spec.model.clone(),
             label,
             // a name the bridge asked for (the orchestrator's "Toast · justgains") outlives the agent's own title
@@ -337,7 +338,7 @@ impl App {
 
     /// A remote launch joins the grid it belongs in (every session's, or the project's on screen when it's
     /// one of its own) without stealing focus, unzooming it, or moving you to another project's tab.
-    fn restore_background_tiles(&mut self, before: (Vec<PaneId>, Option<PaneId>, bool, bool, Option<String>)) {
+    pub(super) fn restore_background_tiles(&mut self, before: (Vec<PaneId>, Option<PaneId>, bool, bool, Option<String>)) {
         let (stack, focus, zoom, tile_all, project) = before;
         if tile_all {
             self.tile_all = true;
@@ -420,6 +421,17 @@ impl App {
                 sidebar::OpenInfo { key: pk.key, name: pk.name, root: pk.root }
             })
             .collect()
+    }
+
+    /// The sidebar's projects for the Skills view while it's open (it lists their own skills): a change looks again.
+    pub(crate) fn publish_projects(&self) {
+        if !self.panes.values().any(|p| p.view() == Some("skills")) {
+            return;
+        }
+        let projects = sidebar::projects(&self.live_infos(), &self.open_infos()).into_iter().map(|(key, name, root)| crate::services::KnownProject { key, name, root }).collect();
+        if self.svc.set_projects(projects) {
+            self.svc.rescan_skills();
+        }
     }
 
     /// Demo: open the demo projects (a real run opens its start folder via [`App::start_in`]).
@@ -934,13 +946,24 @@ impl App {
             let mut term = if self.opts.fixed_demo {
                 Term::fixed(meta, &crate::services::demo::transcript(d.harness), self.svc.clone())
             } else {
-                let c = crate::services::demo::shell_command(d.harness, &label, cwd);
+                // the session that waits on you shows its prompt at the bottom, as Claude Code draws it
+                let c = if d.activity == Some(crate::pane::Activity::Blocked) {
+                    crate::services::demo::shell_showing(d.harness, &label, cwd, &crate::services::demo::blocked_screen(), Some("blocked"))
+                } else {
+                    crate::services::demo::shell_command(d.harness, &label, cwd)
+                };
                 Term::new(meta, Spawn { program: c.program, args: c.args, ..Spawn::default() }, self.svc.clone())
             };
             term.demo_activity = d.activity;
             // the first Claude session leads an agent team (not in the fixed demo the tests draw)
             if i == 0 && !self.opts.fixed_demo {
                 term.set_demo_team(crate::services::demo::team());
+            }
+            // what the agents said and did, for focus mode (not in the fixed demo either)
+            if !self.opts.fixed_demo
+                && let Some(jsonl) = crate::services::demo::conversation(i)
+            {
+                term.set_demo_transcript(&jsonl);
             }
             // the shell shares the first tab as a split; the rest get tabs
             let id = if i == 2 {

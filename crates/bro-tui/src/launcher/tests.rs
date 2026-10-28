@@ -47,6 +47,7 @@ fn data() -> Data {
         models: st.models.clone(),
         keyed: vec!["openrouter".into(), "openai".into()],
         orchestrator_running: None,
+        shared: false,
     }
 }
 
@@ -364,4 +365,76 @@ fn gemini_signs_in_before_it_launches() {
     key(&mut l, KeyCode::Enter);
     let s = launched(key(&mut l, KeyCode::Enter));
     assert_eq!((s.provider_id.as_deref(), s.model.as_deref()), (Some("gemini"), Some("gemini-4-argon")));
+}
+
+// ------------------------------------------------------------------ proxy mode
+
+fn recent(harness: Harness, profile: Option<&str>, provider: Option<&str>, model: Option<&str>) -> Recent {
+    Recent { harness, profile_id: profile.map(Into::into), provider_id: provider.map(Into::into), model: model.map(Into::into), cwd: PathBuf::from("/code/bro"), permission: Permission::Skip, browser: BrowserMode::Off, at: 1, orchestrator: false }
+}
+
+fn accounts(l: &Launcher) -> Vec<Account> {
+    l.items().into_iter().filter_map(|i| match i { Item::Account(a) => Some(a), _ => None }).collect()
+}
+
+fn select(l: &mut Launcher, kind: AccountKind) {
+    let items = l.items();
+    l.list_sel = Launcher::selectable(&items).iter().position(|&i| matches!(&items[i], Item::Account(a) if a.kind == kind)).expect("row");
+    l.reset_models();
+}
+
+#[test]
+fn proxy_mode_offers_each_family_once_instead_of_its_logins() {
+    let mut d = data();
+    d.shared = true;
+    d.usage.insert("claude:local".into(), 20.0);
+    d.usage.insert("claude:work".into(), 60.0);
+    d.recents = vec![recent(Harness::Claude, Some("claude:work"), None, None), recent(Harness::Claude, None, Some("pool"), None), recent(Harness::Claude, None, Some("openrouter"), Some("qwen/qwen3-coder"))];
+    let mut l = Launcher::new(d, Some(PathBuf::from("/code/bro")), Place::Tab);
+    let rows = accounts(&l);
+    assert!(rows.iter().all(|a| !matches!(&a.kind, AccountKind::Profile(p) if p.starts_with("claude:") || p.starts_with("codex:")) && a.kind != AccountKind::Pool), "no login to pick: {rows:?}");
+    assert!(l.items().iter().any(|i| matches!(i, Item::Header("proxy mode"))));
+    assert_eq!(l.recents_for(Harness::Claude), vec![2], "combos naming one login (or the pool) aren't offered");
+
+    select(&mut l, AccountKind::Shared(true));
+    let Some(Item::Account(own)) = l.current() else { panic!() };
+    assert_eq!(own.label, "all your logins");
+    assert!(own.detail.starts_with("local, personal, work"), "{}", own.detail);
+    assert_eq!(own.left, Some(60.0), "the average of what the read logins have left");
+    assert!(!l.needs_model(), "/model picks inside, as ever");
+    let s = l.spec().unwrap();
+    assert_eq!((s.profile_id, s.provider_id, s.model), (None, None, None), "the launch picks the login it runs as");
+
+    // the other family through the proxy takes a model from its own list
+    select(&mut l, AccountKind::Shared(false));
+    assert!(l.needs_model());
+    assert_eq!(l.models().first().map(|m| m.id.clone()), l.data.models.get("codex").and_then(|m| m.first()).map(|m| m.id.clone()));
+    let s = l.spec().unwrap();
+    assert_eq!(s.provider_id.as_deref(), Some(bro_core::launch::LOGINS_CODEX));
+    assert!(s.model.is_some());
+
+    // a recent of the shared logins reads as them
+    let (kind, who) = l.recent_row(&recent(Harness::Claude, None, None, None));
+    assert_eq!((kind, who.as_str()), (AccountKind::Shared(true), "all your logins"));
+    let (kind, who) = l.recent_row(&recent(Harness::Claude, None, Some(bro_core::launch::LOGINS_CODEX), Some("gpt-5.5")));
+    assert_eq!((kind, who.as_str()), (AccountKind::Shared(false), "all your chatgpt logins"));
+}
+
+#[test]
+fn proxy_mode_codex_starts_on_its_logins_and_pi_gets_both_families() {
+    let mut d = data();
+    d.shared = true;
+    let codex = Launcher::new(d.clone(), None, Place::Tab).with_harness(Harness::Codex);
+    let s = codex.quick_spec().expect("one click: no login, no model");
+    assert_eq!((s.harness, s.profile_id, s.provider_id), (Harness::Codex, None, None));
+    let pi = Launcher::new(d, None, Place::Tab).with_harness(Harness::Pi);
+    let kinds: Vec<AccountKind> = accounts(&pi).into_iter().map(|a| a.kind).filter(|k| !matches!(k, AccountKind::Provider(_) | AccountKind::Profile(_))).collect();
+    assert_eq!(kinds, [AccountKind::Native, AccountKind::Shared(true), AccountKind::Shared(false)]);
+}
+
+#[test]
+fn proxy_mode_off_keeps_every_login() {
+    let l = Launcher::new(data(), None, Place::Tab);
+    assert!(accounts(&l).iter().all(|a| !matches!(a.kind, AccountKind::Shared(_))));
+    assert_eq!(l.recent_row(&recent(Harness::Claude, None, None, None)).0, AccountKind::Native);
 }

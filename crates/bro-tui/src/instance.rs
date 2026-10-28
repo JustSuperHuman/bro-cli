@@ -173,6 +173,15 @@ fn serve_via(file: PathBuf, tx: Sender<Event>) -> Option<Guard> {
 /// The desktop app's window (`bro gui`): raised by a hand-off instead of a console window. 0 in the terminal UI.
 pub static APP_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
+/// Bring this bro forward: the desktop app's window, or the terminal it runs in. Blocks briefly (a minimised
+/// window is restored), so call it off the UI thread.
+pub fn bring_self_to_front() {
+    let h = window::terminal_window();
+    if h != 0 {
+        window::bring_to_front(h);
+    }
+}
+
 /// The terminal window this bro runs in, and raising another bro's.
 mod window {
     /// The top-level window hosting this console (Windows Terminal owns the pseudo-console window it gives
@@ -202,14 +211,20 @@ mod window {
         super::APP_WINDOW.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Restore (if minimised) and focus a window. Windows only lets the foreground process move the focus;
-    /// a tap of Alt is the documented way for the process the user just typed into to hand it over.
+    /// Restore (if minimised) and focus a window. Windows only lets the process that sent the last input take
+    /// the focus: a tap of Alt earns it (with a dummy key inside, so the app in front doesn't open its menu
+    /// bar), once the system has handled the tap, which can take a few ms after `keybd_event` returns; failing
+    /// that, joining the input of the window in front. The keys carry bro-voice's mark, so a push-to-talk press
+    /// in progress lets them through instead of taking them for a chord. Can block ~100 ms.
     #[cfg(windows)]
     pub fn bring_to_front(h: isize) {
+        use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, VK_MENU, keybd_event};
-        use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
+        };
         let hwnd = h as windows_sys::Win32::Foundation::HWND;
-        // SAFETY: the handle came from the running bro; IsWindow guards against a stale one.
+        // SAFETY: plain Win32 calls; IsWindow guards against a stale handle and the thread input is detached again.
         unsafe {
             if IsWindow(hwnd) == 0 {
                 return;
@@ -217,9 +232,29 @@ mod window {
             if IsIconic(hwnd) != 0 {
                 ShowWindow(hwnd, SW_RESTORE);
             }
-            keybd_event(VK_MENU as u8, 0, 0, 0);
-            keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
-            SetForegroundWindow(hwnd);
+            let front = || GetForegroundWindow() == hwnd;
+            if front() {
+                return;
+            }
+            const MASK: u8 = 0xE8;
+            let mark = bro_voice::INJECTED;
+            keybd_event(VK_MENU as u8, 0, 0, mark);
+            keybd_event(MASK, 0, 0, mark);
+            keybd_event(MASK, 0, KEYEVENTF_KEYUP, mark);
+            keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, mark);
+            for _ in 0..10 {
+                if SetForegroundWindow(hwnd) != 0 && front() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let theirs = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+            let ours = GetCurrentThreadId();
+            if theirs != 0 && theirs != ours && AttachThreadInput(ours, theirs, 1) != 0 {
+                BringWindowToTop(hwnd);
+                SetForegroundWindow(hwnd);
+                AttachThreadInput(ours, theirs, 0);
+            }
         }
     }
 

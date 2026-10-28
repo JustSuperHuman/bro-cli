@@ -65,7 +65,7 @@ mod rest;
 mod rest_sessions;
 mod server;
 mod session;
-mod slash_commands;
+pub mod slash_commands;
 mod state;
 mod vt_stream;
 pub mod watchdog;

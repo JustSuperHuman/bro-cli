@@ -63,6 +63,15 @@ pub(crate) struct Recorder {
     ev: Option<ProxyEvent>,
     usage: Option<Usage>,
     upstream_error: bool,
+    /// Where the account that served it counts (proxy mode); else the Claude pool, by `account`
+    counter: Option<Counter>,
+}
+
+/// The request counters an account's requests go into, and its key there.
+#[derive(Clone)]
+pub(crate) struct Counter {
+    pub pool: Arc<crate::upstream::pool::PoolManager>,
+    pub key: String,
 }
 
 impl Recorder {
@@ -89,6 +98,7 @@ impl Recorder {
             }),
             usage: None,
             upstream_error: false,
+            counter: None,
         }
     }
 
@@ -109,6 +119,10 @@ impl Recorder {
         if let Some(e) = self.ev() {
             e.account = a;
         }
+    }
+    /// The counters the serving account's request goes into (proxy mode).
+    pub fn set_counter(&mut self, c: Option<Counter>) {
+        self.counter = c;
     }
     /// Request compression ran (estimated input tokens before / after).
     pub fn set_trim(&mut self, tokens: Option<(u64, u64)>) {
@@ -139,11 +153,11 @@ impl Recorder {
             ev.output_tokens = Some(u.output_tokens);
             ev.cache_read_tokens = u.cache_read_input_tokens;
         }
-        if let Some(account) = &ev.account {
-            let pool = self.state.pool();
+        let counter = self.counter.take().or_else(|| ev.account.clone().map(|key| Counter { pool: self.state.pool(), key }));
+        if let Some(Counter { pool, key }) = counter {
             match (&error, self.upstream_error) {
-                (None, _) => pool.record_success(account, self.usage.as_ref()),
-                (Some(msg), true) => pool.record_error(account, msg),
+                (None, _) => pool.record_success(&key, self.usage.as_ref()),
+                (Some(msg), true) => pool.record_error(&key, msg),
                 _ => {}
             }
         }

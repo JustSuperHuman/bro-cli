@@ -12,6 +12,7 @@
 pub mod atlas;
 pub mod builtin;
 pub mod color;
+mod display;
 pub mod geom;
 pub mod renderer;
 pub mod scene;

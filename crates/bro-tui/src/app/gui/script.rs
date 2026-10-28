@@ -2,8 +2,8 @@
 //!
 //! Steps: `wait:<ms>`, `key:<chord>` (any chord the keymap understands: `alt+n`, `ctrl+space`, `esc`, `enter`),
 //! `type:<text>`, `move:<x>,<y>` / `click:<x>,<y>` / `rclick:` / `dclick:` (logical pixels), `wheel:<x>,<y>,<lines>`,
-//! `alt:down` / `alt:up` (holding alt alone), `theme:<name>`, `material:<solid|acrylic|mica|glass>[,<tint %>]`,
-//! `shot:<file.png>`, `exit`.
+//! `alt:down` / `alt:up` (holding alt alone), `theme:<name>`, `material:<solid|acrylic|glass>[,<tint %>]`,
+//! `preview:<file>` (the file preview, as a view opens it), `shot:<file.png>`, `exit`.
 
 use super::Gui;
 use crate::pane::Event;
@@ -17,12 +17,16 @@ pub enum Step {
     Wait(Duration),
     Key(crossterm::event::KeyEvent),
     Type(String),
+    /// text pasted where the keyboard is
+    Paste(String),
     Move(Point),
     Click(Point, MouseButton, u32),
     Wheel(Point, f32),
     Shot(String),
     /// a file dropped on the window
     Drop(std::path::PathBuf),
+    /// the file preview on a file
+    Preview(std::path::PathBuf),
     /// alt held down alone (`true`) or let go: the key hints
     Alt(bool),
     /// show a theme (not saved)
@@ -70,6 +74,7 @@ fn parse(raw: &str) -> Option<Step> {
             Step::Key(crossterm::event::KeyEvent::new(c.code, c.mods))
         }
         "type" => Step::Type(arg.to_string()),
+        "paste" => Step::Paste(arg.to_string()),
         "move" => Step::Move(point(arg)?),
         "click" => Step::Click(point(arg)?, MouseButton::Left, 1),
         "dclick" => Step::Click(point(arg)?, MouseButton::Left, 2),
@@ -80,6 +85,7 @@ fn parse(raw: &str) -> Option<Step> {
         }
         "shot" => Step::Shot(arg.to_string()),
         "drop" => Step::Drop(std::path::PathBuf::from(arg)),
+        "preview" => Step::Preview(std::path::PathBuf::from(arg)),
         "alt" => Step::Alt(arg != "up"),
         "theme" => Step::Theme(arg.trim().to_string()),
         "material" => {
@@ -117,7 +123,9 @@ pub fn step(g: &mut Gui) {
                     g.key(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char(c), crossterm::event::KeyModifiers::NONE));
                 }
             }
+            Step::Paste(text) => super::mouse::type_text(g, &text),
             Step::Drop(path) => super::mouse::dropped(g, path),
+            Step::Preview(path) => g.app.preview_file(path),
             Step::Move(p) => {
                 g.pointer = Some(p);
                 super::mouse::moved(g, p);

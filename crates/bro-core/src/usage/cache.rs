@@ -137,6 +137,11 @@ pub fn for_config_dir(config_dir: &Path) -> Option<Usage> {
         .and_then(|e| e.usage.clone())
 }
 
+/// The last reading of the login with this profile id ("claude:work", "codex:local").
+pub fn for_profile(id: &str) -> Option<Usage> {
+    cache().lock().get(id).and_then(|e| e.usage.clone())
+}
+
 /// A reading shows the login out of quota right now: a window at 100% that has not reset yet.
 pub fn exhausted(usage: &Usage) -> bool {
     let now = now_secs();

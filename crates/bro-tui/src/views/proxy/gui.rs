@@ -1,8 +1,9 @@
-//! The proxy view in the desktop app: where the proxy listens, request compression with its switch, the
-//! routes launches registered, the Claude pool's accounts, and the live request log (newest first, scrolled
-//! by the view's own `scroll` like the terminal UI's). Narrow panes fold each row onto two lines.
+//! The proxy view in the desktop app: where the proxy listens, request compression and proxy mode with their
+//! switches, the routes launches registered, proxy mode's logins and the Claude pool's accounts, and the live
+//! request log (newest first, scrolled by the view's own `scroll` like the terminal UI's). Narrow panes fold each
+//! row onto two lines.
 
-use super::{ProxyView, hms, saved, tokens, upstream_label};
+use super::{ProxyView, hms, members_text, saved, tokens, upstream_label};
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::{Cursor, Style, Tokens, Ui, brand, radius, size, weight, widgets};
 use crate::pane::Cx;
@@ -11,7 +12,7 @@ use crate::views::usage::gui::{card, chip_fill, edge_fades, hints, icon_text_but
 use bro_core::config::ProxySettings;
 use bro_gfx::text::Align;
 use bro_gfx::{Color, Point, Rect};
-use bro_proxy::{PoolAccountStatus, ProxyEvent, Route, Upstream};
+use bro_proxy::{LoginStatus, PoolAccountStatus, ProxyEvent, Route, Upstream};
 use crossterm::event::KeyModifiers;
 
 /// The view's background (wheel, focus).
@@ -20,6 +21,8 @@ const BODY: usize = 0;
 const TRIM: usize = 1;
 /// Back to the newest request.
 const NEWEST: usize = 2;
+/// The proxy mode switch.
+const SHARED: usize = 3;
 
 const PAD: f32 = 28.0;
 const MAX_W: f32 = 1240.0;
@@ -36,6 +39,10 @@ struct Snap {
     routes: Vec<Route>,
     routes_all: usize,
     pool: Vec<PoolAccountStatus>,
+    /// proxy mode's logins as the proxy sees them, Claude's first
+    logins: Vec<LoginStatus>,
+    /// signed-in Claude and ChatGPT logins proxy mode shares
+    members: (usize, usize),
     events: usize,
     settings: ProxySettings,
     /// (requests compression ran on, estimated tokens it saved) in the recent log
@@ -58,6 +65,8 @@ fn snapshot(cx: &Cx) -> Snap {
         routes: p.routes.iter().take(6).cloned().collect(),
         routes_all: p.routes.len(),
         pool: p.pool.iter().take(6).cloned().collect(),
+        logins: p.logins.iter().take(8).cloned().collect(),
+        members: st.profiles.ready().map_or((0, 0), |ps| (bro_core::profiles::subscription_logins_in(ps, true).len(), bro_core::profiles::subscription_logins_in(ps, false).len())),
         events: p.events.len(),
         settings: st.settings.proxy.clone(),
         trimmed,
@@ -106,11 +115,12 @@ pub(crate) fn draw(v: &mut ProxyView, ui: &mut Ui, area: Rect, cx: &mut Cx) -> b
     header(ui, head, &s);
 
     let foot_y = area.bottom() - 30.0;
-    hints(ui, Point::new(page.x, foot_y), &[("j/k", "scroll log"), ("g", "newest"), ("c", "compression on/off")]);
+    hints(ui, Point::new(page.x, foot_y), &[("j/k", "scroll log"), ("g", "newest"), ("c", "compression on/off"), ("s", "proxy mode on/off")]);
 
-    // compression
+    // compression, then proxy mode
     let mut y = head.bottom() + 20.0;
-    y = compression(ui, Rect::new(page.x, y, page.w, 0.0), &s, cx) + 24.0;
+    y = compression(ui, Rect::new(page.x, y, page.w, 0.0), &s, cx) + 12.0;
+    y = proxy_mode(ui, Rect::new(page.x, y, page.w, 0.0), &s, cx) + 24.0;
 
     // routes
     let line_h = if narrow { 46.0 } else { 30.0 };
@@ -125,6 +135,18 @@ pub(crate) fn draw(v: &mut ProxyView, ui: &mut Ui, area: Rect, cx: &mut Cx) -> b
     for r in &s.routes {
         route_row(ui, Rect::new(page.x, y, page.w, line_h), r, narrow);
         y += line_h;
+    }
+
+    // proxy mode's logins
+    if !s.logins.is_empty() {
+        y += 18.0;
+        widgets::section(ui, Rect::new(page.x, y, page.w, 20.0), "Shared logins");
+        y += 28.0;
+        let now = crate::util::now_ms();
+        for a in &s.logins {
+            login_row(ui, Rect::new(page.x, y, page.w, line_h), a, now, narrow);
+            y += line_h;
+        }
     }
 
     // the claude pool
@@ -256,6 +278,74 @@ fn compression(ui: &mut Ui, at: Rect, s: &Snap, cx: &Cx) -> f32 {
     r.bottom()
 }
 
+/// The proxy mode card, as the compression one: what it shares, and its switch. Returns its bottom.
+fn proxy_mode(ui: &mut Ui, at: Rect, s: &Snap, cx: &Cx) -> f32 {
+    let t = ui.t;
+    let on = s.settings.shared;
+    let x = at.x + 16.0;
+    let state_st = Style::new(size::BODY, weight::REGULAR, t.text);
+    let state_w = ui.measure("Off", state_st).max(ui.measure("On", state_st));
+    let text_w = at.w - 32.0 - widgets::SWITCH_W - 12.0 - state_w - 24.0;
+    let detail = if on {
+        format!("New sessions share {} · each conversation stays on one, and a spent one hands off to the next", members_text(s.members.0, s.members.1))
+    } else {
+        "s pools your signed-in logins per agent: no login to pick, and a spent one hands off to the next".to_string()
+    };
+    let db = ui.para(&detail, Style::new(size::SMALL, weight::REGULAR, t.muted), text_w.max(40.0), Some(3));
+    let r = Rect::new(at.x, at.y, at.w, 16.0 + 22.0 + 2.0 + db.h + 16.0);
+    card(ui, r, 0.0, false);
+    let line1 = Rect::new(x, r.y + 16.0, text_w, 22.0);
+    ui.label_in(line1, "Proxy mode", Style::new(size::TITLE, weight::SEMIBOLD, t.text), Align::Left);
+    ui.draw(&db, Point::new(x, line1.bottom() + 2.0));
+    let sw = Point::new(r.right() - 16.0 - widgets::SWITCH_W, r.y + (r.h - widgets::SWITCH_H) / 2.0);
+    widgets::switch(ui, sw, on, Action::View(cx.id, SHARED));
+    ui.label_in(Rect::new(sw.x - 12.0 - state_w, r.y, state_w, r.h), if on { "On" } else { "Off" }, state_st, Align::Right);
+    r.bottom()
+}
+
+/// "5h 25%  ·  week 40%  ·  2 conversations  ·  14 req": what a shared login has used and carries.
+pub(super) fn login_figures(a: &LoginStatus) -> String {
+    let pct = |p: Option<f32>| p.map_or("—".to_string(), |p| format!("{}%", p.round() as i64));
+    let convs = match a.conversations {
+        1 => "1 conversation".to_string(),
+        n => format!("{n} conversations"),
+    };
+    format!("5h {}  ·  week {}  ·  {convs}  ·  {} req", pct(a.five_hour_pct), pct(a.weekly_pct), a.usage.window_requests)
+}
+
+/// One of proxy mode's logins: ready or cooling until its reset, what it has used, what it carries.
+fn login_row(ui: &mut Ui, r: Rect, a: &LoginStatus, now: i64, narrow: bool) {
+    let t = ui.t;
+    row_hover(ui, ("proxy-login", &a.id), r);
+    let cooling = a.cooling_until_ms.filter(|until| *until > now);
+    let (c, state, glyph) = match cooling {
+        Some(until) => (t.inline, format!("back in {}", crate::util::countdown((until - now) / 1000)), "\u{F0150}"),
+        None => (t.good, "ready".to_string(), "\u{F05E0}"),
+    };
+    let name_st = Style::new(size::BODY, weight::SEMIBOLD, t.text);
+    let state_st = Style::new(size::SMALL, weight::SEMIBOLD, c);
+    let fig_st = Style::new(size::SMALL, weight::REGULAR, t.muted);
+    let l1 = if narrow { Rect::new(r.x, r.y + 4.0, r.w, 20.0) } else { r };
+    ui.icon(Rect::new(r.x + 4.0, l1.y, 16.0, l1.h), glyph, size::TITLE, c);
+    let (fx, fy, fh) = if narrow {
+        let sb = ui.label_in(Rect::new(r.x, l1.y, r.w - 8.0, l1.h), &state, state_st, Align::Right);
+        ui.label_in(Rect::new(r.x + 28.0, l1.y, (r.w - 28.0 - sb.w - 20.0).max(1.0), l1.h), &a.id, name_st, Align::Left);
+        (r.x + 28.0, r.y + 24.0, 18.0)
+    } else {
+        ui.label_in(Rect::new(r.x + 28.0, r.y, 150.0, r.h), &a.id, name_st, Align::Left);
+        let sw = ui.label_in(Rect::new(r.x + 184.0, r.y, 130.0, r.h), &state, state_st, Align::Left).w;
+        (r.x + 184.0 + sw.max(110.0) + 20.0, r.y, r.h)
+    };
+    let fb = ui.label_in(Rect::new(fx, fy, (r.right() - fx).max(1.0), fh), &login_figures(a), fig_st, Align::Left);
+    if let Some(e) = &a.usage.last_error {
+        let ex = fx + fb.w + 18.0;
+        if ex + 60.0 < r.right() {
+            ui.icon(Rect::new(ex, fy, 14.0, fh), "\u{F0026}", size::SMALL, t.danger);
+            ui.label_in(Rect::new(ex + 18.0, fy, r.right() - ex - 18.0, fh), e, Style::new(size::SMALL, weight::MEDIUM, t.danger), Align::Left);
+        }
+    }
+}
+
 /// A quiet hover behind rows you read across.
 fn row_hover(ui: &mut Ui, key: impl std::hash::Hash, r: Rect) {
     let hot = ui.hover_amount(key, r);
@@ -298,8 +388,8 @@ fn route_row(ui: &mut Ui, r: Rect, route: &Route, narrow: bool) {
 /// backend, Gemini's for Google's, else the one its base URL names (OpenRouter, DeepSeek, Anthropic…).
 fn upstream_mark(u: &Upstream) -> Option<brand::Mark> {
     match u {
-        Upstream::ClaudePool { .. } | Upstream::ClaudeOAuth { .. } => Some(brand::Mark::Logo(brand::Logo::Claude)),
-        Upstream::ChatGptCodex { .. } => Some(brand::Mark::Logo(brand::Logo::OpenAi)),
+        Upstream::ClaudePool { .. } | Upstream::ClaudeOAuth { .. } | Upstream::ClaudeLogins => Some(brand::Mark::Logo(brand::Logo::Claude)),
+        Upstream::ChatGptCodex { .. } | Upstream::CodexLogins => Some(brand::Mark::Logo(brand::Logo::OpenAi)),
         Upstream::GeminiCodeAssist { .. } => Some(brand::Mark::Logo(brand::Logo::Gemini)),
         Upstream::OpenAiChat { base_url, .. } | Upstream::OpenAiResponses { base_url, .. } | Upstream::Anthropic { base_url, .. } => brand::provider(base_url),
     }
@@ -513,6 +603,10 @@ pub(crate) fn click(v: &mut ProxyView, n: usize, _p: Point, _mods: KeyModifiers,
         TRIM => {
             let on = !cx.svc.settings().proxy.trim;
             cx.svc.set_trim(on);
+        }
+        SHARED => {
+            let on = !cx.svc.settings().proxy.shared;
+            cx.svc.set_shared(on);
         }
         NEWEST => v.scroll = 0,
         _ => {}

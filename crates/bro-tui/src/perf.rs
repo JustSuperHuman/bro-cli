@@ -64,6 +64,7 @@ fn kind(ev: &Event) -> &'static str {
         Event::FolderCreated(..) => "folder",
         Event::Watchdog(_) => "watchdog",
         Event::Voice(_) => "voice",
+        Event::Host(_) => "session server",
     }
 }
 
@@ -81,6 +82,8 @@ pub struct Pass {
     write: Duration,
     /// the slowest pane render this pass
     pane: Option<(PaneId, Duration)>,
+    /// the frame went to the GPU (the desktop app), not a terminal: `write` is the GPU's part
+    gpu: bool,
 }
 
 impl Pass {
@@ -125,6 +128,12 @@ impl Pass {
         self.write += total.saturating_sub(render);
     }
 
+    /// The desktop app's frame is on screen: `build` laid it out, `gpu` got an image and handed the frame over.
+    pub fn drawn_gpu(&mut self, build: Duration, gpu: Duration) {
+        self.gpu = true;
+        self.drawn(build, build + gpu);
+    }
+
     /// End the pass; a slow one is logged.
     pub fn finish(&mut self) {
         let pass = std::mem::take(self);
@@ -150,9 +159,14 @@ impl Pass {
         if let Some((id, d)) = self.pane {
             s += &format!(" (pane {id} {})", ms(d));
         }
-        s += &format!(" · terminal write {}", ms(self.write));
+        s += &format!(" · {} {}", if self.gpu { "gpu" } else { "terminal write" }, ms(self.write));
         s
     }
+}
+
+/// A line for the log that isn't a pass: what the passes after it ran on (the window's GPU, say).
+pub fn note(line: impl Into<String>) {
+    log(line.into());
 }
 
 /// Append a line to the log on a background thread (never the UI's).
@@ -206,6 +220,15 @@ mod tests {
         assert!(line.starts_with("slow pass 80.0 ms"), "{line}");
         assert!(line.contains("events") && line.contains("(2) worst pane output pane 7"), "{line}");
         assert!(line.contains("render 10.0 ms (pane 4 9.0 ms)") && line.contains("terminal write 4.0 ms"), "{line}");
+    }
+
+    #[test]
+    fn the_desktop_apps_frame_names_its_gpu_time() {
+        let mut p = Pass { start: Some(Instant::now()), ..Pass::default() };
+        p.drawn_gpu(Duration::from_millis(7), Duration::from_millis(55));
+        let line = p.line(Duration::from_millis(62));
+        assert!(line.contains("render 7.0 ms") && line.contains("gpu 55.0 ms"), "{line}");
+        assert!(!line.contains("terminal write"), "{line}");
     }
 
     #[test]

@@ -51,6 +51,7 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("watchdog", "\u{F0A43}", "◉"),
     ("team", "\u{F0849}", "⚑"),
     ("history", "\u{F02DA}", "↺"),
+    ("server", "\u{F048B}", "▣"),
     ("branch", "\u{E725}", "⎇"),
 ];
 
@@ -90,6 +91,14 @@ pub fn harness_glyph(h: Option<Harness>) -> &'static str {
         Some(Harness::Omp) => "omp",
         None => "term",
     })
+}
+
+/// The maker of the model a session runs, when it isn't its agent's own lab (see [`crate::maker`]), as a span to
+/// put right after the agent's glyph and its space: "◎ ✻ " for Codex on Claude. None: nothing to add.
+pub fn model_badge(h: Option<Harness>, profile: Option<&str>, model: Option<&str>, t: &Theme) -> Option<Span<'static>> {
+    let maker = crate::maker::badge(h, profile, model)?;
+    let (glyph, color) = provider_glyph(maker, t.muted, t);
+    Some(Span::styled(format!("{glyph} "), Style::default().fg(color)))
 }
 
 /// Glyph and brand colour for an API provider id ("openrouter", "my-gemini"), so a row reads as its brand at a

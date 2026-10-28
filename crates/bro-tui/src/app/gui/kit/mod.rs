@@ -523,13 +523,15 @@ impl<'a> Ui<'a> {
 
     // ------------------------------------------------------------------ text
 
-    /// Lay out one line of `text` (cached), cut with an ellipsis at `max_w`.
+    /// Lay out one line of `text` (cached), cut with an ellipsis at `max_w`. Line breaks in it read as spaces: a label
+    /// stays on its line whatever it's given (a skill's description can run over several).
     pub fn line(&mut self, text: &str, st: Style, max_w: Option<f32>) -> TextBox {
         let mut o = TextOpts::new(st.size * self.scale);
         o.line_height = (st.size * 1.36 * self.scale).round();
         o.max_width = max_w.map(|w| (w * self.scale).max(1.0));
         o.ellipsis = max_w.is_some();
-        let span = Span { text: text.to_string(), face: st.face, weight: st.weight, italic: st.italic, color: st.color, size: None };
+        let text = if text.contains(['\n', '\r']) { text.split_whitespace().collect::<Vec<_>>().join(" ") } else { text.to_string() };
+        let span = Span { text, face: st.face, weight: st.weight, italic: st.italic, color: st.color, size: None };
         let layout = self.text.layout(&[span], &o);
         TextBox { w: layout.width() / self.scale, h: layout.height() / self.scale, layout }
     }

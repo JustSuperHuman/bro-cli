@@ -134,6 +134,23 @@ pub fn provider(id: &str) -> Option<Mark> {
     Some(Mark::Logo(logo))
 }
 
+/// The mark of a model's maker by its [`crate::maker`] name: its logo, else a glyph in its colour.
+pub fn maker(name: &str) -> Mark {
+    if let Some(m) = provider(name) {
+        return m;
+    }
+    match name {
+        "xai" | "grok" => Mark::Glyph("✕", None),
+        "kimi" | "moonshot" => Mark::Glyph("☾", None),
+        "qwen" => Mark::Glyph("◭", Some(Color::hex(0x615CED))),
+        "zai" | "zhipu" => Mark::Glyph("ℤ", Some(Color::hex(0x3B5BFD))),
+        "meta" => Mark::Glyph("∞", Some(Color::hex(0x1D7CF2))),
+        "groq" => Mark::Glyph("ϟ", Some(Color::hex(0xF55036))),
+        "lmstudio" => Mark::Glyph("▤", None),
+        _ => Mark::Glyph("◇", None),
+    }
+}
+
 impl Ui<'_> {
     /// A logo fitted (square, centred) into `r`, in `color`.
     pub fn logo(&mut self, logo: Logo, r: Rect, color: Color) {
@@ -161,6 +178,26 @@ impl Ui<'_> {
             Mark::Glyph(g, _) => self.icon(r, g, size, c),
         }
     }
+
+    /// [`Self::mark`] with `badge` (the maker of the model it runs, see [`crate::maker`]) tucked into its
+    /// bottom-right corner on a small chip; without one, just the mark.
+    pub fn mark_badged(&mut self, mark: Mark, badge: Option<Mark>, r: Rect, size: f32, color: Option<Color>) {
+        let Some(badge) = badge else { return self.mark(mark, r, size, color) };
+        // the mark a little smaller, up and left; the badge over the corner it leaves
+        let side = size.min(r.w).min(r.h);
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let main = side * 0.8;
+        self.mark(mark, Rect::new(cx - side / 2.0 - 1.5, cy - side / 2.0 - 1.5, main, main), main, color);
+        let b = (side * 0.7).max(8.0);
+        let center = Point::new(cx + side / 2.0 - b / 2.0 + 3.0, cy + side / 2.0 - b / 2.0 + 3.0);
+        let chip = b / 2.0 + 1.0;
+        self.circle(center, chip, self.t.raised);
+        self.ring(center, chip, 1.0, self.t.hairline);
+        // a glyph badge gets room to be set whole (its box would cut it to "…")
+        let inner = b * 0.86;
+        let w = if matches!(badge, Mark::Glyph(..)) { inner * 2.0 } else { inner };
+        self.mark(badge, Rect::new(center.x - w / 2.0, center.y - inner / 2.0, w, inner), inner, None);
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +214,9 @@ mod tests {
         assert_eq!(provider("openrouter"), Some(Mark::Logo(Logo::OpenRouter)));
         assert_eq!(provider("gemini-sub"), Some(Mark::Logo(Logo::Gemini)));
         assert_eq!(provider("zai"), None);
+        assert_eq!(maker("claude"), Mark::Logo(Logo::Claude));
+        assert_eq!(maker("codex"), Mark::Logo(Logo::OpenAi));
+        assert!(matches!(maker("xai"), Mark::Glyph(..)));
         // every path parses and fills a fair part of its square (a parse failure fills next to nothing)
         for l in [Logo::Claude, Logo::OpenAi, Logo::Gemini, Logo::OpenRouter, Logo::Anthropic, Logo::PowerShell, Logo::Bash, Logo::Ollama, Logo::DeepSeek, Logo::Mistral] {
             let px = bro_gfx::raster_path(l.path(), 24.0, 48, 48);

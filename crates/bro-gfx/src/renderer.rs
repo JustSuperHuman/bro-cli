@@ -170,6 +170,31 @@ impl Rebuilds {
     }
 }
 
+/// The GPU to draw with: the one `WGPU_POWER_PREF` asks for; else the one driving the window's display (`display`,
+/// see [`crate::display`]) when it can draw to `surface`; else the low-power one (a laptop's integrated GPU, which
+/// usually drives its own screen). Of a GPU's backends the usual first (Vulkan, then DX12) wins, as below.
+fn pick_adapter(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>, display: Option<(u32, u32)>) -> Result<wgpu::Adapter, String> {
+    let preference = wgpu::PowerPreference::from_env();
+    if preference.is_none()
+        && let Some((vendor, device)) = display
+    {
+        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        if let Some(a) = adapters.into_iter().find(|a| {
+            let info = a.get_info();
+            info.vendor == vendor && info.device == device && a.is_surface_supported(surface)
+        }) {
+            return Ok(a);
+        }
+    }
+    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: preference.unwrap_or(wgpu::PowerPreference::LowPower),
+        compatible_surface: Some(surface),
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .map_err(|e| format!("no graphics adapter: {e}"))
+}
+
 /// Why a frame wasn't drawn.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FrameError {
@@ -260,14 +285,10 @@ impl Renderer {
 
     fn build(instance: wgpu::Instance, target: impl Into<wgpu::SurfaceTarget<'static>>, width: u32, height: u32, options: Options) -> Result<Renderer, String> {
         let vsync = options.vsync;
+        let target = target.into();
+        let display = crate::display::gpu_of_target(&target);
         let surface = instance.create_surface(target).map_err(|e| format!("couldn't create a drawing surface: {e}"))?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::LowPower),
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .map_err(|e| format!("no graphics adapter: {e}"))?;
+        let adapter = pick_adapter(&instance, &surface, display)?;
         let adapter_info = adapter.get_info();
         // subpixel text blends each colour channel by its own coverage: two outputs into one target
         let dual_source = adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING;

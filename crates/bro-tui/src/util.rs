@@ -209,6 +209,21 @@ pub fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
     }
 }
 
+/// Put the calling thread ahead of ordinary work (`true`), or back with it: the window's own thread and the reader
+/// of the session with the keyboard, so they keep up while agents and builds keep every core busy. Windows only
+/// (raising a thread elsewhere takes privileges).
+pub fn prioritize_thread(ahead: bool) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_NORMAL};
+        // SAFETY: the pseudo-handle of the calling thread
+        unsafe {
+            SetThreadPriority(GetCurrentThread(), if ahead { THREAD_PRIORITY_ABOVE_NORMAL } else { THREAD_PRIORITY_NORMAL });
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = ahead;
+}
 
 #[cfg(test)]
 mod tests {

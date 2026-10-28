@@ -1,7 +1,8 @@
 //! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), push-to-talk
 //! voice (its key, set by pressing it), watchdog
 //! defaults and the reviewer's prompt, caveman
-//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, its skill, Quick Install, the JustWatch skill and JustImagine), bro's own updates and the Claude Code environment bro sets on every Claude launch — agent teams (on, the
+//! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, Quick Install, Smart Paste and JustImagine), skills (bro's
+//! own, JustTools', JustWatch's and JustImagine's, and the git repos bro watches for more), bro's own updates and the Claude Code environment bro sets on every Claude launch — agent teams (on, the
 //! teammates' model, the teams running now), then a preset (Standard, Quiet, Private, Lockdown,
 //! Incognito, Presenter, Marathon) plus per-switch overrides. Saved to `~/.bro/v2.toml`; the Claude Code
 //! part applies to sessions launched from now on.
@@ -15,6 +16,7 @@ use crate::alerts::Kind;
 use crate::pane::{Action, Cx, Pane, Place};
 use crate::services::justimagine::commits;
 use crate::services::justtools::JobKind;
+use crate::services::skills::Bundled;
 use crate::ui::{self, fg, muted};
 use bro_core::caveman::Level;
 use bro_core::claude_env::{self, ClaudeEnvSettings, Group, KNOBS, PRESETS, Source};
@@ -35,7 +37,7 @@ use std::time::{Duration, Instant};
 enum BroOpt {
     Theme,
     Font,
-    /// the desktop app's window: solid, acrylic, mica, glass
+    /// the desktop app's window: solid, acrylic, glass
     Material,
     /// how much of the theme covers a see-through window
     Tint,
@@ -43,10 +45,11 @@ enum BroOpt {
     Screensaver,
     SharedBorders,
     ProjectTabs,
-    Icons,
     AutoResume,
     AutoApprove,
     Recaps,
+    /// sessions share every signed-in login of their agent
+    ProxyMode,
     Compression,
 }
 
@@ -59,21 +62,22 @@ const BRO_OPTS: [BroOpt; 13] = [
     BroOpt::Screensaver,
     BroOpt::SharedBorders,
     BroOpt::ProjectTabs,
-    BroOpt::Icons,
     BroOpt::AutoResume,
     BroOpt::AutoApprove,
     BroOpt::Recaps,
+    BroOpt::ProxyMode,
     BroOpt::Compression,
 ];
 
 /// bro's options this window can use: the font only where the terminal can switch it, the window's material only
-/// in the desktop app (a terminal draws its own window).
+/// in the desktop app (a terminal draws its own window), its tint only once something shows through.
 fn bro_opts() -> Vec<BroOpt> {
     BRO_OPTS
         .into_iter()
         .filter(|o| match o {
             BroOpt::Font => crate::fonts::available(),
-            BroOpt::Material | BroOpt::Tint => desktop_app(),
+            BroOpt::Material => desktop_app(),
+            BroOpt::Tint => desktop_app() && SEE_THROUGH.with(|s| s.get()),
             _ => true,
         })
         .collect()
@@ -103,10 +107,10 @@ impl BroOpt {
             BroOpt::Screensaver => "Summary screensaver",
             BroOpt::SharedBorders => "Shared tile borders",
             BroOpt::ProjectTabs => "Project tabs",
-            BroOpt::Icons => "Nerd Font icons",
             BroOpt::AutoResume => "Auto-resume",
             BroOpt::AutoApprove => "Auto-approve prompts",
             BroOpt::Recaps => "Recaps",
+            BroOpt::ProxyMode => "Proxy mode",
             BroOpt::Compression => "Request compression",
         }
     }
@@ -114,22 +118,22 @@ impl BroOpt {
         match self {
             BroOpt::Theme => "enter opens the picker with a live preview",
             BroOpt::Font => "this window only, switches as you go: ←/→ to try them",
-            BroOpt::Material => "let your desktop show through: acrylic frosts it, mica washes in your wallpaper's colours, glass leaves it clear",
+            BroOpt::Material => "let your desktop show through: acrylic frosts it, glass leaves it clear",
             BroOpt::Tint => "how much theme covers a see-through window, evenly from title bar to sessions · text stays solid",
             BroOpt::Rain => "over any theme: everywhere, or only in sessions whose agent is mid-turn",
             BroOpt::Screensaver => "step away and every session turns over to what it's working on; any touch turns them back",
             BroOpt::SharedBorders => "tiles that sit together share one line instead of two; status and × move up beside the title",
             BroOpt::ProjectTabs => "a tab strip over your sessions: All tiles every one, a project's tab tiles just its own, in its color",
-            BroOpt::Icons => "turn off if icons show as boxes",
             BroOpt::AutoResume => "types `continue` when an agent stops on an API error or a limit resets",
             BroOpt::AutoApprove => "answers Yes to Claude's \"Do you want to proceed?\" (bypass mode's rm / path safety checks)",
             BroOpt::Recaps => "asks Claude for a /recap of a pane left waiting unseen (a few cents each)",
+            BroOpt::ProxyMode => "one pool per agent: every signed-in login serves new sessions, and a spent one hands off to the next",
             BroOpt::Compression => "routes new Claude sessions through bro-proxy to trim requests",
         }
     }
     /// How bro looks (Appearance) rather than what it does (Sessions).
     fn looks(self) -> bool {
-        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Material | BroOpt::Tint | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::ProjectTabs | BroOpt::Icons)
+        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Material | BroOpt::Tint | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::ProjectTabs)
     }
     /// The value as shown.
     fn value(self, cx: &Cx) -> String {
@@ -153,10 +157,10 @@ impl BroOpt {
             },
             BroOpt::SharedBorders => on(s.shared_borders),
             BroOpt::ProjectTabs => on(s.project_tabs),
-            BroOpt::Icons => on(ui::NERD.load(Ordering::Relaxed)),
             BroOpt::AutoResume => on(s.auto_resume.enabled),
             BroOpt::AutoApprove => on(s.auto_approve),
             BroOpt::Recaps => on(s.insights.generate_recaps),
+            BroOpt::ProxyMode => on(s.proxy.shared),
             BroOpt::Compression => on(s.proxy.trim),
         }
     }
@@ -203,9 +207,12 @@ impl BroOpt {
                 cx.svc.save_settings(s);
             }
             BroOpt::Theme => cx.act(Action::Run(Act::Themes)),
-            BroOpt::Icons => cx.act(Action::Run(Act::ToggleIcons)),
             BroOpt::AutoResume => cx.act(Action::Run(Act::ToggleAutoResume)),
             BroOpt::Compression => cx.act(Action::Run(Act::ToggleTrim)),
+            BroOpt::ProxyMode => {
+                let on = !cx.svc.settings().proxy.shared;
+                cx.svc.set_shared(on);
+            }
             BroOpt::AutoApprove => {
                 let mut s = cx.svc.settings();
                 s.auto_approve = !s.auto_approve;
@@ -253,8 +260,23 @@ const LIVE_VOICES: [&str; 10] = ["cedar", "marin", "alloy", "ash", "ballad", "co
 /// Keys ←/→ step through where pressing one to set it doesn't work.
 fn key_choices() -> Vec<&'static str> {
     let mut all = vec![bro_voice::default_hotkey()];
-    all.extend(["ralt", "rctrl", "rshift", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "scrolllock", "pause"].into_iter().filter(|k| *k != bro_voice::default_hotkey()));
+    all.extend(
+        ["ralt", "rctrl", "rshift", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24", "scrolllock", "pause"]
+            .into_iter()
+            .filter(|k| *k != bro_voice::default_hotkey()),
+    );
     all
+}
+
+/// The voice key a key that reached bro's window names: function keys (F13–F24 by name) and Insert; keys you
+/// type or move with can't be one.
+fn window_hotkey(code: KeyCode) -> Option<String> {
+    match code {
+        KeyCode::F(n @ 13..=24) => Some(format!("f{n}")),
+        KeyCode::F(n @ 1..=12) => Some(format!("vk:0x{:02X}", 0x6F + u32::from(n))),
+        KeyCode::Insert => Some("insert".into()),
+        _ => None,
+    }
 }
 
 /// The push-to-talk key's name, the platform's default when none is set.
@@ -299,6 +321,39 @@ enum ToolOpt {
     PeonPing,
 }
 
+/// The Skills section's own rows. The JustTools and JustWatch skills ([`ToolOpt::Skill`], [`ToolOpt::WatchSkill`])
+/// are listed there too. The skills themselves, the watched repos and Skill Issue are the Skills view's.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SkillOpt {
+    /// enter opens the Skills view
+    Manage,
+    /// bro's own `bro-open`
+    BroOpen,
+    /// JustImagine's generate-images, -video and -voice
+    Imagine,
+    /// pull the repos when bro opens and every 6 hours
+    AutoSync,
+}
+
+thread_local! {
+    /// Whether the window was see-through as the view last read the settings: the tint row [`rows`] lists.
+    static SEE_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Note what of `s` decides which rows there are (a see-through window), for [`rows`].
+fn note_settings(s: &bro_core::config::Settings) {
+    SEE_THROUGH.with(|w| w.set(s.material.see_through()));
+}
+
+/// "just now", "4 min ago", "2 h ago".
+pub(crate) fn ago(at: Instant) -> String {
+    match at.elapsed().as_secs() {
+        s if s < 60 => "just now".into(),
+        s if s < 3600 => format!("{} min ago", s / 60),
+        s => format!("{} h ago", s / 3600),
+    }
+}
+
 /// Where the sound packs come from.
 const PEONPING_URL: &str = "https://peonping.com";
 
@@ -306,6 +361,19 @@ const PEONPING_URL: &str = "https://peonping.com";
 const IMAGINE_RECHECK: Duration = Duration::from_secs(3);
 /// Stop looking after this long.
 const IMAGINE_WATCH_FOR: Duration = Duration::from_secs(10 * 60);
+
+/// The session server's rows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum HostOpt {
+    /// new sessions run in the server and keep running when bro closes
+    Keep,
+    /// a background bro carries on with them (bridge, proxy, auto-resume, watchdogs) while bro is closed
+    Working,
+    /// how it is; enter restarts it
+    Restart,
+    /// it starts when you sign in (for your user, no admin)
+    Startup,
+}
 
 /// bro's own updates' rows.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -421,14 +489,16 @@ impl ModOpt {
 
 /// A selectable row, in the order the sections run: bro's own options (Appearance, then Sessions), caveman mode,
 /// watchdogs, agent teams, the Claude preset and each other [`KNOBS`] switch, bro's Claude mod, the integrations,
-/// then bro's updates.
+/// the skills, the sounds, then bro's updates.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
     Bro(BroOpt),
     Voice(VoiceOpt),
     Cave(CaveOpt),
     Tool(ToolOpt),
+    Skill(SkillOpt),
     Update(UpdOpt),
+    Host(HostOpt),
     Watch(WatchOpt),
     Mod(ModOpt),
     Preset,
@@ -439,6 +509,7 @@ fn rows() -> Vec<Row> {
     bro_opts()
         .into_iter()
         .map(Row::Bro)
+        .chain([Row::Host(HostOpt::Keep), Row::Host(HostOpt::Working), Row::Host(HostOpt::Restart), Row::Host(HostOpt::Startup)])
         .chain(VOICE_OPTS.map(Row::Voice))
         .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents)])
         .chain(WATCH_OPTS.map(Row::Watch))
@@ -446,10 +517,12 @@ fn rows() -> Vec<Row> {
         .chain([Row::Preset])
         .chain(knobs(false).map(Row::Knob))
         .chain(MOD_OPTS.map(Row::Mod))
-        .chain([Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::Skill), Row::Tool(ToolOpt::AutoUpdate)])
-        .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
+        .chain([Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justpaste::supported().then_some(Row::Tool(ToolOpt::SmartPaste)))
-        .chain([Row::Tool(ToolOpt::Imagine), Row::Tool(ToolOpt::SoundsOn), Row::Tool(ToolOpt::Sounds), Row::Tool(ToolOpt::PeonPing), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
+        .chain([Row::Tool(ToolOpt::Imagine), Row::Skill(SkillOpt::Manage), Row::Skill(SkillOpt::BroOpen), Row::Tool(ToolOpt::Skill)])
+        .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
+        .chain([Row::Skill(SkillOpt::Imagine), Row::Skill(SkillOpt::AutoSync)])
+        .chain([Row::Tool(ToolOpt::SoundsOn), Row::Tool(ToolOpt::Sounds), Row::Tool(ToolOpt::PeonPing), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
         .collect()
 }
 
@@ -498,25 +571,29 @@ fn team_notes(on: bool, teams: &[crate::services::LiveTeam], t: &crate::theme::T
 enum Section {
     Appearance,
     Sessions,
+    Server,
     Voice,
     Caveman,
     Watchdog,
     Claude,
     Mod,
     Integrations,
+    Skills,
     Sounds,
     Updates,
 }
 
-const SECTIONS: [Section; 10] = [
+const SECTIONS: [Section; 12] = [
     Section::Appearance,
     Section::Sessions,
+    Section::Server,
     Section::Voice,
     Section::Caveman,
     Section::Watchdog,
     Section::Claude,
     Section::Mod,
     Section::Integrations,
+    Section::Skills,
     Section::Sounds,
     Section::Updates,
 ];
@@ -526,12 +603,14 @@ impl Section {
         match r {
             Row::Bro(o) if o.looks() => Section::Appearance,
             Row::Bro(_) => Section::Sessions,
+            Row::Host(_) => Section::Server,
             Row::Voice(_) => Section::Voice,
             Row::Cave(_) => Section::Caveman,
             Row::Watch(_) => Section::Watchdog,
             Row::Preset | Row::Knob(_) => Section::Claude,
             Row::Mod(_) => Section::Mod,
             Row::Tool(ToolOpt::SoundsOn | ToolOpt::Sounds | ToolOpt::PeonPing) => Section::Sounds,
+            Row::Tool(ToolOpt::Skill | ToolOpt::WatchSkill) | Row::Skill(_) => Section::Skills,
             Row::Tool(_) => Section::Integrations,
             Row::Update(_) => Section::Updates,
         }
@@ -540,12 +619,14 @@ impl Section {
         match self {
             Section::Appearance => "Appearance",
             Section::Sessions => "Sessions",
+            Section::Server => "Session server",
             Section::Voice => "Voice",
             Section::Caveman => "Caveman",
             Section::Watchdog => "Watchdog",
             Section::Claude => "Claude Code",
             Section::Mod => "bro mod",
             Section::Integrations => "Integrations",
+            Section::Skills => "Skills",
             Section::Sounds => "Sounds",
             Section::Updates => "Updates",
         }
@@ -555,12 +636,14 @@ impl Section {
         match self {
             Section::Appearance => "theme",
             Section::Sessions => "term",
+            Section::Server => "server",
             Section::Voice => "mic",
             Section::Caveman => "caveman",
             Section::Watchdog => "watchdog",
             Section::Claude => "claude",
             Section::Mod => "mod",
             Section::Integrations => "rocket",
+            Section::Skills => "skills",
             Section::Sounds => "sound",
             Section::Updates => "history",
         }
@@ -570,12 +653,14 @@ impl Section {
         match self {
             Section::Appearance => "How bro looks. Every change shows up as you make it.",
             Section::Sessions => "What bro does on its own while your agents work.",
+            Section::Server => "Your sessions run in a background process of bro's, so they keep running when bro closes, crashes or updates, and come back when it opens. The terminal UI and the desktop app both pick them up.",
             Section::Voice => "Hold the key in any app, speak, let go: Hugh hears you and gets it done. bro keeps that key to itself while it runs.",
             Section::Caveman => "Terse replies with every fact kept, in new Claude, Codex and Pi sessions.",
             Section::Watchdog => "A fresh reviewer reads a session that went quiet and hands it its next task. Prefix w on a session starts one.",
             Section::Claude => "Agent teams, and the environment bro sets on every Claude launch. New sessions pick it up.",
             Section::Mod => "bro's mod for Claude Code: your sessions and limits a keystroke away in /bro, and a chime and a clock on Claude's questions. New sessions pick it up.",
             Section::Integrations => "Tools your agents can call. bro installs them and tells you when GitHub has something newer.",
+            Section::Skills => "What your agents know how to do. The Skills view lists every skill they have and where each came from, watches repos for more and finds more on Skill Issue; here, the switches for the skills bro brings.",
             Section::Sounds => "Voice lines when a session starts, finishes, fails or needs you, in Claude, Codex, Pi and omp. The sounds and packs are provided by PeonPing.",
             Section::Updates => "New bro releases from GitHub. Nothing installs until you say so.",
         }
@@ -618,6 +703,28 @@ fn switch(on: bool, live: bool, t: &crate::theme::Theme) -> Vec<Span<'static>> {
         (true, true) => vec![Span::styled("● on", fg(t.good).add_modifier(Modifier::BOLD))],
         (true, false) => vec![Span::styled("● on", muted(t))],
         _ => vec![Span::styled("○ off", muted(t))],
+    }
+}
+
+/// "Start at sign-in": a switch, and what's registered under it.
+fn startup_item(hs: &crate::services::host::HostState, t: &crate::theme::Theme) -> Item {
+    use bro_host::service::Startup;
+    let row = Row::Host(HostOpt::Startup);
+    let label = "Start at sign-in";
+    let off_outside = if cfg!(windows) { "turned off in Task Manager › Startup apps" } else { "turned off outside bro (systemctl --user disable)" };
+    let (value, help) = match (&hs.startup_busy, &hs.startup) {
+        (Some(started), _) => (shown(format!("{} switching", spinner(*started)), fg(t.shine).add_modifier(Modifier::BOLD)), String::new()),
+        (None, Some(Startup::On { .. })) => (switch(true, true, t), "bro starts in the background when you sign in and stays running, ready for you and your phone · for your user only, no admin".into()),
+        (None, Some(Startup::Disabled { .. })) => (switch(false, true, t), format!("{off_outside} · enter turns it back on")),
+        (None, _) => (
+            switch(false, true, t),
+            "start bro in the background when you sign in, and keep it running · for your user only, no admin · off: the server starts when bro opens, and stops 10 minutes after bro closes with no session left".into(),
+        ),
+    };
+    let item = Item::new(row, label, value, help);
+    match hs.startup.as_ref().and_then(|s| s.command()) {
+        Some(command) if hs.startup_busy.is_none() => item.note(vec![Span::styled(format!("runs {command}"), muted(t))]),
+        _ => item,
     }
 }
 
@@ -718,6 +825,10 @@ pub struct SettingsView {
     imagine_update: Option<(Instant, Option<String>)>,
     /// when the last look at JustImagine during that update was asked for
     imagine_looked: Option<Instant>,
+    /// the watched repos' clones have been looked at since the view opened
+    skills_loaded: bool,
+    /// a repo is being pulled: keep its spinner moving
+    skills_busy: bool,
 }
 
 impl SettingsView {
@@ -776,12 +887,7 @@ impl SettingsView {
                 }
             }
             ToolOpt::Imagine => self.imagine(cx),
-            ToolOpt::WatchSkill => {
-                cx.svc.set_justwatch_skill_on(!s.justwatch.skill);
-                if s.justwatch.skill {
-                    cx.toast(Kind::Info, "JustWatch skill off · bro took its copies back out");
-                }
-            }
+            ToolOpt::WatchSkill => cx.svc.set_bundled(Bundled::JustWatch, !s.justwatch.skill),
             ToolOpt::SmartPaste if jt.paste_busy.is_some() => {}
             ToolOpt::SmartPaste if jt.installed.is_none() && !cx.svc.is_demo() => cx.act(Action::Run(Act::QuickInstall)),
             ToolOpt::SmartPaste if jt.installed.is_some() && jt.paste.is_none() && jt.update().is_some() && jt.job.is_none() => cx.svc.install_justtools(),
@@ -793,12 +899,26 @@ impl SettingsView {
             ToolOpt::Install if cx.svc.is_demo() => cx.toast(Kind::Info, "the demo doesn't install anything"),
             ToolOpt::Install if jt.update().is_some() => cx.svc.install_justtools(),
             ToolOpt::Install => cx.svc.check_justtools(),
-            ToolOpt::Skill if s.justtools.skill => {
-                cx.svc.set_justtools_skill_on(false);
-                cx.toast(Kind::Info, "JustTools skill off · bro took its copies back out");
+            ToolOpt::Skill => cx.svc.set_bundled(Bundled::JustTools, !s.justtools.skill),
+        }
+    }
+
+    /// Enter on a Skills row: open the Skills view, switch bro-open or auto-sync, or write JustImagine's skills.
+    fn skill(&mut self, o: SkillOpt, cx: &mut Cx) {
+        let mut s = cx.svc.settings();
+        match o {
+            SkillOpt::Manage => cx.act(Action::Run(Act::Skills)),
+            SkillOpt::BroOpen => cx.svc.set_bundled(Bundled::Open, !s.skills.bro_open),
+            SkillOpt::AutoSync => {
+                s.skills.auto_sync = !s.skills.auto_sync;
+                let on = s.skills.auto_sync;
+                cx.svc.save_settings(s);
+                if on {
+                    cx.svc.sync_skill_repos();
+                }
             }
-            ToolOpt::Skill if jt.installed.is_none() && !cx.svc.is_demo() => cx.toast(Kind::Info, "install JustTools first: its skill needs the commands"),
-            ToolOpt::Skill => cx.svc.set_justtools_skill_on(true),
+            SkillOpt::Imagine if cx.svc.is_demo() => cx.toast(Kind::Info, "the demo doesn't install anything"),
+            SkillOpt::Imagine => cx.svc.install_imagine_skills(),
         }
     }
 
@@ -835,7 +955,6 @@ impl SettingsView {
         let mut s = cx.svc.settings();
         let v = &mut s.voice;
         match o {
-            VoiceOpt::Key if bro_voice::Voice::can_capture_hotkey() => return cx.svc.capture_voice_hotkey(),
             VoiceOpt::Key => {
                 let all = key_choices();
                 let i = all.iter().position(|k| *k == voice_key(v)).map_or(0, |i| i as isize + dir);
@@ -861,6 +980,15 @@ impl SettingsView {
         }
     }
 
+    /// Enter on the selected row: the voice key waits for the key you press (where that works); everything
+    /// else steps forward.
+    fn press(&mut self, cx: &mut Cx) {
+        if self.row() == Row::Voice(VoiceOpt::Key) && bro_voice::Voice::can_capture_hotkey() {
+            return cx.svc.capture_voice_hotkey();
+        }
+        self.step(1, cx);
+    }
+
     /// Step the selected row's value by `dir` (+1 / -1).
     fn step(&mut self, dir: isize, cx: &mut Cx) {
         let mut s = cx.svc.settings();
@@ -869,6 +997,7 @@ impl SettingsView {
             Row::Bro(o) => return o.change(dir, cx),
             Row::Voice(o) => return self.voice(o, dir, cx),
             Row::Tool(o) => return self.tool(o, cx),
+            Row::Skill(o) => return self.skill(o, cx),
             Row::Update(UpdOpt::Version) => {
                 let u = cx.svc.state().updates.clone();
                 match () {
@@ -883,6 +1012,23 @@ impl SettingsView {
                 if s.updates.check {
                     cx.svc.check_bro_update(true);
                 }
+            }
+            Row::Host(HostOpt::Keep) => {
+                s.server.keep_sessions = !s.server.keep_sessions;
+                if s.server.keep_sessions {
+                    cx.svc.ensure_host();
+                }
+            }
+            Row::Host(HostOpt::Working) => s.server.keep_working = !s.server.keep_working,
+            Row::Host(HostOpt::Restart) => {
+                // the app asks first: restarting ends the sessions it runs
+                cx.act(Action::Run(Act::RestartServer));
+                return;
+            }
+            Row::Host(HostOpt::Startup) => {
+                let on = cx.svc.state().host.startup.as_ref().is_some_and(|s| s.on());
+                cx.svc.set_host_startup(!on);
+                return;
             }
             Row::Cave(CaveOpt::Mode) => {
                 let all = cave_choices();
@@ -931,7 +1077,7 @@ impl SettingsView {
         let mut s = cx.svc.settings();
         match self.row() {
             Row::Mod(ModOpt::TimerSecs) => s.claude_mod.timer_secs = bro_core::claude_mod::ClaudeModSettings::default().timer_secs,
-            Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Update(_) | Row::Mod(_) | Row::Voice(VoiceOpt::On | VoiceOpt::ApiKey) => return,
+            Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Skill(_) | Row::Update(_) | Row::Host(_) | Row::Mod(_) | Row::Voice(VoiceOpt::On | VoiceOpt::ApiKey) => return,
             Row::Voice(o) => {
                 match o {
                     VoiceOpt::Key => s.voice.hotkey = None,
@@ -1062,8 +1208,7 @@ impl SettingsView {
                             let style = if v == "off" || v == "solid" { muted(t) } else { fg(t.inline) };
                             choice(v, style, t)
                         }
-                        // only counts while something shows through
-                        BroOpt::Tint => choice(v, if st.material.see_through() { fg(t.inline) } else { muted(t) }, t),
+                        BroOpt::Tint => choice(v, fg(t.inline), t),
                         _ => switch(v == "on", true, t),
                     };
                     // the font row says what the current pick is like
@@ -1180,7 +1325,50 @@ impl SettingsView {
                 out
             }
             Section::Integrations => self.integrations(cx),
+            Section::Skills => self.skills(cx),
             Section::Sounds => self.sounds(cx),
+            Section::Server => {
+                let hs = cx.svc.state().host.clone();
+                let live = cx.svc.host().map(|h| h.live()).unwrap_or(0);
+                let current = bro_core::self_update::CURRENT;
+                let keep = Item::new(
+                    Row::Host(HostOpt::Keep),
+                    "Keep sessions running",
+                    switch(st.server.keep_sessions, true, t),
+                    "when bro closes, and pick them up when it opens again · off: new sessions run inside bro and end with it",
+                );
+                let working = Item::new(
+                    Row::Host(HostOpt::Working),
+                    "Keep working while bro is closed",
+                    switch(st.server.keep_working, st.server.keep_sessions, t),
+                    "a background bro carries on with the sessions: the phone bridge, proxy, auto-resume and watchdogs keep going until you open bro again · off: they stop when bro closes (the sessions keep running)",
+                );
+                let sessions = crate::services::skills::plural(live, "session");
+                let (v, style, help): (String, Style, String) = match (&hs.restarting, &hs.server) {
+                    (Some(started), _) => (format!("{} restarting", spinner(*started)), bold(t.shine), String::new()),
+                    (None, Some(s)) if s.version != current => (
+                        format!("running · {sessions}"),
+                        fg(t.shine),
+                        format!("it runs bro {}: enter restarts it on {current} · its sessions end, and Claude and Codex sessions come back resumed", s.version),
+                    ),
+                    (None, Some(_)) => (format!("running · {sessions}"), fg(t.good), "enter restarts it: its sessions end, and Claude and Codex sessions come back in their panes, resuming their conversations".into()),
+                    (None, None) if st.server.keep_sessions => ("not running".into(), muted(t), "enter starts it · it also starts with your next session".into()),
+                    (None, None) => ("not running".into(), muted(t), "enter starts it".into()),
+                };
+                let mut server = Item::new(Row::Host(HostOpt::Restart), "Session server", shown(v, style), help);
+                if let Some(s) = &hs.server {
+                    let up = (crate::util::now_ms().max(0) as u64).saturating_sub(s.started_ms) / 1000;
+                    let watching = match hs.peers.viewers {
+                        0 => String::new(),
+                        1 => " · 1 more window watching".into(),
+                        n => format!(" · {n} more windows watching"),
+                    };
+                    server = server.note(vec![Span::styled(format!("pid {} · bro {} · up {}{watching}", s.pid, s.version, crate::watchdog::human(up)), muted(t))]);
+                } else if let Some(p) = &hs.problem {
+                    server = server.note(vec![Span::styled(format!("✗ {p}"), fg(t.danger))]);
+                }
+                vec![Block::Item(keep), Block::Item(working), Block::Item(server), Block::Item(startup_item(&hs, t))]
+            }
             Section::Updates => {
                 let u = cx.svc.state().updates.clone();
                 let current = bro_core::self_update::CURRENT;
@@ -1235,13 +1423,19 @@ impl SettingsView {
             on = on.note(vec![Span::styled(format!("✗ {e}"), fg(t.danger))]);
         }
 
+        // bro comes forward on a press (Windows): a modifier only once it's held, so chords like Win+E still work
+        let raise = match () {
+            _ if !cfg!(windows) => "",
+            _ if bro_voice::Voice::hotkey_is_modifier(&voice_key(v)) => " · bro comes forward once you hold it",
+            _ => " · bro comes forward the moment it goes down",
+        };
         let (value, help) = match vs.capturing {
             Some(started) => (shown(format!("{} press a key…", spinner(started)), bold(t.shine)), format!("press it now, in any app · esc keeps {label}")),
             None if bro_voice::Voice::can_capture_hotkey() => (
-                shown(label.clone(), fg(t.inline)),
-                "enter, then press the key you want · a G-key or macro key set to F13–F24 in its own software works best, as nothing else uses those".to_string(),
+                choice(label.clone(), fg(t.inline), t),
+                format!("enter, then press the key you want{raise} · a G-key set to F13–F24 is ideal, as nothing else uses those"),
             ),
-            None => (choice(label.clone(), fg(t.inline), t), "the key you hold to talk · ←/→ for another".to_string()),
+            None => (choice(label.clone(), fg(t.inline), t), format!("the key you hold to talk · ←/→ for another{raise}")),
         };
         let mut key = Item::new(Row::Voice(VoiceOpt::Key), "Voice key", value, help);
         if v.hotkey.is_some() {
@@ -1274,7 +1468,7 @@ impl SettingsView {
         vec![Block::Item(on), Block::Item(key), Block::Item(mode), Block::Item(speaker), Block::Item(api)]
     }
 
-    /// JustTools, Quick Install, the skills and JustImagine.
+    /// JustTools, Quick Install, Smart Paste and JustImagine.
     fn integrations(&self, cx: &Cx) -> Vec<Block> {
         let t = cx.theme;
         let bold = |c| fg(c).add_modifier(Modifier::BOLD);
@@ -1313,22 +1507,8 @@ impl SettingsView {
             shown("open ›", fg(t.inline)),
             "tick what to install: JustTools, JustPaste, JustWatch, JustImagine, Git, Node.js, Bun, Python, .NET 9 / 10 / 11, Claude Code, Codex, Pi, omp…",
         );
-        let value = match &jt.job {
-            Some(job) if job.kind == JobKind::Skill => shown(format!("{} adding", spinner(job.started)), bold(t.shine)),
-            _ => switch(jts.skill, true, t),
-        };
-        let help = if jt.own_skill { "~/.claude has its own copy, which bro leaves alone" } else { "tells new Claude and Codex sessions when to use the just* commands" };
-        let skill = Item::new(Row::Tool(ToolOpt::Skill), "JustTools skill", value, help);
         let auto = Item::new(Row::Tool(ToolOpt::AutoUpdate), "Auto-update JustTools", switch(jts.auto_update, true, t), "when bro opens, looks on GitHub for a newer release and installs it");
-        let mut out = vec![Block::Item(tools), Block::Item(quick), Block::Item(skill), Block::Item(auto)];
-        if bro_core::justwatch::supported() {
-            out.push(Block::Item(Item::new(
-                Row::Tool(ToolOpt::WatchSkill),
-                "JustWatch skill",
-                switch(st.justwatch.skill, true, t),
-                "lets new Claude and Codex sessions check, restart and tail your dev servers through JustWatch",
-            )));
-        }
+        let mut out = vec![Block::Item(tools), Block::Item(quick), Block::Item(auto)];
         if bro_core::justpaste::supported() {
             out.push(Block::Item(self.smart_paste(&jt, cx)));
         }
@@ -1351,6 +1531,63 @@ impl SettingsView {
             None => {}
         }
         out.push(Block::Item(imagine));
+        out
+    }
+
+    /// The Skills view, then bro's own skill, JustTools', JustWatch's and JustImagine's, and keeping the watched repos in
+    /// step.
+    fn skills(&self, cx: &Cx) -> Vec<Block> {
+        use crate::services::skills::plural;
+        let t = cx.theme;
+        let bold = |c| fg(c).add_modifier(Modifier::BOLD);
+        let note = |text: String, style: Style| vec![Span::styled(text, style)];
+        let st = cx.svc.settings();
+        let (jt, ji, sk) = {
+            let s = cx.svc.state();
+            (s.justtools.clone(), s.justimagine.clone(), s.skills.clone())
+        };
+
+        let watched = st.skills.repos.len();
+        let value = match sk.inventory.as_ref() {
+            Some(inv) => format!("{} ›", plural(inv.everywhere().count(), "skill")),
+            None if watched > 0 => format!("{} watched ›", plural(watched, "repo")),
+            None => "open ›".into(),
+        };
+        let mut out = vec![Block::Item(Item::new(
+            Row::Skill(SkillOpt::Manage),
+            "Manage skills",
+            shown(value, fg(t.inline)),
+            "every skill your agents have and where each came from, by source and by project · watch a repo for more (Theo's tstack is a click away) · find more on Skill Issue",
+        ))];
+        out.push(Block::Sub("bundled".into()));
+        out.push(Block::Item(Item::new(Row::Skill(SkillOpt::BroOpen), "bro-open", switch(st.skills.bro_open, true, t), Bundled::Open.about())));
+        let value = match &jt.job {
+            Some(job) if job.kind == JobKind::Skill => shown(format!("{} adding", spinner(job.started)), bold(t.shine)),
+            _ => switch(st.justtools.skill, true, t),
+        };
+        let help = if jt.own_skill { "~/.claude has its own copy, which bro leaves alone" } else { Bundled::JustTools.about() };
+        out.push(Block::Item(Item::new(Row::Tool(ToolOpt::Skill), "JustTools skill", value, help)));
+        if bro_core::justwatch::supported() {
+            out.push(Block::Item(Item::new(Row::Tool(ToolOpt::WatchSkill), "JustWatch skill", switch(st.justwatch.skill, true, t), Bundled::JustWatch.about())));
+        }
+        let what = Bundled::JustImagine.about();
+        let (value, help) = match sk.imagine {
+            Some(true) => (shown("installed", fg(t.good)), format!("{what} · enter writes them again")),
+            Some(false) => (shown("not installed", muted(t)), format!("{what} · enter writes them into every agent home")),
+            None => (shown("checking…", muted(t)), what.to_string()),
+        };
+        let mut imagine = Item::new(Row::Skill(SkillOpt::Imagine), "JustImagine skills", value, help);
+        if ji.checked && ji.installed.is_none() {
+            imagine = imagine.note(note("they work through JustImagine, which isn't installed yet (Integrations)".into(), muted(t)));
+        }
+        out.push(Block::Item(imagine));
+        out.push(Block::Sub("watched repos".into()));
+        out.push(Block::Item(Item::new(
+            Row::Skill(SkillOpt::AutoSync),
+            "Keep them in sync",
+            switch(st.skills.auto_sync, true, t),
+            "pulls each repo when bro opens and every 6 hours; a skill that leaves its repo leaves your homes too",
+        )));
         out
     }
 
@@ -1431,10 +1668,33 @@ impl SettingsView {
                     None => Span::raw(""),
                 }
             }
+            Section::Skills => {
+                let sk = cx.svc.state().skills.clone();
+                let watched: Vec<_> = st.skills.repos.iter().filter_map(|r| sk.repos.get(r)).collect();
+                match watched.iter().find_map(|r| r.syncing) {
+                    Some(started) => Span::styled(spinner(started), fg(t.shine)),
+                    None if watched.iter().any(|r| r.error.is_some()) => Span::styled("✗", fg(t.danger)),
+                    // every skill installed, once the Skills view has looked; else what the repos brought
+                    None => match sk.inventory.as_ref() {
+                        Some(inv) => Span::styled(crate::services::skills::plural(inv.everywhere().count(), "skill"), muted(t)),
+                        None if st.skills.repos.is_empty() => Span::raw(""),
+                        None => Span::styled(crate::services::skills::plural(st.skills.repos.len(), "repo"), muted(t)),
+                    },
+                }
+            }
             Section::Sounds => match st.peon.on {
                 true => Span::styled("on", fg(t.good)),
                 false => Span::styled("off", muted(t)),
             },
+            Section::Server => {
+                let hs = cx.svc.state().host.clone();
+                match (&hs.restarting, cx.svc.host()) {
+                    (Some(started), _) => Span::styled(spinner(*started), fg(t.shine)),
+                    (None, Some(h)) => Span::styled(format!("{} running", h.live()), muted(t)),
+                    (None, None) if hs.problem.is_some() => Span::styled("✗", fg(t.danger)),
+                    (None, None) => Span::styled("off", muted(t)),
+                }
+            }
             Section::Updates => {
                 let u = cx.svc.state().updates.clone();
                 match (&u.job, u.available()) {
@@ -1468,11 +1728,17 @@ impl Pane for SettingsView {
     }
     fn render(&mut self, f: &mut Frame, area: Rect, cx: &mut Cx) {
         let t = cx.theme;
+        note_settings(&cx.svc.settings());
         if !self.tools_checked {
             self.tools_checked = true;
             cx.svc.check_justtools();
             cx.svc.check_justimagine(true);
         }
+        if !self.skills_loaded {
+            self.skills_loaded = true;
+            cx.svc.load_skill_repos();
+        }
+        self.skills_busy = cx.svc.state().skills.busy();
         // an update running in a tab: look again until the checkout moves
         if let Some((started, from)) = self.imagine_update.clone() {
             let moved = cx.svc.state().justimagine.installed.as_ref().is_some_and(|f| f.commit != from);
@@ -1491,6 +1757,10 @@ impl Pane for SettingsView {
 
         let row = self.row();
         let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
+        if row == Row::Voice(VoiceOpt::Key) && bro_voice::Voice::can_capture_hotkey() {
+            hints.truncate(2);
+            hints.extend([("enter", "press the key"), ("←/→", "pick one")]);
+        }
         match row {
             r if team_knob(r) => hints.push(("r", "bro's default")),
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
@@ -1578,12 +1848,26 @@ impl Pane for SettingsView {
         }
     }
     fn tick_every(&self) -> Option<Duration> {
-        if self.tools_busy || self.update_busy || self.voice_busy {
+        if self.tools_busy || self.update_busy || self.voice_busy || self.skills_busy {
             return Some(Duration::from_millis(100));
         }
         self.imagine_update.as_ref().map(|_| IMAGINE_RECHECK)
     }
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
+        note_settings(&cx.svc.settings());
+        // "press the key you want" swallows keys before any window sees them: one that arrives here got past
+        // it, so it's the answer (or esc, no change); the rest wait with it
+        if cx.svc.state().voice.capturing.is_some() {
+            match key.code {
+                KeyCode::Esc => cx.svc.voice_key_pressed_here(None),
+                code => {
+                    if let Some(name) = window_hotkey(code) {
+                        cx.svc.voice_key_pressed_here(Some(name));
+                    }
+                }
+            }
+            return true;
+        }
         let last = rows().len() - 1;
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.sel = (self.sel + 1).min(last),
@@ -1594,7 +1878,8 @@ impl Pane for SettingsView {
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => self.jump(-1),
             KeyCode::Tab => self.jump(1),
             KeyCode::BackTab => self.jump(-1),
-            KeyCode::Enter | KeyCode::Char(' ' | 'l') | KeyCode::Right => self.step(1, cx),
+            KeyCode::Enter | KeyCode::Char(' ') => self.press(cx),
+            KeyCode::Char('l') | KeyCode::Right => self.step(1, cx),
             KeyCode::Char('h') | KeyCode::Left => self.step(-1, cx),
             KeyCode::Char('r') => self.reset(cx),
             _ => return false,
@@ -1614,7 +1899,7 @@ impl Pane for SettingsView {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(&(_, s)) = self.hits.iter().find(|(y, _)| *y == ev.row) {
                     if s == self.sel {
-                        self.step(1, cx);
+                        self.press(cx);
                     }
                     self.sel = s;
                 }
@@ -1627,6 +1912,17 @@ impl Pane for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_reaching_the_window_name_voice_keys() {
+        for (code, label) in [(KeyCode::F(13), "F13"), (KeyCode::F(24), "F24"), (KeyCode::F(5), "F5"), (KeyCode::Insert, "Insert")] {
+            let name = window_hotkey(code).expect("a voice key");
+            assert!(bro_voice::Voice::parse_hotkey(&name).is_some(), "{name}");
+            assert_eq!(bro_voice::Voice::hotkey_label(&name), label);
+        }
+        assert_eq!(window_hotkey(KeyCode::Char('a')), None);
+        assert_eq!(window_hotkey(KeyCode::Enter), None);
+    }
 
     #[test]
     fn preview_lists_vars_and_settings() {
@@ -1648,6 +1944,11 @@ mod tests {
         let r = rows();
         assert_eq!(r[0], Row::Bro(BroOpt::Theme));
         let n = bro_opts().len();
+        assert_eq!(r[n], Row::Host(HostOpt::Keep), "the session server follows Sessions");
+        assert_eq!(r[n + 1], Row::Host(HostOpt::Working));
+        assert_eq!(r[n + 2], Row::Host(HostOpt::Restart));
+        assert_eq!(r[n + 3], Row::Host(HostOpt::Startup));
+        let n = n + 4;
         assert_eq!(r[n], Row::Voice(VoiceOpt::On));
         let n = n + VOICE_OPTS.len();
         assert_eq!(r[n], Row::Cave(CaveOpt::Mode));
@@ -1660,17 +1961,42 @@ mod tests {
         let tools = mods + MOD_OPTS.len();
         assert_eq!(r[tools], Row::Tool(ToolOpt::Install));
         assert_eq!(r[tools + 1], Row::Tool(ToolOpt::QuickInstall));
-        let watch = usize::from(bro_core::justwatch::supported()) + usize::from(bro_core::justpaste::supported());
-        assert_eq!(r[tools + 4 + watch], Row::Tool(ToolOpt::Imagine));
-        assert_eq!(r[tools + 5 + watch], Row::Tool(ToolOpt::SoundsOn));
-        assert_eq!(r[tools + 6 + watch], Row::Tool(ToolOpt::Sounds));
-        assert_eq!(r[tools + 7 + watch], Row::Tool(ToolOpt::PeonPing));
-        assert_eq!(r[tools + 8 + watch], Row::Update(UpdOpt::Version));
-        assert_eq!(r.len(), tools + 10 + watch);
+        let (paste, watch) = (usize::from(bro_core::justpaste::supported()), usize::from(bro_core::justwatch::supported()));
+        assert_eq!(r[tools + 3 + paste], Row::Tool(ToolOpt::Imagine));
+        // the skills: the Skills view, bro's, JustTools', JustWatch's, JustImagine's, keeping the repos in sync
+        let skills = tools + 4 + paste;
+        assert_eq!(r[skills], Row::Skill(SkillOpt::Manage));
+        assert_eq!(r[skills + 1], Row::Skill(SkillOpt::BroOpen));
+        assert_eq!(r[skills + 2], Row::Tool(ToolOpt::Skill));
+        assert_eq!(r[skills + 3 + watch], Row::Skill(SkillOpt::Imagine));
+        assert_eq!(r[skills + 4 + watch], Row::Skill(SkillOpt::AutoSync));
+        let sounds = skills + 5 + watch;
+        assert_eq!(r[sounds], Row::Tool(ToolOpt::SoundsOn));
+        assert_eq!(r[sounds + 1], Row::Tool(ToolOpt::Sounds));
+        assert_eq!(r[sounds + 2], Row::Tool(ToolOpt::PeonPing));
+        assert_eq!(r[sounds + 3], Row::Update(UpdOpt::Version));
+        assert_eq!(r.len(), sounds + 5);
         // each section's rows sit together, in the order the sections are listed
         let order: Vec<usize> = r.iter().map(|row| SECTIONS.iter().position(|s| *s == Section::of(*row)).unwrap()).collect();
         assert!(order.is_sorted(), "{order:?}");
         assert!((0..SECTIONS.len()).all(|i| order.contains(&i)), "every section has a row");
+    }
+
+    #[test]
+    fn the_tint_row_shows_only_for_a_see_through_window() {
+        use bro_core::config::{Material, Settings};
+        crate::fonts::TEST_APP_WINDOW.with(|w| w.set(true));
+        let has_tint = |m: Material| {
+            note_settings(&Settings { material: m, ..Default::default() });
+            rows().contains(&Row::Bro(BroOpt::Tint))
+        };
+        assert!(!has_tint(Material::Solid), "a solid window has nothing to tint");
+        assert!(has_tint(Material::Acrylic) && has_tint(Material::Glass));
+        let r = rows();
+        let window = r.iter().position(|x| *x == Row::Bro(BroOpt::Material)).unwrap();
+        assert_eq!(r[window + 1], Row::Bro(BroOpt::Tint), "right under Window");
+        crate::fonts::TEST_APP_WINDOW.with(|w| w.set(false));
+        note_settings(&Settings::default());
     }
 
     #[test]

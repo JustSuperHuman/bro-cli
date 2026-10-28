@@ -19,6 +19,7 @@ mod editor;
 mod env_cmd;
 mod gemini_cmd;
 mod file_view;
+mod focus;
 mod folder;
 mod fonts;
 mod fuzzy;
@@ -26,6 +27,7 @@ mod help;
 mod instance;
 mod icons;
 mod keymap;
+mod maker;
 mod launcher;
 mod layout;
 mod palette;
@@ -46,6 +48,7 @@ mod sidebar;
 mod team_board;
 mod skin;
 mod skills_cmd;
+mod host_cmd;
 mod testkit;
 mod textarea;
 mod theme;
@@ -65,6 +68,11 @@ fn main() -> ExitCode {
     }
     // `bro-cli` (`--tui`, or BRO_UI=tui): the terminal UI; so does the terminal fork hosting bro (`--app-window`)
     let tui = take_tui_flag(&mut args) || fonts::APP_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    // `--view`: another window on the bro that's running (its sessions, to watch and type into)
+    if let Some(i) = args.iter().position(|a| a == "--view") {
+        args.remove(i);
+        services::host::set_role(bro_host::Role::Viewer);
+    }
     // `bro gui [folder] [--new] [--demo]`: the desktop app even where bro would pick the terminal UI
     #[cfg(feature = "gui")]
     let gui = app::gui::take_flag(&mut args);
@@ -188,6 +196,20 @@ fn main() -> ExitCode {
             print!("{}", skills_cmd::HELP);
             ExitCode::SUCCESS
         }
+        Ok(cli::Command::Background) => match run_background() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro background: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(cli::Command::Host(cmd)) => match host_cmd::run(cmd) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro host: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(cli::Command::Skills(cmd)) => match skills_cmd::run(cmd) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -315,8 +337,9 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
         Some(d) => util::strip_verbatim(std::fs::canonicalize(&d).map_err(|_| anyhow::anyhow!("{} isn't a folder", d.display()))?),
         None => std::env::current_dir()?,
     };
+    let mut viewer = services::host::role() == bro_host::Role::Viewer;
     // running inside tmux? show that bro here (an SSH login reaches the same sessions)
-    if !demo && !new {
+    if !demo && !new && !viewer {
         match instance::running_in_tmux() {
             Some(Some(pane)) => {
                 if named_folder {
@@ -324,20 +347,26 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
                 }
                 return pane.attach();
             }
-            // a desktop bro: opening the folder there would show nothing to someone over SSH
+            // a desktop bro: opening the folder there would show nothing to someone over SSH, so watch its sessions
+            // here instead (they're in the session server)
             Some(None) if over_ssh() => {
-                eprintln!(
-                    "bro is already running on this machine's desktop, outside tmux, so it can't be shown over SSH.
-                     Start it inside tmux to reach it from anywhere: tmux new -A -s bro bro
-                     (bro --new opens a separate one here)"
-                );
-                return Ok(());
+                if bro_host::client::status(&bro_host::client::default_dir()).is_err() {
+                    eprintln!(
+                        "bro is already running on this machine's desktop, outside tmux, so it can't be shown over SSH
+                         (its sessions aren't in the session server: Settings › Session server › Keep sessions running).
+                         Start it inside tmux to reach it from anywhere: tmux new -A -s bro bro
+                         (bro --new opens a separate one here)"
+                    );
+                    return Ok(());
+                }
+                services::host::set_role(bro_host::Role::Viewer);
+                viewer = true;
             }
             _ => {}
         }
     }
     // already running? hand the folder over and get out of the way
-    if !demo && !new && instance::hand_off(&dir).unwrap_or(false) {
+    if !demo && !new && !viewer && instance::hand_off(&dir).unwrap_or(false) {
         println!("bro is already running — opened {} there (bro --new for a second one)", dir.display());
         return Ok(());
     }
@@ -350,7 +379,21 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
     while event::poll(std::time::Duration::ZERO).unwrap_or(false) {
         let _ = event::read();
     }
-    let svc = if demo { services::Services::demo(settings, tx.clone()) } else { services::Services::start(settings, tx.clone()) };
+    // a second bro beside a running one (`--new`) leaves the session server to that one
+    if new && instance::running() && !viewer {
+        services::host::solo();
+    }
+    // the answers to what sessions ask their terminal: this terminal UI's colours
+    services::host::set_profile(services::host::tui_profile(&theme::get(&settings.theme)));
+    let svc = match () {
+        _ if demo => services::Services::demo(settings, tx.clone()),
+        _ if viewer => services::Services::start_viewer(settings, tx.clone()),
+        _ => services::Services::start(settings, tx.clone()),
+    };
+    if viewer && svc.host().is_none() {
+        drop(svc);
+        anyhow::bail!("there's no session server to watch (is bro running, with Keep sessions running on?)");
+    }
 
     terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -382,19 +425,70 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
             input_tx.send(pane::Event::Input(ev)).is_ok()
         }))?;
 
-    let _instance = if demo { None } else { instance::serve(tx.clone()) };
+    let _instance = if demo || viewer { None } else { instance::serve(tx.clone()) };
     let mut app = app::App::new(svc, tx, app::Opts { demo, fixed_demo: false, load_recents: !demo });
+    if viewer {
+        // the orchestrator, settings files and the like are the other bro's
+        app.guest = true;
+        app.persist = false;
+    }
     if !demo {
         app.start_in(dir);
+        // sessions the session server kept running while bro was closed (or, watching, the other bro's)
+        app.reattach_sessions();
         // an orchestrator that was running when bro last stopped comes back the way it was launched
-        app.restore_orchestrator();
+        if !viewer {
+            app.restore_orchestrator();
+        }
     }
     if let Some(p) = problem.filter(|p| !services::guard::is_unimplemented(p)) {
         app.toast(alerts::Kind::Error, format!("settings: {p} — using defaults"));
     }
     let res = app.run(&mut term, rx);
     services::guard::restore_terminal();
+    let n = app.left_running;
+    let (s, them) = if n == 1 { ("", "it") } else { ("s", "them") };
+    if viewer {
+        println!("stopped watching · the sessions carry on in your other bro");
+    } else if app.taken_over {
+        println!("bro opened in another window: it has your sessions now");
+    } else if app.left_to_background {
+        println!("{n} session{s} still running · bro carries on with {them} in the background (phone bridge, auto-resume, watchdogs) · run bro to pick {them} up again");
+    } else if n > 0 {
+        println!("{n} session{s} still running in bro's session server · run bro to pick {them} up again");
+    }
     res
+}
+
+/// `bro background`: the background bro. It drives the session server while no window is open, running the
+/// workspace with no screen (see [`app::App::run_headless`]); a window that opens takes over and it stops.
+fn run_background() -> anyhow::Result<()> {
+    services::host::set_role(bro_host::Role::Background);
+    services::guard::install_panic_hook();
+    util::probe_local_offset();
+    let (settings, _) = services::load_settings();
+    if !settings.server.keep_sessions {
+        return Ok(());
+    }
+    if !settings.server.keep_working {
+        // signed in with bro set to start then, but no background bro wanted: only the server
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = bro_host::client::spawn_detached(&exe, &["host"], &bro_host::client::default_dir());
+        }
+        return Ok(());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let svc = services::Services::start(settings, tx.clone());
+    // a window drives it (or it couldn't start): nothing to stand in for
+    if svc.host().is_none() {
+        svc.shutdown();
+        return Ok(());
+    }
+    let mut app = app::App::new(svc, tx, app::Opts { demo: false, fixed_demo: false, load_recents: true });
+    app.reattach_sessions();
+    app.restore_orchestrator();
+    app.run_headless(rx);
+    Ok(())
 }
 
 /// Make sure escape sequences (colours, sixel logos) are interpreted, not printed or dropped.

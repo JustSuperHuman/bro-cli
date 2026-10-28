@@ -19,6 +19,8 @@ pub fn isolate() {
             std::env::set_var("BRO_DIR", d.join(".bro"));
             std::env::set_var("CLAUDE_POOL_DIR", d.join(".claude-max-pool"));
             std::env::set_var("BRO_CODEX_PROFILES_DIR", d.join("codex-profiles"));
+            // the skills view never reaches skill-issue.in
+            std::env::set_var("BRO_SKILL_MARKET_URL", "http://127.0.0.1:9/never");
         }
         d
     });

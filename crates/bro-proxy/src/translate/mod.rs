@@ -353,9 +353,39 @@ pub fn ensure_claude_code_system(req: &mut MessagesRequest) {
     req.system = Some(SystemPrompt::Blocks(blocks));
 }
 
+/// [`ensure_claude_code_system`] on a Messages body as JSON (requests passed through as they came).
+pub fn ensure_claude_code_system_json(v: &mut Value) {
+    let Some(obj) = v.as_object_mut() else { return };
+    let mut blocks = match obj.remove("system") {
+        Some(Value::String(t)) if t.is_empty() => vec![],
+        Some(Value::String(t)) => vec![json!({"type": "text", "text": t})],
+        Some(Value::Array(b)) => b,
+        _ => vec![],
+    };
+    let has = blocks.first().and_then(|b| b.get("text")).and_then(Value::as_str).is_some_and(|t| t.starts_with(CLAUDE_CODE_SYSTEM));
+    if !has {
+        blocks.insert(0, json!({"type": "text", "text": CLAUDE_CODE_SYSTEM}));
+    }
+    obj.insert("system".into(), Value::Array(blocks));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_code_identity_on_json_bodies() {
+        let mut v = json!({"system": "Be brief.", "messages": []});
+        ensure_claude_code_system_json(&mut v);
+        assert_eq!(v["system"][0]["text"], CLAUDE_CODE_SYSTEM);
+        assert_eq!(v["system"][1]["text"], "Be brief.");
+        let before = v.clone();
+        ensure_claude_code_system_json(&mut v);
+        assert_eq!(v, before, "added once");
+        let mut none = json!({"messages": []});
+        ensure_claude_code_system_json(&mut none);
+        assert_eq!(none["system"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn effort_mapping() {

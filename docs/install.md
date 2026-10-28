@@ -11,7 +11,9 @@ irm https://raw.githubusercontent.com/JustSuperHuman/bro-cli/main/install.ps1 | 
 Or download `bro-<version>-x86_64-pc-windows-msvc-setup.exe` from the
 [latest release](https://github.com/JustSuperHuman/bro-cli/releases/latest) and run it. It installs bro for
 your user only (no admin prompt), adds **bro** to the Start menu (it opens the desktop app), can put bro on your
-`PATH` and a shortcut on your desktop, and is listed in Settings → Apps for uninstalling. Run a newer one to
+`PATH` and a shortcut on your desktop, can start bro in the background when you sign in (a startup app for your
+user), and is listed in Settings → Apps for uninstalling (which stops the session server and removes bro from your
+startup apps). Run a newer one to
 update, even while bro is open.
 
 **macOS**: download the `.dmg` for your Mac from the
@@ -32,7 +34,10 @@ The scripts download the latest release for your platform, check its SHA-256 and
 `%LOCALAPPDATA%\Programs\bro` (added to your user `PATH`) or `~/.local/bin`. Set `BRO_VERSION` (e.g. `v2.1.0`)
 to pin a release or `BRO_INSTALL_DIR` to change the location. On a fresh install they then list the Quick Install
 tools and ask which to install (Enter: the recommended ones that are missing). Set `BRO_TOOLS` to skip the
-question: e.g. `justtools git node claude`, `recommended`, `all` or `none`.
+question: e.g. `justtools git node claude`, `recommended`, `all` or `none`. They also ask whether bro should start in the
+background when you sign in, for your user only: a startup app on Windows, a LaunchAgent on macOS, a systemd user
+unit on Linux (Enter: no; bro still keeps your sessions running while its window is closed). Set `BRO_STARTUP=yes` or `no` to skip that question; Settings → Session server → Start at
+sign-in and `bro host install` / `bro host uninstall` change it later.
 
 What gets installed:
 

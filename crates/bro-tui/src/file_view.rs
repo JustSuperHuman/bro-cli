@@ -1,7 +1,8 @@
 //! The file preview overlay: a file path clicked in a terminal (or one an agent opened with `bro open`), loaded
 //! and highlighted on a worker thread, scrolled to its line. Big files page in as you scroll; keys open it in
 //! your editor, copy its path or mention it to the agent. Files the terminal can't display open
-//! directly in the system's default app.
+//! directly in the system's default app. In the desktop app an HTML file shows as the page itself
+//! (`app::gui::page`), its source a key away.
 
 /// Drawn by the desktop app (`bro gui`).
 #[cfg(feature = "gui")]
@@ -22,11 +23,20 @@ use ratatui::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+/// HTML can show as its page here (the desktop app has a web view to put over the card).
+static PAGES: AtomicBool = AtomicBool::new(false);
+
+/// Whether previews opened from now on show HTML as the page (the desktop app says, and takes it back when the
+/// system's web view won't start).
+pub fn set_pages(on: bool) {
+    PAGES.store(on, Ordering::Relaxed);
+}
+
 /// Past this, the rest of a load shows unhighlighted rather than keep you waiting.
 const HIGHLIGHT_BUDGET: Duration = Duration::from_millis(1500);
 /// Start loading the next page this many lines before the loaded edge.
@@ -104,6 +114,8 @@ pub enum Outcome {
     Editor,
     /// hand it to the OS default app
     System,
+    /// show it in the file manager
+    Reveal,
     Copy,
     /// type `@path ` into the session
     Mention,
@@ -135,8 +147,15 @@ pub struct FileView {
     /// clickable hints from the last draw
     pub hits: Vec<(Rect, Outcome)>,
     pub frame: Rect,
-    /// Markdown shows rendered (the default) or as source; `m` flips it and the choice is remembered
+    /// Markdown and HTML show rendered (the default) or as source; `m` flips it, remembered for Markdown
     pub rendered: bool,
+    /// HTML shows as its page (see [`set_pages`])
+    pub pages: bool,
+    /// where the desktop app draws the page this frame (None while it doesn't)
+    #[cfg(feature = "gui")]
+    pub page: Option<bro_gfx::Rect>,
+    /// the page is on screen over the card (the desktop app's web view has painted it)
+    pub page_shown: bool,
     theme: Theme,
     tx: Sender<Event>,
 }
@@ -162,6 +181,10 @@ impl FileView {
             hits: vec![],
             frame: Rect::default(),
             rendered: markdown::rendered_pref(),
+            pages: PAGES.load(Ordering::Relaxed),
+            #[cfg(feature = "gui")]
+            page: None,
+            page_shown: false,
             theme: theme.clone(),
             tx,
         };
@@ -193,6 +216,10 @@ impl FileView {
         match loaded.result {
             Ok(Payload::Text(doc)) => {
                 self.target = doc.path.to_string_lossy().into_owned();
+                // a page opens as the page, whatever Markdown was left on
+                if doc.language == "html" && matches!(self.body, Body::Loading) {
+                    self.rendered = true;
+                }
                 self.body = Body::Text(doc);
                 self.top = self.top.min(self.max_top());
             }
@@ -238,15 +265,32 @@ impl FileView {
         }
     }
 
-    /// A Markdown file is shown, so the rendered / source switch applies.
+    /// A Markdown file is shown.
     pub fn is_markdown(&self) -> bool {
         matches!(&self.body, Body::Text(d) if d.preview.is_some())
     }
 
-    /// Flip Markdown between rendered and source, and remember it for the next file.
+    /// An HTML file that can show as its page.
+    fn is_page(&self) -> bool {
+        self.pages && matches!(&self.body, Body::Text(d) if d.language == "html")
+    }
+
+    /// The rendered / source switch applies: Markdown, or HTML where it can show as the page.
+    pub fn can_render(&self) -> bool {
+        self.is_markdown() || self.is_page()
+    }
+
+    /// HTML shows as the page now (not its source).
+    pub fn shows_page(&self) -> bool {
+        self.rendered && self.is_page()
+    }
+
+    /// Flip between rendered and source; Markdown remembers it for the next file (HTML always opens as the page).
     pub fn toggle_rendered(&mut self) {
         self.rendered = !self.rendered;
-        markdown::save_rendered_pref(self.rendered);
+        if self.is_markdown() {
+            markdown::save_rendered_pref(self.rendered);
+        }
     }
 
     #[cfg(test)]
@@ -329,11 +373,12 @@ impl FileView {
             KeyCode::Left | KeyCode::Char('h') => self.left = self.left.saturating_sub(8),
             KeyCode::Right | KeyCode::Char('l') => self.left += 8,
             KeyCode::Char('0') => self.left = 0,
-            KeyCode::Char('m') if self.is_markdown() => self.toggle_rendered(),
+            KeyCode::Char('m') if self.can_render() => self.toggle_rendered(),
             KeyCode::Char('e') if media => return Outcome::System,
             KeyCode::Char('e') if openable => return Outcome::Editor,
             KeyCode::Enter if matches!(self.body, Body::Text(_)) => return Outcome::Editor,
             KeyCode::Enter | KeyCode::Char('o') if openable => return Outcome::System,
+            KeyCode::Char('p') if openable => return Outcome::Reveal,
             KeyCode::Char('c') | KeyCode::Char('y') if openable => return Outcome::Copy,
             KeyCode::Char('@') | KeyCode::Char('i') if self.mention().is_some() => return Outcome::Mention,
             _ => {}
@@ -713,13 +758,13 @@ pub fn draw(f: &mut Frame, area: Rect, v: &mut FileView, hover: Position, t: &Th
     // hints, clickable
     let mut pairs: Vec<(&str, &str, Outcome)> = vec![];
     match &v.body {
-        Body::Text(_) if v.is_markdown() => pairs.push(("m", if v.rendered { "source" } else { "preview" }, Outcome::ToggleRendered)),
+        Body::Text(_) if v.can_render() => pairs.push(("m", if v.rendered { "source" } else { "preview" }, Outcome::ToggleRendered)),
         _ => {}
     }
     match &v.body {
-        Body::Text(_) => pairs.extend([("e", "editor", Outcome::Editor), ("o", "system app", Outcome::System), ("c", "copy path", Outcome::Copy), ("@", "mention", Outcome::Mention), ("↑↓ pgup pgdn", "scroll", Outcome::None)]),
-        Body::Media(_) => pairs.extend([("⏎", "open", Outcome::System), ("c", "copy path", Outcome::Copy), ("@", "mention", Outcome::Mention)]),
-        Body::Failed { path: Some(_), .. } => pairs.extend([("⏎", "system app", Outcome::System), ("c", "copy path", Outcome::Copy)]),
+        Body::Text(_) => pairs.extend([("e", "editor", Outcome::Editor), ("o", "system app", Outcome::System), ("p", "open path", Outcome::Reveal), ("c", "copy path", Outcome::Copy), ("@", "mention", Outcome::Mention), ("↑↓ pgup pgdn", "scroll", Outcome::None)]),
+        Body::Media(_) => pairs.extend([("⏎", "open", Outcome::System), ("p", "open path", Outcome::Reveal), ("c", "copy path", Outcome::Copy), ("@", "mention", Outcome::Mention)]),
+        Body::Failed { path: Some(_), .. } => pairs.extend([("⏎", "system app", Outcome::System), ("p", "open path", Outcome::Reveal), ("c", "copy path", Outcome::Copy)]),
         _ => {}
     }
     pairs.push(("esc", "close", Outcome::Close));
@@ -839,6 +884,36 @@ mod tests {
         let mut v = FileView::open(None, roots(dir.path()), outside.path().to_string_lossy().into_owned(), None, None, Some(uri.clone()), &theme(), tx);
         let Ok(Event::FileView(l)) = rx.recv_timeout(Duration::from_secs(10)) else { panic!("loaded") };
         assert_eq!(v.apply(*l), Outcome::Fallback(uri), "a folder opens in the file manager");
+    }
+
+    #[test]
+    fn html_shows_as_the_page_where_there_is_a_web_view() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("report.html"), "<!doctype html>\n<h1>Totals</h1>\n").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let open = |pages: bool| {
+            let mut v = FileView::open(None, roots(dir.path()), "report.html".into(), None, None, None, &theme(), tx.clone());
+            v.pages = pages;
+            // Markdown left on source doesn't make a page open as source
+            v.rendered = false;
+            let Ok(Event::FileView(l)) = rx.recv_timeout(Duration::from_secs(10)) else { panic!("loaded") };
+            assert_eq!(v.apply(*l), Outcome::None);
+            v
+        };
+        let m = KeyEvent::from(KeyCode::Char('m'));
+        // the terminal UI: the source, no switch
+        let mut v = open(false);
+        assert!(!v.can_render() && !v.shows_page() && !v.is_markdown());
+        v.key(m);
+        assert!(!v.shows_page());
+        // the desktop app: the page, and m flips to the source and back
+        let mut v = open(true);
+        assert!(v.can_render() && v.shows_page() && !v.is_markdown());
+        assert_eq!(v.key(m), Outcome::None);
+        assert!(!v.shows_page() && matches!(v.body, Body::Text(_)), "the source");
+        v.key(m);
+        assert!(v.shows_page());
+        assert_eq!(v.key(KeyEvent::from(KeyCode::Char('o'))), Outcome::System, "your browser");
     }
 
     #[test]

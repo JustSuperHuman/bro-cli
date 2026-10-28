@@ -5,14 +5,19 @@ use crate::events::EventBus;
 use crate::translate::reasoning_cache::ReasoningCache;
 use crate::trim::Trimmer;
 use crate::upstream::chatgpt::CodexModel;
+use crate::upstream::logins::Meter;
 use crate::upstream::pool::PoolManager;
-use crate::{ProxyOptions, Route};
+use crate::{LoginFamily, PoolLogin, ProxyOptions, Route};
 use bro_core::creds::CodexAuth;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+
+/// How long a read of the signed-in logins is trusted: a login signed in or out while sessions run
+/// joins or leaves its pool within this.
+const LOGINS_TTL: Duration = Duration::from_secs(10);
 
 pub(crate) struct AppState {
     routes: RwLock<HashMap<String, Route>>,
@@ -21,6 +26,10 @@ pub(crate) struct AppState {
     pub token: Option<String>,
     pub opts: ProxyOptions,
     pool: OnceLock<Arc<PoolManager>>,
+    codex_pool: OnceLock<Arc<PoolManager>>,
+    logins: Mutex<HashMap<LoginFamily, (Instant, Vec<PoolLogin>)>>,
+    /// Each proxy-mode login's latest rate-limit reading (by profile id), from its responses
+    pub meters: Mutex<HashMap<String, Meter>>,
     pub reasoning: Arc<ReasoningCache>,
     pub chatgpt_models: Mutex<HashMap<PathBuf, (Instant, Vec<CodexModel>)>>,
     pub upstream_models: Mutex<HashMap<String, (Instant, Vec<String>)>>,
@@ -45,6 +54,9 @@ impl AppState {
             token,
             opts,
             pool: OnceLock::new(),
+            codex_pool: OnceLock::new(),
+            logins: Mutex::new(HashMap::new()),
+            meters: Mutex::new(HashMap::new()),
             reasoning: Arc::new(ReasoningCache::new()),
             chatgpt_models: Mutex::new(HashMap::new()),
             upstream_models: Mutex::new(HashMap::new()),
@@ -80,6 +92,50 @@ impl AppState {
                 Arc::new(PoolManager::new(file))
             })
             .clone()
+    }
+
+    /// Where a proxy-mode family's request counters, cooldowns and conversations live: Claude logins
+    /// share v1's pool file (by v1 account name), Codex logins have their own (by profile id).
+    pub fn counters(&self, family: LoginFamily) -> Arc<PoolManager> {
+        match family {
+            LoginFamily::Claude => self.pool(),
+            LoginFamily::Codex => self
+                .codex_pool
+                .get_or_init(|| {
+                    let file = self
+                        .opts
+                        .codex_pool_usage_file
+                        .clone()
+                        .unwrap_or_else(|| bro_core::paths::bro_dir().join("codex-pool-usage.json"));
+                    Arc::new(PoolManager::new(file))
+                })
+                .clone(),
+        }
+    }
+
+    /// The signed-in logins of `family` (cached [`LOGINS_TTL`]; the listing runs off the async workers).
+    pub async fn logins(&self, family: LoginFamily) -> Vec<PoolLogin> {
+        if let Some(list) = self.cached_logins(family) {
+            return list;
+        }
+        let f = self.opts.logins.clone();
+        let list = tokio::task::spawn_blocking(move || read_logins(f.as_ref(), family)).await.unwrap_or_default();
+        self.logins.lock().insert(family, (Instant::now(), list.clone()));
+        list
+    }
+
+    /// [`AppState::logins`] for blocking callers (the Proxy view's status poll).
+    pub fn logins_blocking(&self, family: LoginFamily) -> Vec<PoolLogin> {
+        if let Some(list) = self.cached_logins(family) {
+            return list;
+        }
+        let list = read_logins(self.opts.logins.as_ref(), family);
+        self.logins.lock().insert(family, (Instant::now(), list.clone()));
+        list
+    }
+
+    fn cached_logins(&self, family: LoginFamily) -> Option<Vec<PoolLogin>> {
+        self.logins.lock().get(&family).filter(|(at, _)| at.elapsed() < LOGINS_TTL).map(|(_, list)| list.clone())
     }
 
     /// Claude OAuth token (blocking credential code runs off the async workers).
@@ -133,6 +189,21 @@ impl AppState {
             Err(e) => Err(ProxyError::api(format!("credential task failed: {e}"))),
         }
     }
+}
+
+/// Who shares a family's route: [`ProxyOptions::logins`], else bro's signed-in subscription logins, one per
+/// account (a Claude login names its `accountUuid`, the first half of its identity).
+fn read_logins(f: Option<&crate::LoginsFn>, family: LoginFamily) -> Vec<PoolLogin> {
+    if let Some(f) = f {
+        return f(family);
+    }
+    bro_core::profiles::subscription_logins(family == LoginFamily::Claude)
+        .into_iter()
+        .map(|p| {
+            let account = if p.is_claude() { p.identity.as_deref().and_then(|i| i.split(':').next()).filter(|u| !u.is_empty()).map(str::to_string) } else { None };
+            PoolLogin { id: p.id, dir: p.dir, account }
+        })
+        .collect()
 }
 
 fn default_pool_usage_file() -> PathBuf {

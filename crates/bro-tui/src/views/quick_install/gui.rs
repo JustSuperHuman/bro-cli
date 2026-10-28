@@ -355,6 +355,7 @@ fn tool_mark(tool: Tool) -> Mark {
         Tool::JustPaste => "\u{F0192}",
         Tool::JustWatch => "\u{F13B4}",
         Tool::JustImagine => "\u{F0E0C}",
+        Tool::JustBrowse => "\u{F059F}",
         Tool::Git => "\u{F02A2}",
         Tool::GitHubCli => "\u{F02A4}",
         Tool::Node => "\u{F0399}",

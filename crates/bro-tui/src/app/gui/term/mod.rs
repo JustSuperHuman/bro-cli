@@ -14,6 +14,13 @@ pub fn shared_env() -> Arc<Mutex<mirror::Env>> {
     ENV.get_or_init(|| Arc::new(Mutex::new(mirror::Env::default()))).clone()
 }
 
+/// What the desktop app's screens answer with, for the session server to answer the same way for the sessions it
+/// holds (alacritty passes keys on in the kitty protocol when a program asks).
+pub fn profile() -> bro_host::answer::Profile {
+    let e = *shared_env().lock();
+    bro_host::answer::Profile { fg: e.fg, bg: e.bg, cursor: e.cursor, palette: e.palette.to_vec(), cell: Some((e.cell_w, e.cell_h)), kitty: true }
+}
+
 /// The theme or font changed: every screen answers with the new colours and cell size from now on.
 pub fn update_env(t: &Tokens, cell: (u16, u16)) {
     let rgb = |c: bro_gfx::Color| {

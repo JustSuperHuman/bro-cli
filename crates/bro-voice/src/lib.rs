@@ -39,6 +39,11 @@ pub const DEFAULT_MODEL: &str = "gpt-transcribe";
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
+/// Windows: the `dwExtraInfo` to put on a keystroke the app injects itself (a tap of Alt to raise a window).
+/// The push-to-talk hook lets marked keys through, so a press in progress doesn't take one for a chord and
+/// cancel the take.
+pub const INJECTED: usize = hotkey::SENTINEL;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceConfig {
     /// `rwin` (= `rsuper` / `rcmd` / `rmeta`), `lwin`, `rctrl`, `ralt` (=
@@ -63,7 +68,8 @@ pub struct VoiceConfig {
     /// Holds shorter than this are taps. On Windows, a solo Win-key tap is
     /// reserved for voice and does not open Start.
     pub min_ms: u32,
-    /// Recording stops and is transcribed after this long.
+    /// Recording stops and is transcribed after this long (live mode: the
+    /// hold stops being heard).
     pub max_secs: u32,
     /// GPT-Live: talk to a live voice that answers out loud and delegates work
     /// to the host ([`VoiceEvent::Delegation`]). `None` = transcribe only.
@@ -93,6 +99,12 @@ impl Default for VoiceConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VoiceEvent {
+    /// The hotkey went down, before the microphone opens (it may still turn
+    /// out to be a tap or a chord). The moment to bring the app forward.
+    Pressed,
+    /// The press is over: the hotkey came up, or turned out to be part of a
+    /// chord (Win+E). Sent whether or not anything was recorded.
+    Released,
     /// The microphone is open and recording.
     Listening,
     /// Input level, 0..1 (RMS mapped from -60..0 dBFS), ~15 per second.
@@ -278,9 +290,26 @@ impl Voice {
         hotkey::parse_hotkey(name).map_or_else(|| name.to_string(), hotkey::label)
     }
 
+    /// Whether the hotkey is a modifier (Right Win, Alt, Ctrl, Shift), so a press may turn out to be a chord
+    /// meant for the app in front (Win+E): wait for [`VoiceEvent::Released`] or a hold before acting on it.
+    pub fn hotkey_is_modifier(name: &str) -> bool {
+        hotkey::parse_hotkey(name).is_some_and(hotkey::is_modifier)
+    }
+
     /// Whether [`Voice::capture_hotkey`] works on this platform.
     pub fn can_capture_hotkey() -> bool {
         hotkey::can_capture()
+    }
+
+    /// End a waiting [`Voice::capture_hotkey`] (it returns None), say once the key came some other way.
+    pub fn cancel_capture() {
+        hotkey::cancel_capture();
+    }
+
+    /// How many key events the last [`Voice::capture_hotkey`] saw, for a trace: 0 after a wait means no
+    /// key reached it at all.
+    pub fn capture_seen() -> u32 {
+        hotkey::capture_seen()
     }
 
     /// Blocking: wait up to `timeout` for the next key pressed anywhere (swallowed, so the app in front

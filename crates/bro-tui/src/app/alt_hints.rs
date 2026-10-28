@@ -144,6 +144,7 @@ impl App {
                 }
                 SideHit::Usage => Act::Usage,
                 SideHit::Stats => Act::Stats,
+                SideHit::Sessions => Act::ShowTab(0),
                 SideHit::Proxy => Act::Proxy,
                 SideHit::Bridge => Act::Bridge,
                 SideHit::Settings => Act::Settings,

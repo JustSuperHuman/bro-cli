@@ -145,7 +145,7 @@ async fn models_response(resp: reqwest::Response) -> Result<UpstreamResponse, Pr
         .map(|m| m.keys().map(|id| json!({ "id": id })).collect())
         .unwrap_or_default();
     let body = Bytes::from(serde_json::to_vec(&json!({ "data": data })).unwrap_or_default());
-    Ok(UpstreamResponse { status, headers, body: Box::pin(stream::once(async move { Ok(body) })), account: None })
+    Ok(UpstreamResponse { status, headers, body: Box::pin(stream::once(async move { Ok(body) })), account: None, counter: None })
 }
 
 #[cfg(test)]

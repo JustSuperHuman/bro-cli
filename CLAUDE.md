@@ -6,6 +6,7 @@ Rust workspace; see PLAN.md for the product plan.
   `crates/bro-core/claude-mod` is bro's Claude Code mod (TypeScript, built in by `claude_mod.rs`; see docs/claude-mod.md). Check it with `claude plugin validate crates/bro-core/claude-mod`.
 - `crates/bro-proxy`  axum proxy, Anthropic <-> OpenAI translation + Claude pool. Own tokio runtime thread.
 - `crates/bro-bridge` axum bridge host compatible with Just Terminal mobile/web clients. Own tokio runtime thread.
+- `crates/bro-host`   the session server (`bro host`): a headless process that owns every session's PTY so sessions outlive the window; both UIs attach to it over loopback (`~/.bro/v2-host.json`), as the window driving it, the background bro (`bro background`: the same app with no screen, standing in while no window is open) or a viewer (`bro --view`). Blocking threads, no tokio.
 - `crates/bro-tui`    the `bro` binary (ratatui + vt100 + portable-pty, derived from z4-oriel).
 
 Reference sources (read-only, never edit): `F:\bro-cli` (v1, Node), `F:\z4-oriel` (TUI), `F:\terminal\src\cascadia\TerminalConnection\rust-bridge` (bridge).

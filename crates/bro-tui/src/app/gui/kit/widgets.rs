@@ -351,6 +351,118 @@ pub fn row(ui: &mut Ui, r: Rect, key: impl std::hash::Hash, selected: bool, acti
     hot
 }
 
+/// WinUI's checkbox (`r` 20 square): 4px corners, a muted edge when off, the accent with a check when on (`hot`:
+/// hovered).
+pub fn checkbox(ui: &mut Ui, r: Rect, on: bool, hot: f32) {
+    let t = ui.t;
+    if on {
+        ui.round(r, radius::CONTROL, t.accent.fade(1.0 - 0.1 * hot));
+        ui.icon(r, "\u{F012C}", size::TITLE, t.on_accent);
+    } else {
+        ui.panel(r, radius::CONTROL, t.text.with_alpha(0.03 + 0.04 * hot), t.muted);
+    }
+}
+
+/// One line of a [`menu`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MenuLine<'a> {
+    pub icon: Option<&'a str>,
+    pub label: &'a str,
+    /// its key, quietly at the right
+    pub key: Option<&'a str>,
+    /// a heading over the lines under it (an empty one: a separator)
+    pub heading: bool,
+    /// destructive: in the danger colour
+    pub danger: bool,
+}
+
+pub const MENU_ROW: f32 = 32.0;
+const MENU_HEAD: f32 = 26.0;
+const MENU_SEP: f32 = 9.0;
+const MENU_TITLE: f32 = 30.0;
+
+fn menu_line_h(l: &MenuLine) -> f32 {
+    match (l.heading, l.label.is_empty()) {
+        (true, true) => MENU_SEP,
+        (true, false) => MENU_HEAD,
+        _ => MENU_ROW,
+    }
+}
+
+/// How big a [`menu`] of `lines` (under `title`) is.
+pub fn menu_size(ui: &mut Ui, title: Option<&str>, lines: &[MenuLine]) -> (f32, f32) {
+    let icons = lines.iter().any(|l| l.icon.is_some() && !l.heading);
+    let mut w: f32 = 0.0;
+    for l in lines.iter().filter(|l| !l.heading) {
+        let key = l.key.map_or(0.0, |k| ui.measure(k, Style::new(size::CAPTION, weight::MEDIUM, ui.t.faint)) + 20.0);
+        w = w.max(if icons { 36.0 } else { 12.0 } + ui.measure(l.label, Style::new(size::BODY, weight::REGULAR, ui.t.text)) + key + 14.0);
+    }
+    let h: f32 = lines.iter().map(menu_line_h).sum::<f32>() + if title.is_some() { MENU_TITLE } else { 0.0 } + 8.0;
+    (w.clamp(200.0, 380.0) + 8.0, h)
+}
+
+/// A context menu (WinUI's menu flyout): a floating card at `at` (its top-left; flipped up or left to stay inside
+/// `bounds`), an optional title, then its lines (icon, label, key), headings and separators. `sel`: the line the keys
+/// are on. A line's hit runs `act(i)`; the card swallows the clicks between them. Draw it on a layer of its own,
+/// after what it floats over. Returns the card.
+pub fn menu(ui: &mut Ui, at: Point, bounds: Rect, title: Option<&str>, lines: &[MenuLine], sel: Option<usize>, act: impl Fn(usize) -> Action) -> Rect {
+    let t = ui.t;
+    let (w, h) = menu_size(ui, title, lines);
+    let (w, h) = (w.min(bounds.w), h.min(bounds.h));
+    let x = if at.x + w > bounds.right() { (at.x - w).max(bounds.x) } else { at.x };
+    let y = if at.y + h > bounds.bottom() { (at.y - h).max(bounds.y) } else { at.y };
+    let r = Rect::new(x, y, w, h);
+    card(ui, r, radius::OVERLAY);
+    let icons = lines.iter().any(|l| l.icon.is_some() && !l.heading);
+    let mut y = r.y + 4.0;
+    if let Some(title) = title {
+        let st = Style::new(size::SMALL, weight::SEMIBOLD, t.muted);
+        let b = ui.line(title, st, Some(r.w - 24.0));
+        ui.draw(&b, Point::new(r.x + 12.0, y + (MENU_TITLE - b.h) / 2.0));
+        y += MENU_TITLE;
+    }
+    ui.clip(r, radius::OVERLAY);
+    for (i, l) in lines.iter().enumerate() {
+        let lh = menu_line_h(l);
+        if y + lh > r.bottom() + 0.5 {
+            break;
+        }
+        let rr = Rect::new(r.x + 4.0, y, r.w - 8.0, lh);
+        match (l.heading, l.label.is_empty()) {
+            (true, true) => ui.hline(rr.x + 8.0, rr.y + lh / 2.0, rr.w - 16.0, t.hairline),
+            (true, false) => {
+                let b = ui.line(l.label, Style::new(size::CAPTION, weight::SEMIBOLD, t.faint), Some(rr.w - 16.0));
+                ui.draw(&b, Point::new(rr.x + 8.0, rr.bottom() - b.h - 4.0));
+            }
+            _ => {
+                let hot = row(ui, rr, ("menu", i), sel == Some(i), act(i));
+                let ink = if l.danger { t.danger } else { t.text };
+                let quiet = if l.danger { t.danger } else { t.muted.mix(t.text, 0.4 * hot) };
+                let mut tx = rr.x + 10.0;
+                if icons {
+                    if let Some(g) = l.icon {
+                        ui.icon(Rect::new(rr.x + 8.0, rr.y, 18.0, rr.h), g, size::TITLE, quiet);
+                    }
+                    tx = rr.x + 34.0;
+                }
+                let key_w = match l.key {
+                    Some(k) => {
+                        let kb = ui.line(k, Style::new(size::CAPTION, weight::MEDIUM, t.faint), None);
+                        ui.draw(&kb, Point::new(rr.right() - 10.0 - kb.w, rr.y + (rr.h - kb.h) / 2.0));
+                        kb.w + 20.0
+                    }
+                    None => 0.0,
+                };
+                let b = ui.line(l.label, Style::new(size::BODY, weight::REGULAR, ink), Some((rr.right() - key_w - 8.0 - tx).max(10.0)));
+                ui.draw(&b, Point::new(tx, rr.y + (rr.h - b.h) / 2.0));
+            }
+        }
+        y += lh;
+    }
+    ui.unclip();
+    r
+}
+
 /// A tooltip above (or below, near the top) `anchor`, on its own layer.
 pub fn tooltip(ui: &mut Ui, anchor: Rect, text: &str) {
     let screen = ui.screen;

@@ -1,0 +1,26 @@
+[package]
+name = "bro-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "bro's session server: a headless process that owns every session's pseudo-terminal, so sessions outlive the window showing them"
+
+[dependencies]
+bro-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+vt100.workspace = true
+portable-pty.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

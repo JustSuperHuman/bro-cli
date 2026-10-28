@@ -70,6 +70,7 @@ pub fn run(shared: Arc<Shared>, tx: Sender<Msg>, rx: Receiver<Msg>) {
         match msg {
             Msg::Stop => break,
             Msg::Key(Signal::Down) => {
+                shared.emit(VoiceEvent::Pressed);
                 if take.is_some() {
                     continue;
                 }
@@ -97,6 +98,7 @@ pub fn run(shared: Arc<Shared>, tx: Sender<Msg>, rx: Receiver<Msg>) {
                 }
             }
             Msg::Key(Signal::Up { held_ms }) => {
+                shared.emit(VoiceEvent::Released);
                 if let Some(t) = take.take() {
                     if held_ms < shared.cfg.min_ms {
                         drop(t);
@@ -107,6 +109,7 @@ pub fn run(shared: Arc<Shared>, tx: Sender<Msg>, rx: Receiver<Msg>) {
                 }
             }
             Msg::Key(Signal::Combo) => {
+                shared.emit(VoiceEvent::Released);
                 if take.take().is_some() {
                     shared.emit(VoiceEvent::Cancelled);
                 }
@@ -208,6 +211,9 @@ fn run_live(shared: Arc<Shared>, cfg: live::LiveConfig, tx: Sender<Msg>, rx: Rec
     let mut player: Option<Arc<Player>> = None;
     let mut link: Option<Link> = None;
     let mut talking = false;
+    // when talking began: a hold stops being heard after max_secs, as a take ends in transcribe mode
+    let mut talking_since = Instant::now();
+    let max_talk = Duration::from_secs(shared.cfg.max_secs.max(1).into());
     let mut generation = 0u64;
     while let Ok(msg) = rx.recv() {
         if let Msg::Key(signal) = &msg {
@@ -221,6 +227,7 @@ fn run_live(shared: Arc<Shared>, cfg: live::LiveConfig, tx: Sender<Msg>, rx: Rec
                 break;
             }
             Msg::Key(Signal::Down) => {
+                shared.emit(VoiceEvent::Pressed);
                 // Talking over the voice cuts it off.
                 if let Some(player) = &player {
                     player.clear();
@@ -281,12 +288,14 @@ fn run_live(shared: Arc<Shared>, cfg: live::LiveConfig, tx: Sender<Msg>, rx: Rec
                 }
                 if let Some(link) = link.as_mut() {
                     talking = true;
+                    talking_since = Instant::now();
                     link.talk_from = link.batch.len();
                     let _ = link.out.send(Out::Talking(true));
                     shared.emit(VoiceEvent::Listening);
                 }
             }
             Msg::Key(Signal::Up { held_ms }) => {
+                shared.emit(VoiceEvent::Released);
                 if talking {
                     talking = false;
                     if let Some(link) = &link {
@@ -298,6 +307,7 @@ fn run_live(shared: Arc<Shared>, cfg: live::LiveConfig, tx: Sender<Msg>, rx: Rec
                 }
             }
             Msg::Key(Signal::Combo) => {
+                shared.emit(VoiceEvent::Released);
                 if talking {
                     talking = false;
                     if let Some(link) = &link {
@@ -317,6 +327,11 @@ fn run_live(shared: Arc<Shared>, cfg: live::LiveConfig, tx: Sender<Msg>, rx: Rec
                         talking = false;
                     }
                     Ok(samples) => {
+                        // a release that never comes must not leave the room on the air
+                        if talking && talking_since.elapsed() >= max_talk {
+                            talking = false;
+                            let _ = current.out.send(Out::Talking(false));
+                        }
                         let before = current.batch.len();
                         current.resampler.push(&samples, &mut current.batch);
                         if talking {

@@ -7,10 +7,10 @@ use crate::upstream::{Endpoint, UpstreamCall};
 use crate::{Dialect, ProxyConfig, ProxyOptions, auth, flow, models};
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, OriginalUri, Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use http::{HeaderMap, Uri};
+use http::{HeaderMap, Method, Uri};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::future::IntoFuture;
@@ -143,10 +143,13 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/messages/count_tokens", post(count_tokens))
         .route("/v1/chat/completions", post(chat))
         .route("/chat/completions", post(chat))
-        .route("/v1/responses", post(responses))
-        .route("/responses", post(responses))
+        .route("/v1/responses", post(responses).get(upgrade_required))
+        .route("/responses", post(responses).get(upgrade_required))
+        // Codex in proxy mode: its own `openai` provider at `{route}/backend-api/codex`
+        .route("/backend-api/codex/responses", post(responses).get(upgrade_required))
         .route("/v1/models", get(list_models))
-        .route("/models", get(list_models));
+        .route("/models", get(list_models))
+        .fallback(relay_other);
     Router::new()
         .route("/health", get(health))
         .route("/usage", get(usage))
@@ -163,10 +166,14 @@ fn router(state: Arc<AppState>) -> Router {
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Response {
+    // /health answers without the key: a proxy-mode route's id is its key, so it stays out
     let routes: Vec<Value> = state
         .routes()
         .iter()
-        .map(|r| json!({"id": r.id, "label": r.label, "upstream": r.upstream.kind_str()}))
+        .map(|r| {
+            let id = if r.upstream.family().is_some() { "(hidden)" } else { r.id.as_str() };
+            json!({"id": id, "label": r.label, "upstream": r.upstream.kind_str()})
+        })
         .collect();
     axum::Json(json!({"ok": true, "via": "bro proxy", "routes": routes})).into_response()
 }
@@ -202,6 +209,45 @@ async fn not_found(uri: Uri) -> Response {
         .into_response(auth::dialect_for_path(path))
 }
 
+/// Codex opens a WebSocket to `/responses` first; 426 makes it use HTTP for the session, at once and
+/// without a retry.
+async fn upgrade_required() -> Response {
+    (http::StatusCode::UPGRADE_REQUIRED, "bro-proxy serves Responses over HTTP").into_response()
+}
+
+/// `/r/{id}{rest}` → (id, rest with the query)
+fn split_route(uri: &Uri) -> Option<(String, String)> {
+    let rest = uri.path().strip_prefix("/r/")?;
+    let (id, path) = rest.split_once('/').map(|(i, p)| (i, format!("/{p}"))).unwrap_or((rest, String::new()));
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    Some((id.to_string(), format!("{path}{query}")))
+}
+
+/// Anything else under a route: for proxy mode's routes, the harness's own backend with its own
+/// credentials (model lists, files…); for the rest, not found.
+async fn relay_other(State(s): State<Arc<AppState>>, OriginalUri(uri): OriginalUri, method: Method, headers: HeaderMap, body: Bytes) -> Response {
+    let route = split_route(&uri).and_then(|(id, rest)| Some((s.route(&id)?, rest)));
+    match route {
+        Some((r, rest)) if r.upstream.family().is_some() => relay(&s, &r, method, &rest, &headers, body).await,
+        _ => not_found(uri).await,
+    }
+}
+
+/// A proxy-mode route's own backend, relayed as the harness that asked (errors in its dialect).
+async fn relay(s: &AppState, route: &crate::Route, method: Method, rest: &str, headers: &HeaderMap, body: Bytes) -> Response {
+    let family = route.upstream.family().expect("a proxy-mode route");
+    let mut headers = headers.clone();
+    // a client that signs in with the proxy's own key (Pi, omp) has nothing to show the backend
+    if s.token.as_deref().is_some_and(|t| auth::presented_key(&headers).is_some_and(|k| k.trim() == t)) {
+        headers.remove(http::header::AUTHORIZATION);
+        headers.remove("x-api-key");
+    }
+    match crate::upstream::logins::relay(s, family, method, rest, &headers, body).await {
+        Ok(r) => r,
+        Err(e) => e.into_response(route.upstream.dialect()),
+    }
+}
+
 async fn messages(
     State(s): State<Arc<AppState>>,
     Path(route): Path<String>,
@@ -229,11 +275,17 @@ async fn responses(
     flow::handle(s, Dialect::Responses, route, headers, body).await
 }
 
-async fn list_models(State(s): State<Arc<AppState>>, Path(route_id): Path<String>) -> Response {
+async fn list_models(State(s): State<Arc<AppState>>, Path(route_id): Path<String>, OriginalUri(uri): OriginalUri, headers: HeaderMap) -> Response {
     let Some(route) = s.route(&route_id) else {
         return ProxyError::new(ErrorKind::NotFound, format!("unknown route '{route_id}'"))
             .into_response(Dialect::Chat);
     };
+    // proxy mode: the list the harness's own login gets
+    if route.upstream.family().is_some()
+        && let Some((_, rest)) = split_route(&uri)
+    {
+        return relay(&s, &route, Method::GET, &rest, &headers, Bytes::new()).await;
+    }
     let list = models::list(&s, &route).await;
     let owner = match route.upstream.dialect() {
         Dialect::Anthropic => "anthropic",
@@ -246,6 +298,7 @@ async fn list_models(State(s): State<Arc<AppState>>, Path(route_id): Path<String
 async fn count_tokens(
     State(s): State<Arc<AppState>>,
     Path(route_id): Path<String>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -253,6 +306,12 @@ async fn count_tokens(
         return ProxyError::new(ErrorKind::NotFound, format!("unknown route '{route_id}'"))
             .into_response(Dialect::Anthropic);
     };
+    // proxy mode: counted by the harness's own login, as when it is signed in directly
+    if matches!(route.upstream, crate::Upstream::ClaudeLogins)
+        && let Some((_, rest)) = split_route(&uri)
+    {
+        return relay(&s, &route, Method::POST, &rest, &headers, body).await;
+    }
     let estimate = || {
         axum::Json(json!({"input_tokens": (body.len() as u64).div_ceil(4).max(1)})).into_response()
     };
@@ -288,6 +347,7 @@ async fn count_tokens(
             .map(str::to_string),
         translated: false,
         codex_auth: None,
+        user_id: None,
     };
     let result = async {
         let resp = crate::upstream::send(&s, &route, &call).await?;

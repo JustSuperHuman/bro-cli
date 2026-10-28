@@ -60,6 +60,8 @@ pub enum AccountKind {
     Provider(String),
     /// the Claude account pool
     Pool,
+    /// proxy mode: every signed-in login of the Claude family (`true`) or the Codex one
+    Shared(bool),
     /// pi / omp with their own configured login
     Native,
 }
@@ -103,6 +105,8 @@ pub struct Data {
     pub keyed: Vec<String>,
     /// The orchestrator already running, by its label: launching it again goes to that one.
     pub orchestrator_running: Option<String>,
+    /// Proxy mode: sessions run on all of a family's logins, so the list offers those instead of each login.
+    pub shared: bool,
 }
 
 /// Something clickable in the launcher (recorded while drawing).
@@ -326,6 +330,15 @@ impl Launcher {
         Some(self)
     }
 
+    /// Select proxy mode's row for a family's logins together (None outside proxy mode, or with none signed in).
+    pub fn with_shared(mut self, claude: bool) -> Option<Launcher> {
+        self.list_filter.clear();
+        let items = self.items();
+        self.list_sel = Self::selectable(&items).iter().position(|&i| matches!(&items[i], Item::Account(a) if a.kind == AccountKind::Shared(claude)))?;
+        self.reset_models();
+        Some(self)
+    }
+
     /// What a one-click "new claude / codex" should run: the top of `h`'s list (your latest combo for it, else
     /// its first login). None when that still needs a decision (not installed, nothing to run on, a model to pick).
     pub fn quick_spec(&self) -> Option<LaunchSpec> {
@@ -399,6 +412,7 @@ impl Launcher {
                 _ => false,
             },
             AccountKind::Native | AccountKind::Pool => true,
+            AccountKind::Shared(claude) => self.own_family() == Some(*claude),
             AccountKind::Provider(_) => false,
         };
         let mut best: Option<(usize, f64)> = None;
@@ -455,6 +469,53 @@ impl Launcher {
         (n > 0).then(|| Account { kind: AccountKind::Pool, label: "pool".into(), detail: format!("{n} claude accounts · failover"), ready: true, left: None })
     }
 
+    /// The family a harness signs in to itself: Claude (`true`) or Codex; None for Pi and omp.
+    fn own_family(&self) -> Option<bool> {
+        match self.harness {
+            Harness::Claude => Some(true),
+            Harness::Codex => Some(false),
+            Harness::Pi | Harness::Omp => None,
+        }
+    }
+
+    /// Proxy mode's row for a family: its logins by name, and the % they have left together (the average over
+    /// them, as the sidebar sums a family up).
+    fn shared_account(&self, claude: bool) -> Option<Account> {
+        let logins = bro_core::profiles::subscription_logins_in(&self.data.profiles, claude);
+        if logins.is_empty() {
+            return None;
+        }
+        let read: Vec<f64> = logins.iter().filter_map(|p| self.data.usage.get(&p.id)).map(|u| (100.0 - *u as f64).clamp(0.0, 100.0)).collect();
+        let left = (!read.is_empty()).then(|| read.iter().sum::<f64>() / read.len() as f64);
+        let shown: Vec<&str> = logins.iter().map(|p| p.name.as_str()).take(3).collect();
+        let mut who = shown.join(", ");
+        if logins.len() > shown.len() {
+            who.push_str(&format!(" +{}", logins.len() - shown.len()));
+        }
+        let family = if claude { "claude" } else { "chatgpt" };
+        let label = if self.own_family() == Some(claude) { "all your logins".to_string() } else { format!("all your {family} logins") };
+        Some(Account { kind: AccountKind::Shared(claude), label, detail: who, ready: true, left })
+    }
+
+    /// How a recent combo reads in the list: the kind its mark comes from, and who it runs as.
+    pub fn recent_row(&self, rc: &Recent) -> (AccountKind, String) {
+        let shared = |claude: bool| {
+            let label = if self.own_family() == Some(claude) { "all your logins".to_string() } else { format!("all your {} logins", if claude { "claude" } else { "chatgpt" }) };
+            (AccountKind::Shared(claude), label)
+        };
+        match (rc.provider_id.as_deref(), rc.profile_id.as_deref()) {
+            (Some("pool"), _) => (AccountKind::Pool, "pool".into()),
+            (Some(bro_core::launch::LOGINS_CLAUDE), _) => shared(true),
+            (Some(bro_core::launch::LOGINS_CODEX), _) => shared(false),
+            (Some(p), _) => (AccountKind::Provider(p.into()), p.into()),
+            (None, Some(p)) => (AccountKind::Profile(p.into()), p.split(':').next_back().unwrap_or(p).into()),
+            (None, None) => match self.own_family().filter(|_| self.data.shared) {
+                Some(claude) => shared(claude),
+                None => (AccountKind::Native, "own login".into()),
+            },
+        }
+    }
+
     fn provider_account(&self, p: &Provider) -> Account {
         let n = self.data.models.get(&p.id).map(Vec::len).unwrap_or(p.models.len());
         let keyed = p.no_key || self.data.keyed.iter().any(|k| k == &p.id);
@@ -477,7 +538,15 @@ impl Launcher {
         let recents: Vec<Item> = self.recents_for(h).into_iter().map(Item::Recent).collect();
         groups.push(("recent", recents));
 
-        let (own, via): (Vec<Account>, Vec<Account>) = match h {
+        let native = || Account { kind: AccountKind::Native, label: format!("{}'s own login", h.label()), detail: "whatever it's configured with".into(), ready: true, left: None };
+        let (own, via): (Vec<Account>, Vec<Account>) = if self.data.shared {
+            // proxy mode: no login to pick, each family's logins together
+            match self.own_family() {
+                Some(claude) => (self.shared_account(claude).into_iter().collect(), self.shared_account(!claude).into_iter().collect()),
+                None => (vec![native()], [true, false].into_iter().filter_map(|c| self.shared_account(c)).collect()),
+            }
+        } else {
+            match h {
             Harness::Claude => (
                 claude.iter().map(|p| self.profile_account(p, false)).chain(self.pool_account()).collect(),
                 codex.iter().map(|p| self.profile_account(p, true)).collect(),
@@ -487,11 +556,14 @@ impl Launcher {
                 claude.iter().map(|p| self.profile_account(p, true)).chain(self.pool_account()).collect(),
             ),
             Harness::Pi | Harness::Omp => (
-                vec![Account { kind: AccountKind::Native, label: format!("{}'s own login", h.label()), detail: "whatever it's configured with".into(), ready: true, left: None }],
+                vec![native()],
                 claude.iter().chain(codex.iter()).map(|p| self.profile_account(p, true)).chain(self.pool_account()).collect(),
             ),
+            }
         };
-        groups.push(("your logins", own.into_iter().map(Item::Account).collect()));
+        // Pi and omp keep their own login in proxy mode: only Claude and Codex share theirs
+        let own_head = if self.data.shared && self.own_family().is_some() { "proxy mode" } else { "your logins" };
+        groups.push((own_head, own.into_iter().map(Item::Account).collect()));
         groups.push(("other logins · via proxy", via.into_iter().map(Item::Account).collect()));
         let providers = self.data.providers.iter().filter(|p| p.mode != ProviderMode::Native && !(p.is_google_login() && self.data.profiles.iter().any(|profile| profile.is_gemini_subscription()))).map(|p| Item::Account(self.provider_account(p))).collect();
         let gemini = self.data.profiles.iter().filter(|p| p.is_gemini()).map(|p| Item::Account(self.profile_account(p, true))).collect();
@@ -533,6 +605,11 @@ impl Launcher {
             if r.harness != h || r.orchestrator != self.orchestrator {
                 continue;
             }
+            // proxy mode has no logins to pick: a combo naming one (or the pool) isn't offered
+            let names_login = r.profile_id.as_deref().is_some_and(|p| p.starts_with("claude:") || p.starts_with("codex:")) || r.provider_id.as_deref() == Some("pool");
+            if self.data.shared && names_login {
+                continue;
+            }
             let dup = out.iter().any(|&j| {
                 let o = &self.data.recents[j];
                 o.profile_id == r.profile_id && o.provider_id == r.provider_id && o.model == r.model
@@ -571,6 +648,7 @@ impl Launcher {
                 AccountKind::Provider(_) => true,
                 AccountKind::Profile(p) => !((self.harness == Harness::Claude && p.starts_with("claude:")) || (self.harness == Harness::Codex && p.starts_with("codex:"))),
                 AccountKind::Pool => self.harness != Harness::Claude,
+                AccountKind::Shared(claude) => self.own_family() != Some(*claude),
                 AccountKind::Native => false,
             },
             _ => false,
@@ -587,6 +665,7 @@ impl Launcher {
                 AccountKind::Provider(p) => p,
                 AccountKind::Profile(p) if bro_core::profiles::is_gemini_id(&p) => p,
                 AccountKind::Profile(p) if p.starts_with("codex:") => "codex".into(),
+                AccountKind::Shared(false) => "codex".into(),
                 _ => "claude".into(),
             },
             _ => return &[],
@@ -630,6 +709,9 @@ impl Launcher {
                     AccountKind::Profile(p) => base(Some(p), None, model),
                     AccountKind::Provider(p) => base(None, Some(p), model),
                     AccountKind::Pool => base(None, Some("pool".into()), model),
+                    // its own family's logins: proxy mode picks the login it runs as
+                    AccountKind::Shared(claude) if self.own_family() == Some(claude) => base(None, None, model),
+                    AccountKind::Shared(claude) => base(None, Some(bro_core::launch::logins_upstream(claude).into()), model),
                     AccountKind::Native => base(None, None, model),
                 })
             }
@@ -680,6 +762,8 @@ impl Launcher {
             AccountKind::Profile(p) => (Some(p.clone()), None),
             AccountKind::Provider(p) => (None, Some(p.clone())),
             AccountKind::Pool => (None, Some("pool".to_string())),
+            AccountKind::Shared(claude) if self.own_family() == Some(*claude) => (None, None),
+            AccountKind::Shared(claude) => (None, Some(bro_core::launch::logins_upstream(*claude).to_string())),
             AccountKind::Native => (None, None),
         };
         let last = self.data.recents.iter().find(|r| r.profile_id == profile && r.provider_id == provider && r.model.is_some()).and_then(|r| r.model.clone());

@@ -328,14 +328,8 @@ fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Ve
             Item::Header(h) => heading(f, Rect { x: r.x + 1, width: r.width.saturating_sub(1), ..r }, h, t),
             Item::Recent(i) => {
                 let rc = &l.data.recents[*i];
-                let who = rc.provider_id.clone().or_else(|| rc.profile_id.as_ref().map(|p| p.split(':').next_back().unwrap_or(p).to_string())).unwrap_or_else(|| "own login".into());
+                let (kind, who) = l.recent_row(rc);
                 let model = rc.model.as_deref().map(|m| crate::services::launch::short_model(m.rsplit('/').next().unwrap_or(m)));
-                let kind = match (&rc.provider_id, &rc.profile_id) {
-                    (Some(p), _) if p == "pool" => AccountKind::Pool,
-                    (Some(p), _) => AccountKind::Provider(p.clone()),
-                    (None, Some(p)) => AccountKind::Profile(p.clone()),
-                    (None, None) => AccountKind::Native,
-                };
                 let (g, c) = account_glyph(&kind, l.harness, t);
                 let mut spans = vec![mark, Span::raw(" "), Span::styled(format!("{g} "), fg(c)), Span::styled(who, label_style)];
                 if let Some(m) = model {
@@ -374,7 +368,8 @@ fn account_glyph(kind: &AccountKind, harness: Harness, t: &Theme) -> (&'static s
     match kind {
         AccountKind::Profile(p) if bro_core::profiles::is_gemini_id(&p) => ui::provider_glyph("gemini", t.shine, t),
         AccountKind::Profile(p) if p.starts_with("codex:") => brand(Harness::Codex),
-        AccountKind::Profile(_) | AccountKind::Pool => brand(Harness::Claude),
+        AccountKind::Profile(_) | AccountKind::Pool | AccountKind::Shared(true) => brand(Harness::Claude),
+        AccountKind::Shared(false) => brand(Harness::Codex),
         AccountKind::Provider(id) => ui::provider_glyph(id, t.shine, t),
         AccountKind::Native => brand(harness),
     }

@@ -1,7 +1,8 @@
 //! The file preview in the desktop app: a large card over the dimmed window. The header names the file (its
 //! path in the session with the line, the language, size and full path) and where you are in it; the body is
 //! the code in the terminal font with the theme's syntax colours, a line-number gutter and the target line
-//! tinted; the footer's buttons are the terminal UI's hints. Keys reach [`FileView`] through the workspace;
+//! tinted (an HTML file's body is the page itself: `app::gui::page` lays the web view where this leaves room for
+//! it); the footer's buttons are the terminal UI's hints. Keys reach [`FileView`] through the workspace;
 //! this draws its state and turns clicks into the [`Outcome`]s the terminal UI's mouse handler gives (a click
 //! outside the card closes it).
 
@@ -26,6 +27,7 @@ const COPY: usize = 3;
 const MENTION: usize = 4;
 const CLOSE: usize = 5;
 const RENDERED: usize = 6;
+const REVEAL: usize = 7;
 
 /// The card: the window less this on every side, at most `MAX_W` wide.
 const MARGIN: f32 = 24.0;
@@ -51,6 +53,7 @@ const ICON_ALERT: &str = "\u{F0A4C}";
 const ICON_IMAGE: &str = "\u{F02E9}";
 const ICON_VIDEO: &str = "\u{F0567}";
 const ICON_AUDIO: &str = "\u{F075A}";
+const ICON_WEB: &str = "\u{F059F}";
 
 /// Draw the file preview over the whole window.
 pub(crate) fn draw(s: &mut FileView, ui: &mut Ui, area: Rect, _cx: &Cx) -> bool {
@@ -63,6 +66,7 @@ pub(crate) fn click(s: &mut FileView, n: usize, _p: Point, _mods: KeyModifiers, 
         SCRIM | CLOSE => Outcome::Close,
         EDITOR => Outcome::Editor,
         SYSTEM => Outcome::System,
+        REVEAL => Outcome::Reveal,
         COPY => Outcome::Copy,
         MENTION => Outcome::Mention,
         RENDERED => {
@@ -218,13 +222,22 @@ fn paint(s: &mut FileView, ui: &mut Ui, area: Rect) -> bool {
     ui.hline(inner.x, l.foot.y - hair, inner.w, t.hairline);
 
     header(ui, s, l.head);
+    let page = s.shows_page();
     match &s.body {
+        // the web view covers the well once the page has painted; until then it's loading
+        Body::Text(_) if page => {
+            if !s.page_shown {
+                loading(ui, l.body);
+            }
+        }
         Body::Text(d) => code(ui, s, d, &l, &m, pitch_px, y, x, well),
         Body::Loading => loading(ui, l.body),
         Body::Failed { message, path } => failed(ui, l.body, message, path.is_some()),
         Body::Media(media) => media_card(ui, l.body, media),
     }
     footer(ui, s, l.foot);
+    // the page goes between the hairlines once the card has settled
+    s.page = (page && open >= 1.0).then(|| Rect::new(inner.x, l.body.y + hair, inner.w, (l.foot.y - hair - l.body.y - hair).max(1.0)));
     true
 }
 
@@ -311,6 +324,7 @@ fn header(ui: &mut Ui, s: &FileView, r: Rect) {
     let t = ui.t;
     // what kind of file, as a plain icon on the card (an alert in the danger colour when it can't be shown)
     let (glyph, tint) = match &s.body {
+        Body::Text(_) if s.shows_page() => (ICON_WEB, t.text),
         Body::Text(d) if matches!(d.language.as_str(), "plaintext" | "markdown") => (ICON_DOC, t.text),
         Body::Text(_) => (ICON_CODE, t.text),
         Body::Media(m) => (media_kind(&m.mime).0, t.text),
@@ -384,12 +398,15 @@ fn header(ui: &mut Ui, s: &FileView, r: Rect) {
     }
 }
 
-/// Right of the header: "top–last of total", "→N" when scrolled sideways, a spinner while a page loads.
-/// Returns where it starts.
+/// Right of the header: "top–last of total", "→N" when scrolled sideways, a spinner while a page loads (none
+/// of it for HTML shown as the page). Returns where it starts.
 fn where_you_are(ui: &mut Ui, s: &FileView, right: f32, cy: f32) -> f32 {
     let t = ui.t;
     let mut x = right;
     let Body::Text(d) = &s.body else { return x };
+    if s.shows_page() {
+        return x;
+    }
     let last = (s.top + s.rows).saturating_sub(1).min(d.total.max(1));
     let st = Style::new(size::SMALL, weight::MEDIUM, t.muted);
     let spans = vec![(format!("{}–{}", s.top, last), st.color(t.text.mix(t.muted, 0.35))), (format!(" of {}", d.total), st)];
@@ -692,15 +709,26 @@ fn buttons(s: &FileView) -> &'static [Button] {
     const TEXT: &[Button] = &[
         Button { key: "e", label: "editor", target: EDITOR },
         Button { key: "o", label: "system app", target: SYSTEM },
+        Button { key: "p", label: "open path", target: REVEAL },
         Button { key: "c", label: "copy path", target: COPY },
         Button { key: "@", label: "mention", target: MENTION },
     ];
-    const MEDIA: &[Button] = &[Button { key: "⏎", label: "open", target: SYSTEM }, Button { key: "c", label: "copy path", target: COPY }, Button { key: "@", label: "mention", target: MENTION }];
-    const FAILED: &[Button] = &[Button { key: "⏎", label: "system app", target: SYSTEM }, Button { key: "c", label: "copy path", target: COPY }];
-    // Markdown: the source / preview switch last, beside close
-    const MD_RENDERED: &[Button] = &[TEXT[0], TEXT[1], TEXT[2], TEXT[3], Button { key: "m", label: "source", target: RENDERED }];
-    const MD_SOURCE: &[Button] = &[TEXT[0], TEXT[1], TEXT[2], TEXT[3], Button { key: "m", label: "preview", target: RENDERED }];
+    const MEDIA: &[Button] = &[Button { key: "⏎", label: "open", target: SYSTEM }, Button { key: "p", label: "open path", target: REVEAL }, Button { key: "c", label: "copy path", target: COPY }, Button { key: "@", label: "mention", target: MENTION }];
+    const FAILED: &[Button] = &[Button { key: "⏎", label: "system app", target: SYSTEM }, Button { key: "p", label: "open path", target: REVEAL }, Button { key: "c", label: "copy path", target: COPY }];
+    // Markdown and HTML: the source / preview switch last, beside close (HTML's system app is your browser)
+    const MD_RENDERED: &[Button] = &[TEXT[0], TEXT[1], TEXT[2], TEXT[3], TEXT[4], Button { key: "m", label: "source", target: RENDERED }];
+    const MD_SOURCE: &[Button] = &[TEXT[0], TEXT[1], TEXT[2], TEXT[3], TEXT[4], Button { key: "m", label: "preview", target: RENDERED }];
+    const BROWSER: Button = Button { key: "o", label: "browser", target: SYSTEM };
+    const PAGE: &[Button] = &[TEXT[0], BROWSER, TEXT[2], TEXT[3], TEXT[4], Button { key: "m", label: "source", target: RENDERED }];
+    const PAGE_SOURCE: &[Button] = &[TEXT[0], BROWSER, TEXT[2], TEXT[3], TEXT[4], Button { key: "m", label: "page", target: RENDERED }];
     match &s.body {
+        Body::Text(_) if s.can_render() && !s.is_markdown() => {
+            if s.rendered {
+                PAGE
+            } else {
+                PAGE_SOURCE
+            }
+        }
         Body::Text(_) if s.is_markdown() => {
             if s.rendered {
                 MD_RENDERED
@@ -915,6 +943,7 @@ pub(crate) mod tests {
         assert_eq!(click(&mut v, CLOSE, p, m, 1), Outcome::Close);
         assert_eq!(click(&mut v, EDITOR, p, m, 1), Outcome::Editor);
         assert_eq!(click(&mut v, SYSTEM, p, m, 1), Outcome::System);
+        assert_eq!(click(&mut v, REVEAL, p, m, 1), Outcome::Reveal);
         assert_eq!(click(&mut v, COPY, p, m, 1), Outcome::Copy);
         assert_eq!(click(&mut v, MENTION, p, m, 1), Outcome::Mention);
         assert_eq!(click(&mut v, 99, p, m, 1), Outcome::None);
@@ -941,10 +970,10 @@ pub(crate) mod tests {
         assert_eq!(rows, layout(Rect::new(0.0, 0.0, 1440.0, 900.0), pitch, 0.0).rows, "the page keys use the rows drawn");
         assert!(v.top <= 200 && 200 < v.top + rows, "the target line is in view: top {} rows {rows}", v.top);
         assert_eq!(v.top, 200 - rows / 3, "a third of the way down, as in the terminal UI");
-        assert_eq!(targets(&hits), vec![SCRIM, EDITOR, SYSTEM, COPY, MENTION, CLOSE]);
+        assert_eq!(targets(&hits), vec![SCRIM, EDITOR, SYSTEM, COPY, MENTION, CLOSE, REVEAL]);
         // Enter's action is the rightmost button, close the leftmost
         let x_of = |n: usize| hits.iter().find(|h| matches!(h.action, Action::Overlay(m) if m == n)).map(|h| h.rect.x).unwrap();
-        assert!(x_of(EDITOR) > x_of(SYSTEM) && x_of(SYSTEM) > x_of(COPY) && x_of(COPY) > x_of(MENTION) && x_of(MENTION) > x_of(CLOSE));
+        assert!(x_of(EDITOR) > x_of(SYSTEM) && x_of(SYSTEM) > x_of(REVEAL) && x_of(REVEAL) > x_of(COPY) && x_of(COPY) > x_of(MENTION) && x_of(MENTION) > x_of(CLOSE));
         // the wheel scrolls three lines
         let top = v.top;
         wheel(&mut v, None, true);
@@ -959,13 +988,13 @@ pub(crate) mod tests {
         std::fs::write(dir.path().join("a.txt"), "x").unwrap();
         let mut v = opened(dir.path(), "a.txt", None);
         v.body = Body::Failed { message: "This file can't be shown as text.".into(), path: Some(dir.path().join("a.txt")) };
-        assert_eq!(targets(&drawn(&mut v, "paper", 1000.0, 700.0)), vec![SCRIM, SYSTEM, COPY, CLOSE]);
+        assert_eq!(targets(&drawn(&mut v, "paper", 1000.0, 700.0)), vec![SCRIM, SYSTEM, COPY, CLOSE, REVEAL]);
         v.body = Body::Failed { message: bro_bridge::file_preview::NOT_FOUND.into(), path: None };
         assert_eq!(targets(&drawn(&mut v, "paper", 1000.0, 700.0)), vec![SCRIM, CLOSE]);
         v.body = Body::Loading;
         assert_eq!(targets(&drawn(&mut v, "paper", 1000.0, 700.0)), vec![SCRIM, CLOSE]);
         v.body = Body::Media(Media { path: dir.path().join("clip.mp4"), relative: "clip.mp4".into(), mention: "@clip.mp4".into(), mime: "video/mp4".into(), bytes: 2048 });
-        assert_eq!(targets(&drawn(&mut v, "paper", 1000.0, 700.0)), vec![SCRIM, SYSTEM, COPY, MENTION, CLOSE]);
+        assert_eq!(targets(&drawn(&mut v, "paper", 1000.0, 700.0)), vec![SCRIM, SYSTEM, COPY, MENTION, CLOSE, REVEAL]);
     }
 
     #[test]
@@ -985,7 +1014,34 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "// hi\nfn main() {}\n").unwrap();
         let mut v = opened(dir.path(), "a.rs", Some(2));
-        assert_eq!(targets(&drawn(&mut v, "paper", 1000.0, 700.0)), vec![SCRIM, EDITOR, SYSTEM, COPY, MENTION, CLOSE]);
+        assert_eq!(targets(&drawn(&mut v, "paper", 1000.0, 700.0)), vec![SCRIM, EDITOR, SYSTEM, COPY, MENTION, CLOSE, REVEAL]);
+    }
+
+    #[test]
+    fn html_leaves_the_body_to_its_page_once_the_card_settles() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("report.html"), "<!doctype html>\n<h1>Totals</h1>\n").unwrap();
+        let mut v = opened(dir.path(), "report.html", None);
+        v.pages = true;
+        let window = Rect::new(0.0, 0.0, 1440.0, 900.0);
+        let hits = drawn(&mut v, "graphite", window.w, window.h);
+        assert_eq!(v.page, None, "not while the card opens");
+        assert_eq!(targets(&hits), vec![SCRIM, EDITOR, SYSTEM, COPY, MENTION, CLOSE, RENDERED, REVEAL]);
+        drawn(&mut v, "graphite", window.w, window.h);
+        let page = v.page.expect("room for the page");
+        let l = layout(window, 18.0, 0.0);
+        assert!(page.y > l.head.bottom() - 0.5 && page.bottom() < l.foot.y + 0.5, "between the header and the footer: {page:?}");
+        assert!(page.x > l.card.x && page.right() < l.card.right(), "inside the card's edges: {page:?}");
+        // the source: no page
+        assert_eq!(click(&mut v, RENDERED, Point::new(0.0, 0.0), KeyModifiers::NONE, 1), Outcome::None);
+        drawn(&mut v, "graphite", window.w, window.h);
+        assert_eq!(v.page, None);
+        // without a web view, HTML is only ever source
+        v.toggle_rendered();
+        v.pages = false;
+        let hits = drawn(&mut v, "graphite", window.w, window.h);
+        assert_eq!(v.page, None);
+        assert_eq!(targets(&hits), vec![SCRIM, EDITOR, SYSTEM, COPY, MENTION, CLOSE, REVEAL], "no switch");
     }
 
     #[test]

@@ -190,6 +190,7 @@ impl Services {
             let svc = self.clone();
             std::thread::spawn(move || {
                 let _ = guard("justtools::remove_skill_everywhere", justtools::remove_skill_everywhere);
+                svc.rescan_skills();
                 svc.wake();
             });
             return;

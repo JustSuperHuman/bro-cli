@@ -7,11 +7,12 @@
 //! sidebar does (they're the same [`crate::sidebar`] rows and [`SideHit`]s).
 
 use super::actions::Action;
-use super::chrome::{harness_mark, session_mark, status_dot};
+use super::chrome::{harness_mark, session_badge, session_mark, status_dot};
 use super::kit::{Cursor, Style, Ui, radius, size, weight, widgets};
 use crate::app::App;
 use crate::app::SideHit;
 use crate::app::project_tabs::{StripHit, StripTab};
+use crate::app::side_view::{Status, Tally};
 use crate::pane::Activity;
 use crate::services::Avail;
 use crate::sidebar::Row;
@@ -79,6 +80,8 @@ fn bar_geometry(view: Rect, content: f32, scroll: f32) -> Option<(Rect, f32, f32
 }
 
 const PAD: f32 = 10.0;
+/// The header (wordmark, buttons, clock) ends this far below the sidebar's top.
+pub const HEAD_BOTTOM: f32 = 44.0;
 
 pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_window: bool, media_open: bool, media_unseen: usize) {
     let t = ui.t;
@@ -91,7 +94,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_win
     let inner = Rect::new(r.x + PAD, r.y, r.w - 2.0 * PAD - 1.0, r.h);
 
     // ---- header: wordmark, settings, clock
-    let head = Rect::new(inner.x, r.y + 8.0, inner.w, 36.0);
+    let head = Rect::new(inner.x, r.y + 8.0, inner.w, HEAD_BOTTOM - 8.0);
     let mark = ui.label(Point::new(head.x + 6.0, head.y + 8.0), "bro", Style::new(17.0, weight::BOLD, t.text));
     ui.circle(Point::new(head.x + 6.0 + mark.w + 4.0, head.y + 24.0), 2.2, t.accent);
     let clock = crate::util::clock();
@@ -133,7 +136,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_win
     let usage = app.usage_lines();
     let sessions = app.panes.values().filter(|p| p.is_terminal()).count();
     let tile_row = app.strip.height == 0 && sessions >= 2;
-    let status_h = if app.usage_expanded { 52.0 } else { 0.0 };
+    let status_h = if app.usage_expanded { STATUS_H } else { 0.0 };
     let usage_h = if usage.is_empty() { 0.0 } else { 30.0 + usage.len() as f32 * 26.0 };
     let foot_h = 12.0 + if tile_row { 34.0 } else { 0.0 } + 44.0 + usage_h + status_h + 8.0;
     let foot_h = foot_h.min((r.h - filter_r.bottom() - 120.0).max(60.0));
@@ -422,7 +425,7 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
             }
             let mark = Rect::new(x0 + 14.0, mid - 9.0, 18.0, 18.0);
             let m = session_mark(app, info.pane, t);
-            ui.mark(m, mark, if info.orchestrator { 16.0 } else { 15.0 }, None);
+            ui.mark_badged(m, session_badge(app, info.pane), mark, if info.orchestrator { 16.0 } else { 15.0 }, None);
             let text_x = mark.right() + 8.0;
             if let Some(text) = renaming {
                 let fr = Rect::new(text_x - 4.0, r.y + 3.0, r.right() - 8.0 - text_x + 4.0, 26.0);
@@ -577,8 +580,10 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
         }
     }
     y += 44.0;
-    // usage left
-    if !usage.is_empty() {
+    // usage left: lines while there's room over the status rows (and in a window too short for its heading too, as
+    // in the terminal UI, only those rows)
+    let status_h = if app.usage_expanded { STATUS_H } else { 0.0 };
+    if !usage.is_empty() && y + 22.0 <= r.bottom() - status_h {
         let head = Rect::new(r.x, y, r.w, 22.0);
         let arrow = if app.usage_expanded { "\u{F0140}" } else { "\u{F0142}" };
         let hh = ui.hover_amount("usage-head", head);
@@ -607,7 +612,7 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
         y += 26.0;
         let now = crate::util::now_secs();
         for u in usage {
-            if y + 24.0 > r.bottom() - if app.usage_expanded { 52.0 } else { 0.0 } {
+            if y + 24.0 > r.bottom() - status_h {
                 break;
             }
             let row = Rect::new(r.x, y, r.w, 24.0);
@@ -678,8 +683,9 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
             y += 26.0;
         }
     }
-    // proxy and phone bridge (expanded usage only)
+    // the session counter, proxy and phone bridge (expanded usage only)
     if app.usage_expanded {
+        let tally = app.session_tally();
         let st = app.svc.state();
         let proxy = match &st.proxy.status {
             Avail::Ready(i) => {
@@ -707,9 +713,10 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
             _ => (t.danger, "off".into(), false),
         };
         drop(st);
-        let base = r.bottom() - 50.0;
+        let base = r.bottom() - STATUS_H + 2.0;
+        session_counter(ui, Rect::new(r.x, base, r.w, 22.0), tally);
         for (k, (icon, name, (c, text, busy), hit)) in [("\u{F04E1}", "Proxy", proxy, SideHit::Proxy), ("\u{F05A9}", "Phone", bridge, SideHit::Bridge)].into_iter().enumerate() {
-            let row = Rect::new(r.x, base + k as f32 * 24.0, r.w, 22.0);
+            let row = Rect::new(r.x, base + (k + 1) as f32 * STATUS_ROW, r.w, 22.0);
             let h = ui.hover_amount(("status-row", k), row);
             ui.round(row, radius::CONTROL, t.hover.fade(h));
             ui.icon(Rect::new(row.x + 4.0, row.y, 16.0, row.h), icon, size::SMALL, t.faint);
@@ -726,6 +733,114 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
             ui.label_in(Rect::new(row.x + 90.0, row.y, row.w - 92.0, row.h), &text, Style::new(size::SMALL, weight::MEDIUM, if busy { t.text } else { t.muted }), Align::Left);
             ui.hit(row, Action::Side(hit));
         }
+    }
+}
+
+/// The status rows under usage (sessions, proxy, phone; expanded usage only) sit this far apart…
+const STATUS_ROW: f32 = 24.0;
+/// …at the footer's foot, in this much of it.
+const STATUS_H: f32 = 3.0 * STATUS_ROW + 4.0;
+
+/// Room between two of the session counter's statuses…
+const STATUS_GAP: f32 = 8.0;
+/// …and between a status's icon and its count.
+const COUNT_GAP: f32 = 3.0;
+
+/// The width of a status's icon as drawn (the spinner is narrower than the alert), so each count sits as far from
+/// its icon.
+fn status_icon_w(s: Status) -> f32 {
+    match s {
+        Status::Working => 10.0,
+        Status::NeedsYou => 13.0,
+        Status::Done => 12.0,
+    }
+}
+
+/// What of the session counter fits `room` px, from the widths of its number, " running" and the separator and of
+/// each status (icon and count): whether "running" stays, and which statuses do. Short of room "running" goes
+/// first, then done, then working; what needs you always stays.
+fn counter_fit(room: f32, (num, word, sep): (f32, f32, f32), statuses: &[(Status, f32)]) -> (bool, Vec<Status>) {
+    let mut kept = statuses.to_vec();
+    let width = |running: bool, kept: &[(Status, f32)]| {
+        let rest = kept.iter().map(|s| s.1).sum::<f32>() + STATUS_GAP * kept.len().saturating_sub(1) as f32;
+        num + if running { word } else { 0.0 } + if kept.is_empty() { 0.0 } else { sep + rest }
+    };
+    let mut running = true;
+    while width(running, &kept) > room {
+        if running {
+            running = false;
+        } else if let Some(i) = [Status::Done, Status::Working].iter().find_map(|d| kept.iter().position(|s| s.0 == *d)) {
+            kept.remove(i);
+        } else {
+            break;
+        }
+    }
+    (running, kept.into_iter().map(|s| s.0).collect())
+}
+
+/// The session counter over the proxy and phone rows: how many sessions run, the number lined up with what those
+/// rows say, then how many are working, need you or are done, each the icon its row shows with its count (as the
+/// project tabs show them; the words are in a tooltip). A click shows them all, or with none starts one.
+fn session_counter(ui: &mut Ui, row: Rect, n: Tally) {
+    const SEP: &str = " · ";
+    let t = ui.t;
+    let h = ui.hover_amount("status-sessions", row);
+    ui.round(row, radius::CONTROL, t.hover.fade(h));
+    ui.icon(Rect::new(row.x + 4.0, row.y, 16.0, row.h), "\u{F018D}", size::SMALL, t.faint);
+    ui.label(Point::new(row.x + 24.0, row.y + 3.0), "Sessions", Style::new(size::SMALL, weight::MEDIUM, t.muted));
+    ui.hit(row, Action::Side(SideHit::Sessions));
+    let x = row.x + 90.0;
+    let room = row.right() - 4.0 - x;
+    if n.total == 0 {
+        ui.label_in(Rect::new(x, row.y, room, row.h), "none running", Style::new(size::SMALL, weight::MEDIUM, t.muted), Align::Left);
+        if h > 0.5 {
+            widgets::tooltip(ui, row, "New session");
+        }
+        return;
+    }
+    let num = n.total.to_string();
+    let ns = Style::new(size::SMALL, weight::SEMIBOLD, t.text);
+    let ws = Style::new(size::SMALL, weight::MEDIUM, t.text);
+    let nw = ui.measure(&num, ns);
+    let ww = ui.measure(" running", ws);
+    let sw = ui.measure(SEP, ws);
+    let statuses: Vec<(Status, String, f32)> = n
+        .statuses()
+        .map(|(s, k)| {
+            let k = k.to_string();
+            let w = status_icon_w(s) + COUNT_GAP + ui.measure(&k, ns);
+            (s, k, w)
+        })
+        .collect();
+    let (running, kept) = counter_fit(room, (nw, ww, sw), &statuses.iter().map(|s| (s.0, s.2)).collect::<Vec<_>>());
+    let y = row.y + 3.0;
+    ui.label(Point::new(x, y), &num, ns);
+    if running {
+        ui.label(Point::new(x + nw, y), " running", ws);
+    }
+    let mut cx = x + nw + if running { ww } else { 0.0 };
+    if !kept.is_empty() {
+        ui.label(Point::new(cx, y), SEP, ws.color(t.muted));
+        cx += sw;
+    }
+    for (s, k, w) in statuses.iter().filter(|s| kept.contains(&s.0)) {
+        let iw = status_icon_w(*s);
+        let icon = Rect::new(cx, row.y + (row.h - 13.0) / 2.0, iw, 13.0);
+        let c = match s {
+            Status::Working => t.accent,
+            Status::NeedsYou => t.danger,
+            Status::Done => t.good,
+        };
+        match s {
+            Status::Working => ui.spinner(icon.center(), 4.0, 1.4, c),
+            Status::NeedsYou => ui.icon(icon, "\u{F0028}", size::SMALL, c),
+            Status::Done => ui.icon(icon, "\u{F012C}", size::SMALL, c),
+        }
+        ui.label(Point::new(cx + iw + COUNT_GAP, y), k, ns.color(c));
+        cx += w + STATUS_GAP;
+    }
+    if h > 0.5 {
+        widgets::tooltip(ui, row, &n.words());
     }
 }
 
@@ -1085,6 +1200,21 @@ mod tests {
         s.bar = bar_geometry(view, s.content, 0.0);
         s.grab_bar(track.bottom());
         assert_eq!(s.scroll, 800.0);
+    }
+
+    #[test]
+    fn the_session_counter_gives_way_word_first_and_keeps_what_needs_you() {
+        use Status::*;
+        // "5" 7, " running" 49, " · " 10, statuses 23 each with 8 between: 151 in all
+        let widths = (7.0, 49.0, 10.0);
+        let all = [(Working, 23.0), (NeedsYou, 23.0), (Done, 23.0)];
+        assert_eq!(counter_fit(160.0, widths, &all), (true, vec![Working, NeedsYou, Done]));
+        assert_eq!(counter_fit(120.0, widths, &all), (false, vec![Working, NeedsYou, Done]));
+        assert_eq!(counter_fit(80.0, widths, &all), (false, vec![Working, NeedsYou]));
+        assert_eq!(counter_fit(30.0, widths, &all), (false, vec![NeedsYou]));
+        assert_eq!(counter_fit(0.0, widths, &all), (false, vec![NeedsYou]));
+        // all idle: the count and its word
+        assert_eq!(counter_fit(160.0, widths, &[]), (true, vec![]));
     }
 
     #[test]

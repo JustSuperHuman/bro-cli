@@ -19,11 +19,13 @@ pub struct Prefs {
     pub window: Option<(f64, f64)>,
     pub position: Option<(i32, i32)>,
     pub maximized: bool,
+    /// focus mode: agent sessions as their conversation (alt+f)
+    pub focus: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Prefs {
-        Prefs { font_size: DEFAULT_FONT_SIZE, line_height: 1.18, sidebar_width: 272.0, media_width: 380.0, media_open: false, window: None, position: None, maximized: false }
+        Prefs { font_size: DEFAULT_FONT_SIZE, line_height: 1.18, sidebar_width: 272.0, media_width: 380.0, media_open: false, window: None, position: None, maximized: false, focus: false }
     }
 }
 

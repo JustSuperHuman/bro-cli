@@ -835,7 +835,8 @@ fn account_mark(kind: &AccountKind, harness: Harness, ui: &Ui) -> Mark {
     match kind {
         AccountKind::Profile(p) if bro_core::profiles::is_gemini_id(&p) => brand::provider("gemini").unwrap(),
         AccountKind::Profile(p) if p.starts_with("codex:") => brand::harness(Harness::Codex),
-        AccountKind::Profile(_) | AccountKind::Pool => brand::harness(Harness::Claude),
+        AccountKind::Profile(_) | AccountKind::Pool | AccountKind::Shared(true) => brand::harness(Harness::Claude),
+        AccountKind::Shared(false) => brand::harness(Harness::Codex),
         AccountKind::Provider(id) => provider_mark(id, ui),
         AccountKind::Native => brand::harness(harness),
     }
@@ -901,14 +902,8 @@ fn draw_run_on(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
                 let Some(rc) = l.data.recents.get(*i) else { continue };
                 row_fill(ui, rr, ("run-on", this), on, focused);
                 ui.hit(rr, Action::Overlay(ROW + this));
-                let who = rc.provider_id.clone().or_else(|| rc.profile_id.as_ref().map(|p| p.split(':').next_back().unwrap_or(p).to_string())).unwrap_or_else(|| "own login".into());
+                let (kind, who) = l.recent_row(rc);
                 let model = rc.model.as_deref().map(|m| crate::services::launch::short_model(m.rsplit('/').next().unwrap_or(m)));
-                let kind = match (&rc.provider_id, &rc.profile_id) {
-                    (Some(p), _) if p == "pool" => AccountKind::Pool,
-                    (Some(p), _) => AccountKind::Provider(p.clone()),
-                    (None, Some(p)) => AccountKind::Profile(p.clone()),
-                    (None, None) => AccountKind::Native,
-                };
                 ui.mark(account_mark(&kind, l.harness, ui), mark, 15.0, None);
                 let age = format!("{} ago", crate::util::short_dur((now - rc.at).max(0) as u64));
                 let ast = Style::new(size::SMALL, weight::REGULAR, t.faint);
@@ -1500,6 +1495,7 @@ mod tests {
             models: st.models.clone(),
             keyed: vec!["openrouter".into(), "openai".into()],
             orchestrator_running: None,
+            shared: false,
         };
         Launcher::new(data, Some(PathBuf::from("/code/bro")), Place::Tab)
     }

@@ -9,7 +9,7 @@ bro install dotnet9 dotnet10 dotnet11
 bro install codex --force          # reinstall / update one
 ```
 
-Tools: `justtools`, `justpaste` (Windows), `justwatch` (Windows), `justimagine`, `git`, `gh`, `node`, `bun`, `python`, `uv`, `dotnet9`, `dotnet10`, `dotnet11`,
+Tools: `justtools`, `justpaste` (Windows), `justwatch` (Windows), `justimagine`, `justbrowse`, `git`, `gh`, `node`, `bun`, `python`, `uv`, `dotnet9`, `dotnet10`, `dotnet11`,
 `claude`, `codex`, `pi`, `omp`, `rg`, `ffmpeg`, `yt-dlp`, `tailscale`, `powertoys` (Windows), `sharex` (Windows, JustSuperHuman's fork). Windows installs with WinGet, macOS with Homebrew
 (installed first if missing), Linux with apt, dnf, pacman, zypper or apk. Bun, uv and .NET on
 macOS / Linux (into `~/.dotnet`) use their official install scripts; JustTools, Claude Code, Codex,
@@ -23,7 +23,7 @@ you turn on its copy filters (skip `node_modules`, `.gitignore`d files…) in it
 
 JustWatch keeps your local dev servers running from the Windows tray. Installing it also turns on
 its `justwatch` skill, so new Claude and Codex sessions can check, restart and tail those services
-through its API on `localhost:6767`. Switch the skill off or on in settings → integrations.
+through its API on `localhost:6767`. Switch the skill off or on in settings → skills.
 
 JustImagine is your own image, video, song and voice studio. `bro install justimagine` clones
 [its `main` branch](https://github.com/JustGains/JustImagine) into `%LOCALAPPDATA%\Programs\JustImagine`
@@ -34,6 +34,16 @@ keeps them. It needs Git and Node.js, so install those first. JustImagine has no
 compares the checkout with GitHub when it opens and every 12 hours, and says when `main` has new
 commits. Enter on settings → integrations → JustImagine, or `bro install justimagine --force`, pulls
 them, reinstalls dependencies and restarts the service.
+
+JustBrowseMCP lets agents drive your own signed-in Chrome, Edge or Brave over MCP, each session in
+background tabs of its own. `bro install justbrowse` runs
+[its installer](https://github.com/JustSuperHuman/mcp-chrome-but-good#install): the newest release,
+checked against its SHA-256, goes in `%LOCALAPPDATA%\JustBrowseMCP` (`~/Library/Application
+Support/JustBrowseMCP` on macOS, `~/.local/share/justbrowse-mcp` on Linux) with the extension, its
+native bridge, the native host for Chrome, Chromium, Edge and Brave, the `justbrowse-browser` skill and
+the `justbrowse` MCP server (`http://127.0.0.1:12306/mcp`) for Claude Code and Codex. It needs Node.js.
+Browsers only take an unpacked extension by hand, so load the printed `extension` folder once (Developer
+mode, **Load unpacked**) and click **Connect** in its popup. Run it again to update.
 
 In bro, Quick Install is a checklist: settings → integrations → Quick install (or Enter on JustTools
 when it isn't installed), the palette, or `prefix I`. Tick tools with space and press `i`: JustTools

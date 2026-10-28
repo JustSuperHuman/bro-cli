@@ -52,6 +52,12 @@ impl App {
         self.open_file_view(Some(pane), roots, path.to_string_lossy().into_owned(), line, column, Some(uri.to_string()));
     }
 
+    /// A view asked to show a file (a skill's SKILL.md): the preview, rooted at the file's folder.
+    pub(crate) fn preview_file(&mut self, path: PathBuf) {
+        let cwd = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        self.open_file_view(None, ResolveRoots { cwd, project: None }, path.to_string_lossy().into_owned(), None, None, None);
+    }
+
     pub(crate) fn open_file_view(&mut self, pane: Option<PaneId>, roots: ResolveRoots, target: String, line: Option<u32>, column: Option<u32>, fallback: Option<String>) {
         self.sel = None;
         self.overlay = Overlay::File(Box::new(FileView::open(pane, roots, target, line, column, fallback, &self.theme, self.tx.clone())));
@@ -102,6 +108,14 @@ impl App {
                 if let Some(p) = path {
                     self.overlay = Overlay::None;
                     self.open_in_editor(pane, p, line, column);
+                }
+            }
+            Outcome::Reveal => {
+                if let Some(p) = path {
+                    self.overlay = Overlay::None;
+                    if !cfg!(test) {
+                        crate::panes::links::reveal(&p);
+                    }
                 }
             }
             Outcome::System => {

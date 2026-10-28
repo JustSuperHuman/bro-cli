@@ -2,12 +2,14 @@
 //! pane to the transcript it is writing (`bro_core::sessions::live::Binder`), tails it once a second (only new
 //! bytes) into `AgentFacts`, and publishes a snapshot the UI reads without touching the disk. It wakes the pane
 //! when something changed. A generated `/recap` lands here too ([`Insights::set_generated`]), and a Claude
-//! session's agent team ([`bro_core::agent_teams`]) is read alongside, once a second.
+//! session's agent team ([`bro_core::agent_teams`]) is read alongside, once a second. The same lines build the
+//! conversation the desktop app's focus mode shows ([`Conversation`]), each parsed once for both.
 
 use crate::pane::Waker;
 use bro_core::Harness;
 use bro_core::agent_teams::{self, Team};
 use bro_core::recap::CachedRecap;
+use bro_core::sessions::conversation::Conversation;
 use bro_core::sessions::live::{AgentFacts, BindSpec, Binder, Tail};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,8 @@ const EVERY: Duration = Duration::from_secs(1);
 #[derive(Clone, Default)]
 pub struct Snapshot {
     pub facts: Option<Arc<AgentFacts>>,
+    /// What was said and done, for focus mode (its items are shared, so this is cheap to hand out)
+    pub conversation: Option<Arc<Conversation>>,
     /// The transcript the pane is bound to
     pub transcript: Option<PathBuf>,
     /// The agent's own session id (Claude: from `sessions/<pid>.json`, else the transcript)
@@ -80,15 +84,34 @@ impl Insights {
     /// Tests: facts from a whole transcript, read now on this thread (no worker, no binding).
     #[cfg(test)]
     pub fn from_transcript(harness: Harness, path: &Path, session_id: Option<&str>) -> Insights {
-        let me = Insights::empty(None);
-        let mut facts = AgentFacts::new(harness);
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        facts.ingest(&text.lines().collect::<Vec<_>>());
+        let me = Insights::fixed_transcript(harness, &text);
         {
             let mut s = me.inner.snap.lock();
-            s.session_id = session_id.map(str::to_string).or_else(|| facts.session_id.clone());
-            s.facts = Some(Arc::new(facts));
+            if let Some(id) = session_id {
+                s.session_id = Some(id.to_string());
+            }
             s.transcript = Some(path.to_path_buf());
+        }
+        me
+    }
+
+    /// A worker-less handle with the facts and conversation of a whole transcript (`bro --demo`'s sessions).
+    pub fn fixed_transcript(harness: Harness, jsonl: &str) -> Insights {
+        let me = Insights::empty(None);
+        let mut facts = AgentFacts::new(harness);
+        let mut conversation = Conversation::new(harness);
+        for line in jsonl.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                facts.ingest_value(&v);
+                conversation.ingest(&v);
+            }
+        }
+        {
+            let mut s = me.inner.snap.lock();
+            s.session_id = facts.session_id.clone();
+            s.facts = Some(Arc::new(facts));
+            s.conversation = Some(Arc::new(conversation));
             s.rev = 1;
         }
         me
@@ -96,6 +119,11 @@ impl Insights {
 
     pub fn snapshot(&self) -> Snapshot {
         self.inner.snap.lock().clone()
+    }
+
+    /// [`Snapshot::session_id`] without cloning the rest.
+    pub fn session_id(&self) -> Option<String> {
+        self.inner.snap.lock().session_id.clone()
     }
 
     /// [`Snapshot::team`] without cloning the rest.
@@ -139,10 +167,11 @@ impl Insights {
         let mut binder = Binder::new(spec);
         let mut tail: Option<Tail> = None;
         let mut facts: Option<AgentFacts> = None;
+        let mut conversation: Option<Conversation> = None;
         let mut busy = None;
         let mut team: Option<Arc<Team>> = None;
         while !self.inner.stop.load(Ordering::SeqCst) {
-            let step = crate::services::guard("insights::step", || step(harness, &mut binder, &mut tail, &mut facts));
+            let step = crate::services::guard("insights::step", || step(harness, &mut binder, &mut tail, &mut facts, &mut conversation));
             match step {
                 Ok(Some(update)) => self.publish(update),
                 Ok(None) => {}
@@ -150,6 +179,7 @@ impl Insights {
                 Err(_) => {
                     tail = None;
                     facts = None;
+                    conversation = None;
                 }
             }
             let now = match harness {
@@ -191,6 +221,7 @@ impl Insights {
         {
             let mut s = self.inner.snap.lock();
             s.facts = Some(Arc::new(u.facts));
+            s.conversation = Some(Arc::new(u.conversation));
             s.transcript = Some(u.transcript);
             s.session_id = u.session_id;
             s.generated = u.generated;
@@ -203,28 +234,40 @@ impl Insights {
 /// A new snapshot from one worker step.
 struct Update {
     facts: AgentFacts,
+    conversation: Conversation,
     transcript: PathBuf,
     session_id: Option<String>,
     generated: Option<CachedRecap>,
 }
 
 /// One poll: re-bind when due, read new lines, and say what changed (None = nothing).
-fn step(harness: Harness, binder: &mut Binder, tail: &mut Option<Tail>, facts: &mut Option<AgentFacts>) -> Option<Update> {
+fn step(harness: Harness, binder: &mut Binder, tail: &mut Option<Tail>, facts: &mut Option<AgentFacts>, conversation: &mut Option<Conversation>) -> Option<Update> {
     let mut changed = false;
     if binder.poll(Instant::now())
         && let Some(path) = binder.path()
     {
         *tail = Some(Tail::new(path));
         *facts = Some(AgentFacts::new(harness));
+        *conversation = Some(Conversation::new(harness));
         changed = true;
     }
     let (Some(t), Some(f)) = (tail.as_mut(), facts.as_mut()) else { return None };
+    let c = conversation.get_or_insert_with(|| Conversation::new(harness));
     if let Ok(read) = t.read() {
         if read.reset {
             *f = AgentFacts::new(harness);
+            *c = Conversation::new(harness);
             changed = true;
         }
-        changed |= f.ingest(&read.lines);
+        // each line parsed once, for the facts and the conversation both
+        let before = f.revision;
+        for line in &read.lines {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                f.ingest_value(&v);
+                changed |= c.ingest(&v);
+            }
+        }
+        changed |= f.revision != before;
     }
     if !changed {
         return None;
@@ -232,7 +275,7 @@ fn step(harness: Harness, binder: &mut Binder, tail: &mut Option<Tail>, facts: &
     let transcript = t.path().to_path_buf();
     let session_id = binder.session_id().map(str::to_string).or_else(|| f.session_id.clone());
     let generated = generated_for(harness, session_id.as_deref(), &transcript);
-    Some(Update { facts: f.clone(), transcript, session_id, generated })
+    Some(Update { facts: f.clone(), conversation: c.clone(), transcript, session_id, generated })
 }
 
 /// The cached `/recap` while it still matches the transcript (Claude only).
@@ -287,12 +330,14 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         let mut tail = Some(Tail::new(&path));
         let mut facts = Some(AgentFacts::new(Harness::Claude));
+        let mut conversation = None;
         let mut binder = Binder::new(BindSpec { harness: Harness::Pi, profile_id: None, config_dir: None, pid: None, cwd: dir.path().into(), started: std::time::SystemTime::now(), resume_id: None });
-        assert!(step(Harness::Claude, &mut binder, &mut tail, &mut facts).is_none(), "nothing yet");
+        assert!(step(Harness::Claude, &mut binder, &mut tail, &mut facts, &mut conversation).is_none(), "nothing yet");
         let line = serde_json::json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","message":{"id":"m1","content":[{"type":"text","text":"All done. Want me to ship it?"}]}});
         std::fs::write(&path, format!("{line}\n")).unwrap();
-        let u = step(Harness::Claude, &mut binder, &mut tail, &mut facts).expect("new lines change the facts");
+        let u = step(Harness::Claude, &mut binder, &mut tail, &mut facts, &mut conversation).expect("new lines change the facts");
         assert!(u.facts.asked.is_some());
-        assert!(step(Harness::Claude, &mut binder, &mut tail, &mut facts).is_none(), "no new bytes, no update");
+        assert_eq!(u.conversation.items.len(), 1, "the same line is the conversation's");
+        assert!(step(Harness::Claude, &mut binder, &mut tail, &mut facts, &mut conversation).is_none(), "no new bytes, no update");
     }
 }

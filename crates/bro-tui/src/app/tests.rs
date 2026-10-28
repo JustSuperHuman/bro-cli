@@ -1172,6 +1172,30 @@ fn sidebar_with_three_projects() {
 }
 
 #[test]
+fn the_session_counter_adds_up_every_session_over_proxy_and_phone() {
+    let mut a = app(true);
+    assert_eq!(a.session_tally(), super::side_view::Tally { total: 5, working: 1, blocked: 1, done: 1 });
+    let s = draw(&mut a);
+    assert!(!s.contains("5 running"), "with proxy and phone: only while usage is expanded\n{s}");
+    a.usage_expanded = true;
+    let s = shot(&mut a, "sidebar-session-counter");
+    let at = |what: &str| s.lines().position(|l| l.contains(what)).unwrap_or_else(|| panic!("{what} missing\n{s}"));
+    assert_eq!(at("5 running · ") + 1, at("port 3458"), "the counter sits right over the proxy\n{s}");
+    assert!(s.contains("●1 ✓1"), "one needs you, one is done\n{s}");
+    // a click shows every one of them
+    let r = a.side_hits.iter().find_map(|(r, h)| matches!(h, SideHit::Sessions).then_some(*r)).expect("the counter is a click target");
+    click_at(&mut a, r, MouseButton::Left);
+    assert_eq!(a.showing_tab(), Some(super::project_tabs::StripTab::All));
+    // with none running it says so, and a click starts one
+    let mut a = app(false);
+    a.usage_expanded = true;
+    assert!(draw(&mut a).contains("none running"));
+    let r = a.side_hits.iter().find_map(|(r, h)| matches!(h, SideHit::Sessions).then_some(*r)).unwrap();
+    click_at(&mut a, r, MouseButton::Left);
+    assert!(matches!(a.overlay, Overlay::Launcher(_)));
+}
+
+#[test]
 fn launcher_open() {
     let mut a = app(true);
     key(&mut a, KeyCode::Char('n'), KeyModifiers::ALT);
@@ -2462,6 +2486,36 @@ fn usage_rows_launch_the_clicked_account_or_harness_in_the_current_project() {
 }
 
 #[test]
+fn proxy_mode_usage_rows_launch_on_all_of_a_familys_logins() {
+    use bro_core::Harness;
+    // a family's total, and one of its logins (a usage card, the profiles view), start on all of that family's
+    // logins, as the launcher's proxy mode row does: no login named, the launch picks the one it runs as
+    for (h, profile) in [(Harness::Claude, None), (Harness::Codex, None), (Harness::Claude, Some("claude:work")), (Harness::Codex, Some("codex:team"))] {
+        let (mut a, rx) = usage_launch_app();
+        a.svc.set_shared(true);
+        a.launch_usage(h, profile.map(Into::into));
+        let launch = usage_launch_result(&rx);
+        assert_eq!((launch.spec.harness, launch.spec.profile_id.as_deref(), launch.spec.provider_id.as_deref()), (h, None, None), "{profile:?}");
+        assert!(matches!(a.overlay, Overlay::None), "{profile:?}");
+    }
+    // expanded: each family's line launches, its logins' meters fold under it
+    let (mut a, rx) = usage_launch_app();
+    a.svc.set_shared(true);
+    a.usage_expanded = true;
+    let lines = a.usage_lines();
+    let rows: Vec<(Option<Harness>, &str)> = lines.iter().map(|l| (l.harness, l.label.as_str())).collect();
+    assert_eq!(rows[..7], [(Some(Harness::Claude), "claude"), (None, "local"), (None, "personal"), (None, "work"), (Some(Harness::Codex), "codex"), (None, "local"), (None, "team")]);
+    assert!(lines[2].h5.is_some() && lines[2].profile.as_deref() == Some("claude:personal"), "a login keeps its own meter");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    draw(&mut a);
+    assert!(!a.side_hits.iter().any(|(_, hit)| matches!(hit, SideHit::LaunchUsage(_, Some(p)) if !bro_core::profiles::is_gemini_id(p))), "no login to pick");
+    let r = a.side_hits.iter().find_map(|(r, hit)| matches!(hit, SideHit::LaunchUsage(Harness::Codex, None)).then_some(*r)).expect("the codex line launches");
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
+    let launch = usage_launch_result(&rx);
+    assert_eq!((launch.spec.harness, launch.spec.profile_id), (Harness::Codex, None));
+}
+
+#[test]
 fn usage_launch_starts_in_the_focused_sessions_project() {
     use bro_core::Harness;
     let (mut a, rx) = usage_launch_app();
@@ -3329,7 +3383,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert_eq!(a.panes[&id].view(), Some("settings"));
     let screen = draw(&mut a);
     // every section is listed down the left; Appearance is open first, and only its settings show
-    for s in ["Appearance", "Sessions", "Voice", "Caveman", "Watchdog", "Claude Code", "bro mod", "Integrations", "Updates"] {
+    for s in ["Appearance", "Sessions", "Voice", "Caveman", "Watchdog", "Claude Code", "bro mod", "Integrations", "Skills", "Updates"] {
         assert!(screen.contains(s), "{s}: {screen}");
     }
     assert!(screen.contains("Summary screensaver") && !screen.contains("Auto-resume"), "{screen}");
@@ -3356,10 +3410,10 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert!(a.svc.settings().project_tabs);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().project_tabs);
-    for _ in 0..3 {
+    for _ in 0..2 {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     }
-    // on past the icons into Sessions: auto-approve (off by default) and recaps toggle in place
+    // on into Sessions: auto-approve (off by default) and recaps toggle in place
     { let s = draw(&mut a); assert!(s.contains("Auto-resume") && s.contains("Auto-approve prompts") && !s.contains("Summary screensaver"), "{s}"); }
     assert!(!a.svc.settings().auto_approve);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -3367,7 +3421,21 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // recaps
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(a.svc.settings().insights.generate_recaps, !recaps);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // proxy mode
+    { let s = draw(&mut a); assert!(s.contains("Proxy mode") && s.contains("every signed-in login serves new sessions"), "{s}"); }
+    assert!(!a.svc.settings().proxy.shared, "off until you turn it on");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().proxy.shared);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().proxy.shared);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // compression
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // keep sessions running
+    { let s = draw(&mut a); assert!(s.contains("Keep sessions running") && s.contains("not running"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // keep working while closed
+    { let s = draw(&mut a); assert!(s.contains("Keep working while bro is closed"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // the session server
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // start at sign-in
+    { let s = draw(&mut a); assert!(s.contains("Start at sign-in") && s.contains("no admin"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // push-to-talk
     { let s = draw(&mut a); assert!(s.contains("Push-to-talk") && s.contains("Voice key") && s.contains("OpenAI key") && !s.contains("Auto-resume"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // its key
@@ -3469,23 +3537,10 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Char('i'), KeyModifiers::NONE); // the demo installs nothing
     a.run_act(Act::Settings); // back to settings, still on the JustTools row
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Quick install
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // its skill
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(a.svc.settings().justtools.skill);
-    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(!a.svc.settings().justtools.skill);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // auto-update: on unless you turn it off
     assert!(a.svc.settings().justtools.auto_update);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().justtools.auto_update);
-    if bro_core::justwatch::supported() {
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustWatch skill: off until you turn it on
-        assert!(!a.svc.settings().justwatch.skill);
-        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(a.svc.settings().justwatch.skill);
-        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(!a.svc.settings().justwatch.skill);
-    }
     if bro_core::justpaste::supported() {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Smart Paste: comes with JustTools, which the demo has none of
         { let s = draw(&mut a); assert!(s.contains("Smart Paste in Explorer") && s.contains("needs JustTools") && s.contains("Ctrl+V in File Explorer"), "{s}"); }
@@ -3494,6 +3549,33 @@ fn settings_view_switches_presets_and_overrides_switches() {
     }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustImagine: the demo has none
     { let s = draw(&mut a); assert!(s.contains("JustImagine") && s.contains("not installed"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // on to Skills: the Skills view first
+    { let s = draw(&mut a); assert!(s.contains("What your agents know how to do") && s.contains("Manage skills") && s.contains("bro-open") && !s.contains("Watch a repo"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // bro-open, on unless you turn it off
+    assert!(a.svc.settings().skills.bro_open);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().skills.bro_open);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().skills.bro_open);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // the JustTools skill, moved here from Integrations
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().justtools.skill);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().justtools.skill);
+    if bro_core::justwatch::supported() {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustWatch skill: off until you turn it on
+        assert!(!a.svc.settings().justwatch.skill);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.svc.settings().justwatch.skill);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!a.svc.settings().justwatch.skill);
+    }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustImagine's skills: the demo writes none
+    { let s = draw(&mut a); assert!(s.contains("JustImagine skills") && s.contains("generate-images"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // keep the repos in sync: on unless you turn it off
+    assert!(a.svc.settings().skills.auto_sync);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().skills.auto_sync);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Sounds: disabled until you turn them on
     { let s = draw(&mut a); assert!(s.contains("Sounds") && s.contains("disabled") && s.contains("provided by PeonPing"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // the packs
@@ -3510,7 +3592,10 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
     { let s = draw(&mut a); assert!(s.contains("Sound packs") && !s.contains("Check for updates"), "{s}"); }
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
-    { let s = draw(&mut a); assert!(s.contains("Quick install") && !s.contains("Sound packs"), "{s}"); }
+    { let s = draw(&mut a); assert!(s.contains("Manage skills") && !s.contains("Sound packs"), "{s}"); }
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    { let s = draw(&mut a); assert!(s.contains("Quick install") && !s.contains("Manage skills"), "{s}"); }
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
@@ -3527,6 +3612,7 @@ fn settings_show_a_justtools_update_its_progress_and_how_it_ended() {
     a.run_act(Act::Settings);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Sounds
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Skills
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     let _ = draw(&mut a);
     a.svc.update(|st| {
@@ -3564,8 +3650,9 @@ fn settings_say_smart_paste_leaves_file_copies_to_windows_unless_filters_are_on(
     a.run_act(Act::Settings);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Sounds
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Skills
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
-    for _ in 0..4 + usize::from(bro_core::justwatch::supported()) {
+    for _ in 0..3 {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // on to Smart Paste
     }
     let _ = draw(&mut a);
@@ -3591,6 +3678,7 @@ fn settings_show_justimagine_behind_github_and_where_it_runs() {
     a.run_act(Act::Settings);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Sounds
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Skills
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     let _ = draw(&mut a);
     let sha = "0a50ae7c5f0e7c2b1d1e9f8a7b6c5d4e3f2a1b0c";
@@ -4413,7 +4501,7 @@ fn settings_sections_open_from_the_left_or_say_where_they_sit() {
     let mut small = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, H)).unwrap();
     small.draw(|f| a.draw(f)).unwrap();
     let s = testkit::dump(small.backend().buffer());
-    assert!(s.contains("Updates  10 of 10") && !s.contains("SETTINGS"), "{s}");
+    assert!(s.contains("Updates  12 of 12") && !s.contains("SETTINGS"), "{s}");
 }
 
 fn tabs_on(a: &mut App) {
@@ -4736,6 +4824,317 @@ fn the_strip_holds_its_row_and_the_minimized_switch() {
 }
 
 #[test]
+fn skills_view_answers_the_desktop_apps_clicks() {
+    use crate::views::skills::{SkillsView, gui};
+    use bro_core::skill_market::Sort;
+    let mut a = app(false);
+    a.run_act(Act::Skills);
+    let id = a.focused().unwrap();
+    // the demo's own slice of the catalogue arrives with the first draw
+    draw(&mut a);
+    let (svc, theme, tx) = (a.svc.clone(), a.theme.clone(), a.tx.clone());
+    let mut actions = vec![];
+    let mut cx = crate::pane::Cx { id, svc: &svc, theme: &theme, tx: &tx, focused: true, actions: &mut actions };
+    let v = a.panes.get_mut(&id).unwrap().as_any_mut().downcast_mut::<SkillsView>().unwrap();
+    v.go(crate::views::skills::Page::Discover);
+    let total = v.discover_list(&cx).len();
+    assert!(total >= 9, "{total}");
+    let none = KeyModifiers::NONE;
+    let p = bro_gfx::Point::new(0.0, 0.0);
+    // a domain chip (Frontend is the second), then All again
+    gui::click(v, gui::DOMAIN + 2, p, none, 1, &mut cx);
+    assert_eq!(v.domain_slug(), Some("frontend"));
+    let frontend = v.discover_list(&cx);
+    assert!(!frontend.is_empty() && frontend.len() < total);
+    // a sort: A–Z
+    gui::click(v, gui::SORT + 2, p, none, 1, &mut cx);
+    assert_eq!(v.sort, Sort::Name);
+    let names: Vec<String> = v.discover_list(&cx).iter().map(|&i| v.skill(i).unwrap().name.to_lowercase()).collect();
+    assert!(names.windows(2).all(|w| w[0] <= w[1]), "{names:?}");
+    // a row selects; the wheel scrolls without moving the selection
+    gui::click(v, gui::ROW + 1, p, none, 1, &mut cx);
+    assert_eq!(v.market.sel, 1);
+    gui::wheel(v, None, true, &mut cx);
+    assert_eq!(v.market.sel, 1);
+    assert!(v.market.scroll > 0);
+    // the search field takes the keys; the clear button empties it
+    gui::click(v, gui::SEARCH, p, none, 1, &mut cx);
+    assert!(v.market.typing);
+    for c in "zzzz".chars() {
+        v.key(KeyEvent::new(KeyCode::Char(c), none), &mut cx);
+    }
+    assert_eq!(v.market.query, "zzzz");
+    assert!(v.discover_list(&cx).is_empty());
+    gui::click(v, gui::CLEAR, p, none, 1, &mut cx);
+    assert!(v.market.query.is_empty());
+    // installed only: the one the demo picked from Skill Issue
+    gui::click(v, gui::MINE, p, none, 1, &mut cx);
+    let mine: Vec<String> = v.discover_list(&cx).iter().map(|&i| v.skill(i).unwrap().name.clone()).collect();
+    assert!(v.mine && mine == ["react-best-practices"], "{mine:?}");
+}
+
+#[test]
+fn skills_view_lists_installed_skills_by_source_and_project() {
+    use crate::views::skills::{Page, SkillsView};
+    let mut a = app(false);
+    let project = crate::services::demo::root().join("bro-cli-v2");
+    a.svc.set_projects(vec![crate::services::KnownProject { key: "bro-cli-v2".into(), name: "bro-cli-v2".into(), root: project.clone() }]);
+    a.run_act(Act::Skills);
+    let id = a.focused().unwrap();
+    // Installed: every skill, grouped by where it came from; the pages down the left with what each holds
+    let s = shot(&mut a, "skills-installed");
+    for want in ["SKILLS", "Installed", "Discover", "bro", "t3dotgg/tstack", "Skill Issue", "Yours", "Codex", "bro-cli-v2", "+ add repo", "Bundled with bro", "From Skill Issue", "Built into Codex", "In bro-cli-v2", "full-send", "react-best-practices", "release"] {
+        assert!(s.contains(want), "{want}\n{s}");
+    }
+    // search: only what matches
+    key(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
+    for c in "council".chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.contains("/ council") && s.contains("Trigger this if the user says 'council'") && !s.contains("full-send"), "{s}");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    // the project's page: its own skills, then the ones every project gets
+    fn view(a: &mut App, id: PaneId) -> &mut SkillsView {
+        a.panes.get_mut(&id).unwrap().as_any_mut().downcast_mut::<SkillsView>().unwrap()
+    }
+    view(&mut a, id).go(Page::Project(project.clone()));
+    let s = draw(&mut a);
+    let (own, everywhere) = (s.find("In this project").unwrap(), s.find("Everywhere").unwrap());
+    assert!(own < s.find("release ").unwrap() && s.find("release ").unwrap() < everywhere && s.contains("snapshot-tests") && !s.contains("expo-deploy"), "{s}");
+    // tab: on through the pages; bro's own with their switches
+    view(&mut a, id).go(Page::Bro);
+    let s = draw(&mut a);
+    assert!(s.contains("bro-open") && s.contains("● on") && s.contains("JustImagine") && s.contains("write ›"), "{s}");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // bro-open: off
+    assert!(!a.svc.settings().skills.bro_open);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().skills.bro_open);
+    // add a repo: not one yet, then a real one, whose page it shows
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+    for c in "not a repo".chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    let s = draw(&mut a);
+    assert!(s.contains("ADD A REPO") && s.contains("› not a repo▏") && s.contains("not a repo yet"), "{s}");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().skills.repos.len(), 2);
+    key(&mut a, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    for c in "https://github.com/anthropics/skills".chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    assert!(draw(&mut a).contains("✓ anthropics/skills"));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().skills.repos.contains(&"anthropics/skills".to_string()));
+    assert_eq!(view(&mut a, id).page, Page::Repo("anthropics/skills".into()));
+    let s = draw(&mut a);
+    assert!(s.contains("ANTHROPICS/SKILLS") && s.contains("not pulled yet") && !s.contains("ADD A REPO"), "{s}");
+    // w on a repo's page: how to stop watching it; enter stops (nothing was installed from it to keep or disable)
+    key(&mut a, KeyCode::Char('w'), KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.contains("Stop watching anthropics/skills?") && s.contains("› Stop watching"), "{s}");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().skills.repos.contains(&"anthropics/skills".to_string()));
+    assert_eq!(view(&mut a, id).page, Page::Installed);
+    // a skill installed from Skill Issue: d disables it (the demo moves nothing), and its repo stays watched
+    view(&mut a, id).go(Page::Picks);
+    assert!(draw(&mut a).contains("react-best-practices"));
+    key(&mut a, KeyCode::Char('d'), KeyModifiers::NONE);
+    assert_eq!(a.svc.settings().skills.repos.len(), 2);
+    // tstack is featured on Discover, and watched in the demo already
+    view(&mut a, id).go(Page::Discover);
+    let s = draw(&mut a);
+    assert!(s.contains("★ tstack") && s.contains("✓ watching"), "{s}");
+}
+
+#[test]
+fn skills_view_lists_the_marketplace_by_domain_search_and_sort() {
+    use bro_core::skill_market::{Catalog, MarketSkill, Metric};
+    let skill = |id: &str, name: &str, domain: (&str, &str), kind: &str, value: Option<f64>, link: &str| MarketSkill {
+        id: id.into(),
+        name: name.into(),
+        domain: domain.1.into(),
+        domain_slug: domain.0.into(),
+        niche: Some("General".into()),
+        use_case: format!("what {name} does"),
+        creator: "someone".into(),
+        link: link.into(),
+        metric: Metric { kind: kind.into(), value },
+        link_verified: true,
+        ..Default::default()
+    };
+    let catalog = Catalog {
+        skills: vec![
+            skill("design-taste", "taste-skill", ("design", "Design"), "stars", Some(41_400.0), "https://github.com/Leonxlnx/taste-skill"),
+            skill("frontend-react", "react-best-practices", ("frontend", "Frontend"), "installs", Some(694_000.0), "https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices"),
+            skill("finance-none", "ledger", ("finance", "Finance"), "none", None, "https://example.com/ledger"),
+        ],
+        clicks: [("design-taste".to_string(), 2670u64), ("finance-none".to_string(), 9000)].into(),
+    };
+    let mut a = app(false);
+    a.run_act(Act::Skills);
+    let id = a.focused().unwrap();
+    assert_eq!(a.panes[&id].view(), Some("skills"));
+    a.panes.get_mut(&id).unwrap().as_any_mut().downcast_mut::<crate::views::skills::SkillsView>().unwrap().catalog = Some(catalog);
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE); // Installed, then Discover
+    let s = shot(&mut a, "skills");
+    assert!(s.contains("SKILLS") && s.contains("3 agent skills") && s.contains("All 3") && s.contains("41.4k stars") && s.contains("694k installs") && s.contains("2.7k clicks"), "{s}");
+    // ranked: the two with numbers lead, the one without follows; the selected one's source shows below
+    let order = |s: &str| ["taste-skill", "react-best-practices", "ledger"].map(|n| s.find(&format!("{n} ")).unwrap_or(usize::MAX));
+    let o = order(&s);
+    assert!(o[2] > o[0] && o[2] > o[1], "{s}");
+    assert!(s.contains("from Leonxlnx/taste-skill"), "{s}");
+    // most clicked puts the finance one first
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE);
+    let s = draw(&mut a);
+    let o = order(&s);
+    assert!(s.contains("sort most clicked") && o[2] < o[0] && o[0] < o[1], "{s}");
+    // the Frontend tab (2) shows just that one, picked from its repo's folder
+    key(&mut a, KeyCode::Char('2'), KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.contains("react-best-practices") && !s.contains("taste-skill  ") && s.contains("vercel-labs/agent-skills › skills/react-best-practices"), "{s}");
+    // search across all of them
+    key(&mut a, KeyCode::Char('0'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
+    for c in "ledg".chars() {
+        key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    let s = draw(&mut a);
+    assert!(s.contains("/ ledg") && s.contains("ledger") && !s.contains("react-best-practices"), "{s}");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    // nothing installed from here yet
+    key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+    assert!(draw(&mut a).contains("nothing installed from here yet"));
+}
+
+/// The Skills view in the demo with bro-cli-v2 in the sidebar, on `page`: the app and the view's pane.
+fn skills_on(page: crate::views::skills::Page) -> (App, PaneId) {
+    let mut a = app(false);
+    let project = crate::services::demo::root().join("bro-cli-v2");
+    a.svc.set_projects(vec![crate::services::KnownProject { key: "bro-cli-v2".into(), name: "bro-cli-v2".into(), root: project }]);
+    a.run_act(Act::Skills);
+    let id = a.focused().unwrap();
+    draw(&mut a);
+    skills_view(&mut a, id).go(page);
+    (a, id)
+}
+
+fn skills_view(a: &mut App, id: PaneId) -> &mut crate::views::skills::SkillsView {
+    a.panes.get_mut(&id).unwrap().as_any_mut().downcast_mut::<crate::views::skills::SkillsView>().unwrap()
+}
+
+#[test]
+fn skills_view_lists_a_watched_repos_skills_to_install_where_you_choose() {
+    use crate::views::skills::{MenuAct, Page};
+    use bro_core::skill_repos::Target;
+    let (mut a, id) = skills_on(Page::Repo("t3dotgg/tstack".into()));
+    // watching installs nothing by itself: every skill in it, installed, waiting to be picked, or disabled
+    let s = shot(&mut a, "skills-repo");
+    // (the last "Installed" and "Disabled" are the groups' headings; the first, the pages down the left)
+    let at = |what: &str| if what.starts_with(char::is_uppercase) { s.rfind(what) } else { s.find(what) }.unwrap_or_else(|| panic!("{what}\n{s}"));
+    assert!(at("Installed") < at("full-send") && at("Not installed") < at("modernize") && at("Disabled") < at("sol-loop"), "{s}");
+    assert!(at("full-send") < at("Not installed") && at("modernize") < at("Disabled"), "{s}");
+    assert!(s.contains("9 skills · 5 installed · 1 disabled") && s.contains("5/9") && s.contains("[ ] modernize"), "{s}");
+    // tick two of the ones not installed, then choose where they go: everywhere, or the project
+    for _ in 0..5 {
+        key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+    }
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.contains("2 ticked: leaving-pr-comments and modernize") && s.contains("[x] modernize"), "{s}");
+    key(&mut a, KeyCode::Char('p'), KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.contains("Install 2 skills") && s.contains("Install everywhere") && s.contains("Or into a project") && s.contains("bro-cli-v2"), "{s}");
+    let v = skills_view(&mut a, id);
+    v.menu.as_mut().unwrap().step(1);
+    let m = v.menu.clone().unwrap();
+    assert!(matches!(&m.items[m.sel].act, Some(MenuAct::Install { names, target: Target::Project(_), .. }) if names == &["leaving-pr-comments", "modernize"]), "{m:?}");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let v = skills_view(&mut a, id);
+    assert!(v.menu.is_none() && v.ticked.is_empty());
+    // an installed one's menu: open it, its folder, the project it isn't in yet, disable it
+    key(&mut a, KeyCode::Char('g'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('m'), KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.contains("Open SKILL.md") && s.contains("Show folder") && s.contains("Also into a project") && s.contains("Disable") && s.contains("Open on GitHub"), "{s}");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(skills_view(&mut a, id).menu.is_none());
+    // the disabled one: x asks before it deletes it for good
+    key(&mut a, KeyCode::Char('G'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.contains("Delete sol-loop for good?") && s.contains("Delete forever") && s.contains("its copy in"), "{s}");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+}
+
+#[test]
+fn skills_view_keeps_disabled_skills_to_enable_or_delete_with_the_mouse() {
+    use crate::views::skills::Page;
+    let (mut a, id) = skills_on(Page::Disabled);
+    let s = shot(&mut a, "skills-disabled");
+    assert!(s.contains("DISABLED") && s.contains("2 skills out of your agents' reach") && s.contains("old-release-notes") && s.contains("sol-loop") && s.contains("days ago"), "{s}");
+    assert!(s.contains("kept in") && s.contains("disabled-skills") && s.contains("e enables it, x deletes it for good"), "{s}");
+    // a right-click on a row: its menu, there
+    let cell = |s: &str, what: &str| s.lines().enumerate().find_map(|(y, l)| l.find(what).map(|x| (l[..x].chars().count() as u16 + 2, y as u16))).unwrap_or_else(|| panic!("{what}\n{s}"));
+    let (x, y) = cell(&s, "sol-loop  ");
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), column: x, row: y, modifiers: KeyModifiers::NONE });
+    let s = draw(&mut a);
+    assert!(skills_view(&mut a, id).installed.sel == 1 && s.contains("› Enable") && s.contains("Delete forever"), "{s}");
+    // a click on "Delete forever" asks once more; a click beside the menu (the view's own title) closes it
+    let (x, y) = cell(&s, "Delete forever");
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
+    assert!(draw(&mut a).contains("Again to confirm"));
+    let (x, y) = cell(&s, " SKILLS");
+    a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
+    assert!(skills_view(&mut a, id).menu.is_none());
+}
+
+#[test]
+fn skills_view_menus_open_where_the_desktop_app_is_right_clicked() {
+    use crate::views::skills::{Page, gui};
+    let (mut a, id) = skills_on(Page::Discover);
+    let (svc, theme, tx) = (a.svc.clone(), a.theme.clone(), a.tx.clone());
+    let mut actions = vec![];
+    let mut cx = crate::pane::Cx { id, svc: &svc, theme: &theme, tx: &tx, focused: true, actions: &mut actions };
+    let v = skills_view(&mut a, id);
+    let p = bro_gfx::Point::new(320.0, 240.0);
+    // a right-click on a row selects it and opens its menu where it was clicked
+    gui::context(v, gui::ROW + 2, p, &mut cx);
+    assert_eq!(v.market.sel, 2);
+    let m = v.menu.clone().expect("its menu");
+    assert_eq!(m.at, Some((320.0, 240.0)));
+    assert!(m.items.iter().any(|i| i.label.contains("Skill Issue")), "{m:?}");
+    // a click beside it closes it; one on an item runs it
+    gui::click(v, gui::MENU_OUT, p, KeyModifiers::NONE, 1, &mut cx);
+    assert!(v.menu.is_none());
+    gui::context(v, gui::ROW + 2, p, &mut cx);
+    let page = v.menu.as_ref().unwrap().items.iter().position(|i| i.label.contains("Skill Issue")).unwrap();
+    gui::click(v, gui::MENU + page, p, KeyModifiers::NONE, 1, &mut cx);
+    assert!(v.menu.is_none());
+    // a right-click on nothing in particular opens nothing
+    gui::context(v, gui::SEARCH, p, &mut cx);
+    assert!(v.menu.is_none());
+}
+
+#[test]
+fn a_skill_description_over_several_lines_stays_on_its_row() {
+    use crate::views::skills::Page;
+    let (mut a, _) = skills_on(Page::Yours);
+    let s = draw(&mut a);
+    // its row: the start of it, on one line
+    let row = s.lines().find(|l| l.contains("higgsfield-generate")).unwrap_or_else(|| panic!("{s}"));
+    assert!(row.contains("Generate images/videos/3D assets"), "{row}");
+    // selected, its details carry on: the lines its SKILL.md wraps join into one, nothing spills under it
+    key(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+    let s = draw(&mut a);
+    assert!(s.lines().any(|l| l.contains("via Higgsfield AI. Defaults: GPT Image 2")), "{s}");
+    assert!(!s.lines().any(|l| ["GPT Image 2", "Nano Banana", "Use when:"].iter().any(|w| l.contains(&format!("│  {w}")) || l.contains(&format!("│ {w}")))), "{s}");
+}
+
+#[test]
 fn sounds_view_switches_sounds_moments_and_harnesses_without_touching_disk_in_the_demo() {
     let mut a = app(false);
     a.run_act(Act::Sounds);
@@ -4796,4 +5195,178 @@ fn a_lead_lists_its_teammates_in_the_sidebar_and_opens_its_team_board() {
     assert_eq!(settings, Some("settings"));
     let screen = draw(&mut a);
     assert!(screen.contains("Agent teams") && screen.contains("Teammate model"), "{screen}");
+}
+
+#[test]
+fn focus_mode_sends_pictures_where_they_were_and_switches_models_in_both_agents() {
+    use crate::focus::{MenuKind, visible};
+    let none = KeyModifiers::NONE;
+    let mut a = app(true);
+    a.focus.on = true;
+    let id = a.focused().unwrap();
+    let sent = |a: &mut App, id| {
+        term_of(a, id).flush_outbox();
+        String::from_utf8(std::mem::take(&mut term_of(a, id).sent)).unwrap()
+    };
+    term_of(&mut a, id).demo_activity = Some(Activity::Idle);
+    // a picture pasted mid-sentence holds its place with a token you don't see, and goes there, on its own
+    for c in "compare ".chars() {
+        key(&mut a, KeyCode::Char(c), none);
+    }
+    let shot = std::env::temp_dir().join("bro-focus-shot.png");
+    a.focus_attach(id, vec![shot.clone()]);
+    for c in " with the docs".chars() {
+        key(&mut a, KeyCode::Char(c), none);
+    }
+    assert_eq!(visible(a.focus.drafts[&id].area.text()), "compare  with the docs");
+    // backspace over its place takes the letter before it: the picture stays, its place now at the end
+    for _ in 0.." with the docs".len() + 1 {
+        key(&mut a, KeyCode::Backspace, none);
+    }
+    assert_eq!(visible(a.focus.drafts[&id].area.text()), "compare", "the last one took the hidden place and the space before it");
+    assert_eq!(a.focus.drafts[&id].attachments.len(), 1);
+    for c in " with the docs".chars() {
+        key(&mut a, KeyCode::Char(c), none);
+    }
+    key(&mut a, KeyCode::Enter, none);
+    let out = sent(&mut a, id);
+    let path = shot.to_string_lossy();
+    let (words, picture) = (out.find("compare with the docs").expect("the words"), out.find(&*path).expect("the picture"));
+    assert!(words < picture && out.ends_with('\r'), "{out:?}");
+    assert_eq!(a.focus.drafts[&id].sent[0].pictures, [shot.clone()]);
+    assert!(a.focus.drafts[&id].attachments.is_empty());
+    // `/` lists the commands: tab completes, esc closes the list before it clears the box
+    for c in "/comp".chars() {
+        key(&mut a, KeyCode::Char(c), none);
+    }
+    assert_eq!(a.focus_command_rows(id).first().map(|c| c.name.as_str()), Some("compact"));
+    key(&mut a, KeyCode::Tab, none);
+    assert_eq!(a.focus.drafts[&id].area.text(), "/compact ", "it takes more after it");
+    assert!(a.focus_command_rows(id).is_empty(), "the list goes once there's a space");
+    key(&mut a, KeyCode::Esc, none);
+    for c in "/mo".chars() {
+        key(&mut a, KeyCode::Char(c), none);
+    }
+    assert!(!a.focus_command_rows(id).is_empty());
+    key(&mut a, KeyCode::Esc, none);
+    assert!(a.focus_command_rows(id).is_empty() && a.focus.drafts[&id].area.text() == "/mo", "esc closes the list first");
+    key(&mut a, KeyCode::Esc, none);
+    assert_eq!(a.focus.drafts[&id].area.text(), "");
+    // Claude Code: the model and thinking switch at once, and show before the transcript says so
+    a.focus_toggle_menu(id, MenuKind::Model);
+    let rows = a.focus_menu_rows(id, MenuKind::Model);
+    assert!(rows.iter().any(|r| r.label == "Opus 5.5" && r.detail.is_some()));
+    let sonnet = rows.iter().position(|r| r.label == "Sonnet 5.5").unwrap();
+    key(&mut a, KeyCode::Down, none);
+    assert_eq!(a.focus.drafts[&id].menu.map(|m| m.sel), Some(1), "the keys move in the open list");
+    a.focus_pick(id, MenuKind::Model, sonnet);
+    assert!(a.focus.drafts[&id].menu.is_none());
+    assert!(sent(&mut a, id).starts_with("/model claude-sonnet-5-5"));
+    assert_eq!(a.focus_running_on(id).0.as_deref(), Some("claude-sonnet-5-5"));
+    let max = a.focus_menu_rows(id, MenuKind::Thinking).iter().position(|r| r.label == "Max").unwrap();
+    a.focus_pick(id, MenuKind::Thinking, max);
+    assert!(sent(&mut a, id).starts_with("/effort max"));
+    assert_eq!(a.focus_running_on(id), (Some("claude-sonnet-5-5".into()), Some("max".into())));
+    // Codex: the same lists; a change it can't take mid-turn waits for the turn to end, then goes as one command
+    let cx = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness == Some(bro_core::Harness::Codex))).map(|(id, _)| *id).unwrap();
+    let transcript = |version: &str| {
+        [
+            serde_json::json!({"type":"session_meta","payload":{"cwd":"/x","cli_version":version}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5.2-codex","effort":"high"}}),
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("
+")
+    };
+    term_of(&mut a, cx).set_demo_transcript(&transcript("0.165.0"));
+    term_of(&mut a, cx).demo_activity = Some(Activity::Working);
+    let levels = a.focus_menu_rows(cx, MenuKind::Thinking);
+    assert!(levels.iter().any(|r| r.label == "High" && r.current), "{levels:?}");
+    let extra = levels.iter().position(|r| r.label == "Extra high").unwrap();
+    a.focus_pick(cx, MenuKind::Thinking, extra);
+    assert_eq!(sent(&mut a, cx), "", "Codex takes it between turns");
+    assert!(a.focus_change_waits(cx));
+    assert_eq!(a.focus_running_on(cx).1.as_deref(), Some("xhigh"), "it shows at once all the same");
+    term_of(&mut a, cx).demo_activity = Some(Activity::Idle);
+    a.after_events();
+    assert!(sent(&mut a, cx).starts_with("/model gpt-5.2-codex --reasoning=xhigh"));
+    assert!(!a.focus_change_waits(cx));
+    // an older Codex has only its own menu: the terminal shows it
+    term_of(&mut a, cx).set_demo_transcript(&transcript("0.150.2"));
+    a.after_events();
+    a.focus_pick(cx, MenuKind::Thinking, 0);
+    assert!(sent(&mut a, cx).starts_with("/model") && !a.focus_view(cx));
+}
+
+#[test]
+fn focus_mode_writes_replies_and_answers_choices_through_the_session() {
+    use crate::panes::term::Term;
+    let none = KeyModifiers::NONE;
+    let mut a = app(true);
+    let id = a.focused().unwrap();
+    assert_eq!(a.panes[&id].as_term_ref().unwrap().meta.harness, Some(bro_core::Harness::Claude));
+    let sent = |a: &mut App, id| String::from_utf8(std::mem::take(&mut term_of(a, id).sent)).unwrap();
+    // the terminal UI only says where focus mode is, and its key stays the program's
+    a.run_act(Act::Focus);
+    assert!(!a.focus.on && !a.focus_view(id));
+    key(&mut a, KeyCode::Char('f'), KeyModifiers::ALT);
+    assert_eq!(sent(&mut a, id), "\x1bf", "alt+f reaches the session in the terminal UI");
+    a.focus.on = true;
+    assert!(a.focus_view(id));
+    // typing writes the reply box, not the session; enter sends it and clears the box
+    for c in "ship it".chars() {
+        key(&mut a, KeyCode::Char(c), none);
+    }
+    assert_eq!(a.focus.drafts[&id].area.text(), "ship it");
+    assert_eq!(sent(&mut a, id), "");
+    key(&mut a, KeyCode::Enter, none);
+    assert!(sent(&mut a, id).contains("ship it"));
+    assert_eq!(a.focus.drafts[&id].area.text(), "");
+    assert_eq!(a.focus.drafts[&id].sent.len(), 1, "it shows as sent until the transcript has it");
+    // up on an empty box brings back what you sent
+    key(&mut a, KeyCode::Up, none);
+    assert_eq!(a.focus.drafts[&id].area.text(), "ship it");
+    key(&mut a, KeyCode::Down, none);
+    assert_eq!(a.focus.drafts[&id].area.text(), "");
+    // esc stops a working agent; an idle one keeps its own esc (Claude's double-esc menu would open where you
+    // can't see it)
+    key(&mut a, KeyCode::Esc, none);
+    assert_eq!(sent(&mut a, id), "\x1b");
+    term_of(&mut a, id).demo_activity = Some(Activity::Idle);
+    key(&mut a, KeyCode::Esc, none);
+    assert_eq!(sent(&mut a, id), "");
+    // a choice on screen: its keys reach the session, text you write never goes into it
+    let meta = a.panes[&id].as_term_ref().unwrap().meta.clone();
+    let q = a.new_tab(Box::new(Term::fixed(meta, " Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. No\r\n", a.svc.clone())));
+    term_of(&mut a, q).demo_activity = Some(Activity::Blocked);
+    assert_eq!(a.focus_choice(q).map(|c| c.options.len()), Some(2));
+    key(&mut a, KeyCode::Char('2'), none);
+    assert_eq!(sent(&mut a, q), "2");
+    key(&mut a, KeyCode::Down, none);
+    assert!(sent(&mut a, q).ends_with('B'), "the arrow moves its menu");
+    key(&mut a, KeyCode::Char('n'), none);
+    key(&mut a, KeyCode::Char('o'), none);
+    key(&mut a, KeyCode::Enter, none);
+    assert_eq!(sent(&mut a, q), "", "enter with text in the box doesn't pick for you");
+    assert_eq!(a.focus.drafts[&q].area.text(), "no");
+    // esc clears the box first, then cancels the question
+    key(&mut a, KeyCode::Esc, none);
+    assert_eq!(sent(&mut a, q), "");
+    assert_eq!(a.focus.drafts[&q].area.text(), "");
+    key(&mut a, KeyCode::Esc, none);
+    assert_eq!(sent(&mut a, q), "\x1b");
+    // a command that opens its own screen shows the terminal for it; alt+f brings the conversation back
+    a.paste("/model");
+    assert_eq!(a.focus.drafts[&q].area.text(), "/model", "a paste lands in the box");
+    term_of(&mut a, q).demo_activity = Some(Activity::Idle);
+    key(&mut a, KeyCode::Enter, none);
+    assert!(!a.focus_view(q) && a.focus.on, "this session shows its terminal");
+    assert!(sent(&mut a, q).starts_with("/model"), "typed key by key, so its menu takes it");
+    a.focus.peek.remove(&q);
+    assert!(a.focus_view(q));
+    // shells keep their terminal
+    let shell = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness.is_none())).map(|(id, _)| *id).unwrap();
+    assert!(!a.focus_view(shell));
 }

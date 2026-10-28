@@ -18,13 +18,14 @@ path = "src/bin/bro-app.rs"
 
 [features]
 default = ["gui"]
-# the desktop app (`bro gui`): wgpu renderer, alacritty_terminal screens, photo and video previews
-gui = ["dep:bro-gfx", "dep:bro-media", "dep:winit", "dep:alacritty_terminal", "dep:image", "dep:arboard"]
+# the desktop app (`bro gui`): wgpu renderer, alacritty_terminal screens, photo and video previews, HTML pages
+gui = ["dep:bro-gfx", "dep:bro-media", "dep:winit", "dep:alacritty_terminal", "dep:image", "dep:arboard", "dep:wry", "dep:objc2-foundation", "dep:objc2-web-kit"]
 
 [dependencies]
 bro-core.workspace = true
 bro-proxy.workspace = true
 bro-bridge.workspace = true
+bro-host.workspace = true
 bro-voice.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
@@ -55,6 +56,16 @@ winit = { version = "0.30.13", optional = true }
 alacritty_terminal = { version = "0.26", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 arboard = { version = "3.7", default-features = false, optional = true }
+
+# the desktop app's HTML previews: the system's web view (WebView2, WKWebView) over the preview card. Linux keeps
+# the source: WebKitGTK would need a GTK loop beside winit's.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+wry = { version = "0.57", default-features = false, optional = true }
+
+# a local page loads with read access to its folder (WKWebView's loadFileURL; wry only has loadRequest)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL"], optional = true }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-app-kit", "WKWebView", "WKNavigation"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"

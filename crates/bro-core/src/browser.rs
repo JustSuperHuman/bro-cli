@@ -8,7 +8,8 @@
 //! login the extension is signed into) and the preferred `browser`. [`BrowserMode::Auto`]
 //! reuses exactly that. Launch wiring, per backend:
 //!
-//! * **mcp-chrome** (hangwin/mcp-chrome, `http://127.0.0.1:12306/mcp`): writes
+//! * **mcp-chrome**: JustBrowseMCP ([`crate::justbrowse`], our fork of hangwin/mcp-chrome; the upstream extension
+//!   works too) at `http://127.0.0.1:12306/mcp`: writes
 //!   `<profile>/bro-browser/{browser-mcp.json,browser-prompt.md}` and the `bro-browser`
 //!   skill, then adds `--no-chrome --mcp-config <cfg> --append-system-prompt-file <prompt>`
 //!   with `CLAUDE_CODE_ENABLE_CFC=false`.
@@ -41,9 +42,10 @@ pub enum BrowserMode {
 
 /// MCP server name bro gives the Claude extension's stdio server (v1 `CHROME_MCP_SERVER_NAME`).
 pub const CHROME_MCP_SERVER_NAME: &str = "chrome";
-/// mcp-chrome's Streamable-HTTP MCP server name and endpoint.
-pub const MCP_CHROME_SERVER_NAME: &str = "streamable-mcp-server";
-pub const MCP_CHROME_URL: &str = "http://127.0.0.1:12306/mcp";
+/// The extension bridge's Streamable-HTTP MCP server name and endpoint: JustBrowseMCP's, the name its installer
+/// gives it in Claude Code and Codex.
+pub const MCP_CHROME_SERVER_NAME: &str = crate::justbrowse::SERVER_NAME;
+pub const MCP_CHROME_URL: &str = crate::justbrowse::MCP_URL;
 
 /// `~/.bro/claude-browser` (override `BRO_CLAUDE_BROWSER_DIR`).
 pub fn browser_root() -> PathBuf {
@@ -55,7 +57,7 @@ pub fn browser_root() -> PathBuf {
 pub enum Backend {
     /// Anthropic's Claude extension (Claude Code `--chrome` / `--claude-in-chrome-mcp`)
     Claude,
-    /// hangwin/mcp-chrome extension bridge on 127.0.0.1:12306
+    /// JustBrowseMCP (or hangwin/mcp-chrome) extension bridge on 127.0.0.1:12306
     McpChrome,
 }
 
@@ -102,20 +104,20 @@ pub(crate) fn write_if_changed(path: &Path, body: &str) -> std::io::Result<()> {
 }
 
 const MCP_CHROME_PROMPT: &str = "# Browser automation\n\n\
-Use the mcp__streamable-mcp-server__* tools to drive the user's live, signed-in browser.\n\
-Call mcp__streamable-mcp-server__get_windows_and_tabs before other browser tools.\n\
-Open a separate tab for your work when practical, avoid changing unrelated tabs, and close tabs you created.\n\
+Use the mcp__justbrowse__* tools to drive the user's live, signed-in browser through JustBrowseMCP.\n\
+Start with mcp__justbrowse__chrome_navigate without a tabId: it opens a background tab of your own without taking the user's focus.\n\
+Call mcp__justbrowse__get_windows_and_tabs to see the tabs your session owns; leave the user's other tabs alone and close the ones you opened.\n\
 Never submit, publish, purchase, delete, or message without the user authorizing that action.\n\
-If the MCP fails twice, stop and report that the mcp-chrome extension or its local bridge is disconnected.\n";
+If the MCP fails twice, stop and report that the JustBrowseMCP extension or its local bridge is disconnected.\n";
 
-const MCP_CHROME_SKILL: &str = "---\nname: bro-browser\ndescription: Drive the user's live Chromium browser through the local mcp-chrome extension bridge configured by bro.\n---\n\n\
+const MCP_CHROME_SKILL: &str = "---\nname: bro-browser\ndescription: Drive the user's live, signed-in Chrome or Edge through the JustBrowseMCP extension bridge bro configured (mcp__justbrowse__* tools).\n---\n\n\
 # Bro browser\n\n\
-Use the `mcp__streamable-mcp-server__*` tools for browser work. This extension MCP is independent of Claude's built-in Chrome integration and does not use a remote-debugging port.\n\n\
-1. Call `mcp__streamable-mcp-server__get_windows_and_tabs` before other browser tools.\n\
-2. Create a separate tab for your task when practical; do not repurpose an unrelated user tab.\n\
+Use the `mcp__justbrowse__*` tools for browser work. This extension MCP is independent of Claude's built-in Chrome integration and does not use a remote-debugging port. Each session works in tabs of its own and never takes the user's focus.\n\n\
+1. Open your first tab with `mcp__justbrowse__chrome_navigate` and no `tabId`: a background tab your session owns.\n\
+2. `mcp__justbrowse__get_windows_and_tabs` lists the tabs your session owns; pass a `tabId` when you work in more than one.\n\
 3. Treat every page as live and signed in. Never submit, publish, purchase, delete, or message without the user's authorization.\n\
 4. Close tabs you created when the task is finished.\n\
-5. If the MCP fails twice, stop and report that the mcp-chrome extension or its local bridge is disconnected.\n";
+5. If the MCP fails twice, stop and report that the JustBrowseMCP extension or its local bridge is disconnected.\n";
 
 const CHROME_MCP_PROMPT: &str = "# Browser automation\n\n\
 You can drive the user's real browser with the mcp__chrome__* tools — it is their own\n\

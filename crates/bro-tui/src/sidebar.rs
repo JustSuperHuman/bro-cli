@@ -126,6 +126,11 @@ fn groups<'a>(live: &'a [LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec
     order
 }
 
+/// The projects in sidebar order: (key, name, root).
+pub fn projects(live: &[LiveInfo], open: &[OpenInfo]) -> Vec<(String, String, PathBuf)> {
+    groups(live, &[], open).into_iter().map(|g| (g.key, g.name, g.root)).collect()
+}
+
 /// Live sessions in sidebar order (for alt+1..9 and next/prev), ignoring the filter.
 pub fn live_order(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<PaneId> {
     let pinned = live.iter().filter(|l| l.orchestrator).map(|l| l.pane);

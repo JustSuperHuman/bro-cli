@@ -92,6 +92,10 @@ pub enum ConfirmAction {
     Close(PaneId),
     /// take a project off the sidebar, ending its running sessions
     CloseProject(std::path::PathBuf),
+    /// replace the session server, ending its sessions (agents come back resumed)
+    RestartServer,
+    /// bring back the sessions a server that stopped unasked left (no: let them go)
+    BringBack,
 }
 
 /// A yes/no question.
@@ -153,12 +157,14 @@ impl App {
     pub(super) fn confirm_answer(&mut self, yes: bool) {
         let Overlay::Confirm(c) = std::mem::take(&mut self.overlay) else { return };
         self.confirm_hits.clear();
-        if yes {
-            match c.action {
-                ConfirmAction::Quit => self.quit = true,
-                ConfirmAction::Close(id) => self.close(id),
-                ConfirmAction::CloseProject(root) => self.close_project_now(root),
-            }
+        match (yes, c.action) {
+            (true, ConfirmAction::Quit) => self.quit = true,
+            (true, ConfirmAction::Close(id)) => self.close(id),
+            (true, ConfirmAction::CloseProject(root)) => self.close_project_now(root),
+            (true, ConfirmAction::RestartServer) => self.restart_server(),
+            (true, ConfirmAction::BringBack) => self.bring_back_lost(),
+            (false, ConfirmAction::BringBack) => self.let_lost_go(),
+            (false, _) => {}
         }
     }
 }
@@ -276,6 +282,7 @@ pub(super) fn launcher_data_with_installed(app: &App, installed: Vec<(bro_core::
         recents: app.recents.clone(),
         models: st.models.clone(),
         orchestrator_running: app.orchestrator_pane().and_then(|id| app.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.label.clone()),
+        shared: st.settings.proxy.shared,
         keyed: {
             let cfg = st.config.clone().unwrap_or_default();
             // a Google sign-in is one small file: cheap enough to look at when the launcher opens

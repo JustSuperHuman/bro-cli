@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use trim::TrimLevel;
-pub use upstream::pool::{PoolAccountStatus, pool_account_name};
+pub use upstream::pool::{AccountUsage, PoolAccountStatus, pool_account_name};
 
 /// API dialect of a request or upstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -75,8 +75,19 @@ impl Upstream {
             Upstream::OpenAiResponses { .. } | Upstream::ChatGptCodex { .. } => Dialect::Responses,
             Upstream::Anthropic { .. }
             | Upstream::ClaudeOAuth { .. }
-            | Upstream::ClaudePool { .. } => Dialect::Anthropic,
+            | Upstream::ClaudePool { .. }
+            | Upstream::ClaudeLogins => Dialect::Anthropic,
+            Upstream::CodexLogins => Dialect::Responses,
             Upstream::GeminiCodeAssist { .. } => Dialect::Gemini,
+        }
+    }
+
+    /// The family of logins a proxy-mode upstream shares (None for every other upstream).
+    pub fn family(&self) -> Option<LoginFamily> {
+        match self {
+            Upstream::ClaudeLogins => Some(LoginFamily::Claude),
+            Upstream::CodexLogins => Some(LoginFamily::Codex),
+            _ => None,
         }
     }
 
@@ -89,9 +100,68 @@ impl Upstream {
             Upstream::Anthropic { .. } => "anthropic",
             Upstream::ClaudeOAuth { .. } => "claude_oauth",
             Upstream::ClaudePool { .. } => "claude_pool",
+            Upstream::ClaudeLogins => "claude_logins",
+            Upstream::CodexLogins => "codex_logins",
             Upstream::GeminiCodeAssist { .. } => "gemini_code_assist",
         }
     }
+}
+
+/// The subscriptions proxy mode pools: every signed-in login of one family serves its route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginFamily {
+    /// Claude Code logins (Claude Pro / Max / Team subscriptions)
+    Claude,
+    /// Codex logins signed in with ChatGPT (API-key logins aren't subscriptions)
+    Codex,
+}
+
+impl LoginFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LoginFamily::Claude => "claude",
+            LoginFamily::Codex => "codex",
+        }
+    }
+}
+
+/// One signed-in login a proxy-mode route can send requests as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolLogin {
+    /// Profile id: "claude:local", "codex:work"
+    pub id: String,
+    /// Its `CLAUDE_CONFIG_DIR` / `CODEX_HOME`
+    pub dir: PathBuf,
+    /// Claude's `accountUuid`: requests sent as this login name it in `metadata.user_id`
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+/// Lists the signed-in logins of a family (blocking; the proxy calls it off its async workers and
+/// caches the answer for a few seconds).
+pub type LoginsFn = Arc<dyn Fn(LoginFamily) -> Vec<PoolLogin> + Send + Sync>;
+
+/// One login of a proxy-mode pool as the proxy sees it, for the Proxy view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginStatus {
+    pub id: String,
+    pub dir: PathBuf,
+    /// Not cooling down after a limit
+    pub available: bool,
+    /// Cooling down until (unix ms)
+    pub cooling_until_ms: Option<i64>,
+    /// % used of the 5-hour and weekly windows, from the rate-limit headers of this login's last
+    /// response (bro's usage meters until it has served one)
+    pub five_hour_pct: Option<f32>,
+    pub weekly_pct: Option<f32>,
+    /// unix seconds the windows reset
+    pub five_hour_resets_at: Option<i64>,
+    pub weekly_resets_at: Option<i64>,
+    /// Conversations this proxy keeps on this login
+    pub conversations: usize,
+    /// Requests and tokens the proxy sent as it, and its last error
+    pub usage: AccountUsage,
 }
 
 /// Resolves a Claude OAuth access token for a config dir (`force_refresh` after a 401).
@@ -125,6 +195,12 @@ pub struct ProxyOptions {
     pub gemini_base_urls: Vec<String>,
     /// Default: `bro_core::gemini::auth`
     pub gemini_auth: Option<GeminiAuthFn>,
+    /// Who proxy-mode routes share. Default: bro's signed-in subscription logins
+    /// (`bro_core::profiles::subscription_logins`)
+    pub logins: Option<LoginsFn>,
+    /// Request counters for the shared Codex logins; default `~/.bro/codex-pool-usage.json`
+    /// (Claude logins count in `pool_usage_file`, as v1's pool does)
+    pub codex_pool_usage_file: Option<PathBuf>,
     /// Idle interval after which streams get a keepalive (Anthropic `ping`)
     pub keepalive: Duration,
     /// Compress requests with llmtrim at start-up ([`ProxyHandle::set_trim`] changes it live)
@@ -143,6 +219,8 @@ impl Default for ProxyOptions {
             codex_auth: None,
             gemini_base_urls: Vec::new(),
             gemini_auth: None,
+            logins: None,
+            codex_pool_usage_file: None,
             keepalive: Duration::from_secs(15),
             trim: false,
             trim_level: TrimLevel::Safe,
@@ -158,6 +236,7 @@ impl std::fmt::Debug for ProxyOptions {
             .field("openai_base_url", &self.openai_base_url)
             .field("gemini_base_urls", &self.gemini_base_urls)
             .field("pool_usage_file", &self.pool_usage_file)
+            .field("codex_pool_usage_file", &self.codex_pool_usage_file)
             .field("keepalive", &self.keepalive)
             .field("trim", &self.trim)
             .field("trim_level", &self.trim_level)
@@ -196,6 +275,17 @@ pub enum Upstream {
     /// Gemini on Cloud Code Assist with a Google AI subscription sign-in
     /// (bro_core::gemini::auth on `creds_file`), presenting as the Antigravity CLI
     GeminiCodeAssist { creds_file: PathBuf },
+    /// Proxy mode: api.anthropic.com as every signed-in Claude login. Each conversation stays on
+    /// the login that first served it; new ones go to the login with the most usage left; a limit
+    /// moves the request to the next login before any byte reaches the client. Claude Code keeps
+    /// its own headers and body (only the credentials change); other clients are presented as
+    /// Claude Code. The route's id is its key (harnesses that keep their own sign-in can't send
+    /// the proxy's), so give it an unguessable one.
+    ClaudeLogins,
+    /// Proxy mode for Codex: the ChatGPT Codex backend as every Codex login signed in with
+    /// ChatGPT, with the same picking and failover. Codex reaches it as its own `openai` provider
+    /// (`openai_base_url = {route}/backend-api/codex`). Unguessable id, as above.
+    CodexLogins,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +400,11 @@ impl ProxyHandle {
     /// Pool accounts with their v1-compatible usage counters and availability.
     pub fn pool_status(&self, config_dirs: &[PathBuf]) -> Vec<PoolAccountStatus> {
         self.inner.state.pool().status(config_dirs)
+    }
+    /// Proxy mode's logins of `family`: availability, the meters their responses reported,
+    /// conversations kept on each. Blocking (reads the login list on a miss); call off the UI thread.
+    pub fn logins_status(&self, family: LoginFamily) -> Vec<LoginStatus> {
+        upstream::logins::status(&self.inner.state, family)
     }
     /// Turn request compression on/off or change its level; applies to the next request.
     pub fn set_trim(&self, enabled: bool, level: TrimLevel) {
