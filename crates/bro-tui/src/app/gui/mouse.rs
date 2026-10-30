@@ -310,6 +310,7 @@ fn side_click(g: &mut Gui, hit: SideHit, cb: CButton, m: KeyModifiers) {
         SideHit::Proxy => app.open_view("proxy"),
         SideHit::Bridge => app.open_view("bridge"),
         SideHit::Settings => app.open_view("settings"),
+        SideHit::Tasks => app.open_view("tasks"),
         SideHit::Quick(h) => app.quick_launch(h),
         SideHit::Launcher => app.open_launcher(None, crate::pane::Place::Tab),
         SideHit::Continue => app.open_continue(),

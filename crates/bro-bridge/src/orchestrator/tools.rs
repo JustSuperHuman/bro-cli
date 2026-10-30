@@ -18,7 +18,40 @@ const MAX_WAIT_SECONDS: u64 = 45;
 /// typing the task.
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+tokio::task_local! {
+    /// Set by the transport, never inferred from the target of an operation.
+    static CALLER_SESSION: String;
+    static WORKER_SCOPED: bool;
+}
+
+pub(crate) fn caller_session() -> Option<String> {
+    CALLER_SESSION.try_with(Clone::clone).ok()
+}
+
+pub(crate) fn worker_scoped() -> bool { WORKER_SCOPED.try_with(|value| *value).unwrap_or(false) }
+
+pub(crate) async fn execute_with_worker_scope(app: &AppState, name: &str, args: &Value, caller: Option<&str>, worker_scoped: bool) -> Result<String, String> {
+    WORKER_SCOPED.scope(worker_scoped, execute_for_session(app, name, args, caller)).await
+}
+
+pub(crate) async fn execute_for_session(
+    app: &AppState,
+    name: &str,
+    args: &Value,
+    caller: Option<&str>,
+) -> Result<String, String> {
+    match caller {
+        Some(id) => {
+            if app.summary(id).is_none() {
+                return Err("The calling session is no longer registered. Refresh the bridge connection.".into());
+            }
+            CALLER_SESSION.scope(id.to_owned(), execute(app, name, args)).await
+        }
+        None => execute(app, name, args).await,
+    }
+}
+
+pub(crate) fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
         "description": description,
@@ -32,7 +65,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 }
 
 pub fn definitions() -> Vec<Value> {
-    vec![
+    let mut definitions = vec![
         tool(
             "list_sessions",
             "Fresh snapshot of every terminal tab: id, title, directory, git branch, project, shell, which AI agent is running and what it is doing, any question it is waiting on, and the last screen lines. Use when the workspace may have changed since the conversation started.",
@@ -93,6 +126,10 @@ pub fn definitions() -> Vec<Value> {
             json!({
                 "project": { "type": "string", "description": "Project name or directory path." },
                 "task": { "type": "string", "description": "First message to send the agent (optional)." },
+                "taskId": { "type": "string", "description": "Existing durable task to assign. Omit to create durable work from task." },
+                "taskContract": { "type": "object", "description": "Explicit durable contract with goal, instructions and acceptance criteria; include exact required check commands. Default task uses coordinator outcome review and captures repository instructions." },
+                "readOnly": { "type": "boolean", "description": "Share workspace read access for research/review; default is an exclusive writer." },
+                "origin": { "type": "object", "description": "Exact request origin JSON from the bro-request envelope: originRequestId, replyChannel, replyHandle. Preserves the final result's original destination." },
                 "agent": { "type": "string", "description": "claude (default), codex, pi, or shell. A login-specific id like claude:work also works." },
                 "name": { "type": "string", "description": "Session name; default is the next free squad name." },
                 "focus": { "type": "boolean", "description": "Bring it to the front in bro (default false; true when the user wants to see it)." },
@@ -108,6 +145,7 @@ pub fn definitions() -> Vec<Value> {
                 "project": { "type": "string", "description": "Project name or directory path, resolved like find_project." },
                 "sourceSessionId": { "type": "string", "description": "Your BRO_SESSION_ID; the source must be a running orchestrator." },
                 "task": { "type": "string", "description": "A self-contained task for the project orchestrator." },
+                "origin": { "type": "object", "description": "Exact original request origin JSON (originRequestId,replyChannel,replyHandle), forwarded unchanged to the project coordinator for final result delivery." },
                 "focus": { "type": "boolean", "description": "Bring it to the front (default false)." }
             }),
             &["project", "sourceSessionId"],
@@ -178,7 +216,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "wait_for_sessions",
-            "Wait for several tabs at once: returns when all (mode \"all\", default) or any (mode \"any\") of them have stopped working and gone quiet, or at the timeout, with each tab's state (idle, working, awaiting a prompt answer, closed). Default: every tab running an agent. Use it to supervise parallel agents, then read_session / read_chat the ones that finished.",
+            "Observe several tabs until all (mode \"all\", default) or any (mode \"any\") stop working and go quiet, or the timeout. Returns idle, working, awaiting, exited or closed observations. Idle is a turn state; it does not establish task completion or acceptance. Default: every agent tab.",
             json!({
                 "sessionIds": { "type": "array", "items": { "type": "string" }, "description": "Tabs to watch (ids or names). Default: every agent tab." },
                 "mode": { "type": "string", "enum": ["all", "any"] },
@@ -278,7 +316,9 @@ pub fn definitions() -> Vec<Value> {
             }),
             &["title"],
         ),
-    ]
+    ];
+    definitions.extend(crate::coordination::definitions());
+    definitions
 }
 
 fn key_sequence(key: &str) -> Option<String> {
@@ -335,7 +375,7 @@ fn integer_arg(args: &Value, key: &str) -> Option<u64> {
 
 /// Resolves the tab a tool call names. Exact ids first; then an id prefix
 /// or a title match, so a model that paraphrased still lands on the tab.
-fn resolve_session(app: &AppState, args: &Value) -> Result<String, String> {
+pub(crate) fn resolve_session(app: &AppState, args: &Value) -> Result<String, String> {
     let requested = string_arg(args, "sessionId").ok_or("sessionId is required.")?;
     if app.summary(&requested).is_some() {
         return Ok(requested);
@@ -381,7 +421,8 @@ pub(crate) fn is_orchestrator(app: &AppState, session_id: &str) -> bool {
 /// cannot type into, wait on or close its own terminal.
 fn resolve_worker(app: &AppState, args: &Value) -> Result<String, String> {
     let id = resolve_session(app, args)?;
-    if is_orchestrator(app, &id) && app.summary(&id).is_some_and(|s| bro_core::orchestrator::is_global(std::path::Path::new(&s.cwd))) {
+    let caller = caller_session();
+    if caller.as_deref() == Some(id.as_str()) || (caller.is_none() && is_orchestrator(app, &id) && app.summary(&id).is_some_and(|s| bro_core::orchestrator::is_global(std::path::Path::new(&s.cwd)))) {
         return Err(
             "That is the orchestrator's own session. Act on the other sessions (list_sessions shows them)."
                 .into(),
@@ -472,7 +513,7 @@ pub fn summarize(app: &AppState, name: &str, args: &Value) -> String {
             Some(project) => format!("Closed the tabs in {project}"),
             None => "Closed every tab".into(),
         },
-        "wait_for_sessions" => "Waited for the tabs to finish".into(),
+        "wait_for_sessions" => "Observed the tabs' current activity".into(),
         "get_usage" => "Checked subscription usage".into(),
         "rename_session" => format!(
             "Renamed {} to \"{}\"",
@@ -560,6 +601,8 @@ async fn wait_for_output(
 }
 
 pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String, String> {
+    if name.starts_with("coordination_") { return crate::coordination::execute_tool(app,name,args).await; }
+    if worker_scoped() { return Err("This worker capability only permits its assigned task protocol.".into()); }
     match name {
         "list_sessions" => Ok(
             serde_json::to_string_pretty(&context::session_records(app, 8))
@@ -597,6 +640,9 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
         }
         "send_input" => {
             let id = resolve_worker(app, args)?;
+            if app.summary(&id).is_some_and(|s| matches!(s.agent_activity.as_deref(), Some("working" | "awaiting"))) {
+                return Err("The target is working or waiting for a prompt answer. Use task steering for assigned work, or wait until it is ready before sending a new task.".into());
+            }
             let text = args
                 .get("text")
                 .and_then(Value::as_str)
@@ -992,7 +1038,7 @@ async fn wait_for_sessions(app: &AppState, ids: &[String], any: bool, timeout: D
             .filter(|(id, (_, changed))| settled(id, *changed))
             .count();
         if (any && done > 0) || done == ids.len() {
-            break if any { "a tab finished" } else { "every tab finished" };
+            break if any { "a tab settled" } else { "every tab settled" };
         }
         if started.elapsed() >= timeout {
             break "timed out";
@@ -1004,17 +1050,18 @@ async fn wait_for_sessions(app: &AppState, ids: &[String], any: bool, timeout: D
         .map(|(id, (_, changed))| match app.session_view(id) {
             None => json!({ "id": id, "state": "closed" }),
             Some(view) => {
-                let state = match view.summary.agent_activity.as_deref() {
+                let state = if view.summary.status != "running" { "exited" } else { match view.summary.agent_activity.as_deref() {
                     Some("working") => "working",
                     Some("awaiting") => "awaiting",
                     _ if changed.elapsed() < QUIET => "printing",
                     _ => "idle",
-                };
+                }};
                 json!({
                     "id": id,
                     "title": view.summary.title,
                     "agent": view.summary.agent,
                     "state": state,
+                    "taskAccepted": false,
                     "waitingOn": view.prompt.as_ref().and_then(|prompt| prompt.get("title")).cloned(),
                 })
             }
@@ -1024,6 +1071,8 @@ async fn wait_for_sessions(app: &AppState, ids: &[String], any: bool, timeout: D
         "outcome": outcome,
         "elapsedSeconds": (started.elapsed().as_secs_f32() * 10.0).round() / 10.0,
         "sessions": sessions,
+        "observationOnly": true,
+        "note": "Session activity does not establish task completion. Inspect durable task results and verification before accepting work.",
     }))
     .unwrap_or_default()
 }
@@ -1031,7 +1080,7 @@ async fn wait_for_sessions(app: &AppState, ids: &[String], any: bool, timeout: D
 /// Types `text` into a tab the way a person pasting would: one bracketed
 /// paste when the program supports it, paced, then Enter once the paste has
 /// settled (an Enter inside an agent's paste window becomes a newline).
-async fn type_text(app: &AppState, id: &str, text: &str, submit: bool) -> Result<(), String> {
+pub(crate) async fn type_text(app: &AppState, id: &str, text: &str, submit: bool) -> Result<(), String> {
     let view = app
         .session_view(id)
         .ok_or("The session is no longer available.")?;
@@ -1076,15 +1125,30 @@ async fn find_folders(app: &AppState, query: &str) -> Vec<folders::FolderMatch> 
 /// Waits until a freshly started tab can take a message: its agent was
 /// detected and sits idle at the prompt, or (a shell) its output settled.
 /// Returns the question the tab is blocked on, if it is.
-async fn wait_until_ready(app: &AppState, id: &str) -> Result<Option<String>, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    Ready,
+    Awaiting(String),
+    TimedOut,
+    Exited,
+}
+
+async fn wait_until_ready(app: &AppState, id: &str, expected_agent: bool) -> Result<Readiness, String> {
+    wait_until_ready_for(app, id, expected_agent, READY_TIMEOUT).await
+}
+
+pub(crate) async fn wait_until_ready_for(app: &AppState, id: &str, expected_agent: bool, timeout: Duration) -> Result<Readiness, String> {
     let started = Instant::now();
     let mut last_seq = 0;
     let mut last_change = Instant::now();
-    while started.elapsed() < READY_TIMEOUT {
+    while started.elapsed() < timeout {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let view = app
             .session_view(id)
             .ok_or("The session closed while starting.")?;
+        if view.summary.status != "running" {
+            return Ok(Readiness::Exited);
+        }
         let seq = app.session_seq(id).unwrap_or(0);
         if seq != last_seq {
             last_seq = seq;
@@ -1100,16 +1164,16 @@ async fn wait_until_ready(app: &AppState, id: &str) -> Result<Option<String>, St
                     .and_then(Value::as_str)
                     .unwrap_or("a question")
                     .to_string();
-                return Ok(Some(question));
+                return Ok(Readiness::Awaiting(question));
             }
             Some("working") => {}
-            _ if view.summary.agent.is_some() && quiet => return Ok(None),
+            Some("idle") if view.summary.agent.is_some() && quiet => return Ok(Readiness::Ready),
             // Agents take a moment to be detected; a plain shell never is.
-            _ if quiet && started.elapsed() >= Duration::from_secs(6) => return Ok(None),
+            _ if !expected_agent && view.summary.agent.is_none() && quiet && started.elapsed() >= Duration::from_secs(6) => return Ok(Readiness::Ready),
             _ => {}
         }
     }
-    Ok(None)
+    Ok(Readiness::TimedOut)
 }
 
 async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
@@ -1138,6 +1202,7 @@ async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
         cast::next_name(titles.iter().map(String::as_str))
     });
     let title = cast::title(&name, Some(&best.name));
+    let durable_task=crate::coordination::prepare_assignment(app,&best.path,args).await?;
     let watched = match string_arg(args, "forWatchdog") {
         Some(_) => Some(resolve_session(app, &json!({ "sessionId": args["forWatchdog"] }))?),
         None => None,
@@ -1148,6 +1213,7 @@ async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
     )
     .await?;
     let id = session.id.clone();
+    if let Some(task)=&durable_task{crate::coordination::record_owned_worker(app,&id,&task.id).await?;}
     if let Some(watched) = &watched {
         app.watchdogs.add_helper(watched, &id);
     }
@@ -1160,6 +1226,7 @@ async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
         "title": title,
         "cwd": best.path,
         "agent": agent,
+        "taskId": durable_task.as_ref().map(|task|task.id.clone()),
     });
     // Same-named folders elsewhere (the most recently used one was picked).
     let others: Vec<&str> = matches
@@ -1171,17 +1238,24 @@ async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
     if !others.is_empty() {
         outcome["alsoFound"] = json!(others);
     }
-    if let Some(task) = string_arg(args, "task") {
-        match wait_until_ready(app, &id).await? {
-            Some(question) => {
+    if let Some(durable_task) = durable_task {
+        match wait_until_ready(app, &id, agent != "shell").await? {
+            Readiness::Awaiting(question) => {
                 outcome["taskSent"] = json!(false);
                 outcome["note"] = json!(format!(
-                    "The session is waiting on \"{question}\"; answer it with answer_prompt, then send the task with send_input."
+                    "The session is waiting on \"{question}\". Answer it with answer_prompt, then use coordination_dispatch with taskId {} and sessionId {id}. The durable task already exists.",durable_task.id
                 ));
             }
-            None => {
-                type_text(app, &id, &task, true).await?;
-                outcome["taskSent"] = json!(true);
+            Readiness::Ready => {
+                match crate::coordination::execute_tool(app,"coordination_dispatch",&json!({"commandId":format!("dispatch-{}",durable_task.id),"taskId":durable_task.id,"sessionId":id})).await{
+                    Ok(dispatch)=>{let dispatch:Value=serde_json::from_str(&dispatch).map_err(|e|e.to_string())?;outcome["taskSent"]=dispatch["taskSent"].clone();outcome["delivery"]=dispatch;}
+                    Err(error)=>{outcome["taskSent"]=json!(false);outcome["dispatchError"]=json!(error);outcome["note"]=json!("Session and task were created. Inspect their state and retry coordination_dispatch with these IDs; do not open another worker.");}
+                }
+            }
+            state => {
+                outcome["taskSent"] = json!(false);
+                outcome["readiness"] = json!(if state == Readiness::Exited { "exited" } else { "timedOut" });
+                outcome["note"] = json!("The session did not become ready. No task was typed. Inspect its state before retrying.");
             }
         }
     }
@@ -1217,15 +1291,17 @@ async fn open_orchestrator(app: &AppState, args: &Value) -> Result<String, Strin
     }
     let mut outcome = json!({ "id": id, "cwd": best.path, "orchestrator": true });
     if let Some(task) = string_arg(args, "task") {
+        let task=crate::coordination::forward_origin(args,&task)?;
+        outcome["originForwarded"]=json!(args.get("origin").is_some());
         if id == source {
             return Err("That project belongs to your own orchestrator. Delegate its work to worker sessions.".into());
         }
-        match wait_until_ready(app, &id).await? {
-            Some(question) => {
+        match wait_until_ready(app, &id, true).await? {
+            Readiness::Awaiting(question) => {
                 outcome["taskSent"] = json!(false);
                 outcome["note"] = json!(format!("Waiting on \"{question}\". Answer it, then send the task with send_input."));
             }
-            None => {
+            Readiness::Ready => {
                 if app.summary(&id).is_some_and(|s| s.agent_activity.as_deref() == Some("working")) {
                     outcome["taskSent"] = json!(false);
                     outcome["note"] = json!("This orchestrator is working. Wait until it is idle before sending the task.");
@@ -1233,6 +1309,11 @@ async fn open_orchestrator(app: &AppState, args: &Value) -> Result<String, Strin
                     type_text(app, &id, &task, true).await?;
                     outcome["taskSent"] = json!(true);
                 }
+            }
+            state => {
+                outcome["taskSent"] = json!(false);
+                outcome["readiness"] = json!(if state == Readiness::Exited { "exited" } else { "timedOut" });
+                outcome["note"] = json!("The coordinator did not become ready. No task was typed. Inspect its state before retrying.");
             }
         }
     }

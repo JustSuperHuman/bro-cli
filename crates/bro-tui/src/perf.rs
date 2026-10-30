@@ -64,6 +64,8 @@ fn kind(ev: &Event) -> &'static str {
         Event::FolderCreated(..) => "folder",
         Event::Watchdog(_) => "watchdog",
         Event::Voice(_) => "voice",
+        Event::CoordinationTaskAction { .. } => "task coordination",
+        Event::OrchestratorInbox(_) => "orchestrator inbox",
         Event::Host(_) => "session server",
     }
 }

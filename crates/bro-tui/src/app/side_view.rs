@@ -193,6 +193,12 @@ impl App {
         let projects = &rows[..];
         if projects.is_empty() {
             self.side_scroll = 0;
+            if y < list.bottom() {
+                let tasks = Rect { y, height: 1, ..list };
+                ui::line_lr(f, tasks, vec![Span::styled(" Tasks · outcomes", ui::bold_accent(&t))], vec![Span::styled(format!(" {} ", self.keymap.primary(crate::keymap::Act::Tasks)), muted(&t))]);
+                self.side_hits.push((tasks, SideHit::Tasks));
+                y += 1;
+            }
             if !self.side.filter.is_empty() && y < list.bottom() {
                 ui::line(f, Rect { y, height: 1, ..list }, vec![Span::styled(" nothing matches", muted(&t))]);
             }
@@ -214,6 +220,12 @@ impl App {
                 ui::line(f, Rect { y, height: 1, ..list }, vec![Span::styled("╌".repeat(list.width as usize), fg(crate::theme::mix(gold, t.frame, 0.7)))]);
                 y += 1;
             }
+        }
+        if y < list.bottom() {
+            let tasks = Rect { y, height: 1, ..list };
+            ui::line_lr(f, tasks, vec![Span::styled(" Tasks · outcomes", ui::bold_accent(&t))], vec![Span::styled(format!(" {} ", self.keymap.primary(crate::keymap::Act::Tasks)), muted(&t))]);
+            self.side_hits.push((tasks, SideHit::Tasks));
+            y += 1;
         }
         let room = list.bottom().saturating_sub(y);
         if room == 0 || projects.len() == pinned {

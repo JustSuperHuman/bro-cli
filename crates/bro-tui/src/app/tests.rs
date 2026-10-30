@@ -4500,13 +4500,14 @@ fn voice_starts_an_orchestrator_on_the_roomiest_login_and_goes_to_it() {
     a.pump_voice();
     assert!(a.voice.queue.is_empty());
     let sent = String::from_utf8_lossy(&a.panes[&boss].as_term_ref().unwrap().sent).to_string();
-    assert!(sent.starts_with("[voice · looking at \"") && sent.contains(&format!("(sessionId {looking_sid})] what is Toast doing")), "{sent:?}");
+    assert!(sent.starts_with("[bro-request ") && sent.contains("[voice · looking at \"") && sent.contains(&format!("(sessionId {looking_sid})] what is Toast doing")), "{sent:?}");
     assert_eq!(a.voice.awaiting.len(), 1, "the live voice waits for the answer");
 
     // its answer goes back to be spoken
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("t.jsonl");
-    let reply = serde_json::json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","message":{"id":"m1","content":[{"type":"text","text":"Toast is running the tests."}]}});
+    let request_id = sent.split("[bro-request ").nth(1).unwrap().split_whitespace().next().unwrap();
+    let reply = serde_json::json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","message":{"id":"m1","content":[{"type":"text","text":format!("Toast is running the tests. [bro-response {request_id}]")}]}});
     std::fs::write(&transcript, format!("{reply}\n")).unwrap();
     a.voice.awaiting[0].since -= Duration::from_secs(5);
     a.panes.get_mut(&boss).unwrap().as_term().unwrap().set_insights(crate::panes::insights::Insights::from_transcript(bro_core::Harness::Claude, &transcript, None));
@@ -4517,7 +4518,7 @@ fn voice_starts_an_orchestrator_on_the_roomiest_login_and_goes_to_it() {
     a.focus_pane(boss);
     a.voice_message(VoiceMsg { text: "close Pinky".into(), focused: Some(a.panes[&boss].as_term_ref().unwrap().meta.sid.clone()), tag: None });
     let sent = String::from_utf8_lossy(&a.panes[&boss].as_term_ref().unwrap().sent).to_string();
-    assert!(sent.ends_with("[voice] close Pinky"), "looking at the orchestrator itself: just the words · {sent:?}");
+    assert!(sent.contains("[voice] close Pinky"), "looking at the orchestrator itself: just the words · {sent:?}");
 }
 
 #[test]
@@ -4548,18 +4549,36 @@ fn typed(a: &App, id: PaneId) -> String {
     String::from_utf8_lossy(&a.panes[&id].as_term_ref().unwrap().sent).to_string()
 }
 
+fn inbox_request_id(a: &App, id: PaneId) -> String {
+    typed(a, id).rsplit("[bro-request ").next().unwrap().split_whitespace().next().unwrap().to_owned()
+}
+
+fn inbox_reply(a: &mut App, boss: PaneId, request_id: &str, text: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("reply.jsonl");
+    let reply = serde_json::json!({"type":"assistant","timestamp":"2026-10-30T10:00:00Z","message":{"id":uuid::Uuid::new_v4().to_string(),"content":[{"type":"text","text":format!("{text} [bro-response {request_id}]")}]}});
+    std::fs::write(&transcript, format!("{reply}\n")).unwrap();
+    for awaiting in &mut a.voice.awaiting { awaiting.since -= Duration::from_secs(3); }
+    let t = a.panes.get_mut(&boss).unwrap().as_term().unwrap();
+    t.demo_activity = Some(Activity::Idle);
+    t.set_insights(crate::panes::insights::Insights::from_transcript(bro_core::Harness::Claude, &transcript, None));
+    a.pump_voice();
+}
+
 #[test]
 fn panels_schedules_and_stop_reach_the_orchestrator_session() {
     use bro_bridge::OrchestratorCommand as C;
     let mut a = app(true);
     let boss = ready_orchestrator(&mut a, bro_core::Harness::Claude);
     a.orchestrator_command(C::Message { id: "item1".into(), text: " is anything stuck? ".into(), voice: false, focused: None, tag: None });
-    assert!(typed(&a, boss).ends_with("[panel] is anything stuck?"), "{:?}", typed(&a, boss));
+    assert!(typed(&a, boss).contains("[panel] is anything stuck?"), "{:?}", typed(&a, boss));
     assert!(matches!(&a.voice.awaiting[..], [w] if w.reply == super::voice::Reply::Panel("item1".into())), "the panel waits for the answer");
     a.orchestrator_command(C::Scheduled { id: "ab12cd34".into(), name: "toast check".into(), prompt: "check Toast's tests".into(), persist: true });
-    assert!(typed(&a, boss).ends_with("[schedule \"toast check\" · persistent trigger ab12cd34] check Toast's tests"), "{:?}", typed(&a, boss));
+    assert!(!typed(&a, boss).contains("[schedule"), "a schedule cannot steal the panel's uncorrelated turn");
+    assert_eq!(a.voice.queue.len(), 1);
     a.orchestrator_command(C::Cancel);
     assert!(typed(&a, boss).ends_with('\x1b'), "stop is esc");
+    assert_eq!(a.voice.queue.len(), 1, "a separately scheduled trigger remains queued");
     // the orchestrator closes: whoever waits hears so, and its session schedule goes
     a.close(boss);
     assert!(a.voice.awaiting.is_empty());
@@ -4588,8 +4607,126 @@ fn the_orchestrator_clears_its_own_context_once_its_turn_ends() {
         a.pump_voice();
         let after = typed(&a, boss);
         assert!(after.contains("[fresh start · your handoff notes] Toast runs the tests in justgains"), "{after:?}");
-        assert!(after.ends_with("[panel] status"), "then what came after, in order: {after:?}");
+        assert!(!after.contains("[panel] status"), "the handoff gets its own correlated turn: {after:?}");
+        let handoff = inbox_request_id(&a,boss);
+        inbox_reply(&mut a,boss,&handoff,"Handoff restored");
+        assert!(typed(&a,boss).contains("[panel] status"), "the next request follows the completed handoff");
     }
+}
+
+#[test]
+fn inbox_correlates_two_requests_and_rejects_delayed_or_unrelated_replies() {
+    use bro_bridge::OrchestratorCommand as C;
+    let mut a = app(true);
+    let boss = ready_orchestrator(&mut a,bro_core::Harness::Claude);
+    let message = |id:&str,text:&str| C::Message { id:id.into(),text:text.into(),voice:false,focused:None,tag:None };
+    a.orchestrator_command(message("a","Task A"));
+    let first=inbox_request_id(&a,boss);
+    a.orchestrator_command(message("b","Task B"));
+    assert_eq!((a.voice.awaiting.len(),a.voice.queue.len()),(1,1));
+    inbox_reply(&mut a,boss,"another-request","An unrelated answer");
+    assert_eq!((a.voice.awaiting.len(),a.voice.queue.len()),(1,1));
+    assert!(!typed(&a,boss).contains("[panel] Task B"));
+    inbox_reply(&mut a,boss,&first,"A complete");
+    assert_eq!((a.voice.awaiting.len(),a.voice.queue.len()),(1,0));
+    let second=inbox_request_id(&a,boss);
+    assert_ne!(first,second);
+    inbox_reply(&mut a,boss,&first,"Delayed A completion");
+    assert_eq!(a.voice.awaiting.len(),1,"A cannot resolve B");
+    inbox_reply(&mut a,boss,&second,"B complete");
+    assert!(a.voice.awaiting.is_empty());
+}
+
+#[test]
+fn inbox_waits_for_a_ready_prompt_and_context_clear_keeps_awaiting_work() {
+    use bro_bridge::OrchestratorCommand as C;
+    let mut a=app(true);
+    let boss=ready_orchestrator(&mut a,bro_core::Harness::Claude);
+    a.panes.get_mut(&boss).unwrap().as_term().unwrap().demo_activity=Some(Activity::Working);
+    a.orchestrator_command(C::Message { id:"a".into(),text:"Work A".into(),voice:false,focused:None,tag:None });
+    assert!(typed(&a,boss).is_empty(),"ordinary assignments wait while a turn is running");
+    a.panes.get_mut(&boss).unwrap().as_term().unwrap().demo_activity=Some(Activity::Blocked);
+    a.pump_voice();assert!(typed(&a,boss).is_empty());
+    a.panes.get_mut(&boss).unwrap().as_term().unwrap().demo_activity=Some(Activity::Idle);
+    a.pump_voice();let first=inbox_request_id(&a,boss);
+    a.orchestrator_command(C::ClearContext { handoff:None });
+    a.voice.idle_since=Some(Instant::now()-Duration::from_secs(3));
+    a.pump_voice();
+    assert!(!typed(&a,boss).contains("/clear"),"idle alone cannot discard an awaiting request");
+    assert_eq!(a.voice.awaiting.len(),1);
+    inbox_reply(&mut a,boss,&first,"A completed");
+    assert!(typed(&a,boss).contains("/clear"));
+}
+
+#[test]
+fn inbox_persists_send_intent_off_thread_before_keys_and_reopens_without_replay() {
+    use bro_bridge::OrchestratorCommand as C;
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("inbox.json");
+    let mut a=app(true);let boss=ready_orchestrator(&mut a,bro_core::Harness::Claude);
+    let rx=a.test_inbox_store(path.clone());
+    a.orchestrator_command(C::Message {id:"original-panel".into(),text:"perform one side effect".into(),voice:false,focused:None,tag:None});
+    assert!(typed(&a,boss).is_empty(),"loading/saving cannot submit before acknowledgment");
+    let until=Instant::now()+Duration::from_secs(5);
+    while typed(&a,boss).is_empty() {
+        let Event::OrchestratorInbox(update)=rx.recv_timeout(until.saturating_duration_since(Instant::now())).unwrap() else {panic!()};
+        a.inbox_update(*update);
+        a.pump_voice();
+    }
+    let saved:serde_json::Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["awaiting"][0]["reply"]["Panel"],"original-panel");
+    assert!(saved["queue"].as_array().unwrap().is_empty());
+    drop(a);
+    let mut reopened=app(true);let fresh=ready_orchestrator(&mut reopened,bro_core::Harness::Claude);
+    let rx=reopened.test_inbox_store(path);
+    let until=Instant::now()+Duration::from_secs(5);
+    while reopened.voice.awaiting.is_empty() {
+        let Event::OrchestratorInbox(update)=rx.recv_timeout(until.saturating_duration_since(Instant::now())).unwrap() else {panic!()};
+        reopened.inbox_update(*update);reopened.pump_voice();
+    }
+    assert!(typed(&reopened,fresh).is_empty(),"uncertain sent work never replays into a new session");
+    assert_eq!(reopened.voice.awaiting[0].reply,super::voice::Reply::Panel("original-panel".into()));
+}
+
+#[test]
+fn inbox_timeout_retains_the_original_response_handle_until_real_completion() {
+    use bro_bridge::OrchestratorCommand as C;
+    let mut a=app(true);let boss=ready_orchestrator(&mut a,bro_core::Harness::Claude);
+    a.orchestrator_command(C::Message {id:"slow".into(),text:"long operation".into(),voice:false,focused:None,tag:None});
+    let id=inbox_request_id(&a,boss);
+    a.voice.awaiting[0].since-=Duration::from_secs(300);a.pump_voice();
+    assert_eq!(a.voice.awaiting.len(),1,"status notice is nonterminal");
+    inbox_reply(&mut a,boss,&id,"The actual result");assert!(a.voice.awaiting.is_empty());
+}
+
+#[test]
+fn inbox_explicit_answer_targets_the_blocked_request_without_starting_queued_work() {
+    use bro_bridge::OrchestratorCommand as C;
+    let mut a=app(true);let boss=ready_orchestrator(&mut a,bro_core::Harness::Claude);
+    a.orchestrator_command(C::Message {id:"a".into(),text:"Task A".into(),voice:false,focused:None,tag:None});
+    let target=inbox_request_id(&a,boss);
+    a.panes.get_mut(&boss).unwrap().as_term().unwrap().demo_activity=Some(Activity::Blocked);
+    a.orchestrator_command(C::Message {id:"b".into(),text:"Task B".into(),voice:false,focused:None,tag:None});
+    a.orchestrator_command(C::Control {id:"bad-control".into(),text:"must not be typed".into(),request_id:Some("wrong-request".into()),kind:"answer".into()});
+    assert!(!typed(&a,boss).contains("must not be typed"));
+    a.orchestrator_command(C::Control {id:"answer".into(),text:"Use the existing folder".into(),request_id:Some("a".into()),kind:"answer".into()});
+    assert!(typed(&a,boss).contains("Use the existing folder"));
+    assert!(!typed(&a,boss).contains("[panel] Task B"));
+    assert_eq!((a.voice.awaiting.len(),a.voice.queue.len()),(1,1),"control delivery acknowledges input; A retains its result handle");
+    inbox_reply(&mut a,boss,&target,"A completed");
+    assert!(typed(&a,boss).contains("[panel] Task B"));
+}
+
+#[test]
+fn tasks_view_exposes_outcome_states_and_keeps_working_sessions_open() {
+    let mut a=app(true);
+    let before=a.panes.values().filter(|p|p.is_terminal()).count();
+    a.run_act(Act::Tasks);
+    let text=draw(&mut a);
+    assert!(text.contains("Tasks")&&text.contains("Needs review"),"{text}");
+    assert!(text.contains("queued")&&text.contains("accepted"),"{text}");
+    assert_eq!(a.panes.values().filter(|p|p.is_terminal()).count(),before);
+    a.run_act(Act::Tasks);
+    assert_eq!(a.panes.values().filter(|p|p.view()==Some("tasks")).count(),1,"one task pane is reused");
 }
 
 #[test]

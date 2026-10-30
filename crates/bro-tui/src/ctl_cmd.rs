@@ -40,7 +40,12 @@ Exits 1 when the tool reports an error.
 
 /// `None` = print [`HELP`].
 pub fn parse(args: &[String]) -> Result<Option<CtlArgs>, String> {
-    let Some(first) = args.first() else { return Ok(Some(CtlArgs { tool: None, arguments: json!({}) })) };
+    let Some(first) = args.first() else {
+        return Ok(Some(CtlArgs {
+            tool: None,
+            arguments: json!({}),
+        }));
+    };
     if matches!(first.as_str(), "-h" | "--help" | "help") {
         return Ok(None);
     }
@@ -52,12 +57,18 @@ pub fn parse(args: &[String]) -> Result<Option<CtlArgs>, String> {
     if let [one] = rest
         && one.trim_start().starts_with('{')
     {
-        let v: Value = serde_json::from_str(one).map_err(|e| format!("the arguments aren't valid JSON: {e}"))?;
-        return Ok(Some(CtlArgs { tool: Some(tool), arguments: v }));
+        let v: Value = serde_json::from_str(one)
+            .map_err(|e| format!("the arguments aren't valid JSON: {e}"))?;
+        return Ok(Some(CtlArgs {
+            tool: Some(tool),
+            arguments: v,
+        }));
     }
     let mut map = Map::new();
     for a in rest {
-        let (k, v) = a.split_once('=').ok_or_else(|| format!("'{a}' isn't key=value (or pass one JSON object)"))?;
+        let (k, v) = a
+            .split_once('=')
+            .ok_or_else(|| format!("'{a}' isn't key=value (or pass one JSON object)"))?;
         let k = k.trim();
         if k.is_empty() {
             return Err(format!("'{a}' has no key"));
@@ -69,21 +80,58 @@ pub fn parse(args: &[String]) -> Result<Option<CtlArgs>, String> {
         };
         map.insert(k.to_string(), value);
     }
-    Ok(Some(CtlArgs { tool: Some(tool), arguments: Value::Object(map) }))
+    Ok(Some(CtlArgs {
+        tool: Some(tool),
+        arguments: Value::Object(map),
+    }))
 }
 
 /// One JSON-RPC call to `<bridge>/mcp`.
 fn rpc(bridge: &str, method: &str, params: Value) -> Result<Value, String> {
+    let headers = caller_headers(
+        std::env::var("BRO_SESSION_ID").ok().as_deref(),
+        std::env::var("BRO_TASK_TOKEN").ok().as_deref(),
+    );
+    let borrowed: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    rpc_with_headers(bridge, method, params, &borrowed)
+}
+
+fn rpc_with_headers(
+    bridge: &str,
+    method: &str,
+    params: Value,
+    headers: &[(&str, &str)],
+) -> Result<Value, String> {
     let url = format!("{}/mcp", bridge.trim_end_matches('/'));
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-    let resp = bro_core::http::post_json(&url, &body, TIMEOUT).map_err(|e| format!("bro isn't reachable at {bridge} ({})", e.chain().last().map(|c| c.to_string()).unwrap_or_default()))?;
+    let resp = bro_core::http::post_json_with(&url, headers, &body, TIMEOUT).map_err(|e| {
+        format!(
+            "bro isn't reachable at {bridge} ({})",
+            e.chain().last().map(|c| c.to_string()).unwrap_or_default()
+        )
+    })?;
     if !resp.ok() {
         return Err(format!("bro answered HTTP {}", resp.status));
     }
     if let Some(err) = resp.body.get("error") {
-        return Err(err["message"].as_str().unwrap_or("the call failed").to_string());
+        return Err(err["message"]
+            .as_str()
+            .unwrap_or("the call failed")
+            .to_string());
     }
     Ok(resp.body["result"].clone())
+}
+
+/// Scope managed-agent calls without changing the ordinary user CLI. Credentials never enter output.
+fn caller_headers(session: Option<&str>, token: Option<&str>) -> Vec<(&'static str, String)> {
+    [("x-bro-session-id", session), ("x-bro-task-token", token)]
+        .into_iter()
+        .filter_map(|(key, value)| {
+            value
+                .filter(|v| !v.trim().is_empty() && !v.contains(['\r', '\n']))
+                .map(|v| (key, v.to_owned()))
+        })
+        .collect()
 }
 
 /// The tool list as help text: name, description, then its arguments.
@@ -91,13 +139,28 @@ fn describe(tools: &Value) -> String {
     let mut out = String::new();
     for t in tools.as_array().into_iter().flatten() {
         let name = t["name"].as_str().unwrap_or_default();
-        out.push_str(&format!("{name}\n  {}\n", t["description"].as_str().unwrap_or_default()));
-        let required: Vec<&str> = t["inputSchema"]["required"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        out.push_str(&format!(
+            "{name}\n  {}\n",
+            t["description"].as_str().unwrap_or_default()
+        ));
+        let required: Vec<&str> = t["inputSchema"]["required"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
         if let Some(props) = t["inputSchema"]["properties"].as_object() {
             for (k, p) in props {
                 let kind = p["type"].as_str().unwrap_or("any");
-                let need = if required.contains(&k.as_str()) { ", required" } else { "" };
-                let what = p["description"].as_str().map(|d| format!(": {d}")).unwrap_or_default();
+                let need = if required.contains(&k.as_str()) {
+                    ", required"
+                } else {
+                    ""
+                };
+                let what = p["description"]
+                    .as_str()
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_default();
                 out.push_str(&format!("    {k} ({kind}{need}){what}\n"));
             }
         }
@@ -108,13 +171,32 @@ fn describe(tools: &Value) -> String {
 
 /// Run it. Ok = what to print on stdout; Err = the failure (the tool's own error text when it reports one).
 pub fn run(a: &CtlArgs, bridge: Option<&str>) -> Result<String, String> {
-    let bridge = bridge.ok_or("bro isn't running (no bridge found) — start bro, or turn its bridge on")?;
+    run_with_rpc(a, bridge, rpc)
+}
+
+fn run_with_rpc(
+    a: &CtlArgs,
+    bridge: Option<&str>,
+    call: impl Fn(&str, &str, Value) -> Result<Value, String>,
+) -> Result<String, String> {
+    let bridge =
+        bridge.ok_or("bro isn't running (no bridge found) — start bro, or turn its bridge on")?;
     let Some(tool) = &a.tool else {
-        let listed = rpc(bridge, "tools/list", json!({}))?;
+        let listed = call(bridge, "tools/list", json!({}))?;
         return Ok(describe(&listed["tools"]));
     };
-    let result = rpc(bridge, "tools/call", json!({ "name": tool, "arguments": a.arguments }))?;
-    let text = result["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+    let result = call(
+        bridge,
+        "tools/call",
+        json!({ "name": tool, "arguments": a.arguments }),
+    )?;
+    let text = result["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     if result["isError"].as_bool() == Some(true) {
         return Err(text);
     }
@@ -129,17 +211,143 @@ mod tests {
         parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
 
+    fn read_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+        fn more(stream: &mut std::net::TcpStream, bytes: &mut Vec<u8>) {
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).expect("read request");
+            assert!(n > 0, "client closed an incomplete request");
+            bytes.extend_from_slice(&buf[..n]);
+            assert!(bytes.len() < 1024 * 1024);
+        }
+        let mut bytes = Vec::new();
+        let body_start = loop {
+            if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            more(stream, &mut bytes);
+        };
+        let headers = String::from_utf8_lossy(&bytes[..body_start]).to_ascii_lowercase();
+        if let Some(length) = headers.lines().find_map(|line| {
+            line.strip_prefix("content-length:")
+                .map(|n| n.trim().parse::<usize>().unwrap())
+        }) {
+            while bytes.len() < body_start + length {
+                more(stream, &mut bytes);
+            }
+        } else if headers
+            .lines()
+            .any(|line| line.starts_with("transfer-encoding:") && line.contains("chunked"))
+        {
+            let mut cursor = body_start;
+            loop {
+                let end = loop {
+                    if let Some(i) = bytes[cursor..].windows(2).position(|w| w == b"\r\n") {
+                        break cursor + i;
+                    }
+                    more(stream, &mut bytes);
+                };
+                let length = usize::from_str_radix(
+                    std::str::from_utf8(&bytes[cursor..end])
+                        .unwrap()
+                        .split(';')
+                        .next()
+                        .unwrap(),
+                    16,
+                )
+                .unwrap();
+                cursor = end + 2;
+                if length == 0 {
+                    loop {
+                        let end = loop {
+                            if let Some(i) = bytes[cursor..].windows(2).position(|w| w == b"\r\n") {
+                                break cursor + i;
+                            }
+                            more(stream, &mut bytes);
+                        };
+                        if end == cursor {
+                            break;
+                        }
+                        cursor = end + 2;
+                    }
+                    break;
+                }
+                while bytes.len() < cursor + length + 2 {
+                    more(stream, &mut bytes);
+                }
+                assert_eq!(&bytes[cursor + length..cursor + length + 2], b"\r\n");
+                cursor += length + 2;
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn managed_calls_forward_identity_and_attempt_token_without_changing_unscoped_calls() {
+        use std::io::Write;
+        assert!(caller_headers(None, None).is_empty());
+        assert!(caller_headers(Some("bad\r\nheader"), Some(" ")).is_empty());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let bytes = read_request(&mut stream);
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            stream.flush().unwrap();
+            String::from_utf8_lossy(&bytes).to_ascii_lowercase()
+        });
+        let headers = caller_headers(Some("worker-a"), Some("test-attempt-token"));
+        let borrowed: Vec<_> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        assert_eq!(
+            rpc_with_headers(
+                &format!("http://{address}"),
+                "tools/list",
+                json!({}),
+                &borrowed
+            )
+            .unwrap()["ok"],
+            true
+        );
+        let request = server.join().unwrap();
+        assert!(request.contains("x-bro-session-id: worker-a"));
+        assert!(request.contains("x-bro-task-token: test-attempt-token"));
+        assert!(
+            request.contains("tools/list"),
+            "the server consumed the full JSON request body"
+        );
+    }
+
     #[test]
     fn parses_pairs_json_and_help() {
         assert_eq!(args(&[]).unwrap().unwrap().tool, None);
         assert_eq!(args(&["--help"]), Ok(None));
-        let a = args(&["send_input", "sessionId=Toast", "text=run the tests", "submit=false", "lines=40"]).unwrap().unwrap();
+        let a = args(&[
+            "send_input",
+            "sessionId=Toast",
+            "text=run the tests",
+            "submit=false",
+            "lines=40",
+        ])
+        .unwrap()
+        .unwrap();
         assert_eq!(a.tool.as_deref(), Some("send_input"));
-        assert_eq!(a.arguments, json!({ "sessionId": "Toast", "text": "run the tests", "submit": false, "lines": 40 }));
-        let a = args(&["wait_for_sessions", r#"{"sessionIds":["a"],"mode":"any"}"#]).unwrap().unwrap();
+        assert_eq!(
+            a.arguments,
+            json!({ "sessionId": "Toast", "text": "run the tests", "submit": false, "lines": 40 })
+        );
+        let a = args(&["wait_for_sessions", r#"{"sessionIds":["a"],"mode":"any"}"#])
+            .unwrap()
+            .unwrap();
         assert_eq!(a.arguments["sessionIds"], json!(["a"]));
         // a quoted JSON string stays the text it was typed as
-        assert_eq!(args(&["x", "text=\"hi\""]).unwrap().unwrap().arguments["text"], "\"hi\"");
+        assert_eq!(
+            args(&["x", "text=\"hi\""]).unwrap().unwrap().arguments["text"],
+            "\"hi\""
+        );
         assert!(args(&["x", "oops"]).is_err());
         assert!(args(&["--nope"]).is_err());
     }
@@ -149,19 +357,56 @@ mod tests {
         crate::testkit::isolate();
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = std::sync::mpsc::channel();
-        let cfg = bro_bridge::BridgeConfig { port: 0, automatic_port: false, bind: "127.0.0.1".into(), data_root: dir.path().join("bridge"), web_interface: false };
-        let bridge = bro_bridge::Bridge::start_with(cfg, bro_bridge::StartOptions { import_legacy_token: false }, Box::new(move |c| {
-            let _ = tx.send(c);
-        }))
+        let cfg = bro_bridge::BridgeConfig {
+            port: 0,
+            automatic_port: false,
+            bind: "127.0.0.1".into(),
+            data_root: dir.path().join("bridge"),
+            web_interface: false,
+        };
+        let bridge = bro_bridge::Bridge::start_with(
+            cfg,
+            bro_bridge::StartOptions {
+                import_legacy_token: false,
+            },
+            Box::new(move |c| {
+                let _ = tx.send(c);
+            }),
+        )
         .unwrap();
         let url = bridge.local_url().unwrap();
-        let listed = run(&CtlArgs { tool: None, arguments: json!({}) }, Some(&url)).unwrap();
-        assert!(listed.contains("list_sessions") && listed.contains("sessionId (string, required)"), "{listed}");
+        let run = |args: &CtlArgs, url: Option<&str>| {
+            run_with_rpc(args, url, |url, method, params| {
+                rpc_with_headers(url, method, params, &[])
+            })
+        };
+        let listed = run(
+            &CtlArgs {
+                tool: None,
+                arguments: json!({}),
+            },
+            Some(&url),
+        )
+        .unwrap();
+        assert!(
+            listed.contains("list_sessions") && listed.contains("sessionId (string, required)"),
+            "{listed}"
+        );
         let sessions = run(&args(&["list_sessions"]).unwrap().unwrap(), Some(&url)).unwrap();
         assert_eq!(sessions.trim(), "[]");
-        let err = run(&args(&["read_session", "sessionId=nobody"]).unwrap().unwrap(), Some(&url)).unwrap_err();
+        let err = run(
+            &args(&["read_session", "sessionId=nobody"])
+                .unwrap()
+                .unwrap(),
+            Some(&url),
+        )
+        .unwrap_err();
         assert!(err.contains("No session matches"), "{err}");
-        assert!(run(&args(&["list_sessions"]).unwrap().unwrap(), None).unwrap_err().contains("isn't running"));
+        assert!(
+            run(&args(&["list_sessions"]).unwrap().unwrap(), None)
+                .unwrap_err()
+                .contains("isn't running")
+        );
         bridge.shutdown();
     }
 
@@ -176,13 +421,37 @@ mod tests {
         crate::testkit::isolate();
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let cfg = bro_bridge::BridgeConfig { port: 0, automatic_port: false, bind: "127.0.0.1".into(), data_root: dir.path().join("bridge"), web_interface: false };
-        let bridge = bro_bridge::Bridge::start_with(cfg, bro_bridge::StartOptions { import_legacy_token: false }, Box::new(move |c| {
-            let _ = tx.send(c);
-        }))
+        let cfg = bro_bridge::BridgeConfig {
+            port: 0,
+            automatic_port: false,
+            bind: "127.0.0.1".into(),
+            data_root: dir.path().join("bridge"),
+            web_interface: false,
+        };
+        let bridge = bro_bridge::Bridge::start_with(
+            cfg,
+            bro_bridge::StartOptions {
+                import_legacy_token: false,
+            },
+            Box::new(move |c| {
+                let _ = tx.send(c);
+            }),
+        )
         .unwrap();
         let url = bridge.local_url().unwrap();
-        let meta = |id: &str, title: &str, kind: Option<&str>| bro_bridge::SessionMeta { id: id.into(), title: title.into(), shell: "claude".into(), args: vec![], cwd: Some(dir.path().to_path_buf()), project: None, pid: None, cols: 100, rows: 30, agent: Some("claude".into()), kind: kind.map(String::from) };
+        let meta = |id: &str, title: &str, kind: Option<&str>| bro_bridge::SessionMeta {
+            id: id.into(),
+            title: title.into(),
+            shell: "claude".into(),
+            args: vec![],
+            cwd: Some(dir.path().to_path_buf()),
+            project: None,
+            pid: None,
+            cols: 100,
+            rows: 30,
+            agent: Some("claude".into()),
+            kind: kind.map(String::from),
+        };
         bridge.register(meta("worker-1", "Toast · demo", None));
         bridge.register(meta("boss-1", "orchestrator", Some("orchestrator")));
         let ask = "Use your bro tools: find the session named Toast and type exactly the text PING-FROM-ORCHESTRATOR into it (submit it). Then reply with the word DONE.";
@@ -190,7 +459,9 @@ mod tests {
         let typed_into_toast = |rx: &std::sync::mpsc::Receiver<bro_bridge::BridgeCommand>| {
             let until = std::time::Instant::now() + Duration::from_secs(5);
             let mut text = String::new();
-            while let Ok(c) = rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+            while let Ok(c) =
+                rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+            {
                 if let bro_bridge::BridgeCommand::Input { id, data } = c {
                     assert_eq!(id, "worker-1", "never into the orchestrator itself");
                     text.push_str(&String::from_utf8_lossy(&data));
@@ -202,29 +473,73 @@ mod tests {
         // Claude Code: --append-system-prompt-file + --mcp-config + --allowedTools mcp__bro
         let prompt = orch::write_prompt(Harness::Claude).unwrap();
         let mcp = orch::write_mcp_config(&url).unwrap();
-        let (program, cargs) = bro_core::launch::program_and_args("claude", vec![
-            "-p".into(), ask.into(), "--model".into(), "sonnet".into(),
-            "--append-system-prompt-file".into(), prompt.to_string_lossy().into_owned(),
-            "--allowedTools".into(), "mcp__bro".into(),
-            "--mcp-config".into(), mcp.to_string_lossy().into_owned(),
-        ]);
-        let out = std::process::Command::new(program).args(cargs).current_dir(dir.path()).env_remove("CLAUDECODE").env_remove("CLAUDE_CODE_ENTRYPOINT").output().unwrap();
+        let (program, cargs) = bro_core::launch::program_and_args(
+            "claude",
+            vec![
+                "-p".into(),
+                ask.into(),
+                "--model".into(),
+                "sonnet".into(),
+                "--append-system-prompt-file".into(),
+                prompt.to_string_lossy().into_owned(),
+                "--allowedTools".into(),
+                "mcp__bro".into(),
+                "--mcp-config".into(),
+                mcp.to_string_lossy().into_owned(),
+            ],
+        );
+        let out = std::process::Command::new(program)
+            .args(cargs)
+            .current_dir(dir.path())
+            .env_remove("CLAUDECODE")
+            .env_remove("CLAUDE_CODE_ENTRYPOINT")
+            .output()
+            .unwrap();
         let reply = String::from_utf8_lossy(&out.stdout);
-        assert!(reply.contains("DONE"), "claude: {reply}\n{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            reply.contains("DONE"),
+            "claude: {reply}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let typed = typed_into_toast(&rx);
-        assert!(typed.contains("PING-FROM-ORCHESTRATOR"), "claude typed {typed:?}");
+        assert!(
+            typed.contains("PING-FROM-ORCHESTRATOR"),
+            "claude typed {typed:?}"
+        );
 
         // Codex: -c mcp_servers.bro.* + developer_instructions
-        let mut cargs = vec!["exec".to_string(), "--skip-git-repo-check".into(), "--dangerously-bypass-approvals-and-sandbox".into()];
+        let mut cargs = vec![
+            "exec".to_string(),
+            "--skip-git-repo-check".into(),
+            "--dangerously-bypass-approvals-and-sandbox".into(),
+        ];
         cargs.extend(orch::codex_mcp_args(&url));
-        cargs.extend(["-c".into(), format!("developer_instructions={}", serde_json::to_string(&orch::prompt(Harness::Codex)).unwrap())]);
+        cargs.extend([
+            "-c".into(),
+            format!(
+                "developer_instructions={}",
+                serde_json::to_string(&orch::prompt(Harness::Codex)).unwrap()
+            ),
+        ]);
         cargs.push(ask.into());
         let (program, cargs) = bro_core::launch::program_and_args("codex", cargs);
-        let out = std::process::Command::new(program).args(cargs).current_dir(dir.path()).stdin(std::process::Stdio::null()).output().unwrap();
+        let out = std::process::Command::new(program)
+            .args(cargs)
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
         let reply = String::from_utf8_lossy(&out.stdout);
-        assert!(reply.contains("DONE"), "codex: {reply}\n{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            reply.contains("DONE"),
+            "codex: {reply}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let typed = typed_into_toast(&rx);
-        assert!(typed.contains("PING-FROM-ORCHESTRATOR"), "codex typed {typed:?}");
+        assert!(
+            typed.contains("PING-FROM-ORCHESTRATOR"),
+            "codex typed {typed:?}"
+        );
         bridge.shutdown();
     }
 }

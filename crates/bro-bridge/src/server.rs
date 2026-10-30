@@ -137,6 +137,9 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/api/peers/{*rest}", any(rest::peers_unavailable))
         .route("/api/orchestrator", get(rest::orchestrator_status))
+        .route("/api/coordination", get(crate::coordination::http_snapshot))
+        .route("/api/coordination/command", post(crate::coordination::http_command))
+        .route("/api/coordination/{operation}", post(crate::coordination::http_tool))
         .route(
             "/api/orchestrator/config",
             get(rest::orchestrator_config)
@@ -281,6 +284,7 @@ pub(crate) fn spawn_background(state: &AppState) {
         }
     });
     crate::hosts::spawn(state);
+    crate::coordination::spawn_supervisor(state);
     let observer = state.clone();
     tokio::spawn(async move {
         loop {

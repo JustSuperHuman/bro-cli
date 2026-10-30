@@ -46,6 +46,9 @@ mod apps;
 mod alerts;
 mod auth;
 mod commands;
+mod coordination;
+mod coordination_evidence;
+mod coordination_worktrees;
 mod conversation;
 pub mod file_links;
 pub mod file_preview;
@@ -198,6 +201,8 @@ pub enum FocusControlChange {
 
 /// Commands the bridge asks bro to execute on its PTYs.
 pub enum BridgeCommand {
+    /// A durable task needs its coordinator. The inbox deduplicates this task/revision/action.
+    CoordinationWake { task_id: String, revision: u64, seq: u64, project: PathBuf, action: String },
     /// The desktop and phone share the model and thinking controls, including changes waiting for a turn to end.
     FocusControls {
         id: String,
@@ -271,6 +276,8 @@ pub enum BridgeCommand {
 /// the built-in orchestrator (Hugh) used to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OrchestratorCommand {
+    /// Explicit response or steering for an in-flight request; never interpreted as a new assignment.
+    Control { id: String, text: String, request_id: Option<String>, kind: String },
     /// A message from an orchestrator panel (web, phone): answer with [`Bridge::orchestrator_answer`] and `id`.
     Message { id: String, text: String, voice: bool, focused: Option<String>, tag: Option<String> },
     /// A scheduled trigger came due (bro fires it; type `prompt` in).
@@ -284,6 +291,7 @@ pub enum OrchestratorCommand {
 impl std::fmt::Debug for BridgeCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::CoordinationWake { task_id, revision, seq, project, action } => f.debug_struct("CoordinationWake").field("task_id", task_id).field("revision", revision).field("seq", seq).field("project", project).field("action", action).finish(),
             Self::FocusControls { id, change, .. } => f.debug_struct("FocusControls").field("id", id).field("change", change).finish(),
             Self::Seen { id, event_id } => f.debug_struct("Seen").field("id", id).field("event_id", event_id).finish(),
             Self::Input { id, data } => f
@@ -519,6 +527,21 @@ impl Bridge {
 
     pub fn unregister(&self, id: &str) {
         self.state().unregister(id);
+    }
+
+    /// Durable task state. Performs file I/O; call from a worker thread.
+    pub fn coordination_snapshot(&self) -> Result<bro_core::coordination::Snapshot, String> {
+        coordination::snapshot_sync(&self.state())
+    }
+
+    /// A recoverable task context packet. Performs file I/O; call off the UI thread.
+    pub fn coordination_context(&self, task_id: &str) -> Result<bro_core::coordination::ContextPacket, String> {
+        coordination::context_sync(&self.state(), task_id)
+    }
+
+    /// Apply a coordinator transition through the shared durable authority, off the UI thread.
+    pub fn coordination_execute(&self, command_id: &str, actor: &bro_core::coordination::Actor, command: bro_core::coordination::Command) -> Result<bro_core::coordination::Outcome, String> {
+        coordination::execute_sync(&self.state(), command_id, actor, command)
     }
 
     /// Why the agent waits and its recap (`docs/agent-insights.md`). Publishes

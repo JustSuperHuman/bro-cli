@@ -89,6 +89,9 @@ pub(crate) struct AppState {
     pub conversations: Arc<crate::conversation::Feeds>,
     /// MCP work for each session's Claude Code mod (see [`crate::mod_jobs`]).
     pub mod_jobs: Arc<crate::mod_jobs::ModJobs>,
+    /// Host exit observations survive unregister. Missing registry entries are never exit proof.
+    pub coordination_exits: Arc<Mutex<HashMap<String, (Option<u32>, String, i64)>>>,
+    pub coordination_wakes: Arc<Mutex<HashMap<String, (u64, u64, String)>>>,
 }
 
 impl AppState {
@@ -132,6 +135,8 @@ impl AppState {
             hosts: Arc::new(crate::hosts::HostDirectory::new()),
             conversations: Arc::new(crate::conversation::Feeds::default()),
             mod_jobs: Arc::new(crate::mod_jobs::ModJobs::default()),
+            coordination_exits: Arc::new(Mutex::new(HashMap::new())),
+            coordination_wakes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -333,6 +338,7 @@ impl AppState {
             session.summary.updated_at = iso_now();
             session.summary.clone()
         };
+        self.coordination_exits.lock().insert(session_id.into(), (summary.pid, summary.created_at.clone(), chrono::Utc::now().timestamp()));
         self.notifications.lock().cancel_bell(session_id);
         self.publish(ServerEvent::session(
             json!({

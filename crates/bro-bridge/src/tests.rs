@@ -50,6 +50,7 @@ impl Harness {
             let seen = seen.clone();
             let slot = slot.clone();
             move |command: BridgeCommand| match command {
+                BridgeCommand::CoordinationWake { .. } => {},
                 BridgeCommand::FocusControls { id, change, reply } => {
                     let _ = reply.send(Ok(json!({ "sessionId": id, "change": change, "model": null, "effort": null, "models": [], "levels": [{"id":"high"}], "pending": false })));
                 }
@@ -62,6 +63,7 @@ impl Harness {
                         args: vec![], cwd: Some(cwd.clone()), project: Some(cwd), pid: Some(8),
                         cols: 100, rows: 30, agent: Some("codex".into()), kind: Some("orchestrator".into()),
                     });
+                    {let mut inner=slot.get().unwrap().state().inner.lock();let session=inner.sessions.get_mut(&id).unwrap();session.seq=1;session.summary.agent=Some("codex".into());session.summary.agent_activity=Some("idle".into());}
                     let _ = reply.send(Ok(id));
                 }
                 BridgeCommand::Input { id, data } => seen
@@ -1216,10 +1218,14 @@ async fn project_orchestrators_open_from_a_source_and_receive_delegated_work() {
         async move { client.post(url).json(&body).send().await.unwrap().json::<Value>().await.unwrap() }
     };
     let project = harness.root.path().to_path_buf();
-    let opened = call("open_orchestrator", json!({ "project": project, "sourceSessionId": "workspace-coordinator", "focus": true })).await;
+    let opened = call("open_orchestrator", json!({ "project": project, "sourceSessionId": "workspace-coordinator", "focus": true,"task":"Produce the requested report","origin":{"originRequestId":"user-request-7","replyChannel":"panel","replyHandle":"original-panel-reply"} })).await;
     assert_eq!(opened["result"]["isError"], false, "{opened}");
     let data: Value = serde_json::from_str(opened["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(data["id"], "project-coordinator");
+    assert_eq!(data["originForwarded"],true);
+    let forwarded=harness.seen.lock().iter().filter_map(|seen|match seen{Seen::Input(id,text) if id=="project-coordinator"=>Some(text.clone()),_=>None}).collect::<String>();
+    assert!(forwarded.contains("[bro-request-origin {"),"{forwarded}");
+    assert!(forwarded.contains("user-request-7")&&forwarded.contains("original-panel-reply"),"{forwarded}");
     assert!(harness.seen.lock().iter().any(|s| matches!(s, Seen::OpenOrchestrator(cwd, source) if bro_core::util::same_path(cwd, &project) && source == "workspace-coordinator")));
     assert!(harness.seen.lock().contains(&Seen::Focus("project-coordinator".into())));
     let list = call("list_sessions", json!({})).await;
@@ -1972,7 +1978,7 @@ async fn cleanup_usage_and_fleet_tools() {
         }
     };
     let waited = call(1, "wait_for_sessions", json!({ "sessionIds": ["alpha", "bravo title"], "timeoutSeconds": 10 })).await;
-    assert_eq!(waited["outcome"], "every tab finished", "{waited}");
+    assert_eq!(waited["outcome"], "every tab settled", "{waited}");
     assert_eq!(waited["sessions"][1]["id"], "bravo");
     assert_eq!(waited["sessions"][0]["state"], "idle");
     let usage = call(2, "get_usage", json!({})).await;

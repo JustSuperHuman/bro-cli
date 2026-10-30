@@ -51,6 +51,7 @@ pub mod managed_skill;
 pub mod self_update;
 pub mod proc_tree;
 pub mod orchestrator;
+pub mod coordination;
 pub mod peon;
 pub mod agent_teams;
 

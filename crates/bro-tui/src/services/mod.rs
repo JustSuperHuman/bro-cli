@@ -178,6 +178,7 @@ struct Inner {
     teams: Mutex<Vec<LiveTeam>>,
     /// The sidebar's projects (kept current by the UI loop while the Skills view is open), whose own skills it lists.
     sidebar_projects: Mutex<Vec<KnownProject>>,
+    task_workers: RwLock<HashMap<String, String>>,
     /// The session server this window drives (see [`host`]).
     host: RwLock<Option<bro_host::Client>>,
 }
@@ -335,6 +336,12 @@ pub fn load_settings() -> (Settings, Option<String>) {
 }
 
 impl Services {
+    #[cfg(test)]
+    pub(crate) fn coordination_test_bridge(bridge: Bridge) -> Services {
+        let (tx,_rx)=std::sync::mpsc::channel();
+        let svc=Services::with_state(Services::empty_state(fallback_settings()),tx,false,false);
+        *svc.inner.bridge.write()=Some(bridge);svc
+    }
     fn with_state(state: State, tx: Sender<Event>, demo: bool, guest: bool) -> Services {
         Services {
             inner: Arc::new(Inner {
@@ -355,6 +362,7 @@ impl Services {
                 login_watch: Mutex::new(Default::default()),
                 teams: Mutex::new(vec![]),
                 sidebar_projects: Mutex::new(vec![]),
+                task_workers: RwLock::new(HashMap::new()),
                 host: RwLock::new(None),
             }),
         }
@@ -829,6 +837,15 @@ impl Services {
         self.inner.sidebar_projects.lock().clone()
     }
 
+    pub(crate) fn set_coordination_workers(&self, names: HashMap<String, String>) {
+        let mut cached = self.inner.task_workers.write();
+        if *cached != names { *cached = names; }
+    }
+
+    pub(crate) fn coordination_workers(&self) -> HashMap<String, String> {
+        self.inner.task_workers.read().clone()
+    }
+
     pub(crate) fn focused_session(&self) -> Option<String> {
         self.inner.focused.lock().clone()
     }
@@ -842,6 +859,39 @@ impl Services {
     /// The orchestrator session's answer to a panel message the bridge routed to it.
     pub(crate) fn orchestrator_answer(&self, id: &str, text: &str, ok: bool) {
         self.with_bridge("bridge::orchestrator_answer", |b| b.orchestrator_answer(id, text, ok));
+    }
+
+    /// Read from a background worker; drawing only consumes the pane's cached snapshot.
+    pub(crate) fn coordination_snapshot(&self) -> Result<bro_core::coordination::Snapshot, String> {
+        if self.is_demo() { return Ok(crate::views::coordination::demo_snapshot()); }
+        let mut result = Err("The bridge is unavailable. Turn it on in Bridge, then refresh Tasks.".into());
+        self.with_bridge("bridge::coordination_snapshot", |b| result = b.coordination_snapshot());
+        result
+    }
+
+    pub(crate) fn coordination_execute(&self, id: &str, command: bro_core::coordination::Command) -> Result<bro_core::coordination::Outcome, String> {
+        if self.is_demo() { return Err("Demo tasks are examples. Open Tasks outside demo to change real work.".into()); }
+        let mut result = Err("The bridge is unavailable. Turn it on in Bridge, then retry.".into());
+        let actor = bro_core::coordination::Actor { id: "desktop".into(), role: bro_core::coordination::ActorRole::Coordinator };
+        self.with_bridge("bridge::coordination_execute", |b| result = b.coordination_execute(id, &actor, command));
+        result
+    }
+
+    pub(crate) fn coordination_context(&self, id: &str) -> Result<bro_core::coordination::ContextPacket, String> {
+        if self.is_demo() {
+            let snapshot = crate::views::coordination::demo_snapshot();
+            return snapshot.tasks.into_iter().find(|t| t.id == id).map(|task| {
+                let checkpoint=bro_core::coordination::Checkpoint {task_id:task.id.clone(),revision:task.revision,summary:task.progress.clone().unwrap_or_default(),next_steps:(!task.next_action.is_empty()).then(||task.next_action.clone()).into_iter().collect(),..Default::default()};
+                bro_core::coordination::ContextPacket {task,checkpoint:Some(checkpoint),..Default::default()}
+            }).ok_or_else(|| "Task no longer exists".into());
+        }
+        let mut result = Err("The bridge is unavailable. Turn it on in Bridge, then refresh Tasks.".into());
+        self.with_bridge("bridge::coordination_context", |b| result = b.coordination_context(id));
+        result
+    }
+
+    pub(crate) fn coordination_task_action(&self, task_id: &str, revision: u64, action: &str) {
+        self.send(Event::CoordinationTaskAction { task_id: task_id.into(), revision, action: action.into() });
     }
 
     /// The orchestrator closed: its session-only scheduled triggers go with it.

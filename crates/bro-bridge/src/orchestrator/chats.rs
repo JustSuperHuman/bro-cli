@@ -8,7 +8,7 @@ use bro_core::sessions::{self, ListOpts, SessionInfo};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 const LIST_SCAN: usize = 300;
 const DEFAULT_MESSAGES: usize = 40;
@@ -73,8 +73,7 @@ pub fn list(project: Option<&str>, query: Option<&str>, limit: usize) -> Value {
     json!({ "chats": found, "scanned": all.len() })
 }
 
-/// The transcript a live session is writing: newest chat of its agent in its
-/// directory, touched since the session started.
+/// A host-bound transcript or native chat identity. Shared directories do not identify a conversation.
 fn live_transcript(app: &AppState, session_id: &str) -> Result<SessionInfo, String> {
     let summary = app
         .summary(session_id)
@@ -82,27 +81,22 @@ fn live_transcript(app: &AppState, session_id: &str) -> Result<SessionInfo, Stri
     let harness = harness_of(summary.agent.as_deref()).ok_or(
         "That tab is not running Claude Code or Codex, so it has no chat transcript; use read_session.",
     )?;
-    let started = DateTime::parse_from_rfc3339(&summary.created_at)
-        .map(|at| SystemTime::from(at.with_timezone(&Utc)))
-        .unwrap_or(SystemTime::UNIX_EPOCH)
-        .checked_sub(Duration::from_secs(5))
-        .unwrap_or(SystemTime::UNIX_EPOCH);
     let cwd = Path::new(&summary.cwd);
-    sessions::list(&ListOpts {
-        limit: 120,
-        harnesses: vec![harness],
-    })
-    .into_iter()
-    .find(|info| {
-        info.modified >= started
-            && info
-                .cwd
-                .as_deref()
-                .is_some_and(|dir| bro_core::util::same_path(dir, cwd))
-    })
+    let bound = app.conversation_source(session_id).and_then(|(path, _)| path);
+    let native_id = summary.acp_session_id.as_deref();
+    let found = if let Some(path) = bound {
+        sessions::list(&ListOpts { limit: LIST_SCAN, harnesses: vec![harness] })
+            .into_iter().find(|info| bro_core::util::same_path(&info.path, &path)
+                && native_id.is_none_or(|id| info.id == id))
+    } else if let Some(id) = native_id {
+        sessions::find_by_id(harness, id)
+    } else {
+        None
+    };
+    found.filter(|info| info.cwd.as_deref().is_some_and(|dir| bro_core::util::same_path(dir, cwd)))
     .ok_or_else(|| {
         format!(
-            "No {} transcript for \"{}\" yet (the agent writes one after its first message).",
+            "The {} transcript identity for \"{}\" is not bound yet. Use read_session or an explicit chatId from list_chats; a chat in the same folder may belong to another worker.",
             harness.label(),
             summary.title
         )

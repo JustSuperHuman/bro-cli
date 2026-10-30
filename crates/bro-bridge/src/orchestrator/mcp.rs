@@ -8,7 +8,7 @@ use super::tools;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
@@ -28,7 +28,12 @@ fn error(id: &Value, code: i64, message: &str) -> Value {
 }
 
 /// Answers one JSON-RPC message; `None` for notifications.
+#[cfg(test)]
 pub(crate) async fn handle_message(app: &AppState, message: &Value) -> Option<Value> {
+    handle_message_for_session(app, message, None).await
+}
+
+async fn handle_message_for_session(app: &AppState, message: &Value, caller: Option<&str>) -> Option<Value> {
     let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -59,12 +64,14 @@ pub(crate) async fn handle_message(app: &AppState, message: &Value) -> Option<Va
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return Some(error(&id, -32602, "tools/call needs a tool name."));
             };
-            let arguments = params
+            let mut arguments = params
                 .get("arguments")
                 .cloned()
                 .filter(Value::is_object)
                 .unwrap_or_else(|| json!({}));
-            let (text, is_error) = match tools::execute(app, name, &arguments).await {
+            if let Some(token) = message.get("_broWorkerToken").and_then(Value::as_str) { arguments["workerToken"] = json!(token); }
+            let worker_scoped = arguments.get("workerToken").is_some();
+            let (text, is_error) = match tools::execute_with_worker_scope(app, name, &arguments, caller, worker_scoped).await {
                 Ok(text) => (text, false),
                 Err(message) => (message, true),
             };
@@ -79,12 +86,15 @@ pub(crate) async fn handle_message(app: &AppState, message: &Value) -> Option<Va
     })
 }
 
-pub(crate) async fn post(State(app): State<AppState>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn post(State(app): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    let caller = headers.get("x-bro-session-id").and_then(|value| value.to_str().ok());
+    let token = headers.get("x-bro-task-token").and_then(|value| value.to_str().ok());
+    let with_token = |mut message:Value| { if let Some(token)=token { message["_broWorkerToken"] = json!(token); } message };
     match body {
         Value::Array(batch) => {
             let mut answers = Vec::new();
-            for message in &batch {
-                if let Some(answer) = handle_message(&app, message).await {
+            for message in batch {
+                if let Some(answer) = handle_message_for_session(&app, &with_token(message), caller).await {
                     answers.push(answer);
                 }
             }
@@ -94,7 +104,7 @@ pub(crate) async fn post(State(app): State<AppState>, Json(body): Json<Value>) -
                 Json(Value::Array(answers)).into_response()
             }
         }
-        message => match handle_message(&app, &message).await {
+        message => match handle_message_for_session(&app, &with_token(message), caller).await {
             Some(answer) => Json(answer).into_response(),
             None => StatusCode::ACCEPTED.into_response(),
         },

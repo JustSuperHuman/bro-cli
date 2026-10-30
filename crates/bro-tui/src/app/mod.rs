@@ -18,6 +18,7 @@ mod history;
 pub(crate) mod hosting;
 mod input;
 pub(crate) mod insights;
+pub(crate) mod inbox_store;
 mod menu;
 mod mouse;
 mod overlays;
@@ -108,6 +109,7 @@ pub(crate) enum SideHit {
     Bridge,
     /// the new-session strip's gear: the settings view
     Settings,
+    Tasks,
     /// the new-session strip's icons: claude / codex, or a terminal (None)
     Quick(Option<bro_core::Harness>),
     /// the new-session strip's "+" and key hint: the launcher
@@ -946,6 +948,7 @@ impl App {
         self.update_insights();
         self.publish_teams();
         self.publish_projects();
+        self.svc.set_coordination_workers(self.panes.values().filter_map(|p| p.as_term_ref().map(|t| (t.meta.sid.clone(), t.display_name()))).collect());
         self.pump_voice();
         self.toasts.expire();
     }
@@ -977,6 +980,7 @@ impl App {
         for id in ids {
             self.close(id);
         }
+        self.finish_inbox();
         // a server left with nothing to run stops: the next bro starts a fresh one (its own version). One that
         // starts when you sign in stays, unless it runs an older bro. A viewer leaves it to the bro it watched.
         if self.left_running == 0
@@ -1190,6 +1194,8 @@ impl App {
             Event::FolderCreated(request, result) => self.project_folder_created(request, result),
             Event::Watchdog(u) => self.watchdog_event(u),
             Event::Voice(m) => self.voice_message(*m),
+            Event::CoordinationTaskAction {task_id, revision, action} => self.coordination_task_action(&task_id, revision, &action),
+            Event::OrchestratorInbox(update) => self.inbox_update(*update),
             Event::Host(e) => self.host_event(e),
             Event::ThemeFilesChanged => {
                 if theme::is_custom(&self.theme.name) {

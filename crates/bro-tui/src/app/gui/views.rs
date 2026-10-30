@@ -5,6 +5,7 @@
 use super::kit::Ui;
 use crate::app::App;
 use crate::pane::{Cx, PaneId};
+use crate::views::coordination::CoordinationView;
 use crate::views::{bridge::BridgeView, profiles::ProfilesView, proxy::ProxyView, quick_install::QuickInstallView, settings::SettingsView, setup::SetupView, skills::SkillsView, sounds::SoundsView, stats::StatsView, usage::UsageView};
 use bro_gfx::{Point, Rect};
 use crossterm::event::KeyModifiers;
@@ -31,7 +32,9 @@ fn with_view<R>(app: &mut App, id: PaneId, focused: bool, f: impl FnOnce(&mut dy
 /// UI's drawing instead.
 pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, focused: bool) -> bool {
     with_view(app, id, focused, |any, cx| {
-        if let Some(v) = any.downcast_mut::<SettingsView>() {
+        if let Some(v) = any.downcast_mut::<CoordinationView>() {
+            crate::views::coordination::gui::draw(v, ui, area, cx)
+        } else if let Some(v) = any.downcast_mut::<SettingsView>() {
             crate::views::settings::gui::draw(v, ui, area, cx)
         } else if let Some(v) = any.downcast_mut::<StatsView>() {
             crate::views::stats::gui::draw(v, ui, area, cx)
@@ -61,7 +64,9 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, focused: bool) -
 /// Target `n` of view pane `id` was clicked.
 pub fn click(app: &mut App, id: PaneId, n: usize, p: Point, m: KeyModifiers, count: u32) {
     with_view(app, id, true, |any, cx| {
-        if let Some(v) = any.downcast_mut::<SettingsView>() {
+        if let Some(v) = any.downcast_mut::<CoordinationView>() {
+            crate::views::coordination::gui::click(v, n, p, m, count, cx)
+        } else if let Some(v) = any.downcast_mut::<SettingsView>() {
             crate::views::settings::gui::click(v, n, p, m, count, cx)
         } else if let Some(v) = any.downcast_mut::<StatsView>() {
             crate::views::stats::gui::click(v, n, p, m, count, cx)
@@ -97,7 +102,9 @@ pub fn context(app: &mut App, id: PaneId, n: usize, p: Point) {
 /// The wheel over view pane `id` (`n`: the target under the pointer, if any).
 pub fn wheel(app: &mut App, id: PaneId, n: Option<usize>, down: bool) {
     with_view(app, id, true, |any, cx| {
-        if let Some(v) = any.downcast_mut::<SettingsView>() {
+        if let Some(v) = any.downcast_mut::<CoordinationView>() {
+            crate::views::coordination::gui::wheel(v, n, down, cx)
+        } else if let Some(v) = any.downcast_mut::<SettingsView>() {
             crate::views::settings::gui::wheel(v, n, down, cx)
         } else if let Some(v) = any.downcast_mut::<StatsView>() {
             crate::views::stats::gui::wheel(v, n, down, cx)

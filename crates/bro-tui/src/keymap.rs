@@ -93,6 +93,8 @@ pub enum Act {
     Reload,
     /// Go to bro's orchestrator, or start one (the launcher on its tab).
     Orchestrator,
+    /// Durable outcomes, blockers, evidence, and recovery.
+    Tasks,
     SwitchLogin,
     CloseProject,
     /// Open the folder whose path is on the clipboard as a project.
@@ -146,7 +148,7 @@ impl Act {
         v.extend((0..=9).map(ShowTab));
         v.extend([LastTab, NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, Focus, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleProxyMode, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Sounds, Quips, Skills, Setup, RefreshUsage, Media]);
+        v.extend([Tasks, Usage, UsageDetails, Stats, Profiles, Proxy, ToggleProxyMode, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Sounds, Quips, Skills, Setup, RefreshUsage, Media]);
         v.extend([Palette, Help, Themes, ToggleIcons, ToggleProjectTabs, ToggleAutoResume, ToggleCaveman, RestartServer, Quit]);
         v
     }
@@ -216,6 +218,7 @@ impl Act {
             Continue => "continue".into(),
             Reload => "reload".into(),
             Orchestrator => "orchestrator".into(),
+            Tasks => "tasks".into(),
             SwitchLogin => "switch_login".into(),
             CloseProject => "close_project".into(),
             OpenClipboardFolder => "open_clipboard_folder".into(),
@@ -301,6 +304,7 @@ impl Act {
             Reload => "reload session with a profile…".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
             Orchestrator => "go to or start this project's orchestrator".into(),
+            Tasks => "tasks: outcomes, blockers, verification and recovery".into(),
             CloseProject => "close the current project (and its sessions)".into(),
             OpenClipboardFolder => "open the folder whose path you copied as a project".into(),
             OpenedFile => "show the file an agent last opened (bro open)".into(),
@@ -320,7 +324,7 @@ impl Act {
             NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Reload | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Team | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | ShowTab(_) | LastTab | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | Focus | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleProxyMode | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Sounds | Quips | Skills | Setup | RefreshUsage | Media => Group::Views,
+            Tasks | Usage | UsageDetails | Stats | Profiles | Proxy | ToggleProxyMode | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Sounds | Quips | Skills | Setup | RefreshUsage | Media => Group::Views,
             Palette | Help | Themes | ToggleIcons | ToggleProjectTabs | ToggleAutoResume | ToggleCaveman | RestartServer | Quit => Group::App,
         }
     }
@@ -366,6 +370,7 @@ impl Act {
             SwitchLogin => vec!["alt+L"],
             Continue => vec!["alt+r"],
             Orchestrator => vec!["alt+O"],
+            Tasks => vec!["alt+shift+d"],
             OpenClipboardFolder => vec!["ctrl+shift+o"],
             Profiles => vec!["alt+o"],
             Proxy => vec!["alt+y"],
@@ -421,6 +426,7 @@ impl Act {
             Continue => vec!["C"],
             Reload => vec!["R"],
             Orchestrator => vec!["O"],
+            Tasks => vec!["v"],
             SwitchLogin => vec!["P"],
             CloseProject => vec!["X"],
             OpenedFile => vec!["f"],

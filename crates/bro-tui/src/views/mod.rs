@@ -10,6 +10,7 @@ pub mod profiles;
 pub mod proxy;
 pub mod stats;
 pub mod usage;
+pub mod coordination;
 
 use crate::pane::Pane;
 
@@ -17,6 +18,7 @@ use crate::pane::Pane;
 pub fn open(name: &str) -> Option<Box<dyn Pane>> {
     Some(match name {
         "usage" => Box::new(usage::UsageView::new()),
+        "tasks" => Box::new(coordination::CoordinationView::new()),
         "profiles" => Box::new(profiles::ProfilesView::new()),
         "proxy" => Box::new(proxy::ProxyView::new()),
         "bridge" => Box::new(bridge::BridgeView::new()),

@@ -136,6 +136,7 @@ impl App {
             Act::Setup => self.open_view("setup"),
             Act::Proxy => self.open_view("proxy"),
             Act::Bridge => self.open_view("bridge"),
+            Act::Tasks => self.open_view("tasks"),
             Act::Help => self.overlay = Overlay::Help(Help::default()),
             Act::Rename => {
                 if let Some(id) = self.focused() {

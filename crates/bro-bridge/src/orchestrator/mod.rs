@@ -92,6 +92,9 @@ pub struct TranscriptItem {
     /// Global sequence at the item's last change; clients poll with `since`.
     pub seq: u64,
     pub turn_id: String,
+    /// The original request for an accepted task outcome, after its initial reply has completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_request_id: Option<String>,
     /// `user`, `assistant`, `tool` or `error`.
     pub role: String,
     pub text: String,
@@ -126,6 +129,8 @@ struct History {
     usage: Usage,
     /// Claude Code session to `--resume` after a restart.
     claude_session: Option<String>,
+    /// Panel response handles survive native orchestrator inbox recovery.
+    awaiting: std::collections::HashMap<String, Option<String>>,
 }
 
 struct ActiveTurn {
@@ -250,14 +255,14 @@ impl Orchestrator {
         let mut items = history.items;
         // A turn that was streaming when the host went away never finished.
         for item in &mut items {
-            if item.status == "streaming" {
+            if item.status == "streaming" && !history.awaiting.contains_key(&item.id) {
                 item.status = "cancelled".into();
             }
         }
         let seq = items.iter().map(|item| item.seq).max().unwrap_or(0);
         Self {
             routed: std::sync::atomic::AtomicBool::new(false),
-            awaiting: Mutex::new(std::collections::HashMap::new()),
+            awaiting: Mutex::new(history.awaiting.into_iter().filter(|(id, _)| items.iter().any(|item| &item.id == id && item.status == "streaming")).collect()),
             state: Mutex::new(State {
                 config,
                 launch: OrchestratorLaunch::default(),
@@ -316,6 +321,15 @@ impl Orchestrator {
         self.status(None, false)
     }
 
+    pub(crate) fn route_control(&self, app:&crate::state::AppState,text:String,kind:String,request_id:Option<String>)->Value{
+        let turn_id=uuid::Uuid::new_v4().simple().to_string();
+        let mut user=Self::new_item(&turn_id,"user","done");user.text=text.clone();self.push_item(user);
+        let answer=self.push_item(Self::new_item(&turn_id,"assistant","streaming"));
+        self.awaiting.lock().insert(answer.id.clone(),None);
+        app.send_command(crate::BridgeCommand::Orchestrator(crate::OrchestratorCommand::Control{id:answer.id,text,request_id,kind}));
+        self.persist_history_locked(&self.state.lock());self.publish_status();self.status(None,false)
+    }
+
     /// bro's orchestrator session answered routed message `id`.
     pub fn answer(&self, id: &str, text: &str, ok: bool) {
         let Some(tag) = self.awaiting.lock().remove(id) else { return };
@@ -328,6 +342,33 @@ impl Orchestrator {
         });
         self.emit(if ok { OrchestratorUpdate::Reply { text, tag } } else { OrchestratorUpdate::Failed { message: text, tag } });
         self.publish_status();
+    }
+
+    /// Durable accepted-outcome notification, separate from a request's initial response handle.
+    pub(crate) fn task_completion(&self, origin_request_id:&str, task_id:&str, revision:u64, text:&str)->bool {
+        use std::io::Write;
+        let identity=format!("task-result:{task_id}:{revision}");
+        let item={
+            let mut state=self.state.lock();
+            if state.items.iter().any(|item|item.id==identity) {return true;}
+            let turn=state.items.iter().find(|item|item.id==origin_request_id).map(|item|item.turn_id.clone()).unwrap_or_else(||format!("task-outcome:{task_id}"));
+            let mut item=Self::new_item(&turn,"assistant","done");
+            item.id=identity;item.origin_request_id=Some(origin_request_id.into());item.text=format!("Accepted outcome\n{}",text.trim());item.finished_at=Some(iso_now());item.seq=state.seq+1;
+            let mut items=state.items.clone();items.push(item.clone());
+            if items.len()>MAX_ITEMS {let excess=items.len()-MAX_ITEMS;items.drain(..excess);}
+            let history=History {items:items.clone(),usage:state.usage.clone(),claude_session:state.claude_session.clone(),awaiting:self.awaiting.lock().clone()};
+            let saved=(||->std::io::Result<()> {
+                let path=self.data_root.join(HISTORY_FILE);std::fs::create_dir_all(&self.data_root)?;
+                let bytes=serde_json::to_vec_pretty(&history).map_err(std::io::Error::other)?;
+                let temporary=path.with_extension(format!("task-pending-{}",std::process::id()));
+                let mut file=std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(&temporary)?;
+                file.write_all(&bytes)?;file.sync_all()?;drop(file);std::fs::rename(temporary,&path)?;
+                std::fs::OpenOptions::new().read(true).write(true).open(path)?.sync_all()?;Ok(())
+            })();
+            if saved.is_err() {return false;}
+            state.seq=item.seq;state.items=items;item
+        };
+        self.publish_item(&item);self.publish_status();true
     }
 
     /// Cancelled while routed: the pending answers stop waiting.
@@ -376,6 +417,7 @@ impl Orchestrator {
                 items: state.items.clone(),
                 usage: state.usage.clone(),
                 claude_session: state.claude_session.clone(),
+                awaiting: self.awaiting.lock().clone(),
             },
         );
     }
@@ -638,6 +680,7 @@ impl Orchestrator {
             rev: 1,
             seq: 0,
             turn_id: turn_id.to_string(),
+            origin_request_id: None,
             role: role.to_string(),
             text: String::new(),
             reasoning: None,
@@ -706,6 +749,22 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepted_task_notification_follows_initial_reply_and_deduplicates_after_restart() {
+        let root=tempfile::tempdir().unwrap();let (events,_)=broadcast::channel(32);
+        let orchestrator=Orchestrator::new(root.path(),events.clone());
+        let initial=orchestrator.push_item(Orchestrator::new_item("original-panel-turn","assistant","streaming"));
+        orchestrator.awaiting.lock().insert(initial.id.clone(),None);
+        orchestrator.answer(&initial.id,"Started the requested work",true);
+        assert!(orchestrator.task_completion(&initial.id,"task-a",3,"Preferences persist after reopening. Checks passed."));
+        assert!(orchestrator.awaiting.lock().is_empty());
+        let reloaded=Orchestrator::new(root.path(),events);
+        assert!(reloaded.task_completion(&initial.id,"task-a",3,"Repeated delivery"));
+        let state=reloaded.state.lock();assert_eq!(state.items.len(),2,"one initial reply and one accepted outcome");
+        let accepted=&state.items[1];assert_eq!(accepted.id,"task-result:task-a:3");
+        assert_eq!(accepted.turn_id,"original-panel-turn");assert_eq!(accepted.origin_request_id.as_deref(),Some(initial.id.as_str()));assert!(accepted.text.contains("Preferences persist"));
+    }
 
     #[test]
     fn openrouter_era_configs_migrate_to_claude_code() {

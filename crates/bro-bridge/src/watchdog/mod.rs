@@ -133,6 +133,10 @@ pub struct WatchdogSnapshot {
     pub paused: bool,
     /// Why it stood down, once it has (milestones done, out of wake-ups, the reviewer said so).
     pub finished: Option<String>,
+    /// Why observation stopped. This is separate from accepting a durable task.
+    pub stop_reason: Option<WatchdogStopReason>,
+    /// Legacy milestone notes never constitute runtime task acceptance.
+    pub accepted: bool,
     pub running: Option<Running>,
     /// Newest last.
     pub runs: Vec<RunRecord>,
@@ -140,6 +144,13 @@ pub struct WatchdogSnapshot {
     pub helpers: Vec<String>,
     /// Bumped on every change.
     pub revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WatchdogStopReason {
+    ReviewerStopped,
+    WakeBudgetExhausted,
 }
 
 impl WatchdogSnapshot {
@@ -268,6 +279,7 @@ impl Watchdogs {
             // a finished watchdog given more to do (or more wake-ups) watches again
             if s.finished.is_some() && (plan.milestones.iter().any(|m| m.status != MilestoneStatus::Done) || plan.max_wakes > s.wakes) {
                 s.finished = None;
+                s.stop_reason = None;
             }
             s.plan = plan;
         })
@@ -319,6 +331,7 @@ impl Watchdogs {
             }
             if s.wakes >= s.plan.max_wakes {
                 s.finished = Some(format!("used all {} wake-ups", s.plan.max_wakes));
+                s.stop_reason = Some(WatchdogStopReason::WakeBudgetExhausted);
                 return Err("The watchdog has used all its wake-ups.".into());
             }
             s.wakes += 1;
@@ -368,6 +381,7 @@ impl Watchdogs {
                 }
                 if s.finished.is_none() && s.wakes >= s.plan.max_wakes {
                     s.finished = Some(format!("used all {} wake-ups", s.plan.max_wakes));
+                    s.stop_reason = Some(WatchdogStopReason::WakeBudgetExhausted);
                 }
                 true
             })
@@ -422,11 +436,12 @@ impl Watchdogs {
             if args.get("standDown").and_then(Value::as_bool).unwrap_or(false) {
                 let why = args.get("reason").and_then(Value::as_str).map(str::trim).filter(|r| !r.is_empty()).unwrap_or("the reviewer found nothing left to do").to_string();
                 s.finished = Some(why.clone());
+                s.stop_reason = Some(WatchdogStopReason::ReviewerStopped);
                 stood_down = Some(why);
                 changes.push("stood down".into());
             }
             let (done, total) = s.plan.progress();
-            Ok(json!({ "changes": changes, "progress": format!("{done}/{total} done"), "milestones": s.plan.milestones }))
+            Ok(json!({ "changes": changes, "progress": format!("{done}/{total} done"), "milestones": s.plan.milestones, "stopReason": s.stop_reason, "accepted": false }))
         });
         let result = result.ok_or("This session has no watchdog.")??;
         if let Some(why) = stood_down {

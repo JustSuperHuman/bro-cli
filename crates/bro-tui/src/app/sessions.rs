@@ -293,6 +293,7 @@ impl App {
             }
             BridgeCommand::OpenFile { id, path, line, column } => self.agent_opened_file(&id, path, line, column),
             BridgeCommand::Orchestrator(c) => self.orchestrator_command(c),
+            BridgeCommand::CoordinationWake {task_id, revision, seq, project, action} => self.coordination_changed(&task_id, revision, seq, &project, &action),
             BridgeCommand::Tile { project } => {
                 let tab = match project {
                     Some(dir) => super::project_tabs::StripTab::Project(self.svc.project_for(&dir).key),

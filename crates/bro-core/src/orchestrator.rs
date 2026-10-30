@@ -96,10 +96,34 @@ pub fn prompt(harness: Harness) -> String {
     p.push_str(TOOLS);
     p.push('\n');
     p.push_str(PROMPT_PLAYBOOK);
+    p.push_str(DURABLE_PLAYBOOK);
     p.push('\n');
     p.push_str(CTL_REFERENCE);
     p
 }
+
+const DURABLE_PLAYBOOK: &str = r#"
+
+## Durable work and completion
+
+Use durable tasks for every delegated user outcome. `open_session(task=...)` creates an intent and task, captures applicable AGENTS.md source identities, assigns the worker, and persists delivery before typing. Pass the exact request origin JSON from the incoming envelope as `origin` so final accepted results reach the original panel or notification. Pass `taskContract` with explicit acceptance criteria and exact authorized check commands when the default outcome review is insufficient. For already created tasks, call `open_session(taskId=...)` or `coordination_dispatch` with that existing task ID; preserve the graph instead of creating another task. Use `coordination_ready` for fair ranked admission. Keep a single owner for integration. Use readOnly for independent research/review; writing tasks require exclusive workspace or resource claims.
+
+The worker must acknowledge its assignment with its private workerToken and the exact attemptId/epoch. A PTY write receipt, quiet terminal, final chat text or session exit does not accept a task. Use `coordination_snapshot` for durable state, `coordination_context` for recovery, and source-backed task checkpoints before clearing context. Raw send_input remains a terminal control; it is not a durable task completion protocol.
+
+Workers submit actual artifacts through `coordination_submit`; Bro hashes the current dirty and untracked workspace content. Read the candidate with `coordination_inspect`, review the requested behavior and repository instructions, and record each criterion through `coordination_verify`. A check runs only its exact authorized contract command. A review needs the inspect token, decision and specific findings tied to that candidate. Capture actual installed or deployed state when the user's instructions require it. Tests alone do not establish build installation or product usability.
+
+When the worker has submitted its result, use `coordination_retire_worker` to stop a worker created for this task and release its execution resources after a real process-tree exit. Bro refuses automatic retirement of pre-existing user terminals or coordinators. Preserve native resume/checkpoint context for the replacement worker. Idle is not a guarantee that a persistent CLI worker can no longer mutate files or browser state. Accept the stopped candidate with `coordination_accept` only after required evidence is current. If bytes or source instructions changed, revise/retry using the supported task transitions and perform verification again.
+
+`coordination_command` also supports dependency-aware task graphs, steering, cancellation, retry, policy and context operations. A cancelled or revised old attempt is fenced from submitting a result; its process must still be stopped before another writer receives its resources. An uncertain delivery stays claimed. Inspect and reconcile it; never blindly paste the assignment again. Coordinate tasks waiting for a device, browser tab, build slot or integration branch through resource claims and visible blockers.
+
+Bro sends actionable durable task events through the same inbox. Recover the task by ID/revision, act on its next step, and leave unrelated intents running. Report verified outcomes to the user, including remaining blockers and any retained claims. Keep time, token and cost limits proportionate to the task; ask only for genuinely missing decisions.
+
+## Request correlation
+
+Messages prefixed `[bro-request <id> kind=<kind>]` carry an exact response handle. Preserve that ID and put `[bro-response <id>]` in your final reply to that request. Never answer another request's handle, and never infer completion from a nearby unrelated chat. Status questions and steering preserve the original intent unless the user cancels or replaces it.
+
+For root-to-project routing, pass the exact original origin JSON to `open_orchestrator` as `origin` alongside its self-contained task. A forwarded `[bro-request-origin {...}]` identifies the user's original panel or voice destination. Preserve it unchanged in subsequent `open_session` or `coordination_command` creation calls, even when a new local inbox message has its own response handle. The local handle acknowledges coordination; the original origin receives the later accepted outcome.
+"#;
 
 /// Scope is part of the launch instructions, so each coordinator knows who owns project work.
 pub fn scoped_prompt(harness: Harness, cwd: &Path) -> String {
@@ -312,7 +336,19 @@ pub fn write_scoped_prompt(harness: Harness, cwd: &Path) -> std::io::Result<Path
 /// `~/.bro/orchestrator/mcp.json`: Claude Code's `--mcp-config` for the bridge at `bridge`.
 pub fn write_mcp_config(bridge: &str) -> std::io::Result<PathBuf> {
     let path = dir().join("mcp.json");
-    let body = serde_json::json!({ "mcpServers": { MCP_SERVER: { "type": "http", "url": mcp_url(bridge) } } });
+    let body = serde_json::json!({ "mcpServers": { MCP_SERVER: { "type": "http", "url": mcp_url(bridge), "headers": { "x-bro-session-id": "${BRO_SESSION_ID}" } } } });
+    crate::browser::write_if_changed(&path, &(serde_json::to_string_pretty(&body).unwrap_or_default() + "\n"))?;
+    Ok(path)
+}
+
+/// Session-scoped files keep simultaneous coordinators' caller identities separate.
+pub fn write_session_mcp_config(bridge: &str, session: &str) -> std::io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let key = format!("{:x}", Sha256::digest(session.as_bytes()));
+    let path = dir().join(format!("mcp-{}.json", &key[..20]));
+    let body = serde_json::json!({ "mcpServers": { MCP_SERVER: {
+        "type": "http", "url": mcp_url(bridge), "headers": { "x-bro-session-id": session }
+    } } });
     crate::browser::write_if_changed(&path, &(serde_json::to_string_pretty(&body).unwrap_or_default() + "\n"))?;
     Ok(path)
 }
@@ -327,7 +363,16 @@ pub fn codex_mcp_args(bridge: &str) -> Vec<String> {
         format!("mcp_servers.{MCP_SERVER}.tool_timeout_sec=120"),
         "-c".into(),
         format!("mcp_servers.{MCP_SERVER}.startup_timeout_sec=20"),
+        "-c".into(),
+        format!("mcp_servers.{MCP_SERVER}.env_http_headers={{\"x-bro-session-id\"=\"BRO_SESSION_ID\"}}"),
     ]
+}
+
+pub fn codex_session_mcp_args(bridge: &str, session: &str) -> Vec<String> {
+    let mut args = codex_mcp_args(bridge);
+    let quoted = serde_json::to_string(session).unwrap_or_default();
+    args.extend(["-c".into(), format!("mcp_servers.{MCP_SERVER}.http_headers={{\"x-bro-session-id\"={quoted}}}")]);
+    args
 }
 
 #[cfg(test)]

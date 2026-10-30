@@ -123,6 +123,16 @@ pub(crate) fn submit_settle(bytes: usize) -> Duration {
     Duration::from_millis((350 + bytes as u64 / 40).min(800))
 }
 
+fn agent_submit_settle(state: &AppState, id: &str, bytes: usize) -> Duration {
+    // Codex can keep its paste-burst window open after the PTY write returns.
+    // A terminal write receipt is not an acknowledgement from the agent.
+    if state.summary(id).is_some_and(|s| s.agent.as_deref() == Some("codex")) {
+        submit_settle(bytes).max(Duration::from_millis(1500))
+    } else {
+        submit_settle(bytes)
+    }
+}
+
 /// The callback normally queues work on bro's UI thread. Starting a paste timer when that work is queued
 /// lets a busy frame collapse paste and Enter into consecutive writes. Wait for the session to take it first.
 async fn write_confirmed(state: &AppState, id: &str, data: &str) -> Result<(), String> {
@@ -142,7 +152,7 @@ pub(crate) async fn compose_input(state: &AppState, id: &str, data: &str, submit
     write_paced(state, id, data).await?;
     if submit {
         if !data.is_empty() {
-            tokio::time::sleep(submit_settle(data.len())).await;
+            tokio::time::sleep(agent_submit_settle(state, id, data.len())).await;
         }
         write_confirmed(state, id, "\r").await?;
     }

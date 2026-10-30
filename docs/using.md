@@ -112,6 +112,22 @@ would be hard to read.
 Make your own in `~/.bro/themes/<name>.toml`: start from any of them (`base = "dracula"`) and list only what you
 change. bro picks up each save as you make it.
 
+## Tasks
+
+Choose **Tasks · outcomes** in the sidebar, press **Ctrl+Space V** (lowercase `v`), or use **Alt+Shift+D**. Tasks opens beside your workspace in both the desktop app and terminal UI. Your other sessions keep running.
+
+The list tracks outcomes separately from agent activity. **Working** means an assigned worker is active. **Waiting** shows a blocker and its wake condition. **Needs review** means a candidate still needs acceptance evidence. **Accepted** means the current contract has passed its required checks. A worker going idle does not accept its task.
+
+Choose **New** (`n`) to enter an outcome, an observable review check, and the project folder. Use **Tab** to move between fields and **Ctrl+Enter** to save. **Ctrl+Q** changes the quality mode. Quick uses focused checks, Standard verifies the changed behavior, and Critical requires an independent review. The project's own instructions still apply. Saved work wakes the coordinator and stays in the task ledger across restarts.
+
+Select a task with **Up/Down**. **Steer** (`s`) revises its goal and first acceptance criterion while retaining its other requirements. **Cancel** (`x`) requests that it stop; a running worker retains ownership until its stop or isolation is confirmed. **Retry** (`r`) respects remaining budgets and unresolved ownership. **Review** (`v`) asks the coordinator to inspect a candidate, collect evidence, stop its task-owned worker and verify the final artifact before acceptance. **Retire worker** (`z`) requests that safe stop. These actions preserve unrelated sessions. Accepted delegated work returns as a separate **Accepted outcome** in the original orchestrator conversation; an initial reply can acknowledge work before it is finished.
+
+**Context** (`c`) shows the task's handoff, prerequisites and recovery notices, followed by recorded outcomes and available cost reports. **Finished** (`a`) includes accepted and cancelled work. **Evidence** (`e`) opens the latest recorded verification log when one is available. **Details** (`d`) adds technical identities and evidence digests. **F5** refreshes; **Page Up/Down** scrolls the detail. The bridge must be on for live task state; a connection error keeps the last snapshot visible.
+
+Phone, web and voice requests have separate request identities. Ordinary requests wait for a ready orchestrator prompt and run one at a time when the adapter has no separate turn channel. A response can answer only its matching request. Clearing conversation context preserves pending work. After a restart, an uncertain sent request waits for its original answer or explicit cancellation; Bro does not blindly repeat its side effects.
+
+See [Coordination](coordination.md) for the task tools, evidence protocol, recovery rules and reproducible checks.
+
 ## Everything it does
 
 - **Runs your agents in panes** — split, zoom, and switch between live sessions, grouped by project.

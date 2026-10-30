@@ -226,6 +226,14 @@ pub(crate) async fn orchestrator_send(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    if let Some(kind)=body.get("messageKind").and_then(Value::as_str){
+        if !matches!(kind,"answer"|"steer"){return api_error(StatusCode::BAD_REQUEST,"messageKind must be answer or steer.");}
+        if text.trim().is_empty()||text.len()>32768{return api_error(StatusCode::BAD_REQUEST,"A bounded response text is required.");}
+        if !state.orchestrator.routed(){return api_error(StatusCode::CONFLICT,"Explicit request control requires the native coordinator inbox.");}
+        let request_id=body.get("requestId").and_then(Value::as_str).map(str::to_owned);
+        if request_id.is_none(){return api_error(StatusCode::BAD_REQUEST,"requestId is required for an explicit response or steering message.");}
+        return (StatusCode::ACCEPTED,Json(state.orchestrator.route_control(&state,text,kind.into(),request_id))).into_response();
+    }
     match orchestrator::send_message(&state, text).await {
         Ok(status) => (StatusCode::ACCEPTED, Json(status)).into_response(),
         Err((code, message)) => api_error(

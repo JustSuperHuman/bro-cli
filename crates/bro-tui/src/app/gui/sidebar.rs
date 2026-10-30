@@ -257,12 +257,15 @@ fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused:
         s.manual = false;
     }
     if rows.is_empty() {
+        let task_link = Rect::new(list.x + PAD, list.y, list.w - 2.0 * PAD, 30.0);
+        ui.label_in(task_link.inset(8.0), "Tasks · outcomes", Style::new(size::SMALL, weight::MEDIUM, t.accent), Align::Left);
+        ui.hit(task_link, Action::Side(crate::app::SideHit::Tasks));
         s.bar = None;
         if !app.side.filter.is_empty() {
-            ui.label_in(Rect::new(list.x + 18.0, list.y + 6.0, list.w - 36.0, 24.0), "Nothing matches", Style::new(size::BODY, weight::MEDIUM, t.muted), Align::Left);
+            ui.label_in(Rect::new(list.x + 18.0, list.y + 40.0, list.w - 36.0, 24.0), "Nothing matches", Style::new(size::BODY, weight::MEDIUM, t.muted), Align::Left);
         } else {
             let p = ui.para("Open a folder or start a session: projects you work in appear here.", Style::new(size::SMALL, weight::REGULAR, t.faint), list.w - 36.0, Some(3));
-            ui.draw(&p, Point::new(list.x + 18.0, list.y + 8.0));
+            ui.draw(&p, Point::new(list.x + 18.0, list.y + 42.0));
         }
         return;
     }
@@ -277,6 +280,10 @@ fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused:
         y += h + 6.0;
         ui.hline(list.x + PAD + 8.0, y - 3.0, list.w - 2.0 * PAD - 16.0, t.hairline);
     }
+    let task_link = Rect::new(list.x + PAD, y, list.w - 2.0 * PAD, 30.0);
+    ui.label_in(task_link.inset(8.0), "Tasks · outcomes", Style::new(size::SMALL, weight::MEDIUM, t.accent), Align::Left);
+    ui.hit(task_link, Action::Side(crate::app::SideHit::Tasks));
+    y += 34.0;
     let view = Rect::new(list.x, y, list.w, (list.bottom() - y).max(0.0));
     let first = usize::from(pinned);
     // heights

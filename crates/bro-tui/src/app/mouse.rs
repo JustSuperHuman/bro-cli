@@ -254,6 +254,7 @@ impl App {
                         SideHit::Proxy => self.open_view("proxy"),
                         SideHit::Bridge => self.open_view("bridge"),
                         SideHit::Settings => self.open_view("settings"),
+                        SideHit::Tasks => self.open_view("tasks"),
                         SideHit::Quick(h) => self.quick_launch(h),
                         SideHit::Launcher => self.open_launcher(None, crate::pane::Place::Tab),
                         SideHit::Continue => self.open_continue(),
