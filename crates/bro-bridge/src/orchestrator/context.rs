@@ -170,7 +170,8 @@ pub fn session_records(app: &AppState, tail_lines: usize) -> Vec<Value> {
                 "lastOutput": describe_idle(idle),
                 "idleSeconds": idle,
                 "screenTail": tail,
-                "orchestrator": orchestrator
+                "orchestrator": orchestrator,
+                "projectPath": if orchestrator && bro_core::orchestrator::is_global(std::path::Path::new(&view.summary.cwd)) { None } else { Some(bro_core::projects::project_for(std::path::Path::new(&view.summary.cwd)).root) }
             })
         })
         .collect()

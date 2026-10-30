@@ -200,7 +200,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     };
     let mut extra_settings = bro_mod(&mut cmd, &mut args, ctx, mod_profile, mod_backend);
     if spec.orchestrator {
-        orchestrator_args(&mut args, &config_dir, ctx)?;
+        orchestrator_args(&mut args, &config_dir, ctx, spec)?;
     } else if let (Some(scope), Some(bin)) = (crate::peers::Scope::of(&ctx.claude_env), &ctx.bro_bin) {
         // messages between sessions stay in this one's project; the orchestrator spans them all
         crate::peers::add_hooks(&mut extra_settings, scope, bin, &spec.cwd);
@@ -250,10 +250,10 @@ fn agent_summaries(cmd: &mut CommandSpec, enabled: bool) {
 
 /// The orchestrator's instructions (merged with any others by [`apply_caveman`]), its skill, and the
 /// bridge's tools as the `bro` MCP server, allowed without asking.
-fn orchestrator_args(args: &mut Vec<String>, config_dir: &Path, ctx: &LaunchCtx) -> anyhow::Result<()> {
+fn orchestrator_args(args: &mut Vec<String>, config_dir: &Path, ctx: &LaunchCtx, spec: &LaunchSpec) -> anyhow::Result<()> {
     use crate::orchestrator as orch;
     let bridge = super::orchestrator_bridge(ctx).unwrap_or_default();
-    let prompt = orch::write_prompt(Harness::Claude)?;
+    let prompt = orch::write_scoped_prompt(Harness::Claude, &spec.cwd)?;
     // best effort, like bro's other skills
     let _ = orch::write_skill(config_dir);
     let end = options_end(args);

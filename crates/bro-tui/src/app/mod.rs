@@ -277,8 +277,8 @@ pub struct App {
     history: history::History,
     /// per watched session: when its watchdog should wake
     pub(crate) watch: HashMap<PaneId, crate::watchdog::Trigger>,
-    /// An orchestrator launch is building (since when): a second one waits for it instead.
-    pub(crate) orchestrator_pending: Option<Instant>,
+    /// Launches in flight, keyed by project (or the root Orchestrator), so scopes start independently.
+    pub(crate) orchestrator_pending: HashMap<String, Instant>,
     /// bro is shutting down: sessions closing now weren't closed by you (the orchestrator is kept for next time).
     quitting: bool,
     /// Panes held open while the session server restarts, and how each comes back (see [`hosting`]).
@@ -394,7 +394,7 @@ impl App {
             tile_regions: vec![],
             history: Default::default(),
             watch: HashMap::new(),
-            orchestrator_pending: None,
+            orchestrator_pending: HashMap::new(),
             quitting: false,
             comebacks: vec![],
             taken_over: false,
@@ -478,7 +478,7 @@ impl App {
         let live = self.live_infos();
         let ids = crate::sidebar::live_order(&live, &self.past_infos(), &self.open_infos());
         let ids: Vec<PaneId> = match project {
-            Some(key) => ids.into_iter().filter(|id| live.iter().any(|l| l.pane == *id && l.project_key == key)).collect(),
+            Some(key) => ids.into_iter().filter(|id| live.iter().any(|l| l.pane == *id && if key == crate::panes::term::ORCHESTRATOR_KEY { l.orchestrator } else { l.project_key == key })).collect(),
             None => ids,
         };
         if self.show_minimized { ids } else { ids.into_iter().filter(|id| !self.minimized.contains(id)).collect() }
@@ -525,7 +525,7 @@ impl App {
             let mut ids = self.tile_ids(self.tile_project.as_deref());
             if !ids.contains(&id) {
                 // a session in another project: its own project's tab when the tabs are on, else widen the grid
-                let key = self.panes.get(&id).and_then(|p| p.as_term_ref()).filter(|t| !t.meta.orchestrator).map(|t| t.meta.project.key.clone());
+                let key = self.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.key.clone());
                 self.tile_project = key.filter(|_| self.svc.settings().project_tabs);
                 ids = self.tile_ids(self.tile_project.as_deref());
             }
@@ -581,7 +581,7 @@ impl App {
             return false;
         };
         let focus = focus.filter(|id| ids.contains(id)).or_else(|| self.focused().filter(|id| ids.contains(id))).unwrap_or(first);
-        if ids.len() >= 2 || self.tile_all {
+        if ids.len() >= 2 || self.tile_all || self.panes.get(&first).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.orchestrator) {
             self.stack = ids;
             self.stack_focus = Some(focus);
             self.stack_zoom = false;
@@ -663,7 +663,7 @@ impl App {
     /// Close a pane: end its session (bridge, proxy route, staged files) and drop it from its tab.
     pub(crate) fn close(&mut self, id: PaneId) {
         let mut remaining = None;
-        let was_orchestrator = self.panes.get(&id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.orchestrator);
+        let orchestrator_cwd = self.panes.get(&id).and_then(|p| p.as_term_ref()).filter(|t| t.meta.orchestrator).map(|t| t.meta.cwd.clone());
         self.minimized.retain(|pane| *pane != id);
         if self.stack.contains(&id) {
             self.stack.retain(|x| *x != id);
@@ -732,13 +732,12 @@ impl App {
         if let Some(id) = remaining {
             self.focus_pane(id);
         }
-        if was_orchestrator && self.orchestrator_pane().is_none() {
-            self.orchestrator_closed();
-            // you ended the orchestrator: the next bro starts without one (quitting bro keeps it)
-            if !self.quitting && self.persist {
-                if !self.guest {
-                    crate::orchestrator_state::clear();
-                }
+        if let Some(cwd) = orchestrator_cwd {
+            if bro_core::orchestrator::is_global(&cwd) && self.orchestrator_for(&cwd).is_none() {
+                self.orchestrator_closed();
+            }
+            if !self.quitting && self.persist && !self.guest && self.orchestrator_for(&cwd).is_none() {
+                crate::orchestrator_state::forget(&cwd);
             }
         }
     }
@@ -748,7 +747,7 @@ impl App {
         if self.tile_all && self.minimized.contains(&id) && !self.stack.contains(&id) {
             self.minimized.retain(|pane| *pane != id);
             if self.tile_project.as_deref().is_some_and(|key| {
-                self.panes.get(&id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.project.key != key)
+                self.panes.get(&id).and_then(|p| p.as_term_ref()).is_some_and(|t| if key == crate::panes::term::ORCHESTRATOR_KEY { !t.meta.orchestrator } else { t.meta.project.key != key })
             }) {
                 self.tile_project = None;
             }
@@ -959,7 +958,7 @@ impl App {
             return;
         }
         self.last_focus = focused;
-        if let Some(t) = focused.and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).filter(|t| !t.meta.orchestrator) {
+        if let Some(t) = focused.and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).filter(|t| t.meta.project.key != crate::panes::term::ORCHESTRATOR_KEY) {
             self.cur_project = Some(t.meta.project.root.clone());
         }
     }

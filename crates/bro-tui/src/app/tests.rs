@@ -1365,6 +1365,7 @@ fn sidebar_filter_selects_a_project_below_a_matching_orchestrator() {
     let t = a.panes.get_mut(&id).unwrap().as_term().unwrap();
     t.meta.orchestrator = true;
     t.meta.name = Some("just orchestrator".into());
+    t.meta.project = crate::panes::term::orchestrator_project(&bro_core::orchestrator::workspace());
     a.run_act(Act::FocusSidebar);
     a.paste("just\n");
     assert_eq!(a.side.filter, "just");
@@ -4069,7 +4070,7 @@ fn orchestrator_spec(h: bro_core::Harness) -> bro_core::launch::LaunchSpec {
         profile_id: None,
         provider_id: None,
         model: None,
-        cwd: std::env::temp_dir(),
+        cwd: bro_core::orchestrator::workspace(),
         resume: None,
         permission: bro_core::launch::Permission::Skip,
         browser: bro_core::browser::BrowserMode::Off,
@@ -4080,8 +4081,104 @@ fn orchestrator_spec(h: bro_core::Harness) -> bro_core::launch::LaunchSpec {
 
 /// An orchestrator launch finished building (its program doesn't exist: the pane shows why).
 fn land_orchestrator(a: &mut App) {
-    let cmd = bro_core::launch::CommandSpec { program: "definitely-not-a-program-xyz".into(), label: "orchestrator · claude · local".into(), cwd: std::env::temp_dir(), ..Default::default() };
+    let cmd = bro_core::launch::CommandSpec { program: "definitely-not-a-program-xyz".into(), label: "orchestrator · claude · local".into(), cwd: bro_core::orchestrator::workspace(), ..Default::default() };
     a.launched(crate::services::Launched { spec: orchestrator_spec(bro_core::Harness::Claude), place: Place::SplitRight, reply: None, name: None, remember: true, result: Ok(cmd), route_id: None, note: None, into: None });
+}
+
+fn land_project_orchestrator(a: &mut App, cwd: std::path::PathBuf) -> PaneId {
+    let spec = bro_core::launch::LaunchSpec { cwd: cwd.clone(), model: Some("project-model".into()), ..orchestrator_spec(bro_core::Harness::Codex) };
+    let cmd = bro_core::launch::CommandSpec { program: "definitely-not-a-program-xyz".into(), label: "orchestrator · codex · project-model".into(), cwd: cwd.clone(), ..Default::default() };
+    a.launched(crate::services::Launched { spec, place: Place::Tab, reply: None, name: None, remember: true, result: Ok(cmd), route_id: None, note: None, into: None });
+    a.orchestrator_for(&cwd).unwrap()
+}
+
+#[test]
+fn project_orchestrators_belong_to_their_projects_and_share_one_tab() {
+    use super::project_tabs::StripTab;
+    let tmp = tempfile::tempdir().unwrap();
+    let first = tmp.path().join("first");
+    let second = tmp.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let mut a = app(true);
+    land_orchestrator(&mut a);
+    let global = a.orchestrator_for(&bro_core::orchestrator::workspace()).unwrap();
+    let first_id = land_project_orchestrator(&mut a, first.clone());
+    let second_id = land_project_orchestrator(&mut a, second.clone());
+    assert_eq!(a.orchestrator_panes().len(), 3);
+    let first_key = a.svc.project_for(&first).key;
+    let second_key = a.svc.project_for(&second).key;
+    let tabs = a.project_tabs();
+    assert_eq!(tabs.iter().find(|p| p.key == first_key).unwrap().live, 1, "a coordinator alone keeps its project visible");
+    a.show_tab(StripTab::Project(first_key.clone()));
+    assert_eq!(a.stack, vec![first_id]);
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(first_key.clone())));
+    assert_eq!(a.current_project(), Some(first.clone()));
+    a.show_tab(StripTab::Orchestrator);
+    assert_eq!(a.showing_tab(), Some(StripTab::Orchestrator));
+    assert_eq!(a.stack.len(), 3);
+    assert!([global, first_id, second_id].iter().all(|id| a.stack.contains(id)));
+    assert!(a.orchestrator_column(a.body).is_none(), "coordinators have equal space in their shared view");
+    a.minimize_pane(first_id);
+    a.show_tab(StripTab::Orchestrator);
+    assert!(a.stack.contains(&first_id), "the tab reveals every coordinator");
+    a.show_tab(StripTab::Project(second_key));
+    assert_eq!(a.stack, vec![second_id]);
+    let before = a.panes.len();
+    a.launch_spec(bro_core::launch::LaunchSpec { cwd: first.clone(), ..orchestrator_spec(bro_core::Harness::Claude) }, Place::Tab);
+    assert_eq!(a.focused(), Some(first_id));
+    assert_eq!(a.panes.len(), before, "reusing a project never changes its running model");
+    assert_eq!(a.panes[&first_id].as_term_ref().unwrap().meta.model.as_deref(), Some("project-model"));
+    a.close_project_now(first.clone());
+    assert!(a.orchestrator_for(&first).is_none());
+    assert_eq!(a.orchestrator_for(&second), Some(second_id));
+    assert_eq!(a.orchestrator_for(&bro_core::orchestrator::workspace()), Some(global));
+    shot(&mut a, "project-orchestrators");
+}
+
+#[test]
+fn project_orchestrators_inherit_the_source_model_and_launch_options() {
+    let mut a = app(true);
+    land_orchestrator(&mut a);
+    let source = a.orchestrator_pane().unwrap();
+    let term = a.panes.get_mut(&source).unwrap().as_term().unwrap();
+    let mut config = term.launch_spec.clone().unwrap();
+    config.harness = bro_core::Harness::Pi;
+    config.profile_id = Some("pi:team".into());
+    config.provider_id = Some("provider".into());
+    config.model = Some("same-model".into());
+    config.permission = bro_core::launch::Permission::Auto;
+    config.browser = bro_core::browser::BrowserMode::Chrome;
+    config.extra_args = vec!["--verbose".into()];
+    config.resume = Some(bro_core::launch::Resume { session_id: "old-chat".into(), fork: false });
+    term.launch_spec = Some(config.clone());
+    let sid = term.meta.sid.clone();
+    let cwd = std::env::temp_dir().join("new-project");
+    let inherited = a.inherited_orchestrator_spec(&sid, cwd.clone()).unwrap();
+    assert_eq!(inherited.harness, config.harness);
+    assert_eq!((inherited.profile_id, inherited.provider_id, inherited.model), (config.profile_id, config.provider_id, config.model));
+    assert_eq!((inherited.permission, inherited.browser, inherited.extra_args), (config.permission, config.browser, config.extra_args));
+    assert_eq!(inherited.cwd, cwd);
+    assert!(inherited.resume.is_none() && inherited.orchestrator);
+    a.panes.get_mut(&source).unwrap().as_term().unwrap().meta.model = Some("changed-in-session".into());
+    assert_eq!(a.inherited_orchestrator_spec(&sid, std::env::temp_dir()).unwrap().model.as_deref(), Some("changed-in-session"));
+    assert!(a.inherited_orchestrator_spec("missing", std::env::temp_dir()).is_none());
+    let worker = a.live_infos().into_iter().find(|l| !l.orchestrator).unwrap().pane;
+    let sid = a.panes[&worker].as_term_ref().unwrap().meta.sid.clone();
+    assert!(a.inherited_orchestrator_spec(&sid, std::env::temp_dir()).is_none());
+}
+
+#[test]
+fn project_orchestrators_can_start_independently_while_duplicates_wait() {
+    let mut a = app(true);
+    let first = std::env::temp_dir().join("first-orchestrator");
+    let second = std::env::temp_dir().join("second-orchestrator");
+    for cwd in [&first, &second, &first] {
+        a.launch_spec(bro_core::launch::LaunchSpec { cwd: cwd.clone(), ..orchestrator_spec(bro_core::Harness::Claude) }, Place::Tab);
+    }
+    assert_eq!(a.orchestrator_pending.len(), 2);
+    assert!(a.orchestrator_starting(&first) && a.orchestrator_starting(&second));
+    assert!(a.toasts.latest().unwrap().text.contains("already starting"));
 }
 
 #[test]
@@ -4125,7 +4222,7 @@ fn the_orchestrator_is_one_gold_session_pinned_atop_the_sidebar() {
 
     // alt+O goes to it too
     a.overlay = Overlay::None;
-    a.run_act(Act::Orchestrator);
+    a.show_tab(super::project_tabs::StripTab::Orchestrator);
     assert_eq!(a.focused(), Some(boss));
     assert!(!a.overlay.is_open());
 }
@@ -4172,13 +4269,14 @@ fn the_orchestrator_tab_in_the_launcher() {
     assert!(spec.orchestrator);
     let s = shot(&mut a, "launcher-orchestrator");
     assert!(s.contains("★ orchestrator") && s.contains("runs on") && s.contains("Start it on"), "{s}");
-    assert!(s.contains("runs in") && s.contains("orchestrator "), "the folder chip names ~/orchestrator\n{s}");
+    assert!(s.contains("Orchestrator alt+g"), "the root Orchestrator can be selected explicitly\n{s}");
+    let starting_spec = spec.clone();
     // enter starts it as its own session
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.overlay.is_open());
-    assert!(a.orchestrator_pending.is_some());
+    assert!(!a.orchestrator_pending.is_empty());
     // a second start while the first builds waits for it
-    a.launch_spec(orchestrator_spec(bro_core::Harness::Claude), Place::Tab);
+    a.launch_spec(starting_spec, Place::Tab);
     assert!(a.toasts.latest().unwrap().text.contains("already starting"));
 }
 
@@ -4236,12 +4334,12 @@ fn a_running_orchestrator_comes_back_when_bro_reopens() {
     let land = |a: &mut App, spec: &bro_core::launch::LaunchSpec, result: Result<bro_core::launch::CommandSpec, String>| {
         a.launched(crate::services::Launched { spec: spec.clone(), place: Place::Tab, reply: None, name: None, remember: false, result, route_id: None, note: None, into: None });
     };
-    let cmd = || Ok(bro_core::launch::CommandSpec { program: "definitely-not-a-program-xyz".into(), label: "orchestrator · codex · team · gpt-5.2".into(), cwd: std::env::temp_dir(), ..Default::default() });
+    let cmd = || Ok(bro_core::launch::CommandSpec { program: "definitely-not-a-program-xyz".into(), label: "orchestrator · codex · team · gpt-5.2".into(), cwd: bro_core::orchestrator::workspace(), ..Default::default() });
 
     // nothing saved: a fresh bro starts without one
     let mut a = bro();
     a.restore_orchestrator();
-    assert!(a.orchestrator_pending.is_none());
+    assert!(a.orchestrator_pending.is_empty());
 
     // it runs: saved with its params; quitting bro keeps them
     land(&mut a, &spec, cmd());
@@ -4253,7 +4351,7 @@ fn a_running_orchestrator_comes_back_when_bro_reopens() {
     // the next bro (a reopen, or another instance) starts it the same way
     let mut b = bro();
     b.restore_orchestrator();
-    assert!(b.orchestrator_pending.is_some(), "relaunching");
+    assert!(!b.orchestrator_pending.is_empty(), "relaunching");
     assert!(b.toasts.latest().unwrap().text.contains("orchestrator · codex · team · gpt-5.2"), "{:?}", b.toasts.latest());
 
     // a plain session never counts
@@ -4272,6 +4370,28 @@ fn a_running_orchestrator_comes_back_when_bro_reopens() {
     state::save(&spec);
     land(&mut b, &spec, Err("unknown profile \"codex:team\"".into()));
     assert!(state::load().is_none());
+
+    // Every scope survives independently, and an older singleton file migrates to the root Orchestrator.
+    let first = bro_core::launch::LaunchSpec { cwd: std::env::temp_dir().join("saved-first"), ..spec.clone() };
+    let second = bro_core::launch::LaunchSpec { cwd: std::env::temp_dir().join("saved-second"), ..spec.clone() };
+    state::save(&spec);
+    state::save(&first);
+    state::save(&second);
+    state::save(&first);
+    assert_eq!(state::load_all().len(), 3, "saving twice updates one project");
+    state::forget(&first.cwd);
+    let saved = state::load_all();
+    assert_eq!(saved.len(), 2);
+    assert!(saved.iter().any(|s| s.cwd == second.cwd));
+    assert!(saved.iter().any(|s| bro_core::orchestrator::is_global(&s.cwd)));
+    let mut next = bro();
+    next.restore_orchestrator();
+    assert!(next.orchestrator_starting(&spec.cwd) && next.orchestrator_starting(&second.cwd));
+    let legacy = crate::orchestrator_state::Saved { spec: first, at: 1 };
+    std::fs::write(state::path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(state::load_all().len(), 1);
+    assert!(bro_core::orchestrator::is_global(&state::load().unwrap().cwd));
+    state::clear();
 }
 
 /// Every signed-in login's usage, as (5h used %, week used %).
@@ -4363,7 +4483,7 @@ fn voice_starts_an_orchestrator_on_the_roomiest_login_and_goes_to_it() {
     let looking = a.focused().unwrap();
     let looking_sid = a.panes[&looking].as_term_ref().unwrap().meta.sid.clone();
     a.voice_message(VoiceMsg { text: "  what is   Toast doing ".into(), focused: Some(looking_sid.clone()), tag: Some("d1".into()) });
-    assert!(a.orchestrator_pending.is_some());
+    assert!(!a.orchestrator_pending.is_empty());
     assert!(a.toasts.latest().unwrap().text.contains("launching orchestrator"));
     assert_eq!(a.voice.queue.len(), 1);
     land_orchestrator(&mut a);
@@ -4483,7 +4603,7 @@ fn a_phone_opens_the_one_orchestrator_by_its_profile_id() {
     let mut a = app(true);
     // none yet: it starts (the reply waits for the launch), and a second ask doesn't start another
     assert!(create(&mut a).is_err(), "answered once the launch lands");
-    assert!(a.orchestrator_pending.is_some());
+    assert!(!a.orchestrator_pending.is_empty());
     let again = create(&mut a).expect("answered at once").unwrap_err().to_string();
     assert!(again.contains("already starting"), "{again}");
 
@@ -4734,6 +4854,7 @@ fn keys_switch_step_and_go_back_through_project_tabs() {
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     let s = draw(&mut a);
     assert!(s.contains("bro-cli-v2"));
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(a.strip_sel, None);

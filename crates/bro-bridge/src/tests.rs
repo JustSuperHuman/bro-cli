@@ -25,6 +25,7 @@ enum Seen {
     Kill(String),
     Rename(String, String),
     Create(Option<String>, Option<String>, Vec<String>),
+    OpenOrchestrator(PathBuf, String),
     Focus(String),
     OpenFile(String, PathBuf, Option<u32>, Option<u32>),
     OpenInEditor(String, PathBuf, Option<u32>, Option<u32>),
@@ -53,6 +54,16 @@ impl Harness {
                     let _ = reply.send(Ok(json!({ "sessionId": id, "change": change, "model": null, "effort": null, "models": [], "levels": [{"id":"high"}], "pending": false })));
                 }
                 BridgeCommand::Seen { .. } => {},
+                BridgeCommand::OpenOrchestrator { cwd, source, reply } => {
+                    seen.lock().push(Seen::OpenOrchestrator(cwd.clone(), source));
+                    let id = "project-coordinator".to_string();
+                    slot.get().unwrap().register(SessionMeta {
+                        id: id.clone(), title: "Project orchestrator".into(), shell: "codex".into(),
+                        args: vec![], cwd: Some(cwd.clone()), project: Some(cwd), pid: Some(8),
+                        cols: 100, rows: 30, agent: Some("codex".into()), kind: Some("orchestrator".into()),
+                    });
+                    let _ = reply.send(Ok(id));
+                }
                 BridgeCommand::Input { id, data } => seen
                     .lock()
                     .push(Seen::Input(id, String::from_utf8_lossy(&data).into_owned())),
@@ -1186,6 +1197,42 @@ async fn orchestrator_tools_are_served_over_mcp() {
     let hello = recv_type(&mut socket, "hello").await;
     assert_eq!(hello["orchestrator"]["state"], "idle");
     assert_eq!(hello["orchestrator"]["config"]["provider"], "claude-code");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_orchestrators_open_from_a_source_and_receive_delegated_work() {
+    let harness = Harness::start();
+    harness.bridge.register(SessionMeta {
+        id: "workspace-coordinator".into(), title: "Orchestrator".into(), shell: "codex".into(),
+        args: vec![], cwd: None, project: None, pid: Some(7), cols: 100, rows: 30,
+        agent: Some("codex".into()), kind: Some("orchestrator".into()),
+    });
+    harness.register("worker", None, None);
+    let client = reqwest::Client::new();
+    let call = |name: &str, arguments: Value| {
+        let client = client.clone();
+        let url = harness.url("/mcp");
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        async move { client.post(url).json(&body).send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let project = harness.root.path().to_path_buf();
+    let opened = call("open_orchestrator", json!({ "project": project, "sourceSessionId": "workspace-coordinator", "focus": true })).await;
+    assert_eq!(opened["result"]["isError"], false, "{opened}");
+    let data: Value = serde_json::from_str(opened["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(data["id"], "project-coordinator");
+    assert!(harness.seen.lock().iter().any(|s| matches!(s, Seen::OpenOrchestrator(cwd, source) if bro_core::util::same_path(cwd, &project) && source == "workspace-coordinator")));
+    assert!(harness.seen.lock().contains(&Seen::Focus("project-coordinator".into())));
+    let list = call("list_sessions", json!({})).await;
+    let sessions: Value = serde_json::from_str(list["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let sessions = sessions.as_array().unwrap();
+    assert!(sessions.iter().find(|s| s["id"] == "workspace-coordinator").unwrap()["projectPath"].is_null());
+    let target = sessions.iter().find(|s| s["id"] == "project-coordinator").unwrap();
+    assert_eq!(target["orchestrator"], true);
+    assert!(target["projectPath"].is_string());
+    let sent = call("send_input", json!({ "sessionId": "project-coordinator", "text": "review this project", "submit": false })).await;
+    assert_eq!(sent["result"]["isError"], false, "a coordinator can delegate to another: {sent}");
+    let invalid = call("open_orchestrator", json!({ "project": project, "sourceSessionId": "worker" })).await;
+    assert_eq!(invalid["result"]["isError"], true, "a worker cannot supply coordinator settings");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

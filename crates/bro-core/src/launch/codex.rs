@@ -259,7 +259,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     // Instructions bro adds: caveman's rules, the orchestrator's brief.
     let mut added: Vec<String> = vec![];
     if spec.orchestrator {
-        added.push(crate::orchestrator::prompt(Harness::Codex));
+        added.push(crate::orchestrator::scoped_prompt(Harness::Codex, &spec.cwd));
     }
     if let Some(level) = ctx.caveman.active() {
         added.push(level.rules().to_string());

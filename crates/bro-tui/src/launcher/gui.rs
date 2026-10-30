@@ -44,6 +44,7 @@ const MODEL_FIELD: usize = 10;
 /// the run-on list's background (the wheel there moves in it)
 const LIST_AREA: usize = 11;
 const MODEL_AREA: usize = 12;
+const NO_PROJECT: usize = 13;
 /// + the agent's index in `Harness::ALL`
 const HARNESS: usize = 20;
 /// + the index in `Harness::ALL` of the harness the orchestrator runs on
@@ -208,6 +209,7 @@ pub(crate) fn click(l: &mut Launcher, n: usize, _p: Point, mods: KeyModifiers, _
         CLOSE => return Outcome::Close,
         PROFILES => return Outcome::Profiles,
         PROJECT => l.open_project_picker(),
+        NO_PROJECT if l.orchestrator => l.select_no_project(),
         TAB_NEW => l.tab = SessionTab::New,
         TAB_CONTINUE => l.tab = SessionTab::Continue,
         LAUNCH => return l.key(key(KeyCode::Enter)),
@@ -291,8 +293,22 @@ pub(crate) fn draw(l: &mut Launcher, ui: &mut Ui, area: Rect, cx: &Cx) -> bool {
     ui.panel(area, radius::OVERLAY, t.surface.with_alpha(0.97), t.hairline);
     ui.block(area);
     let inner = area.inset(PAD);
-    let (bar, close, tabs) = head(inner);
-    address_bar(ui, &l.dir, l.orchestrator && l.tab == SessionTab::New, bar, false);
+    let (mut bar, close, tabs) = head(inner);
+    let mut no_project_button = None;
+    if l.orchestrator && l.tab == SessionTab::New {
+        let w = widgets::button_width(ui, "Orchestrator");
+        let button = Rect::new(bar.right() - w, bar.y, w, bar.h);
+        no_project_button = Some(button);
+        bar.w = (bar.w - w - 8.0).max(0.0);
+        widgets::button(ui, button, "Orchestrator", if l.no_project { widgets::Kind::Secondary } else { widgets::Kind::Ghost }, Action::Overlay(NO_PROJECT));
+        if l.no_project {
+            ui.outline(button, radius::CONTROL, 1.0, t.gold);
+        }
+        if ui.pointer.is_some_and(|p| button.contains(p)) {
+            widgets::tooltip(ui, button, "Coordinate across projects · alt+g");
+        }
+    }
+    address_bar(ui, &l.dir, l.orchestrator && l.no_project && l.tab == SessionTab::New, bar, false);
     if widgets::icon_button(ui, close, I_CLOSE, t.muted, Action::Overlay(CLOSE)) {
         widgets::tooltip(ui, close, "Close · esc");
     }
@@ -311,7 +327,7 @@ pub(crate) fn draw(l: &mut Launcher, ui: &mut Ui, area: Rect, cx: &Cx) -> bool {
             let k = picker::opening(ui);
             let screen = ui.screen;
             widgets::scrim(ui, screen, k, Action::None);
-            address_bar(ui, &l.dir, false, bar, true);
+            address_bar(ui, &l.dir, l.orchestrator && l.no_project, bar, true);
             picker::draw(p, ui, bar, area, &l.dir, PICKER, cx, k);
             ui.set_layer(prev);
         }
@@ -320,8 +336,9 @@ pub(crate) fn draw(l: &mut Launcher, ui: &mut Ui, area: Rect, cx: &Cx) -> bool {
     // alt held: the launcher's own alt keys, as key tips on what they reach
     if cx.alt && l.project_picker.is_none() {
         let prev = ui.layer();
-        if !(l.orchestrator && l.tab == SessionTab::New) {
-            widgets::keytip(ui, Point::new(bar.x + 22.0, bar.bottom() - 2.0), "p");
+        widgets::keytip(ui, Point::new(bar.x + 22.0, bar.bottom() - 2.0), "p");
+        if let Some(button) = no_project_button {
+            widgets::keytip(ui, Point::new(button.x + button.w / 2.0, button.bottom() - 2.0), "g");
         }
         for (r, k) in tips {
             widgets::keytip(ui, Point::new(r.x + r.w / 2.0, r.bottom() - 2.0), k);
@@ -341,26 +358,13 @@ fn head(inner: Rect) -> (Rect, Rect, Rect) {
 
 /// The project as an address bar, as File Explorer's: a folder, the path as breadcrumbs, and on the right the key
 /// that changes it and a chevron. Clicking anywhere on it opens the project picker; `open` draws it lit (an
-/// outline, the chevron up) while the picker hangs from it. On the orchestrator tab it shows where the
-/// orchestrator runs instead: always its own folder, so nothing to click.
-fn address_bar(ui: &mut Ui, dir: &Path, runs_in: bool, r: Rect, open: bool) {
+/// outline, the chevron up) while the picker hangs from it. A coordinator can choose any project folder.
+fn address_bar(ui: &mut Ui, dir: &Path, no_project: bool, r: Rect, open: bool) {
     let t = ui.t;
     if r.w < 80.0 {
         return;
     }
     let icon = Rect::new(r.x + MARK_X, r.y, 18.0, r.h);
-    if runs_in {
-        ui.panel(r, radius::CONTROL, t.control, t.stroke);
-        ui.icon(icon, I_FOLDER, size::TITLE + 1.0, t.gold);
-        let lead = Style::new(size::BODY, weight::REGULAR, t.muted);
-        let lw = ui.measure("runs in", lead);
-        let x = r.x + TEXT_X;
-        ui.label_in(Rect::new(x, r.y, lw + 2.0, r.h), "runs in", lead, Align::Left);
-        let x = x + lw + 12.0;
-        let parts = path_parts(&bro_core::orchestrator::workspace());
-        crumbs(ui, Rect::new(x, r.y, (r.right() - 14.0 - x).max(0.0), r.h), &parts, t.gold);
-        return;
-    }
     let hot = if open { 0.0 } else { ui.hover_amount("launcher-address", r) };
     let down = !open && ui.pressing && hot > 0.5;
     if open {
@@ -383,7 +387,12 @@ fn address_bar(ui: &mut Ui, dir: &Path, runs_in: bool, r: Rect, open: bool) {
         end = kx - 14.0;
     }
     let x = r.x + TEXT_X;
-    crumbs(ui, Rect::new(x, r.y, (end - x).max(0.0), r.h), &path_parts(dir), t.text);
+    let text = Rect::new(x, r.y, (end - x).max(0.0), r.h);
+    if no_project {
+        ui.label_in(text, "Choose a project folder", Style::new(size::BODY, weight::REGULAR, t.muted), Align::Left);
+    } else {
+        crumbs(ui, text, &path_parts(dir), t.text);
+    }
     if !open {
         ui.hit(r, Action::Overlay(PROJECT));
     }
@@ -648,7 +657,7 @@ fn draw_agents(l: &Launcher, ui: &mut Ui, r: Rect) -> f32 {
         x += w + gap;
     }
     // ★ orchestrator, a little apart
-    let running = l.data.orchestrator_running.is_some();
+    let running = l.running_orchestrator().is_some();
     let lw = ui.measure("orchestrator", ls);
     let w = 14.0 + 20.0 + 10.0 + lw + 18.0 + if running { 20.0 } else { 0.0 };
     let apart = 25.0;
@@ -1057,11 +1066,11 @@ fn draw_summary(s: &Shown, ui: &mut Ui, r: Rect) -> f32 {
     };
     if l.orchestrator {
         let w = r.w - 30.0;
-        if let Some(running) = &l.data.orchestrator_running {
+        if let Some(running) = l.running_orchestrator() {
             ui.icon(Rect::new(r.x, y, 22.0, 26.0), I_STAR, 18.0, t.gold);
             ui.label_in(Rect::new(r.x + 30.0, y, w, 26.0), running, Style::new(size::HEADING, weight::SEMIBOLD, t.gold), Align::Left);
             y += 34.0;
-            ui.label_in(Rect::new(r.x + 30.0, y, w, 20.0), "Already running. There's only ever one.", Style::new(size::BODY, weight::REGULAR, t.text), Align::Left);
+            ui.label_in(Rect::new(r.x + 30.0, y, w, 20.0), "Already running for this project.", Style::new(size::BODY, weight::REGULAR, t.text), Align::Left);
             y += 22.0;
             ui.label_in(Rect::new(r.x + 30.0, y, w, 20.0), "⏎ takes you to it.", Style::new(size::BODY, weight::REGULAR, t.muted), Align::Left);
             return y + 20.0 - r.y;
@@ -1073,7 +1082,8 @@ fn draw_summary(s: &Shown, ui: &mut Ui, r: Rect) -> f32 {
         ui.icon(Rect::new(r.x, y, 22.0, 26.0), I_STAR, 18.0, t.gold);
         ui.label_in(Rect::new(r.x + 30.0, y, w, 26.0), &what, Style::new(size::HEADING, weight::SEMIBOLD, t.gold), Align::Left);
         y += 34.0;
-        for line in ["Opens sessions and hands them work,", "then tells you how it went."] {
+        let lines = if l.no_project { ["Coordinates project orchestrators.", "New ones use this model."] } else { ["Coordinates sessions in this project.", "Find it in the Orchestrators tab."] };
+        for line in lines {
             ui.label_in(Rect::new(r.x + 30.0, y, w, 20.0), line, Style::new(size::BODY, weight::REGULAR, t.text), Align::Left);
             y += 20.0;
         }
@@ -1158,8 +1168,8 @@ fn opt_choices(l: &Launcher, o: Opt, long: bool, t: &Tokens) -> (Vec<Seg<'static
     }
 }
 
-/// The orchestrator always opens as its own session, pinned on top.
-const PINNED: &str = "its own, pinned on top";
+/// A coordinator always opens as its own session.
+const PINNED: &str = "its own session";
 
 /// Permissions, browser and placement as labelled rows of choices with their keys, under an "Options" heading.
 fn draw_options(l: &Launcher, ui: &mut Ui, r: Rect) {
@@ -1241,6 +1251,9 @@ struct Main {
 fn main_action(s: &Shown, t: &Tokens) -> Main {
     let l = s.l;
     let go = |label: String, fill: Color, ink: Color, target: usize| Main { label, fill, ink, go: true, target };
+    if l.orchestrator && l.running_orchestrator().is_some() {
+        return go("Go to the orchestrator".into(), t.gold, t.ink_on(t.gold), LAUNCH);
+    }
     // Enter installs first (the terminal UI's button says "Launch …" there while it installs)
     if !s.installed {
         return go(format!("Install {}", l.harness.label()), t.danger, t.ink_on(t.danger), INSTALL);
@@ -1250,7 +1263,6 @@ fn main_action(s: &Shown, t: &Tokens) -> Main {
         return go("Sign in with Google".into(), t.accent, t.on_accent, LAUNCH);
     }
     match &s.spec {
-        Some(_) if l.orchestrator && l.data.orchestrator_running.is_some() => go("Go to the orchestrator".into(), t.gold, t.ink_on(t.gold), LAUNCH),
         Some(spec) if l.orchestrator => go(format!("Start it on {}", crate::services::launch::label_for(spec).trim_start_matches("orchestrator · ")), t.gold, t.ink_on(t.gold), LAUNCH),
         Some(spec) => go(format!("Launch {}", crate::services::launch::label_for(spec)), t.accent, t.on_accent, LAUNCH),
         None => {
@@ -1269,7 +1281,7 @@ fn draw_footer(s: &Shown, ui: &mut Ui, r: Rect) {
         Focus::List if s.needs => "pick a model",
         _ => "launch",
     };
-    let enter = if l.orchestrator && l.data.orchestrator_running.is_some() { "go to it" } else { enter };
+    let enter = if l.orchestrator && l.running_orchestrator().is_some() { "go to it" } else { enter };
     // Enter installs or signs in first, as the button says
     let enter = if !s.installed {
         "install"
@@ -1494,7 +1506,7 @@ mod tests {
             recents: vec![],
             models: st.models.clone(),
             keyed: vec!["openrouter".into(), "openai".into()],
-            orchestrator_running: None,
+            orchestrator_running: BTreeMap::new(),
             shared: false,
         };
         Launcher::new(data, Some(PathBuf::from("/code/bro")), Place::Tab)
@@ -1562,6 +1574,28 @@ mod tests {
         assert!(matches!(tap(&mut l, CLOSE), Outcome::Close));
         assert!(matches!(tap(&mut l, PROFILES), Outcome::Profiles));
         assert!(matches!(tap(&mut l, INSTALL), Outcome::Install(Harness::Claude)));
+    }
+
+    #[test]
+    fn orchestrator_project_selection_and_no_project_use_their_own_running_status() {
+        let mut l = launcher().with_orchestrator();
+        let project = std::env::temp_dir().join("orchestrator-project");
+        l.select_project(project.clone());
+        l.data.orchestrator_running.insert(bro_core::orchestrator::scope_key(&project), "project brain".into());
+        assert_eq!(l.running_orchestrator().map(String::as_str), Some("project brain"));
+        assert_eq!(l.spec().unwrap().cwd, project);
+        tap(&mut l, NO_PROJECT);
+        assert!(l.no_project && l.running_orchestrator().is_none());
+        assert_eq!(l.spec().unwrap().cwd, bro_core::orchestrator::workspace());
+        l.data.orchestrator_running.insert(bro_core::orchestrator::GLOBAL_KEY.into(), "workspace brain".into());
+        assert_eq!(l.running_orchestrator().map(String::as_str), Some("workspace brain"));
+        tap(&mut l, PROJECT);
+        assert!(l.project_picker.is_some(), "the path stays selectable on the orchestrator tab");
+        l.select_project(project.clone());
+        assert!(!l.no_project);
+        assert_eq!(l.running_orchestrator().map(String::as_str), Some("project brain"));
+        l.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+        assert!(l.no_project);
     }
 
     #[test]

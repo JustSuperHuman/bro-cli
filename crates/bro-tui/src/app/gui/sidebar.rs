@@ -268,7 +268,7 @@ fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused:
     }
     let mut y = list.y;
     // the orchestrator is pinned above the scrolling list
-    let pinned = matches!(rows.first(), Some(Row::Live { info, .. }) if info.orchestrator);
+    let pinned = matches!(rows.first(), Some(Row::Live { info, .. }) if info.orchestrator && info.project_key == bro_core::orchestrator::GLOBAL_KEY);
     if pinned {
         let (_, h) = row_height(&rows[0], renaming);
         let r = Rect::new(list.x + PAD, y, list.w - 2.0 * PAD, h);
@@ -422,7 +422,7 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
             let line = Rect::new(r.x + 8.0, r.y + 6.0, r.w - 16.0, 20.0);
             let mid = line.y + 10.0;
             // number (alt+1–9), the agent's mark, the indicator
-            let indent = if info.orchestrator { 0.0 } else { 10.0 };
+            let indent = if info.orchestrator && info.project_key == bro_core::orchestrator::GLOBAL_KEY { 0.0 } else { 10.0 };
             let x0 = line.x + indent;
             if let Some(n) = n {
                 let st = Style::new(size::CAPTION, weight::SEMIBOLD, if is_focus { color } else { t.faint });
@@ -998,11 +998,11 @@ pub fn draw_strip(app: &mut App, ui: &mut Ui, r: Rect) {
             Some(match tab {
                 StripTab::All => StripEntry { tab: tab.clone(), label: "All".into(), count: Some(app.tile_ids(None).len()), working: false, blocked: 0, done: 0 },
                 StripTab::Orchestrator => {
-                    let id = app.orchestrator_pane();
-                    let activity = id.and_then(|id| app.panes.get(&id)).and_then(|p| p.activity());
-                    let blocked = usize::from(activity == Some(Activity::Blocked));
-                    let done = usize::from(blocked == 0 && id.is_some_and(|id| app.done.contains(&id)));
-                    StripEntry { tab: tab.clone(), label: "Orchestrator".into(), count: None, working: activity == Some(Activity::Working), blocked, done }
+                    let ids = app.orchestrator_panes();
+                    let activity = |id: &crate::pane::PaneId| app.panes.get(id).and_then(|p| p.activity());
+                    let blocked = ids.iter().filter(|id| activity(id) == Some(Activity::Blocked)).count();
+                    let done = ids.iter().filter(|id| activity(id) != Some(Activity::Blocked) && app.done.contains(id)).count();
+                    StripEntry { tab: tab.clone(), label: "Orchestrators".into(), count: Some(ids.len()), working: ids.iter().any(|id| activity(id) == Some(Activity::Working)), blocked, done }
                 }
                 StripTab::Project(key) => {
                     let p = tabs.iter().find(|p| &p.key == key)?;
@@ -1108,8 +1108,8 @@ pub fn draw_strip(app: &mut App, ui: &mut Ui, r: Rect) {
         let cs = Style::new(size::CAPTION, weight::MEDIUM, t.faint);
         if let Some(n) = e.count {
             // while one of its agents works, the count's place spins
-            if e.working && e.closable() {
-                ui.spinner(Point::new(cx + 5.0, mid), 4.0, 1.4, t.accent);
+            if e.working && (e.closable() || e.spins_after()) {
+                ui.spinner(Point::new(cx + 5.0, mid), 4.0, 1.4, if e.spins_after() { t.gold } else { t.accent });
             } else {
                 ui.label_in(Rect::new(cx, tr.y, 14.0, tr.h), &n.to_string(), cs, Align::Left);
             }

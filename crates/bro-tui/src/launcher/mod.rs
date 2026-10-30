@@ -2,7 +2,7 @@
 //!
 //! 1. **Project** — the path bar shows the current location and opens the project picker.
 //! 2. **Harness** — tabs across the top (←/→): claude, codex, pi, omp, and ★ orchestrator. The orchestrator
-//!    is bro's one session that drives all the others; on its tab a second row picks the harness it runs on
+//!    coordinates the selected project; on its tab a second row picks the harness it runs on
 //!    (shift+←/→), and the list starts on the smartest login for it (your last orchestrator combo unless that
 //!    login is nearly out, else the ready login with the most left).
 //! 3. **Run on** — one list: recent combos for this harness, then its own logins (no model to pick — the CLI
@@ -103,8 +103,8 @@ pub struct Data {
     pub models: BTreeMap<String, Vec<ModelRow>>,
     /// provider ids with a key configured (or that need none)
     pub keyed: Vec<String>,
-    /// The orchestrator already running, by its label: launching it again goes to that one.
-    pub orchestrator_running: Option<String>,
+    /// Project key → running coordinator's launch label.
+    pub orchestrator_running: BTreeMap<String, String>,
     /// Proxy mode: sessions run on all of a family's logins, so the list offers those instead of each login.
     pub shared: bool,
 }
@@ -114,6 +114,7 @@ pub struct Data {
 pub enum Hit {
     Profiles,
     Project,
+    NoProject,
     Tab(SessionTab),
     ContinueScope(bool),
     ContinueRow(usize),
@@ -167,6 +168,8 @@ pub struct Launcher {
     pub harness: Harness,
     /// The ★ orchestrator tab is open.
     pub orchestrator: bool,
+    /// Coordinate across projects from the dedicated workspace.
+    pub no_project: bool,
     pub focus: Focus,
     pub list_filter: String,
     pub model_filter: String,
@@ -230,6 +233,7 @@ impl Launcher {
             data,
             harness,
             orchestrator: false,
+            no_project: false,
             focus: Focus::List,
             list_filter: String::new(),
             model_filter: String::new(),
@@ -300,8 +304,23 @@ impl Launcher {
 
     pub fn select_project(&mut self, dir: PathBuf) {
         self.dir = dir;
+        self.no_project = false;
         self.project_picker = None;
         self.hits.clear();
+    }
+
+    pub fn select_no_project(&mut self) {
+        self.no_project = true;
+        self.project_picker = None;
+        self.hits.clear();
+    }
+
+    pub fn launch_dir(&self) -> PathBuf {
+        if self.orchestrator && self.no_project { bro_core::orchestrator::workspace() } else { self.dir.clone() }
+    }
+
+    pub fn running_orchestrator(&self) -> Option<&String> {
+        self.data.orchestrator_running.get(&bro_core::orchestrator::scope_key(&self.launch_dir()))
     }
 
     /// Start on the permission mode picked last time instead of skip.
@@ -360,6 +379,7 @@ impl Launcher {
     /// Switch to the orchestrator tab on its smartest harness and login.
     fn enter_orchestrator(&mut self) {
         self.orchestrator = true;
+        self.no_project |= bro_core::orchestrator::is_global(&self.dir);
         self.harness = self.brain_default();
         self.list_filter.clear();
         self.focus = Focus::List;
@@ -690,13 +710,17 @@ impl Launcher {
             profile_id,
             provider_id,
             model,
-            cwd: self.dir.clone(),
+            cwd: self.launch_dir(),
             resume: None,
             permission: self.permission,
             browser: self.browser,
             extra_args: vec![],
             orchestrator: self.orchestrator,
         };
+        // Focusing a running coordinator does not need a new account or model selection.
+        if self.orchestrator && self.running_orchestrator().is_some() {
+            return Some(base(None, None, None));
+        }
         match self.current()? {
             Item::Header(_) => None,
             Item::Recent(i) => {
@@ -841,7 +865,7 @@ impl Launcher {
     }
 
     fn launch(&self) -> Outcome {
-        if self.sign_in_needed() {
+        if self.sign_in_needed() && !(self.orchestrator && self.running_orchestrator().is_some()) {
             return Outcome::SignIn;
         }
         match self.spec() {
@@ -870,6 +894,8 @@ impl Launcher {
         match hit {
             Hit::Profiles => return Outcome::Profiles,
             Hit::Project => self.open_project_picker(),
+            Hit::NoProject if self.orchestrator => self.select_no_project(),
+            Hit::NoProject => {},
             Hit::Tab(tab) => self.tab = tab,
             Hit::ContinueScope(all) => self.continue_picker.set_all(all),
             Hit::ContinueRow(_) => return Self::continue_outcome(self.continue_picker.click(pos, mods)),
@@ -960,6 +986,7 @@ impl Launcher {
         }
         if k.modifiers.contains(KeyModifiers::ALT) {
             match k.code {
+                KeyCode::Char('g' | 'G') if self.orchestrator => { self.select_no_project(); return Outcome::None; }
                 KeyCode::Char('n' | 'N') => { self.tab = SessionTab::New; return Outcome::None; }
                 KeyCode::Char('r' | 'R') => { self.show_continue(); return Outcome::None; }
                 _ => {}
@@ -980,6 +1007,7 @@ impl Launcher {
                     return Outcome::Close;
                 }
             }
+            KeyCode::Enter if self.orchestrator && self.running_orchestrator().is_some() => return self.launch(),
             KeyCode::Enter if !self.installed(self.harness) => return Outcome::Install(self.harness),
             KeyCode::Enter => match self.focus {
                 Focus::List if self.sign_in_needed() => return self.launch(),

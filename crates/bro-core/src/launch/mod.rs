@@ -365,9 +365,9 @@ pub fn build(spec: &LaunchSpec, ctx: &LaunchCtx) -> anyhow::Result<CommandSpec> 
     if spec.orchestrator && orchestrator_bridge(ctx).is_none() {
         bail!("the orchestrator drives bro through its bridge, which isn't running (turn it on in the bridge view)");
     }
-    // the orchestrator always runs in its own folder in your profile
+    // Only No project uses the dedicated coordinator workspace.
     let moved;
-    let spec = if spec.orchestrator {
+    let spec = if spec.orchestrator && crate::orchestrator::is_global(&spec.cwd) {
         let dir = crate::orchestrator::ensure_workspace().with_context(|| format!("creating {}", crate::orchestrator::workspace().display()))?;
         moved = LaunchSpec { cwd: dir, ..spec.clone() };
         &moved

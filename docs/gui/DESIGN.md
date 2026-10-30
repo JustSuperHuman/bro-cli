@@ -112,14 +112,19 @@ search `F0349`, check `F012C`, chevrons `F0142`/`F0140`, alert `F0026`, bell `F0
 - **Tabs (project tab row).** WinUI's TabView: tabs on the window colour; the selected tab is filled with the
   content layer's colour, its top corners 8px, joined to the content below; others are text with a hover fill
   and hairline separators between them; × on hover and on the selected tab. A project's tab is its name in its
-  colour and its session count, which spins while one of its agents works.
+  colour and its session count, which spins while one of its agents works. The permanent Orchestrators tab has
+  a gold star and tiles every coordinator, with their combined count and attention. A project tab includes its
+  own coordinator alongside its sessions.
 - **Sidebar.** WinUI's navigation pane: rows 32–36 high, 4px corners, hover and selection fills; projects are
   their names in their colours over the path and branch; sessions are logo, name, quiet metadata; usage as
-  segments.
+  segments. A project's coordinator leads its session list with a gold star. The root Orchestrator stays
+  pinned above the scrolling project groups.
 - **Key tips.** Holding alt shows WinUI key tips: small raised boxes (4px corners, stroke, soft shadow) with the
   keys, placed at the bottom centre of what they reach.
 - **Address bar.** The launcher's project is an address bar across the top: folder icon, the path as segments,
-  a chevron; clicking it picks another folder.
+  a chevron; clicking it picks another folder, including for an orchestrator. A standard Orchestrator button
+  beside the bar selects cross-project coordination; a gold outline marks this selection. Choosing a folder
+  selects that project. If its coordinator is already running, the primary action is Go to the orchestrator.
 
 ## Motion
 

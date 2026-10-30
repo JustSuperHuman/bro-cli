@@ -284,7 +284,7 @@ pub(super) fn launcher_data_with_installed(app: &App, installed: Vec<(bro_core::
         installed,
         recents: app.recents.clone(),
         models: st.models.clone(),
-        orchestrator_running: app.orchestrator_pane().and_then(|id| app.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.label.clone()),
+        orchestrator_running: app.orchestrator_panes().into_iter().filter_map(|id| app.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| (t.meta.project.key.clone(), t.meta.label.clone()))).collect(),
         shared: st.settings.proxy.shared,
         keyed: {
             let cfg = st.config.clone().unwrap_or_default();

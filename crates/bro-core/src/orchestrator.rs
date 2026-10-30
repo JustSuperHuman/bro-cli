@@ -1,4 +1,4 @@
-//! The orchestrator: one agent session per bro that drives every other session through the
+//! Orchestrators: one coordinator per project, plus an optional workspace coordinator, using the
 //! bridge's tools. Claude Code and Codex reach them as the `bro` MCP server (the bridge's
 //! `/mcp` endpoint on loopback, which needs no token); Pi and omp, which have no MCP client,
 //! run `bro ctl <tool>` in their shell. Any harness can fall back to `bro ctl`.
@@ -8,9 +8,8 @@
 //! harness at when [`crate::launch::LaunchSpec::orchestrator`] is set. Files live under
 //! `~/.bro/orchestrator/` and are rewritten only when their content changes.
 //!
-//! The orchestrator itself always runs in its own folder in the user's profile, `~/orchestrator`
-//! ([`workspace`]), whatever project is current: it belongs to no project, and its chats and notes
-//! collect in one place.
+//! Project coordinators run in their project. The root "Orchestrator" uses [`workspace`]
+//! and hands project work to project coordinators with the same launch configuration.
 use crate::Harness;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +18,17 @@ pub const MCP_SERVER: &str = "bro";
 pub const SKILL_NAME: &str = "bro-orchestrator";
 /// Set in the orchestrator's environment (alongside `BRO_SESSION_ID`).
 pub const ENV_FLAG: &str = "BRO_ORCHESTRATOR";
+pub const GLOBAL_KEY: &str = "bro:orchestrator";
+
+/// The dedicated workspace belongs to the root Orchestrator, including launches saved by older versions.
+pub fn is_global(cwd: &Path) -> bool {
+    cwd.as_os_str().is_empty() || crate::util::same_path(cwd, &workspace())
+}
+
+/// Shared identity for launch deduplication, saved state and project selection.
+pub fn scope_key(cwd: &Path) -> String {
+    if is_global(cwd) { GLOBAL_KEY.into() } else { crate::projects::project_for(cwd).key }
+}
 
 /// `~/.bro/orchestrator`.
 pub fn dir() -> PathBuf {
@@ -91,21 +101,46 @@ pub fn prompt(harness: Harness) -> String {
     p
 }
 
+/// Scope is part of the launch instructions, so each coordinator knows who owns project work.
+pub fn scoped_prompt(harness: Harness, cwd: &Path) -> String {
+    let mut p = prompt(harness);
+    p.push_str("\n## Project ownership\n\n");
+    if is_global(cwd) {
+        p.push_str("You are Orchestrator, the root coordinator. You have no assigned project. Coordinate work across \
+projects. Resolve each project's path with \
+find_project or list_projects. Call open_orchestrator with that project and sourceSessionId set to your \
+BRO_SESSION_ID. Bro reuses the project's running orchestrator or starts one with your exact harness, login, \
+provider, model, permissions and browser. Give it a self-contained task and supervise its result. Route each \
+project's work through its orchestrator; let that orchestrator manage the project's workers. For work spanning \
+several projects, use one project orchestrator per project.\n");
+    } else {
+        p.push_str(&format!("Your project path is {}. You own coordination for this project. Reuse its workers and \
+open new workers in this project. Leave work in other projects to their project orchestrators; use \
+open_orchestrator with sourceSessionId set to your BRO_SESSION_ID when a task needs another project.\n", cwd.display()));
+    }
+    p.push_str("Inspect list_sessions before delegating. Sessions marked orchestrator=true are coordinators; their \
+projectPath identifies their project and is null for the root Orchestrator. You may send work to other project \
+orchestrators. Never send input to, wait on, or close your own BRO_SESSION_ID. Reuse a running project \
+orchestrator even when its model differs; do not restart it to change its model.\n");
+    p
+}
+
 const PROMPT_HEAD: &str = "# You are the bro orchestrator
 
 You are running inside bro, the user's agentic terminal workspace. bro runs many terminal sessions side by \
 side: coding agents (Claude Code, Codex, Pi, omp) and plain shells, grouped by project in a sidebar. You are \
-not one of the workers. You are the one session that controls this bro instance: you see every other session, \
+not one of the workers. You coordinate the sessions in your scope: you see the workspace, \
 open new ones, hand them work, watch them, answer their questions when the user lets you, and report back.
 
-The user talks to you directly in your own session (the gold one pinned at the top of bro's sidebar). Treat \
+The user talks to you directly in your own gold session. Treat \
 what they type as instructions for you, not as code work for you to do yourself. Your value is coordination: \
 split a goal into tasks, put the right agent on each, keep them moving, check their results, and tell the user \
 what happened.
 
-There is only ever one orchestrator, and it is you. Your own session id is in `$BRO_SESSION_ID`; the session \
-list marks you with `\"orchestrator\": true`. Never send input, keys or prompt answers to yourself and never \
-close yourself — the tools refuse it anyway.
+Each project can have its own orchestrator. The root coordinator is called Orchestrator and coordinates across \
+projects. Your own session id is in \
+`$BRO_SESSION_ID`; the session list marks coordinators with `\"orchestrator\": true`. Never send input, keys or \
+prompt answers to yourself and never close yourself.
 ";
 
 const TOOLS: &str = "## Your tools
@@ -117,6 +152,7 @@ const TOOLS: &str = "## Your tools
 | `read_chat` | A session's whole conversation from its transcript (`sessionId` for a live one, `chatId` from `list_chats` for an old one). Far more than the screen shows. |
 | `list_chats` | Past and current Claude Code / Codex chats on disk, newest first, filterable by `project` / `query`. |
 | `open_session` | Open a new agent session in a project (`project` as a name or a path; `agent`: claude, codex, pi, shell, or a login id like `claude:work`; `model`; `name`; `task` to send as its first message; `focus`). It gets a squad name (Mal, Pinky, Toast, Minty, Lilac, Sky, Bitty) you and the user can use instead of its id. Prefer it over `create_session`. |
+| `open_orchestrator` | Open or reuse a project's orchestrator (`project`, `sourceSessionId` from your BRO_SESSION_ID, optional `task` and `focus`). New orchestrators inherit your exact launch configuration, including model. |
 | `send_input` | Type into a session; `submit=true` (default) presses Enter. This is how you prompt an agent. |
 | `send_keys` | Press keys: enter, tab, shift+tab, esc, space, backspace, arrows, home/end, pageup/pagedown, ctrl+c/d/l/r/u/z, or one character. |
 | `answer_prompt` | Answer the question an agent is waiting on (`option` by key or label), or `cancel` it. |
@@ -260,6 +296,16 @@ pub fn write_skill(home: &Path) -> std::io::Result<PathBuf> {
 pub fn write_prompt(harness: Harness) -> std::io::Result<PathBuf> {
     let path = dir().join(format!("prompt-{}.md", harness.label()));
     crate::browser::write_if_changed(&path, &prompt(harness))?;
+    Ok(path)
+}
+
+/// Separate scope files prevent concurrent project launches from overwriting each other's instructions.
+pub fn write_scoped_prompt(harness: Harness, cwd: &Path) -> std::io::Result<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    scope_key(cwd).hash(&mut hash);
+    let path = dir().join(format!("prompt-{}-{:016x}.md", harness.label(), hash.finish()));
+    crate::browser::write_if_changed(&path, &scoped_prompt(harness, cwd))?;
     Ok(path)
 }
 

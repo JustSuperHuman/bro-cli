@@ -65,14 +65,14 @@ impl App {
             self.resume_started(id);
         }
         if spec.orchestrator {
-            self.orchestrator_pending = None;
+            self.orchestrator_pending.remove(&bro_core::orchestrator::scope_key(&spec.cwd));
         }
         let cmd = match result {
             Ok(c) => c,
             Err(e) => {
                 // it can't start this way: don't try it again on every start
-                if spec.orchestrator && self.persist && !self.guest && self.orchestrator_pane().is_none() {
-                    crate::orchestrator_state::clear();
+                if spec.orchestrator && self.persist && !self.guest && self.orchestrator_for(&spec.cwd).is_none() {
+                    crate::orchestrator_state::forget(&spec.cwd);
                 }
                 self.raise(Kind::Error, format!("couldn't launch {}: {e}", spec.harness.label()));
                 if let Some(r) = reply {
@@ -118,12 +118,17 @@ impl App {
         let sid = meta.sid.clone();
         let mut term = Term::new(meta, Spawn { program: cmd.program, args: cmd.args, env: cmd.env, env_remove: cmd.env_remove }, self.svc.clone());
         term.launch_spec = Some(spec.clone());
-        // there is only ever one orchestrator: a second that finished building is ended unstarted
-        if spec.orchestrator && let Some(existing) = self.orchestrator_pane().filter(|id| Some(*id) != replacement) {
+        // A second launch for the same project is discarded before its process starts.
+        if spec.orchestrator && let Some(existing) = self.orchestrator_for(&spec.cwd).filter(|id| Some(*id) != replacement) {
             let id = self.add(Box::new(term));
             self.close(id);
-            self.focus_pane(existing);
-            self.toast(Kind::Info, "the orchestrator is already running");
+            if let Some(reply) = reply {
+                let sid = self.panes[&existing].as_term_ref().unwrap().meta.sid.clone();
+                let _ = reply.send(Ok(sid));
+            } else {
+                self.focus_pane(existing);
+                self.toast(Kind::Info, "the orchestrator is already running in this project");
+            }
             return;
         }
         let place = if spec.orchestrator { Place::Tab } else { place };
@@ -299,21 +304,10 @@ impl App {
                 let pane = self.term_id(&id);
                 self.open_in_editor(pane, path, line, column);
             }
+            BridgeCommand::OpenOrchestrator { cwd, source, reply } => self.create_orchestrator(cwd, Some(&source), reply),
             BridgeCommand::Create { req, reply } if req.profile_id.as_deref() == Some(ORCHESTRATOR_PROFILE) => {
-                // the launcher's ★ tab from a phone: one per bro, so the running one answers
-                if let Some(sid) = self.orchestrator_pane().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()) {
-                    let _ = reply.send(Ok(sid));
-                } else if self.orchestrator_pending.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(90)) {
-                    let _ = reply.send(Err(anyhow::anyhow!("The orchestrator is already starting. It shows up here in a moment.")));
-                } else if let Some(spec) = self.voice_orchestrator_spec() {
-                    self.orchestrator_pending = Some(Instant::now());
-                    let mut lr = LaunchRequest::new(spec, Place::Tab);
-                    lr.reply = Some(reply);
-                    lr.remember = true;
-                    self.svc.launch(lr);
-                } else {
-                    let _ = reply.send(Err(anyhow::anyhow!("No Claude or Codex login can run the orchestrator. Add one in bro's profiles.")));
-                }
+                let cwd = req.cwd.unwrap_or_else(bro_core::orchestrator::workspace);
+                self.create_orchestrator(cwd, None, reply);
             }
             BridgeCommand::Create { req, reply } => {
                 // no folder from the phone → the current project, like alt+n
@@ -369,17 +363,82 @@ impl App {
     /// At startup: start the orchestrator that was running when bro last stopped, with the same harness, login,
     /// model, permissions and browser.
     pub(crate) fn restore_orchestrator(&mut self) {
-        if !self.persist || self.orchestrator_pane().is_some() {
+        if !self.persist || self.guest {
             return;
         }
-        if let Some(spec) = crate::orchestrator_state::load() {
-            self.launch_spec(spec, Place::Tab);
+        for spec in crate::orchestrator_state::load_all() {
+            if self.orchestrator_for(&spec.cwd).is_none() {
+                self.launch_spec(spec, Place::Tab);
+            }
         }
     }
 
     /// bro's orchestrator session, when one is open.
+    #[cfg(test)]
     pub(crate) fn orchestrator_pane(&self) -> Option<PaneId> {
-        self.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.orchestrator)).map(|(id, _)| *id)
+        self.orchestrator_for(&bro_core::orchestrator::workspace())
+            .or_else(|| self.current_project().and_then(|cwd| self.orchestrator_for(&cwd)))
+            .or_else(|| self.orchestrator_panes().into_iter().next())
+    }
+
+    pub(crate) fn orchestrator_for(&self, cwd: &std::path::Path) -> Option<PaneId> {
+        let key = bro_core::orchestrator::scope_key(cwd);
+        self.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.orchestrator && t.meta.project.key == key)).map(|(id, _)| *id)
+    }
+
+    pub(crate) fn orchestrator_panes(&self) -> Vec<PaneId> {
+        crate::sidebar::live_order(&self.live_infos(), &[], &self.open_infos()).into_iter()
+            .filter(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.orchestrator)).collect()
+    }
+
+    pub(crate) fn orchestrator_starting(&self, cwd: &std::path::Path) -> bool {
+        self.orchestrator_pending.get(&bro_core::orchestrator::scope_key(cwd)).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(90))
+    }
+
+    pub(super) fn inherited_orchestrator_spec(&self, source: &str, cwd: PathBuf) -> Option<LaunchSpec> {
+        let t = self.term_id(source).and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).filter(|t| t.meta.orchestrator)?;
+        let mut spec = t.launch_spec.clone()?;
+        // A model changed in the running conversation takes precedence over its original launch choice.
+        spec.model = t.insights().and_then(|s| s.conversation).and_then(|c| c.model.clone()).or_else(|| t.meta.model.clone()).or(spec.model);
+        spec.cwd = cwd;
+        spec.resume = None;
+        spec.orchestrator = true;
+        Some(spec)
+    }
+
+    fn create_orchestrator(&mut self, cwd: PathBuf, source: Option<&str>, reply: tokio::sync::oneshot::Sender<anyhow::Result<String>>) {
+        if self.guest {
+            let _ = reply.send(Err(anyhow::anyhow!("Open orchestrators in the primary Bro window.")));
+            return;
+        }
+        if !bro_core::orchestrator::is_global(&cwd) && !cwd.is_dir() {
+            let _ = reply.send(Err(anyhow::anyhow!("The project folder does not exist: {}", cwd.display())));
+            return;
+        }
+        let config = match source {
+            Some(sid) => self.inherited_orchestrator_spec(sid, cwd.clone()),
+            None => self.voice_orchestrator_spec(),
+        };
+        let Some(mut spec) = config else {
+            let _ = reply.send(Err(anyhow::anyhow!("No launch configuration is available for the source orchestrator.")));
+            return;
+        };
+        if let Some(t) = self.orchestrator_for(&cwd).and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()) {
+            let _ = reply.send(Ok(t.meta.sid.clone()));
+            return;
+        }
+        if self.orchestrator_starting(&cwd) {
+            let _ = reply.send(Err(anyhow::anyhow!("The orchestrator is already starting in this project. Check list_sessions in a moment.")));
+            return;
+        }
+        spec.cwd = cwd;
+        spec.resume = None;
+        spec.orchestrator = true;
+        self.orchestrator_pending.insert(bro_core::orchestrator::scope_key(&spec.cwd), Instant::now());
+        let mut request = LaunchRequest::new(spec, Place::Tab);
+        request.reply = Some(reply);
+        request.remember = true;
+        self.svc.launch(request);
     }
 
     /// Live sessions for the sidebar.
@@ -472,7 +531,7 @@ impl App {
     pub(crate) fn row_root(&self, _rows: &[Row], r: &Row) -> Option<std::path::PathBuf> {
         match r {
             Row::Project { root, .. } => Some(root.clone()),
-            Row::Live { info, .. } => Some(info.project_root.clone()),
+            Row::Live { info, .. } => (info.project_key != crate::panes::term::ORCHESTRATOR_KEY).then(|| info.project_root.clone()),
         }
     }
 
@@ -487,7 +546,7 @@ impl App {
         }
         self.cur_project
             .clone()
-            .or_else(|| self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).filter(|t| !t.meta.orchestrator).map(|t| t.meta.project.root.clone()))
+            .or_else(|| self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).filter(|t| t.meta.project.key != crate::panes::term::ORCHESTRATOR_KEY).map(|t| t.meta.project.root.clone()))
             .or_else(|| self.open_projects.roots.first().cloned())
     }
 

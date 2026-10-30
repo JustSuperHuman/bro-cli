@@ -102,6 +102,17 @@ pub fn definitions() -> Vec<Value> {
             &["project"],
         ),
         tool(
+            "open_orchestrator",
+            "Open or reuse a project's orchestrator. A new one inherits the source orchestrator's exact harness, login, provider, model, permissions and browser. Existing orchestrators keep their configuration. Pass your BRO_SESSION_ID as sourceSessionId. Optionally send a task when the target is ready.",
+            json!({
+                "project": { "type": "string", "description": "Project name or directory path, resolved like find_project." },
+                "sourceSessionId": { "type": "string", "description": "Your BRO_SESSION_ID; the source must be a running orchestrator." },
+                "task": { "type": "string", "description": "A self-contained task for the project orchestrator." },
+                "focus": { "type": "boolean", "description": "Bring it to the front (default false)." }
+            }),
+            &["project", "sourceSessionId"],
+        ),
+        tool(
             "find_project",
             "Resolve a spoken project name to directories on this machine (bro's projects, recent folders, and top-level folders of each drive and the home directory). Returns the best matches with scores.",
             json!({ "query": { "type": "string" } }),
@@ -370,7 +381,7 @@ pub(crate) fn is_orchestrator(app: &AppState, session_id: &str) -> bool {
 /// cannot type into, wait on or close its own terminal.
 fn resolve_worker(app: &AppState, args: &Value) -> Result<String, String> {
     let id = resolve_session(app, args)?;
-    if is_orchestrator(app, &id) {
+    if is_orchestrator(app, &id) && app.summary(&id).is_some_and(|s| bro_core::orchestrator::is_global(std::path::Path::new(&s.cwd))) {
         return Err(
             "That is the orchestrator's own session. Act on the other sessions (list_sessions shows them)."
                 .into(),
@@ -711,6 +722,7 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             .unwrap_or_default())
         }
         "open_session" => open_session(app, args).await,
+        "open_orchestrator" => open_orchestrator(app, args).await,
         "find_project" => {
             let query = string_arg(args, "query").ok_or("query is required.")?;
             let matches = find_folders(app, &query).await;
@@ -1170,6 +1182,57 @@ async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
             None => {
                 type_text(app, &id, &task, true).await?;
                 outcome["taskSent"] = json!(true);
+            }
+        }
+    }
+    Ok(serde_json::to_string_pretty(&outcome).unwrap_or_default())
+}
+
+async fn open_orchestrator(app: &AppState, args: &Value) -> Result<String, String> {
+    let query = string_arg(args, "project").ok_or("project is required.")?;
+    let matches = find_folders(app, &query).await;
+    let best = matches.first().ok_or_else(|| format!("No folder matches \"{query}\". Ask for its path."))?;
+    if matches.get(1).is_some_and(|other| other.score == best.score && best.score < 1000) {
+        return Err(format!("\"{query}\" matches several projects. Use an exact path from find_project."));
+    }
+    let source = resolve_session(app, &json!({ "sessionId": args["sourceSessionId"] }))?;
+    if !is_orchestrator(app, &source) {
+        return Err("sourceSessionId must identify a running orchestrator.".into());
+    }
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    app.send_command(BridgeCommand::OpenOrchestrator { cwd: std::path::PathBuf::from(&best.path), source: source.clone(), reply });
+    let id = tokio::time::timeout(Duration::from_secs(60), answer).await
+        .map_err(|_| "The project orchestrator did not start within 60 seconds. Check list_sessions before retrying.")?
+        .map_err(|_| "Bro declined to open the project orchestrator.")?
+        .map_err(|e| e.to_string())?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    while app.summary(&id).is_none() {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("Orchestrator {id} was created but has not registered yet. Check list_sessions before retrying."));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    if args.get("focus").and_then(Value::as_bool).unwrap_or(false) {
+        app.send_command(BridgeCommand::Focus { id: id.clone() });
+    }
+    let mut outcome = json!({ "id": id, "cwd": best.path, "orchestrator": true });
+    if let Some(task) = string_arg(args, "task") {
+        if id == source {
+            return Err("That project belongs to your own orchestrator. Delegate its work to worker sessions.".into());
+        }
+        match wait_until_ready(app, &id).await? {
+            Some(question) => {
+                outcome["taskSent"] = json!(false);
+                outcome["note"] = json!(format!("Waiting on \"{question}\". Answer it, then send the task with send_input."));
+            }
+            None => {
+                if app.summary(&id).is_some_and(|s| s.agent_activity.as_deref() == Some("working")) {
+                    outcome["taskSent"] = json!(false);
+                    outcome["note"] = json!("This orchestrator is working. Wait until it is idle before sending the task.");
+                } else {
+                    type_text(app, &id, &task, true).await?;
+                    outcome["taskSent"] = json!(true);
+                }
             }
         }
     }

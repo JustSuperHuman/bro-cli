@@ -36,7 +36,7 @@ const WHEEL_GAP: Duration = Duration::from_millis(150);
 pub(crate) enum StripTab {
     /// every session tiled
     All,
-    /// bro's orchestrator, on its own
+    /// Every project orchestrator and the root Orchestrator.
     Orchestrator,
     /// one project's sessions tiled (its key)
     Project(String),
@@ -80,10 +80,7 @@ impl App {
 
     /// Every tab, left to right.
     pub(crate) fn strip_items(&self, tabs: &[ProjectTab]) -> Vec<StripTab> {
-        let mut v = vec![StripTab::All];
-        if self.orchestrator_pane().is_some() {
-            v.push(StripTab::Orchestrator);
-        }
+        let mut v = vec![StripTab::All, StripTab::Orchestrator];
         v.extend(tabs.iter().map(|t| StripTab::Project(t.key.clone())));
         v
     }
@@ -92,7 +89,11 @@ impl App {
     /// every session is on screen and nothing else. None for anything else (a mix you stacked, a view).
     pub(crate) fn showing_tab(&self) -> Option<StripTab> {
         if self.tile_all {
-            return Some(self.tile_project.clone().map_or(StripTab::All, StripTab::Project));
+            return Some(match self.tile_project.as_deref() {
+                Some(crate::panes::term::ORCHESTRATOR_KEY) => StripTab::Orchestrator,
+                Some(key) => StripTab::Project(key.to_string()),
+                None => StripTab::All,
+            });
         }
         if self.stacked() {
             return None;
@@ -101,32 +102,35 @@ impl App {
         let key_of = |id: &PaneId| self.panes.get(id).and_then(|p| p.as_term_ref()).map(|t| (t.meta.orchestrator, t.meta.project.key.clone()));
         let (orchestrator, key) = key_of(vis.first()?)?;
         if orchestrator {
-            return (vis.len() == 1).then_some(StripTab::Orchestrator);
+            return (vis.len() == 1 && self.orchestrator_panes().len() == 1).then_some(StripTab::Orchestrator);
         }
-        let only_it = vis.iter().all(|id| key_of(id).is_some_and(|(o, k)| !o && k == key));
+        let only_it = vis.iter().all(|id| key_of(id).is_some_and(|(_, k)| k == key));
         let all_of_it = self.tile_ids(Some(&key)).iter().all(|id| vis.contains(id));
         (only_it && all_of_it).then_some(StripTab::Project(key))
     }
 
     /// Show `tab` (nothing changes when it's showing already).
     pub(crate) fn show_tab(&mut self, tab: StripTab) {
-        if self.showing_tab().as_ref() == Some(&tab) {
+        if tab != StripTab::Orchestrator && self.showing_tab().as_ref() == Some(&tab) {
             self.leave_sidebar();
             return;
         }
         match tab {
             StripTab::All => self.toggle_tiles(),
-            StripTab::Orchestrator => match self.orchestrator_pane() {
-                Some(id) => {
-                    self.clear_stack();
-                    self.focus_pane(id);
+            StripTab::Orchestrator => {
+                let ids = self.orchestrator_panes();
+                if ids.is_empty() {
+                    self.open_orchestrator();
+                } else {
+                    self.minimized.retain(|id| !ids.contains(id));
+                    self.stack_focus = self.focused().filter(|id| ids.contains(id)).or_else(|| ids.first().copied());
+                    self.stack = ids;
+                    self.stack_zoom = false;
+                    self.tile_all = true;
+                    self.tile_project = Some(crate::panes::term::ORCHESTRATOR_KEY.into());
                     self.leave_sidebar();
                 }
-                None => {
-                    let key = self.keymap.primary(crate::keymap::Act::Orchestrator);
-                    self.toast(Kind::Info, format!("the orchestrator isn't running · {key} starts it"));
-                }
-            },
+            }
             StripTab::Project(key) => {
                 let Some(root) = self.project_tabs().into_iter().find(|t| t.key == key).map(|t| t.root) else {
                     self.toast(Kind::Info, "nothing is running in that project");
@@ -161,7 +165,7 @@ impl App {
     /// The next (`d` = 1) or previous tab, wrapping; the orchestrator's only with `orchestrator`.
     pub(crate) fn step_tab(&mut self, d: i32, orchestrator: bool) {
         let tabs = self.project_tabs();
-        let items: Vec<StripTab> = self.strip_items(&tabs).into_iter().filter(|t| orchestrator || *t != StripTab::Orchestrator).collect();
+        let items: Vec<StripTab> = self.strip_items(&tabs).into_iter().filter(|t| *t != StripTab::Orchestrator || (orchestrator && !self.orchestrator_panes().is_empty())).collect();
         let i = self.showing_tab().and_then(|s| items.iter().position(|t| *t == s));
         let next = match i {
             Some(i) => (i as i32 + d).rem_euclid(items.len() as i32) as usize,
@@ -324,15 +328,18 @@ impl App {
         let style = tab_style(t.accent, on, Rect { x, width: all_w, ..r }.contains(hover), selected == Some(StripTab::All), &t).add_modifier(Modifier::BOLD);
         put(self, f, &mut x, StripTab::All, vec![Span::styled(format!(" ▦ All {} ", self.tile_ids(None).len()), style)]);
 
-        // the orchestrator: gold, with what it's doing and whether it wants you
-        if let Some(id) = self.orchestrator_pane() {
+        // All coordinators, with aggregate activity and attention.
+        {
+            let ids = self.orchestrator_panes();
             let gold = crate::theme::gold(&t);
-            let activity = self.panes.get(&id).and_then(|p| p.activity());
-            let (blocked, done) = (usize::from(activity == Some(Activity::Blocked)), usize::from(self.done.contains(&id) && activity != Some(Activity::Blocked)));
+            let activity = if ids.iter().any(|id| self.panes.get(id).and_then(|p| p.activity()) == Some(Activity::Working)) { Some(Activity::Working) } else { None };
+            let blocked = ids.iter().filter(|id| self.panes.get(id).and_then(|p| p.activity()) == Some(Activity::Blocked)).count();
+            let done = ids.iter().filter(|id| self.done.contains(id) && self.panes.get(id).and_then(|p| p.activity()) != Some(Activity::Blocked)).count();
             let on = showing == Some(StripTab::Orchestrator);
-            let w = 5 + badges_width(blocked, done) as u16;
+            let label = format!(" ★ Orchestrators {} ", ids.len());
+            let w = ui::width(&label) as u16 + 2 + badges_width(blocked, done) as u16;
             let base = tab_style(gold, on, Rect { x: x + 1, width: w, ..r }.contains(hover), selected == Some(StripTab::Orchestrator), &t);
-            let mut spans = vec![Span::styled(" ★ ", base.add_modifier(Modifier::BOLD)), Span::styled(activity_glyph(activity, time), glyph_style(base, gold, on))];
+            let mut spans = vec![Span::styled(label, base.add_modifier(Modifier::BOLD)), Span::styled(activity_glyph(activity, time), glyph_style(base, gold, on))];
             spans.extend(badges(blocked, done, base, on, &t));
             spans.push(Span::styled(" ", base));
             x += 1;

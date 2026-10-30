@@ -58,6 +58,9 @@ impl App {
         if !self.stacked() || self.stack_zoom || self.stack.len() < 2 {
             return None;
         }
+        if self.stack.iter().filter(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.orchestrator)).count() != 1 {
+            return None;
+        }
         let id = self.stack.iter().copied().find(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.orchestrator))?;
         // a third of the width, never so narrow it can't work nor so wide the others starve
         let w = (body.width / 3).clamp(44.min(body.width / 2), 96).min(body.width / 2);

@@ -106,7 +106,7 @@ pub fn automatic_name(cwd: &str, remembered: Option<&RememberedProject>) -> Stri
 
 fn session_counts_for_projects(session: &TerminalSessionSummary, directory: &str) -> bool {
     session.status == "running"
-        && session.kind.as_deref() != Some("orchestrator")
+        && !(session.kind.as_deref() == Some("orchestrator") && bro_core::orchestrator::is_global(std::path::Path::new(directory)))
         && !directory.trim().is_empty()
 }
 

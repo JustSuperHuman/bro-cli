@@ -364,7 +364,8 @@ impl App {
 
     /// Go to the orchestrator, or open the launcher on its tab to start one.
     pub(crate) fn open_orchestrator(&mut self) {
-        if let Some(id) = self.orchestrator_pane() {
+        let cwd = self.current_project().unwrap_or_else(bro_core::orchestrator::workspace);
+        if let Some(id) = self.orchestrator_for(&cwd) {
             self.overlay = Overlay::None;
             self.focus_pane(id);
             self.leave_sidebar();
@@ -497,18 +498,19 @@ impl App {
             return;
         }
         if spec.orchestrator {
-            // one per bro: go to the running one, or wait for the one starting
-            if let Some(id) = self.orchestrator_pane() {
+            // Reuse the coordinator that owns this project.
+            if let Some(id) = self.orchestrator_for(&spec.cwd) {
+                self.clear_stack();
                 self.focus_pane(id);
                 self.leave_sidebar();
                 self.toast(Kind::Info, "the orchestrator is already running · here it is");
                 return;
             }
-            if self.orchestrator_pending.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(90)) {
+            if self.orchestrator_starting(&spec.cwd) {
                 self.toast(Kind::Info, "the orchestrator is already starting…");
                 return;
             }
-            self.orchestrator_pending = Some(std::time::Instant::now());
+            self.orchestrator_pending.insert(bro_core::orchestrator::scope_key(&spec.cwd), std::time::Instant::now());
         }
         let mut req = LaunchRequest::new(spec, place);
         req.remember = true;

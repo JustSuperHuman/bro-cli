@@ -370,7 +370,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     // Both read the file when given a path; omp's help documents the `=` form.
     let mut prompts: Vec<std::path::PathBuf> = vec![];
     if spec.orchestrator {
-        prompts.push(crate::orchestrator::write_prompt(spec.harness)?);
+        prompts.push(crate::orchestrator::write_scoped_prompt(spec.harness, &spec.cwd)?);
     }
     if let Some(level) = ctx.caveman.active()
         && let Ok(rules) = crate::caveman::rules_file(level)

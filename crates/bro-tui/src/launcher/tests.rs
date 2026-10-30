@@ -46,7 +46,7 @@ fn data() -> Data {
         recents: vec![],
         models: st.models.clone(),
         keyed: vec!["openrouter".into(), "openai".into()],
-        orchestrator_running: None,
+        orchestrator_running: BTreeMap::new(),
         shared: false,
     }
 }

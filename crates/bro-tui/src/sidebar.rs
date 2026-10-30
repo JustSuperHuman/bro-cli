@@ -94,6 +94,11 @@ impl Row {
     }
 }
 
+/// Only the workspace coordinator is pinned outside project groups.
+fn global_orchestrator(info: &LiveInfo) -> bool {
+    info.orchestrator && info.project_key == bro_core::orchestrator::GLOBAL_KEY
+}
+
 struct Group<'a> {
     key: String,
     name: String,
@@ -107,8 +112,8 @@ struct Group<'a> {
 fn groups<'a>(live: &'a [LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<Group<'a>> {
     let mut order: Vec<Group> = open.iter().map(|o| Group { key: o.key.clone(), name: o.name.clone(), root: o.root.clone(), live: vec![], last_age: None }).collect();
     let mut at: HashMap<String, usize> = order.iter().enumerate().map(|(i, g)| (g.key.clone(), i)).collect();
-    let mut live_sorted: Vec<&LiveInfo> = live.iter().filter(|l| !l.orchestrator).collect();
-    live_sorted.sort_by_key(|l| l.seq);
+    let mut live_sorted: Vec<&LiveInfo> = live.iter().filter(|l| !global_orchestrator(l)).collect();
+    live_sorted.sort_by_key(|l| (!l.orchestrator, l.seq));
     for l in live_sorted {
         let i = *at.entry(l.project_key.clone()).or_insert_with(|| {
             order.push(Group { key: l.project_key.clone(), name: l.project_name.clone(), root: l.project_root.clone(), live: vec![], last_age: None });
@@ -133,7 +138,7 @@ pub fn projects(live: &[LiveInfo], open: &[OpenInfo]) -> Vec<(String, String, Pa
 
 /// Live sessions in sidebar order (for alt+1..9 and next/prev), ignoring the filter.
 pub fn live_order(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo]) -> Vec<PaneId> {
-    let pinned = live.iter().filter(|l| l.orchestrator).map(|l| l.pane);
+    let pinned = live.iter().filter(|l| global_orchestrator(l)).map(|l| l.pane);
     pinned.chain(groups(live, past, open).iter().flat_map(|g| g.live.iter().map(|l| l.pane))).collect()
 }
 
@@ -162,7 +167,7 @@ impl ProjectTab {
     }
 }
 
-/// Projects with running sessions (the orchestrator isn't one), in sidebar order, ignoring the filter;
+/// Projects with running sessions, including their coordinator, in sidebar order, ignoring the filter;
 /// `hidden` sessions (minimized) count apart.
 pub fn project_tabs(live: &[LiveInfo], open: &[OpenInfo], hidden: &[PaneId]) -> Vec<ProjectTab> {
     groups(live, &[], open)
@@ -199,8 +204,8 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo], st: &SideS
     let q = st.filter.trim().to_lowercase();
     let numbering: HashMap<PaneId, usize> = live_order(live, past, open).into_iter().enumerate().map(|(i, p)| (p, i + 1)).collect();
     let mut rows = vec![];
-    for l in live.iter().filter(|l| l.orchestrator) {
-        if q.is_empty() || matches(&["orchestrator", l.name.as_deref().unwrap_or(""), l.harness.map(|h| h.label()).unwrap_or(""), l.profile.as_deref().unwrap_or("")], &q) {
+    for l in live.iter().filter(|l| global_orchestrator(l)) {
+        if q.is_empty() || matches(&["Orchestrator", l.name.as_deref().unwrap_or(""), l.harness.map(|h| h.label()).unwrap_or(""), l.profile.as_deref().unwrap_or("")], &q) {
             rows.push(Row::Live { info: l.clone(), n: numbering.get(&l.pane).copied().filter(|n| *n <= 9) });
         }
     }
@@ -210,7 +215,7 @@ pub fn build(live: &[LiveInfo], past: &[PastInfo], open: &[OpenInfo], st: &SideS
             .live
             .iter()
             .copied()
-            .filter(|l| q.is_empty() || project_hit || matches(&[l.name.as_deref().unwrap_or(""), l.harness.map(|h| h.label()).unwrap_or("shell"), l.profile.as_deref().unwrap_or(""), l.model.as_deref().unwrap_or("")], &q))
+            .filter(|l| q.is_empty() || project_hit || matches(&[if l.orchestrator { "orchestrator" } else { "" }, l.name.as_deref().unwrap_or(""), l.harness.map(|h| h.label()).unwrap_or("shell"), l.profile.as_deref().unwrap_or(""), l.model.as_deref().unwrap_or("")], &q))
             .collect();
         if !q.is_empty() && live_rows.is_empty() && !project_hit {
             continue;

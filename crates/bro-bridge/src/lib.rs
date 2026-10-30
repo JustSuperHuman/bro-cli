@@ -232,6 +232,12 @@ pub enum BridgeCommand {
         req: CreateRequest,
         reply: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
     },
+    /// Open or reuse a project coordinator; a source coordinator supplies its exact launch configuration.
+    OpenOrchestrator {
+        cwd: PathBuf,
+        source: String,
+        reply: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+    },
     /// Bring this session to the foreground in the TUI (optional nicety)
     Focus {
         id: String,
@@ -303,6 +309,7 @@ impl std::fmt::Debug for BridgeCommand {
                 .field("title", title)
                 .finish(),
             Self::Create { req, .. } => f.debug_struct("Create").field("req", req).finish(),
+            Self::OpenOrchestrator { cwd, source, .. } => f.debug_struct("OpenOrchestrator").field("cwd", cwd).field("source", source).finish(),
             Self::Focus { id } => f.debug_struct("Focus").field("id", id).finish(),
             Self::OpenFile { id, path, line, column } => f
                 .debug_struct("OpenFile")

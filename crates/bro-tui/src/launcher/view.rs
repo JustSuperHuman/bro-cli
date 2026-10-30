@@ -106,7 +106,7 @@ fn draw_inner(f: &mut Frame, r: Rect, l: &mut Launcher, t: &Theme, _time: f64, h
             Focus::List if l.needs_model() => "pick a model",
             _ => "launch",
         };
-        let enter = if l.orchestrator && l.data.orchestrator_running.is_some() { "go to it" } else { enter };
+        let enter = if l.orchestrator && l.running_orchestrator().is_some() { "go to it" } else { enter };
         let mut hints = vec![("⏎", enter), ("↑↓", "move"), ("←→", "agent"), ("type", if l.focus == Focus::List { "project" } else { "filter" })];
         if l.orchestrator {
             hints.insert(3, ("shift+←→", "runs on"));
@@ -158,25 +158,22 @@ fn draw_mode_switch(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut 
 }
 
 /// The project as a chip on the right of the top row: its name, its path, and the key that changes it.
-fn draw_project_chip(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
+fn draw_project_chip(f: &mut Frame, mut r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
     if r.width < 12 {
         return;
     }
-    // the orchestrator always runs in its own folder in your profile
     if l.orchestrator {
         let gold = theme::gold(t);
         let ground = tint(gold, t);
-        let dir = bro_core::orchestrator::workspace();
-        let spans = vec![
-            Span::styled(format!(" {} ", ui::icon("folder")), fg(gold).bg(ground)),
-            Span::styled("runs in ", fg(t.muted).bg(ground)),
-            Span::styled(format!("{} ", crate::util::short_path(&dir, 40)), fg(gold).bg(ground).add_modifier(Modifier::BOLD)),
-        ];
-        let w = spans.iter().map(|s| ui::width(&s.content) as u16).sum::<u16>().min(r.width);
-        ui::line(f, Rect { x: r.right() - w, width: w, ..r }, spans);
-        return;
+        let label = " Orchestrator alt+g ";
+        let w = (ui::width(label) as u16).min(r.width);
+        let at = Rect { x: r.right() - w, width: w, ..r };
+        let style = if l.no_project { fg(gold).bg(ground).add_modifier(Modifier::BOLD) } else { muted(t) };
+        ui::line(f, at, vec![Span::styled(label, style)]);
+        hits.push((at, Hit::NoProject));
+        r.width = r.width.saturating_sub(w + 1);
     }
-    let name = l.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| l.dir.to_string_lossy().into_owned());
+    let name = if l.orchestrator && l.no_project { "Choose project".into() } else { l.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| l.dir.to_string_lossy().into_owned()) };
     let ground = tint(t.shine, t);
     let icon = format!(" {} ", ui::icon("folder"));
     let action = "  change alt+p ";
@@ -220,7 +217,7 @@ fn draw_agents(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(
     }
     // ★ orchestrator, set a little apart in gold
     let gold = theme::gold(t);
-    let text = if l.data.orchestrator_running.is_some() { "  ★ orchestrator ● " } else { "  ★ orchestrator  " };
+    let text = if l.running_orchestrator().is_some() { "  ★ orchestrator ● " } else { "  ★ orchestrator  " };
     let style = if l.orchestrator {
         Style::default().fg(Color::Black).bg(gold).add_modifier(Modifier::BOLD)
     } else {
@@ -465,9 +462,9 @@ fn draw_orchestrator_summary(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme)
     let row = |i: u16| Rect { y: area.y + i, height: 1, ..area };
     let gold = theme::gold(t);
     let w = area.width.saturating_sub(2) as usize;
-    if let Some(running) = &l.data.orchestrator_running {
+    if let Some(running) = l.running_orchestrator() {
         ui::line(f, row(1), vec![Span::styled("★ ", fg(gold)), Span::styled(ui::fit(running, w), fg(gold).add_modifier(Modifier::BOLD))]);
-        ui::line(f, row(2), vec![Span::raw("  "), Span::styled("Already running. There's only ever one.", fg(t.fg))]);
+        ui::line(f, row(2), vec![Span::raw("  "), Span::styled("Already running for this project.", fg(t.fg))]);
         if area.height > 3 {
             ui::line(f, row(3), vec![Span::raw("  "), Span::styled("⏎ takes you to it.", muted(t))]);
         }
@@ -478,9 +475,11 @@ fn draw_orchestrator_summary(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme)
         None => format!("orchestrator · {}", l.harness.label()),
     };
     ui::line(f, row(1), vec![Span::styled("★ ", fg(gold)), Span::styled(ui::fit(&what, w), fg(gold).add_modifier(Modifier::BOLD))]);
-    ui::line(f, row(2), vec![Span::raw("  "), Span::styled(ui::fit("Opens sessions and hands them work,", w), fg(t.fg))]);
+    let description = if l.no_project { "Coordinates project orchestrators." } else { "Coordinates this project's sessions." };
+    ui::line(f, row(2), vec![Span::raw("  "), Span::styled(ui::fit(description, w), fg(t.fg))]);
     if area.height > 3 {
-        ui::line(f, row(3), vec![Span::raw("  "), Span::styled(ui::fit("then tells you how it went.", w), fg(t.fg))]);
+        let detail = if l.no_project { "New ones use this model." } else { "Find it in the Orchestrators tab." };
+        ui::line(f, row(3), vec![Span::raw("  "), Span::styled(ui::fit(detail, w), fg(t.fg))]);
     }
     let items = l.items();
     let left = match l.cursor_row(&items).and_then(|k| items.get(k)) {
@@ -534,7 +533,7 @@ fn draw_options(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut V
     // placement
     let r = row(2);
     if l.orchestrator {
-        ui::line(f, r, vec![label("opens as"), Span::styled(" its own, pinned on top ", fg(theme::gold(t)).add_modifier(Modifier::BOLD))]);
+        ui::line(f, r, vec![label("opens as"), Span::styled(" its own session ", fg(theme::gold(t)).add_modifier(Modifier::BOLD))]);
     } else {
         let place = if l.place == crate::pane::Place::Tab { "new session" } else { "split beside this one" };
         ui::line_lr(f, r, vec![label("opens as"), Span::styled(format!(" {place} "), ui::bold_accent(t))], key("^s"));
@@ -546,7 +545,7 @@ fn draw_options(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut V
 fn draw_button(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
     let brand = if l.orchestrator { theme::gold(t) } else { ui::harness_color(Some(l.harness), t) };
     let (text, style) = match l.spec() {
-        Some(_) if l.orchestrator && l.data.orchestrator_running.is_some() => ("⏎  Go to the orchestrator".to_string(), Style::default().fg(Color::Black).bg(brand).add_modifier(Modifier::BOLD)),
+        Some(_) if l.orchestrator && l.running_orchestrator().is_some() => ("⏎  Go to the orchestrator".to_string(), Style::default().fg(Color::Black).bg(brand).add_modifier(Modifier::BOLD)),
         Some(s) if l.orchestrator => (format!("⏎  Start it on {}", crate::services::launch::label_for(&s).trim_start_matches("orchestrator · ")), Style::default().fg(Color::Black).bg(brand).add_modifier(Modifier::BOLD)),
         Some(s) => (format!("⏎  Launch {}", crate::services::launch::label_for(&s)), Style::default().fg(Color::Black).bg(brand).add_modifier(Modifier::BOLD)),
         None if !l.installed(l.harness) => (format!("⏎  Install {}", l.harness.label()), Style::default().fg(t.bg).bg(t.danger).add_modifier(Modifier::BOLD)),
@@ -557,7 +556,7 @@ fn draw_button(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(
     let text = ui::fit(&text, r.width.saturating_sub(2) as usize);
     let tw = ui::width(&text) as u16;
     ui::line(f, Rect { x: r.x + (r.width.saturating_sub(tw)) / 2, width: tw.min(r.width), ..r }, vec![Span::styled(text, style)]);
-    hits.push((r, if l.installed(l.harness) { Hit::Launch } else { Hit::Install }));
+    hits.push((r, if l.installed(l.harness) || (l.orchestrator && l.running_orchestrator().is_some()) { Hit::Launch } else { Hit::Install }));
 }
 
 /// Narrow screens: the list (and models beside it), then what will run and the switches in two rows.

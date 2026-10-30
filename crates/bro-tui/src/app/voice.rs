@@ -97,7 +97,7 @@ impl App {
                 self.send_to_orchestrator(What::Say { text: format!("[schedule \"{name}\" · {kind} trigger {id}] {}", prompt.trim()), reply: Reply::None });
             }
             OrchestratorCommand::Cancel => {
-                if let Some(t) = self.orchestrator_pane().and_then(|id| self.panes.get_mut(&id)).and_then(|p| p.as_term()) {
+                if let Some(t) = self.orchestrator_for(&bro_core::orchestrator::workspace()).and_then(|id| self.panes.get_mut(&id)).and_then(|p| p.as_term()) {
                     t.send(b"\x1b");
                 }
             }
@@ -134,7 +134,7 @@ impl App {
     /// Queue for the orchestrator, starting one if none runs.
     fn send_to_orchestrator(&mut self, what: What) {
         self.voice.queue.push((what, Instant::now()));
-        if self.orchestrator_pane().is_none() && self.orchestrator_pending.is_none() {
+        if self.orchestrator_for(&bro_core::orchestrator::workspace()).is_none() && !self.orchestrator_starting(&bro_core::orchestrator::workspace()) {
             match self.voice_orchestrator_spec() {
                 Some(spec) => {
                     self.voice.keep_focus = Some(self.focused());
@@ -150,7 +150,7 @@ impl App {
     /// on the Claude or Codex login with the most room left.
     pub(crate) fn voice_orchestrator_spec(&self) -> Option<LaunchSpec> {
         if self.persist
-            && let Some(spec) = crate::orchestrator_state::load()
+            && let Some(spec) = crate::orchestrator_state::load_all().into_iter().find(|s| bro_core::orchestrator::is_global(&s.cwd))
         {
             return Some(spec);
         }
@@ -216,9 +216,9 @@ impl App {
         if self.voice.queue.is_empty() && self.voice.awaiting.is_empty() {
             return;
         }
-        let Some(boss) = self.orchestrator_pane() else {
+        let Some(boss) = self.orchestrator_for(&bro_core::orchestrator::workspace()) else {
             // it didn't start (the launch failed), or never will
-            let starting = self.orchestrator_pending.is_some();
+            let starting = self.orchestrator_starting(&bro_core::orchestrator::workspace());
             if self.voice.queue.iter().any(|(_, at)| at.elapsed() > GIVE_UP) || (!starting && self.voice.queue.iter().all(|(_, at)| at.elapsed() > Duration::from_secs(1))) {
                 self.voice.keep_focus = None;
                 self.inbox_fail("The orchestrator couldn't start.");

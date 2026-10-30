@@ -300,7 +300,7 @@ impl Act {
             Continue => "continue an earlier session (search, resume in any login)".into(),
             Reload => "reload session with a profile…".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
-            Orchestrator => "the orchestrator: go to it, or start the one session that runs all the others".into(),
+            Orchestrator => "go to or start this project's orchestrator".into(),
             CloseProject => "close the current project (and its sessions)".into(),
             OpenClipboardFolder => "open the folder whose path you copied as a project".into(),
             OpenedFile => "show the file an agent last opened (bro open)".into(),

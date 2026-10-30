@@ -79,13 +79,16 @@ pub struct Meta {
     pub orchestrator: bool,
 }
 
-/// The project key every orchestrator session carries: it belongs to no project, so it never joins a
-/// project's group, grid or close-all.
-pub const ORCHESTRATOR_KEY: &str = "bro:orchestrator";
+/// The root Orchestrator's key, also used for the Orchestrators grid.
+pub const ORCHESTRATOR_KEY: &str = bro_core::orchestrator::GLOBAL_KEY;
 
 /// The orchestrator's stand-in project (named "★ orchestrator", rooted where it runs).
 pub fn orchestrator_project(cwd: &std::path::Path) -> ProjectKey {
-    ProjectKey { root: cwd.to_path_buf(), key: ORCHESTRATOR_KEY.into(), name: "★ orchestrator".into() }
+    if bro_core::orchestrator::is_global(cwd) {
+        ProjectKey { root: cwd.to_path_buf(), key: ORCHESTRATOR_KEY.into(), name: "Orchestrator".into() }
+    } else {
+        bro_core::projects::project_for(cwd)
+    }
 }
 
 /// What to run.
@@ -599,6 +602,7 @@ impl Term {
     pub fn from_saved(info: &bro_host::SessionInfo, svc: Services) -> Option<Term> {
         let saved: Saved = serde_json::from_value(info.blob.clone()).ok()?;
         let age = Duration::from_millis((crate::util::now_ms().max(0) as u64).saturating_sub(saved.started_ms));
+        let project = if saved.orchestrator { orchestrator_project(&saved.cwd) } else { saved.project };
         let meta = Meta {
             sid: saved.sid,
             harness: saved.harness,
@@ -609,7 +613,7 @@ impl Term {
             name: saved.name,
             renamed: saved.renamed,
             cwd: saved.cwd,
-            project: saved.project,
+            project,
             started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
             route_id: saved.route_id,
             cleanup: saved.cleanup,
@@ -910,7 +914,7 @@ impl Term {
             shell: s.program.clone(),
             args: s.args.clone(),
             cwd: Some(self.meta.cwd.clone()),
-            project: (!self.meta.orchestrator).then(|| PathBuf::from(&self.meta.project.key)),
+            project: (self.meta.project.key != ORCHESTRATOR_KEY).then(|| PathBuf::from(&self.meta.project.key)),
             pid,
             cols: self.size.1,
             rows: self.size.0,
@@ -1404,7 +1408,7 @@ impl Term {
     /// label) — "bro-cli-v2 · ✱ claude". Each tile's own header says its login, model and folder.
     pub fn tile_group(&self) -> (String, String) {
         let m = &self.meta;
-        let key = format!("{}\u{1f}{:?}", m.project.key, m.harness);
+        let key = format!("{}\u{1f}{:?}\u{1f}{}", m.project.key, m.harness, m.orchestrator);
         let agent = m.harness.map(|h| h.label()).unwrap_or("shell");
         (key, format!("{} · {} {agent}", m.project.name, crate::ui::harness_glyph(m.harness)))
     }

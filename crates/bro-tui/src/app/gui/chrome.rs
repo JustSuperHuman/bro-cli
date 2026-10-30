@@ -494,8 +494,10 @@ fn who_line(term: &crate::panes::term::Term, grouped: bool) -> (String, String) 
         Some(h) => m.label.strip_prefix(&format!("{} · ", h.label())).unwrap_or(&m.label).to_string(),
         None => m.label.clone(),
     };
-    let mut place = if m.orchestrator {
-        "orchestrator".to_string()
+    let mut place = if m.orchestrator && m.project.key == bro_core::orchestrator::GLOBAL_KEY {
+        "Orchestrator".to_string()
+    } else if m.orchestrator {
+        format!("{} · orchestrator", m.project.name)
     } else if grouped {
         String::new()
     } else {

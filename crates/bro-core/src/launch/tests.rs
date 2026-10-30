@@ -815,7 +815,7 @@ fn orchestrator_ctx() -> LaunchCtx {
 }
 
 fn orchestrator(harness: Harness) -> LaunchSpec {
-    LaunchSpec { orchestrator: true, ..spec(harness, None, None, None) }
+    LaunchSpec { orchestrator: true, cwd: crate::orchestrator::workspace(), ..spec(harness, None, None, None) }
 }
 
 #[test]
@@ -823,6 +823,29 @@ fn orchestrator_needs_the_bridge() {
     let _sb = setup();
     let e = build(&orchestrator(Harness::Claude), &ctx()).unwrap_err();
     assert!(format!("{e:#}").contains("bridge"), "{e:#}");
+}
+
+#[test]
+fn project_orchestrators_keep_the_selected_working_directory_and_scope_instructions() {
+    let _sb = setup();
+    let tmp = tempfile::tempdir().unwrap();
+    for harness in Harness::ALL {
+        let launch = LaunchSpec { cwd: tmp.path().to_path_buf(), ..orchestrator(harness) };
+        let command = build(&launch, &orchestrator_ctx()).unwrap();
+        assert_eq!(command.cwd, tmp.path());
+        assert_eq!(env(&command, "BRO_ORCHESTRATOR"), Some("1"));
+        let prompt = crate::orchestrator::scoped_prompt(harness, &launch.cwd);
+        assert!(prompt.contains(&format!("Your project path is {}", tmp.path().display())));
+        assert!(prompt.contains("open_orchestrator") && prompt.contains("BRO_SESSION_ID"));
+        assert!(!prompt.contains("You are Orchestrator, the root coordinator."));
+    }
+    let global = crate::orchestrator::scoped_prompt(Harness::Codex, &crate::orchestrator::workspace());
+    assert!(global.contains("You are Orchestrator, the root coordinator."));
+    assert!(global.contains("exact harness, login") && global.contains("provider, model"));
+    let project_file = crate::orchestrator::write_scoped_prompt(Harness::Claude, tmp.path()).unwrap();
+    let global_file = crate::orchestrator::write_scoped_prompt(Harness::Claude, &crate::orchestrator::workspace()).unwrap();
+    assert_ne!(project_file, global_file, "parallel launches keep separate scope instructions");
+    assert!(std::fs::read_to_string(project_file).unwrap().contains("Your project path is"));
 }
 
 #[test]
