@@ -179,8 +179,7 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
         // the card is a surface of the window (as see-through as the rest of it over a material), its edge isn't
         let px = ui.px(shown);
         let w = ui.scale.round().max(1.0);
-        let surface = notice_ink.map_or(t.surface, |ink| t.surface.mix(ink, if t.light { 0.045 } else { 0.055 }));
-        ui.scene.glass_quad(bro_gfx::Quad::new(px, surface).corners(corners.scale(ui.scale)));
+        ui.scene.glass_quad(bro_gfx::Quad::new(px, t.surface).corners(corners.scale(ui.scale)));
         ui.scene.quad(bro_gfx::Quad::new(px, bro_gfx::Color::TRANSPARENT).corners(corners.scale(ui.scale)).border(w, border));
     }
     ui.clip(shown, if b.joined.any() { 0.0 } else { radius::OVERLAY });
@@ -189,8 +188,14 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
     ui.hit_with(shown, Action::Pane(id, PaneAct::Header), Cursor::Default);
     // header
     let header = Rect { h: b.header.h, ..shown };
+    let header_corners = bro_gfx::Corners { tl: corners.tl, tr: corners.tr, br: 0.0, bl: 0.0 };
+    // unread status colours only the title bar; the session's content keeps its own colours
+    if let Some(ink) = notice_ink {
+        let fill = t.surface.mix(ink, if t.light { 0.045 } else { 0.055 });
+        ui.glass(header, header_corners, fill);
+    }
     if b.focused {
-        ui.round_corners(header, bro_gfx::Corners { tl: corners.tl, tr: corners.tr, br: 0.0, bl: 0.0 }, t.text.with_alpha(if t.light { 0.025 } else { 0.03 }));
+        ui.round_corners(header, header_corners, t.text.with_alpha(if t.light { 0.025 } else { 0.03 }));
     }
     ui.hline(shown.x, header.bottom(), shown.w, t.hairline);
     ui.hit_with(header, Action::Pane(id, PaneAct::Header), Cursor::Default);
@@ -288,9 +293,6 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
         } else {
             st.face_at = None;
         }
-    }
-    if let Some(ink) = notice_ink {
-        ui.top_fill(content, 0.0, ink.with_alpha(if t.light { 0.025 } else { 0.035 }));
     }
     ui.unclip();
 }

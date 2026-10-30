@@ -101,8 +101,9 @@ search `F0349`, check `F012C`, chevrons `F0142`/`F0140`, alert `F0026`, bell `F0
 ## Signature pieces
 
 - **Session attention.** Unread input requests use `warn`, unread finishes use `good`: a 4–6% surface mix on
-  session cards, a 7–8% wash in lists, and a static alert/check with a short header label. No pulse or accent
-  stripe. Keyboard focus keeps its existing outline and project colour. Checking a session removes the status
+  session title bars, a 7–8% wash in lists, and a static alert/check with a short header label. Session content
+  keeps its normal surface and colours. No pulse or accent stripe. Keyboard focus keeps its existing outline
+  and project colour. Checking a session removes the status
   wash; a quiet check in the list means the latest event was read. An unresolved prompt remains available.
   The same event identity and acknowledgement apply on mobile. Settings can hide the treatment while receipts
   continue to work.

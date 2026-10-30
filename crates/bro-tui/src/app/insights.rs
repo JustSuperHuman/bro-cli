@@ -21,7 +21,8 @@ use std::time::{Duration, Instant, SystemTime};
 /// What the app remembers per agent pane between event batches.
 pub(crate) struct Track {
     notice: Option<bro_bridge::insights::AttentionNotice>,
-    wait_key: Option<String>,
+    wait_key: Option<WaitKey>,
+    finished_key: Option<ProgressKey>,
     state: AttentionState,
     /// When it entered `state`
     since: Instant,
@@ -37,6 +38,61 @@ pub(crate) struct Track {
     announced: u64,
     /// The wait (its `since`) a recap was already tried for: never twice for the same wait
     recap_tried: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct ProgressKey {
+    facts: Option<u64>,
+    input: u64,
+}
+
+impl ProgressKey {
+    fn changed_from(self, old: Self) -> bool {
+        self.input != old.input || self.facts.zip(old.facts).is_some_and(|(next, prev)| next != prev)
+    }
+}
+
+/// A prompt's transcript timestamp survives screen redraws and refinements to its displayed reason.
+struct WaitKey {
+    at_ms: Option<i64>,
+    error: Option<String>,
+    label: String,
+}
+
+impl WaitKey {
+    fn new(view: &View, facts: Option<&AgentFacts>) -> Self {
+        let at_ms = facts.and_then(|f| f.pending.as_ref().and_then(|p| p.at_ms)
+            .or_else(|| f.api_error.as_ref().and_then(|e| e.at_ms))
+            .or_else(|| f.last_assistant.as_ref().and_then(|a| a.at_ms)));
+        let error = facts.and_then(|f| f.api_error.as_ref().map(|e| e.id.clone()));
+        let label = view.limit.as_ref().map(|l| l.title.as_str()).or(view.reason.as_deref()).unwrap_or_default()
+            .split_whitespace().collect::<Vec<_>>().join(" ");
+        Self { at_ms, error, label }
+    }
+
+    fn newer_than(&self, old: &Self, left_wait: bool) -> bool {
+        match (self.at_ms, old.at_ms) {
+            (Some(at), Some(prev)) => at > prev,
+            (None, None) => match (&self.error, &old.error) {
+                (Some(id), Some(prev)) => id != prev,
+                _ => left_wait && self.label != old.label,
+            },
+            // The transcript catching up with a screen prompt enriches the same event.
+            _ => false,
+        }
+    }
+}
+
+/// Only conversation progress identifies a new finish; names, recaps and worker revisions do not.
+fn finished_key(facts: &AgentFacts) -> Option<u64> {
+    if facts.prompt.is_none() && facts.reply.is_none() && facts.last_assistant.is_none() && facts.pending.is_none() && facts.api_error.is_none() { return None; }
+    let mut h = DefaultHasher::new();
+    facts.session_id.hash(&mut h);
+    facts.prompt.as_ref().map(|p| (&p.text, p.at_ms)).hash(&mut h);
+    facts.reply.as_ref().or(facts.last_assistant.as_ref()).map(|a| (&a.text, a.at_ms)).hash(&mut h);
+    facts.pending.as_ref().map(|p| (&p.tool, p.at_ms)).hash(&mut h);
+    facts.api_error.as_ref().map(|e| &e.id).hash(&mut h);
+    Some(h.finish())
 }
 
 /// Everything a `/recap` run needs, captured on the UI thread.
@@ -204,7 +260,8 @@ fn recap_job(term: &Term, snap: &Snapshot) -> Option<RecapJob> {
 impl App {
     pub(crate) fn session_notice(&self, id: PaneId) -> Option<&bro_bridge::insights::AttentionNotice> {
         if !self.svc.settings().insights.attention_indicators { return None; }
-        self.tracks.get(&id)?.notice.as_ref()
+        let track = self.tracks.get(&id)?;
+        track.notice.as_ref().filter(|_| track.state != AttentionState::Working)
     }
 
     pub(crate) fn acknowledge_session(&mut self, id: PaneId, event: &str) {
@@ -248,20 +305,32 @@ impl App {
                 None => self.notes.remove(&id),
             };
             let seen = focused == Some(id);
-            let track = self.tracks.entry(id).or_insert_with(|| Track { notice: None, wait_key: None, state, since: now, since_wall: SystemTime::now(), last_seen: None, sent: None, files_sent: None, announced, recap_tried: None });
-            let wait_key = if state == AttentionState::Blocked { Some(view.limit.as_ref().map(|l| l.title.clone()).unwrap_or_else(|| {
-                let at = snap.as_ref().and_then(|s| s.facts.as_deref()).and_then(|f| f.pending.as_ref().and_then(|p| p.at_ms).or_else(|| f.last_assistant.as_ref().and_then(|a| a.at_ms)));
-                format!("{}:{at:?}", view.reason.as_deref().unwrap_or_default())
-            })) } else { None };
-            let new_kind = if wait_key.is_some() && (track.wait_key != wait_key || track.notice.is_none()) {
+            let track = self.tracks.entry(id).or_insert_with(|| Track { notice: None, wait_key: None, finished_key: None, state, since: now, since_wall: SystemTime::now(), last_seen: None, sent: None, files_sent: None, announced, recap_tried: None });
+            let facts = snap.as_ref().and_then(|s| s.facts.as_deref());
+            let finish = ProgressKey { facts: facts.and_then(finished_key), input: t.input_revision() };
+            if let Some(old) = track.finished_key.as_mut()
+                && old.input == finish.input && old.facts.is_none() {
+                old.facts = finish.facts;
+            }
+            let wait_key = (state == AttentionState::Blocked).then(|| WaitKey::new(&view, facts));
+            let left_wait = track.state != AttentionState::Blocked;
+            let new_kind = if wait_key.as_ref().is_some_and(|key| track.wait_key.as_ref().is_none_or(|old| key.newer_than(old, left_wait))) {
                 Some(bro_bridge::insights::NoticeKind::Input)
-            } else if (track.state == AttentionState::Working && matches!(state, AttentionState::Idle | AttentionState::Done))
-                || (state == AttentionState::Done && track.notice.is_none()) {
+            } else if ((track.state == AttentionState::Working && matches!(state, AttentionState::Idle | AttentionState::Done))
+                || (state == AttentionState::Done && track.notice.is_none()))
+                && track.finished_key.is_none_or(|old| finish.changed_from(old)) {
                 Some(bro_bridge::insights::NoticeKind::Finished)
             } else { None };
-            track.wait_key = wait_key;
-            if state == AttentionState::Working { track.notice = None; }
+            // Keep the last event and its receipt through noisy status changes. A late or temporarily missing
+            // transcript must not replace a known prompt timestamp with an older or unknown one.
+            if let Some(key) = wait_key
+                && track.wait_key.as_ref().is_none_or(|old| old.at_ms.is_none() || key.newer_than(old, left_wait)) {
+                track.wait_key = Some(key);
+            }
             if let Some(kind) = new_kind {
+                // An input event already accounts for this progress: a screen flicker cannot turn the same
+                // pending request into an unread completion.
+                track.finished_key = Some(finish);
                 track.notice = Some(bro_bridge::insights::AttentionNotice { event_id: uuid::Uuid::new_v4().to_string(), kind, unread: true, enabled: true });
             }
             if let Some(notice) = &mut track.notice {
@@ -288,7 +357,7 @@ impl App {
             if track.sent != Some(print) {
                 track.sent = Some(print);
                 let mut insights = view.insights(track.since_wall);
-                if let Some(attention) = &mut insights.attention { attention.notice = track.notice.clone(); }
+                if let Some(attention) = &mut insights.attention { attention.notice = track.notice.clone().filter(|_| state != AttentionState::Working); }
                 self.svc.bridge_set_insights(&t.meta.sid, insights);
             }
             if let Some(s) = &snap {
@@ -408,6 +477,126 @@ fn run_recap(job: &RecapJob) -> Result<(String, Option<f64>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn attention_app() -> (App, PaneId) {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(crate::services::fallback_settings(), tx.clone());
+        let mut app = App::new(svc, tx, crate::app::Opts { demo: true, fixed_demo: true, load_recents: false });
+        let id = app.focused().unwrap();
+        app.term_focused = false;
+        (app, id)
+    }
+
+    fn attention_step(app: &mut App, id: PaneId, activity: Activity, transcript: Option<&str>) {
+        let term = app.panes.get_mut(&id).unwrap().as_term().unwrap();
+        if let Some(jsonl) = transcript {
+            term.set_insights(Insights::fixed_transcript(bro_core::Harness::Claude, jsonl));
+        }
+        term.set_screen_status(Some(activity));
+        app.update_insights();
+    }
+
+    #[test]
+    fn a_checked_finish_survives_status_redraws_and_metadata_refreshes() {
+        let (mut app, id) = attention_app();
+        let prompt = serde_json::json!({"type":"user","timestamp":"2026-10-02T10:00:00Z","message":{"content":"Fix the parser"}});
+        let reply = serde_json::json!({"type":"assistant","timestamp":"2026-10-02T10:00:01Z","message":{"id":"m1","content":[{"type":"text","text":"The parser is fixed."}]}});
+        let transcript = format!("{prompt}\n{reply}");
+        attention_step(&mut app, id, Activity::Working, Some(&transcript));
+        attention_step(&mut app, id, Activity::Idle, None);
+        let first = app.session_notice(id).unwrap().clone();
+        app.term_focused = true;
+        app.update_insights();
+        app.term_focused = false;
+        let renamed = serde_json::json!({"type":"custom-title","customTitle":"Parser fix","timestamp":"2026-10-02T10:00:05Z"});
+        let refreshed = format!("{transcript}\n{renamed}");
+        for jsonl in [&transcript, &refreshed] {
+            attention_step(&mut app, id, Activity::Working, Some(jsonl));
+            assert!(app.session_notice(id).is_none(), "past attention stays hidden while working");
+            attention_step(&mut app, id, Activity::Idle, None);
+            let notice = app.session_notice(id).unwrap();
+            assert_eq!(notice.event_id, first.event_id, "a redraw cannot create another finish");
+            assert!(!notice.unread, "the click's acknowledgement must survive the redraw");
+        }
+        attention_step(&mut app, id, Activity::Working, Some(""));
+        attention_step(&mut app, id, Activity::Idle, None);
+        assert_eq!(app.session_notice(id).unwrap().event_id, first.event_id, "a temporarily empty snapshot cannot rearm a finish");
+        assert!(!app.session_notice(id).unwrap().unread);
+        let next_prompt = serde_json::json!({"type":"user","timestamp":"2026-10-02T10:00:10Z","message":{"content":"Add coverage"}});
+        let next_reply = serde_json::json!({"type":"assistant","timestamp":"2026-10-02T10:00:11Z","message":{"id":"m2","content":[{"type":"text","text":"Added regression coverage."}]}});
+        attention_step(&mut app, id, Activity::Working, Some(&format!("{refreshed}\n{next_prompt}")));
+        attention_step(&mut app, id, Activity::Idle, Some(&format!("{refreshed}\n{next_prompt}\n{next_reply}")));
+        let next = app.session_notice(id).unwrap().clone();
+        assert_ne!(next.event_id, first.event_id);
+        assert!(next.unread, "genuinely new work must still ask for attention");
+        app.acknowledge_session(id, &first.event_id);
+        assert!(app.session_notice(id).unwrap().unread, "a delayed receipt cannot check the new finish");
+    }
+
+    #[test]
+    fn a_checked_prompt_survives_late_facts_and_status_changes() {
+        let (mut app, id) = attention_app();
+        attention_step(&mut app, id, Activity::Blocked, None);
+        let first = app.session_notice(id).unwrap().clone();
+        app.term_focused = true;
+        app.update_insights();
+        app.term_focused = false;
+        let call = |time, description, call_id| serde_json::json!({"type":"assistant","timestamp":time,"message":{"id":call_id,"content":[{"type":"tool_use","id":call_id,"name":"Bash","input":{"command":"npm publish","description":description}}]}}).to_string();
+        let pending = call("2026-10-02T10:00:01Z", "Publish the package", "t1");
+        let refined = call("2026-10-02T10:00:01Z", "Publish the updated package", "t1");
+        for jsonl in [&pending, &refined] {
+            attention_step(&mut app, id, Activity::Blocked, Some(jsonl));
+            attention_step(&mut app, id, Activity::Working, None);
+            attention_step(&mut app, id, Activity::Idle, None);
+            attention_step(&mut app, id, Activity::Blocked, None);
+            let notice = app.session_notice(id).unwrap();
+            assert_eq!(notice.event_id, first.event_id, "the same prompt keeps its identity as details arrive");
+            assert!(!notice.unread, "refreshing a checked prompt must not mark it unread");
+        }
+        let newer = call("2026-10-02T10:00:10Z", "Publish the updated package", "t2");
+        attention_step(&mut app, id, Activity::Blocked, Some(&newer));
+        let next = app.session_notice(id).unwrap().clone();
+        assert_ne!(next.event_id, first.event_id);
+        assert!(next.unread, "a new request must notify even with the same words");
+        app.acknowledge_session(id, &first.event_id);
+        assert!(app.session_notice(id).unwrap().unread);
+    }
+
+    #[test]
+    fn a_late_transcript_does_not_rearm_a_checked_finish() {
+        let (mut app, id) = attention_app();
+        attention_step(&mut app, id, Activity::Working, None);
+        attention_step(&mut app, id, Activity::Idle, None);
+        let first = app.session_notice(id).unwrap().clone();
+        app.acknowledge_session(id, &first.event_id);
+        let reply = serde_json::json!({"type":"assistant","timestamp":"2026-10-02T10:00:01Z","message":{"id":"m1","content":[{"type":"text","text":"Finished."}]}}).to_string();
+        attention_step(&mut app, id, Activity::Idle, Some(&reply));
+        attention_step(&mut app, id, Activity::Working, None);
+        attention_step(&mut app, id, Activity::Idle, None);
+        let notice = app.session_notice(id).unwrap();
+        assert_eq!(notice.event_id, first.event_id);
+        assert!(!notice.unread);
+    }
+
+    #[test]
+    fn screen_only_completion_stays_checked_until_more_input() {
+        let (mut app, id) = attention_app();
+        attention_step(&mut app, id, Activity::Working, None);
+        attention_step(&mut app, id, Activity::Idle, None);
+        let first = app.session_notice(id).unwrap().clone();
+        app.acknowledge_session(id, &first.event_id);
+        attention_step(&mut app, id, Activity::Working, None);
+        attention_step(&mut app, id, Activity::Idle, None);
+        assert_eq!(app.session_notice(id).unwrap().event_id, first.event_id);
+        assert!(!app.session_notice(id).unwrap().unread);
+        app.panes.get_mut(&id).unwrap().as_term().unwrap().send(b"continue\r");
+        attention_step(&mut app, id, Activity::Working, None);
+        attention_step(&mut app, id, Activity::Idle, None);
+        let next = app.session_notice(id).unwrap();
+        assert_ne!(next.event_id, first.event_id);
+        assert!(next.unread);
+    }
 
     #[test]
     fn attention_events_survive_tiling_clear_on_focus_and_rearm_for_new_work() {

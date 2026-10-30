@@ -872,6 +872,11 @@ impl Term {
         self.insights.as_ref().map(|i| i.snapshot())
     }
 
+    /// User input received, independently of terminal output and screen redraws.
+    pub fn input_revision(&self) -> u64 {
+        self.typed
+    }
+
     #[cfg(test)]
     pub fn set_screen_status(&mut self, status: Option<Activity>) {
         self.demo_activity = None;

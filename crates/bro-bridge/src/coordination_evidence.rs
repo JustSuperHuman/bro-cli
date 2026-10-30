@@ -1301,7 +1301,10 @@ mod tests {
                 .contains("output exceeded")
         );
         fs::write(dir.path().join("check-mode"), "tree").unwrap();
-        assert!(run_check(dir.path(), &command, Duration::from_secs(1)).is_err());
+        // Both test processes must start before this case can exercise descendant cleanup.
+        // Windows executable startup can exceed one second while a release build is running.
+        let error = run_check(dir.path(), &command, Duration::from_secs(10)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
         assert!(
             dir.path().join("heartbeat").exists(),
             "descendant ran before the timeout"
