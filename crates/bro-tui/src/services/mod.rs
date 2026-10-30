@@ -161,6 +161,9 @@ struct Inner {
     proxy: Mutex<Option<ProxyHandle>>,
     bridge: RwLock<Option<Bridge>>,
     bridge_fuse: guard::Fuse,
+    /// Bumped whenever a session is announced to the bridge (or the bridge changes): one it learns of anew knows
+    /// nothing it was told before, so the app tells it again (see `App::update_insights`).
+    bridge_announced: std::sync::atomic::AtomicU64,
     usage_kick: Mutex<Option<Sender<()>>>,
     projects: Mutex<HashMap<PathBuf, ProjectKey>>,
     /// Push-to-talk listener; dropping it unhooks the hotkey.
@@ -343,6 +346,7 @@ impl Services {
                 proxy: Mutex::new(None),
                 bridge: RwLock::new(None),
                 bridge_fuse: guard::Fuse::default(),
+                bridge_announced: Default::default(),
                 usage_kick: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
                 voice: Mutex::new(None),
@@ -459,6 +463,8 @@ impl Services {
     /// Persist settings on a background thread (no-op in demo mode).
     pub fn save_settings(&self, s: Settings) {
         self.update(|st| st.settings = s.clone());
+        // the phone's media rule changes at once, without restarting the bridge
+        self.with_bridge("bridge::set_media_anywhere", |b| b.set_media_anywhere(!s.bridge.protect_media));
         if self.is_demo() {
             return;
         }
@@ -467,6 +473,8 @@ impl Services {
             if let Err(e) = guard_res("config::Settings::save", || s.save()) {
                 svc.send(Event::Toast(crate::alerts::Kind::Error, format!("couldn't save settings: {e}")));
             }
+            // the co-author switch reaches the logins' own settings.json at once, not at their next launch
+            let _ = guard("coauthor::sync_all", || bro_core::coauthor::sync_all(s.claude_env.coauthor_hidden()));
         });
     }
 
@@ -679,6 +687,13 @@ impl Services {
     pub(crate) fn set_bridge(&self, b: Option<Bridge>) {
         self.inner.bridge_fuse.reset();
         *self.inner.bridge.write() = b;
+        self.inner.bridge_announced.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// How many times sessions were announced to the bridge so far: when it moved, the bridge may have learned of
+    /// a session anew (it started after the pane, or the pane restarted) and lost what it was told of it.
+    pub(crate) fn bridge_announcements(&self) -> u64 {
+        self.inner.bridge_announced.load(Ordering::Acquire)
     }
 
     fn with_bridge(&self, what: &str, f: impl FnOnce(&Bridge)) {
@@ -699,8 +714,29 @@ impl Services {
         url
     }
 
+    /// Ask the bro mod in session `session` to do `job` with its harness's own MCP connections (read an MCP app's
+    /// page, call one of its server's tools). `reply` runs once, on another thread.
+    pub fn mod_ask(&self, session: &str, job: serde_json::Value, reply: Box<dyn FnOnce(Result<serde_json::Value, String>) + Send>) {
+        let g = self.inner.bridge.read();
+        match g.as_ref().filter(|_| !self.inner.bridge_fuse.blown()) {
+            Some(b) => b.mod_ask(session, job, reply),
+            None => {
+                drop(g);
+                reply(Err("bro's bridge is off, and the session's mod reaches bro through it (Settings › Bridge)".into()));
+            }
+        }
+    }
+
+    /// The bro mod in session `session` is taking jobs.
+    pub fn mod_listening(&self, session: &str) -> bool {
+        let mut on = false;
+        self.with_bridge("bridge::mod_listening", |b| on = b.mod_listening(session));
+        on
+    }
+
     pub fn bridge_register(&self, meta: SessionMeta) {
         self.with_bridge("bridge::register", |b| b.register(meta));
+        self.inner.bridge_announced.fetch_add(1, Ordering::AcqRel);
     }
     /// Raw PTY output (called from PTY reader threads; cheap when the bridge is off).
     pub fn bridge_output(&self, id: &str, data: &[u8]) {

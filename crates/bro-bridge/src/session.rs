@@ -84,6 +84,12 @@ pub(crate) struct Observed {
 
 pub(crate) struct Session {
     pub summary: TerminalSessionSummary,
+    /// Keep composed messages from different clients intact through their final Enter.
+    pub compose_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    pub answered_prompt: Option<String>,
+    reported_attention: Option<crate::insights::Attention>,
+    acknowledged_event: Option<String>,
+    screen_limit: Option<bro_core::sessions::limits::UsageLimit>,
     pub parser: vt100::Parser,
     pub output_filter: OutputFilter,
     pub bells: BellDetector,
@@ -100,6 +106,8 @@ pub(crate) struct Session {
     pub observation_pending: bool,
     /// Files the agent sent / touched (`agent-files`).
     pub agent_files: crate::insights::AgentFiles,
+    /// Media attached or opened here, oldest first, for the gallery (`/api/media`).
+    pub media: Vec<crate::media::Noted>,
     /// When insights last produced a `session` event, and whether one is queued.
     pub insights_published: Option<Instant>,
     pub insights_scheduled: bool,
@@ -119,7 +127,12 @@ pub(crate) struct SessionView {
 impl Session {
     pub fn new(summary: TerminalSessionSummary) -> Self {
         Self {
+            compose_lock: Default::default(),
+            answered_prompt: None,
             parser: vt100::Parser::new(summary.rows, summary.cols, SCROLLBACK_ROWS),
+            reported_attention: summary.attention.clone(),
+            acknowledged_event: None,
+            screen_limit: None,
             summary,
             output_filter: OutputFilter::default(),
             bells: BellDetector::default(),
@@ -131,6 +144,7 @@ impl Session {
             last_observed: None,
             observation_pending: false,
             agent_files: Default::default(),
+            media: Vec::new(),
             insights_published: None,
             insights_scheduled: false,
         }
@@ -166,7 +180,9 @@ impl Session {
             .and_then(agents::Agent::parse);
         let observation =
             agents::observe_with_hint(&self.summary, osc_agent, &text, self.agent_hint);
-        let waiting = observation.agent.is_some() && prompt::detect_prompt(&text).is_some();
+        self.screen_limit = observation.agent.and_then(|_| bro_core::sessions::limits::UsageLimit::from_screen(&text));
+        let attention_changed = self.refresh_attention();
+        let waiting = observation.agent.is_some() && (self.screen_limit.is_some() || prompt::detect_prompt(&text).is_some());
         let activity = agents::activity(&observation, waiting).map(str::to_owned);
         let agent = observation.agent.map(|agent| agent.id().to_owned());
         let source = observation.source.map(str::to_owned);
@@ -182,7 +198,7 @@ impl Session {
             }
             _ => None,
         };
-        let changed = self.summary.agent != agent
+        let changed = attention_changed || self.summary.agent != agent
             || self.summary.agent_source != source
             || self.summary.agent_activity != activity;
         self.summary.agent = agent;
@@ -194,6 +210,36 @@ impl Session {
             changed,
             transition,
         }
+    }
+
+    /// Keep screen evidence above a stale host busy update, and restore the host's latest state on recovery.
+    pub(crate) fn set_attention(&mut self, attention: Option<crate::insights::Attention>) -> bool {
+        self.reported_attention = attention;
+        self.refresh_attention()
+    }
+
+    pub(crate) fn acknowledge_attention(&mut self, event_id: &str) -> bool {
+        let Some(notice) = self.summary.attention.as_ref().and_then(|a| a.notice.as_ref()) else { return false };
+        if notice.event_id != event_id || !notice.unread { return false; }
+        self.acknowledged_event = Some(event_id.into());
+        self.refresh_attention()
+    }
+
+    fn refresh_attention(&mut self) -> bool {
+        let mut next = self.screen_limit.as_ref().map(|limit| crate::insights::Attention {
+            state: crate::insights::AttentionState::Blocked,
+            reason: Some(limit.message.clone()),
+            since: self.summary.attention.as_ref().filter(|a| a.limit.is_some()).and_then(|a| a.since.clone()).or_else(|| Some(iso_now())),
+            limit: Some(limit.clone()),
+            notice: self.reported_attention.as_ref().and_then(|a| a.notice.clone()),
+        }).or_else(|| self.reported_attention.clone());
+        if let Some(notice) = next.as_mut().and_then(|a| a.notice.as_mut())
+            && self.acknowledged_event.as_deref() == Some(notice.event_id.as_str()) {
+            notice.unread = false;
+        }
+        let changed = self.summary.attention != next;
+        self.summary.attention = next;
+        changed
     }
 
     /// Whether a throttled observation is due.
@@ -385,6 +431,32 @@ mod tests {
         assert_eq!(stream.decode(&bytes[..2]), "a");
         assert_eq!(stream.decode(&bytes[2..]), "✓b");
         assert_eq!(stream.decode(&[0xff, b'x']), "\u{FFFD}x");
+    }
+
+    #[test]
+    fn a_limit_banner_overrides_busy_and_stale_host_updates_then_clears() {
+        let mut session = session(140, 24);
+        session.output_filter.osc_agent = Some("claude".into());
+        let busy = crate::insights::Attention { state: crate::insights::AttentionState::Working, reason: None, since: None, limit: None, notice: None };
+        session.set_attention(Some(busy.clone()));
+        let text = "\x1b[31m✻ Weekly limit reached · Retrying in 5h (Nov 1, 7pm) · attempt 1/30\x1b[0m\r\nYou've used 99% of your weekly limit\r\n❯\r\n⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt";
+        // PTY boundaries may divide an escape sequence or a banner.
+        session.append(text[..11].to_string());
+        session.append(text[11..].to_string());
+        session.observe();
+        let attention = session.summary.attention.as_ref().unwrap();
+        assert_eq!(attention.state, crate::insights::AttentionState::Blocked);
+        assert_eq!(attention.limit.as_ref().unwrap().retry.as_deref(), Some("Retrying in 5h (Nov 1, 7pm)"));
+        assert_eq!(session.summary.agent_activity.as_deref(), Some("awaiting"));
+        assert_eq!(session.input_context()["busy"], false);
+        assert_eq!(session.input_context()["limit"]["title"], "Weekly limit reached");
+        session.set_attention(Some(busy));
+        assert!(session.summary.attention.as_ref().unwrap().limit.is_some(), "stale transcript busy must not hide the visible warning");
+        session.append("\x1b[2J\x1b[H● Reading the share code\r\n❯\r\nesc to interrupt".into());
+        session.observe();
+        assert_eq!(session.summary.agent_activity.as_deref(), Some("working"));
+        assert!(session.summary.attention.as_ref().unwrap().limit.is_none());
+        assert_eq!(session.input_context()["busy"], true);
     }
 
     #[test]

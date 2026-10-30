@@ -9,7 +9,7 @@ vt100 = { path = "vendor/vt100" }
 portable-pty = { path = "vendor/portable-pty" }
 
 [workspace.package]
-version = "2.1.15"
+version = "2.1.20"
 edition = "2024"
 license = "MIT"
 publish = false

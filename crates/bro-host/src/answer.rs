@@ -101,7 +101,10 @@ impl Answers {
         }
         let cursor = |prefix: &str| {
             let (r, c) = screen.cursor_position();
-            format!("\x1b[{prefix}{};{}R", r + 1, c + 1)
+            // vt100 keeps a pending wrap as col == columns; DSR reports the
+            // visible cursor, which is still on the final cell until more text.
+            let (rows, cols) = screen.size();
+            format!("\x1b[{prefix}{};{}R", r.min(rows.saturating_sub(1)) + 1, c.min(cols.saturating_sub(1)) + 1)
         };
         let reply = match (i1, i2, c) {
             (None, None, 'n') if p(0) == Some(6) => Some(cursor("")),
@@ -206,6 +209,7 @@ fn private_mode(screen: &vt100::Screen, mode: u16) -> u8 {
     let on = |b: bool| if b { 1 } else { 2 };
     match mode {
         1 => on(screen.application_cursor()),
+        7 => on(screen.auto_wrap()),
         25 => on(!screen.hide_cursor()),
         1000 => on(screen.mouse_protocol_mode() == Mouse::PressRelease),
         1002 => on(screen.mouse_protocol_mode() == Mouse::ButtonMotion),

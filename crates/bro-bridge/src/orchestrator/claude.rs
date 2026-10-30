@@ -943,6 +943,10 @@ mod tests {
                 BridgeCommand::Input { id, data } if id == "mal" => {
                     typed_cb.lock().push_str(&String::from_utf8_lossy(&data))
                 }
+                BridgeCommand::Write { id, data, reply } => {
+                    if id == "mal" { typed_cb.lock().push_str(&String::from_utf8_lossy(&data)); }
+                    let _ = reply.send(Ok(()));
+                }
                 // Declined: only whether Hugh tried matters here.
                 BridgeCommand::Create { reply, .. } => {
                     *creates_cb.lock() += 1;

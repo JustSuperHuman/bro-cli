@@ -58,6 +58,8 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     if ctx.justwatch_skill {
         let _ = crate::justwatch::write_skill(&config_dir);
     }
+    // the login's own settings.json follows the co-author knob, so sessions started outside bro do too
+    let _ = crate::coauthor::sync(&config_dir, ctx.claude_env.coauthor_hidden());
     match login {
         Some(p) if p.kind == ProfileKind::ClaudeAccount => cmd.set_env("CLAUDE_CONFIG_DIR", p.dir.to_string_lossy()),
         _ => cmd.remove_env("CLAUDE_CONFIG_DIR"),
@@ -162,6 +164,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             cmd.set_env(&k, v);
         }
     }
+    agent_summaries(&mut cmd, ctx.claude_env.skip_agent_summaries());
 
     let mut args = permission_args(spec.permission);
     let wants_browser = !spec.extra_args.iter().any(|a| a == "--chrome" || a == "--no-chrome");
@@ -228,6 +231,22 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
 }
 
 const PROMPT_FILE: &str = "--append-system-prompt-file";
+
+/// Keep this opt-in local to Claude launches. A nested Bro may inherit the preload, so explicitly
+/// turn it off when the setting is off. An unwritable cache leaves Claude working as it ships.
+fn agent_summaries(cmd: &mut CommandSpec, enabled: bool) {
+    use crate::agent_summaries as summaries;
+    cmd.set_env(summaries::ENABLED, "0");
+    if !enabled {
+        return;
+    }
+    let inherited = cmd.env.iter().find(|(key, _)| key == "BUN_OPTIONS").map(|(_, value)| value.clone())
+        .unwrap_or_else(|| std::env::var("BUN_OPTIONS").unwrap_or_default());
+    if let Ok(options) = summaries::install().and_then(|file| summaries::bun_options(&inherited, &file)) {
+        cmd.set_env("BUN_OPTIONS", options);
+        cmd.set_env(summaries::ENABLED, "1");
+    }
+}
 
 /// The orchestrator's instructions (merged with any others by [`apply_caveman`]), its skill, and the
 /// bridge's tools as the `bro` MCP server, allowed without asking.

@@ -1964,6 +1964,33 @@ fn bridge_commands_drive_sessions() {
 }
 
 #[test]
+fn bridge_composed_input_reports_the_session_write_result() {
+    let mut a = app(true);
+    let _ = draw(&mut a);
+    let pane = a.panes.iter().find(|(_, pane)| pane.as_term_ref().is_some()).map(|(id, _)| *id).unwrap();
+    let term = a.panes.get_mut(&pane).and_then(|pane| pane.as_term()).unwrap();
+    let sid = term.meta.sid.clone();
+    term.set_test_writer(Box::new(std::io::sink()));
+    let (reply, mut answer) = tokio::sync::oneshot::channel();
+    a.bridge_command(bro_bridge::BridgeCommand::Write { id: sid.clone(), data: b"hello".to_vec(), reply });
+    assert!(answer.try_recv().unwrap().is_ok());
+    assert!(a.panes.get(&pane).and_then(|pane| pane.as_term_ref()).unwrap().sent.ends_with(b"hello"));
+
+    struct Closed;
+    impl std::io::Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Err(std::io::ErrorKind::BrokenPipe.into()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    a.panes.get_mut(&pane).and_then(|pane| pane.as_term()).unwrap().set_test_writer(Box::new(Closed));
+    let (reply, mut answer) = tokio::sync::oneshot::channel();
+    a.bridge_command(bro_bridge::BridgeCommand::Write { id: sid, data: b"hello".to_vec(), reply });
+    assert!(answer.try_recv().unwrap().unwrap_err().contains("could not receive"));
+    let (reply, mut answer) = tokio::sync::oneshot::channel();
+    a.bridge_command(bro_bridge::BridgeCommand::Write { id: "closed-session".into(), data: b"hello".to_vec(), reply });
+    assert!(answer.try_recv().unwrap().unwrap_err().contains("no longer available"));
+}
+
+#[test]
 fn launched_sessions_open_panes_and_report_errors() {
     let mut a = app(false);
     let spec = bro_core::launch::LaunchSpec {
@@ -3151,6 +3178,32 @@ fn agent_panes_say_why_they_wait_and_list_the_files_they_touched_or_sent() {
 }
 
 #[test]
+fn a_bridge_that_learns_of_a_session_late_is_told_its_transcript() {
+    use serde_json::json;
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    let said = json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","message":{"id":"m1","content":[{"type":"text","text":"Shipped the landing page."}]}});
+    let (id, sid) = insight_pane(&mut a, dir.path(), &[said], Activity::Idle);
+    let cfg = bro_bridge::BridgeConfig { port: 0, automatic_port: false, bind: "127.0.0.1".into(), data_root: dir.path().join("bridge"), web_interface: false };
+    let bridge = bro_bridge::Bridge::start_with(cfg, bro_bridge::StartOptions { import_legacy_token: false }, Box::new(|_| {})).unwrap();
+    a.svc.set_bridge(Some(bridge.clone()));
+    // told before the bridge knows the session (a window's panes attach before its bridge starts): not kept
+    a.update_insights();
+    assert!(bridge.agent_files(&sid).is_none());
+    // then it learns of it: told again, though nothing in the transcript moved
+    let meta = a.panes[&id].as_term_ref().unwrap().bridge_meta(&crate::panes::term::Spawn::default(), None);
+    a.svc.bridge_register(meta.clone());
+    a.update_insights();
+    assert_eq!(bridge.agent_files(&sid).and_then(|f| f.transcript), Some(dir.path().join("session.jsonl")));
+    // announced again (a pane restarting), the bridge keeps it
+    a.svc.bridge_register(meta);
+    a.update_insights();
+    assert!(bridge.agent_files(&sid).and_then(|f| f.transcript).is_some());
+    a.svc.set_bridge(None);
+    bridge.shutdown();
+}
+
+#[test]
 fn a_recap_is_generated_once_for_a_wait_nobody_looked_at() {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3429,6 +3482,13 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!a.svc.settings().proxy.shared);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // compression
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // session status indicators
+    { let s = draw(&mut a); assert!(s.contains("Session status indicators"), "{s}"); }
+    assert!(a.svc.settings().insights.attention_indicators);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().insights.attention_indicators);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().insights.attention_indicators);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // keep sessions running
     { let s = draw(&mut a); assert!(s.contains("Keep sessions running") && s.contains("not running"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // keep working while closed
@@ -3436,6 +3496,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // the session server
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // start at sign-in
     { let s = draw(&mut a); assert!(s.contains("Start at sign-in") && s.contains("no admin"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // protect phone media
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // push-to-talk
     { let s = draw(&mut a); assert!(s.contains("Push-to-talk") && s.contains("Voice key") && s.contains("OpenAI key") && !s.contains("Auto-resume"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // its key
@@ -3487,6 +3548,13 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert_eq!(a.svc.settings().claude_env.overrides.get("teammate_model").map(String::as_str), Some("opus"));
     key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
     assert!(a.svc.settings().claude_env.overrides.is_empty());
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // skip agent summaries: opt-in
+    assert!(!a.svc.settings().claude_env.skip_agent_summaries());
+    assert!(draw(&mut a).contains("Original post by Flamerix AI"));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.svc.settings().claude_env.skip_agent_summaries());
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert!(!a.svc.settings().claude_env.skip_agent_summaries());
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Claude preset
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // Standard → Quiet
     assert_eq!(a.svc.settings().claude_env.preset, "quiet");
@@ -3549,6 +3617,8 @@ fn settings_view_switches_presets_and_overrides_switches() {
     }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // JustImagine: the demo has none
     { let s = draw(&mut a); assert!(s.contains("JustImagine") && s.contains("not installed"), "{s}"); }
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Quips has its own settings page
+    { let s = draw(&mut a); assert!(s.contains("Manage Quips") && s.contains("local text expanders"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // on to Skills: the Skills view first
     { let s = draw(&mut a); assert!(s.contains("What your agents know how to do") && s.contains("Manage skills") && s.contains("bro-open") && !s.contains("Watch a repo"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // bro-open, on unless you turn it off
@@ -3594,7 +3664,10 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
     { let s = draw(&mut a); assert!(s.contains("Manage skills") && !s.contains("Sound packs"), "{s}"); }
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
+    { let s = draw(&mut a); assert!(s.contains("Manage Quips") && !s.contains("Manage skills"), "{s}"); }
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
     { let s = draw(&mut a); assert!(s.contains("Quick install") && !s.contains("Manage skills"), "{s}"); }
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
@@ -3613,6 +3686,7 @@ fn settings_show_a_justtools_update_its_progress_and_how_it_ended() {
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Sounds
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Skills
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Quips
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     let _ = draw(&mut a);
     a.svc.update(|st| {
@@ -3651,6 +3725,7 @@ fn settings_say_smart_paste_leaves_file_copies_to_windows_unless_filters_are_on(
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Sounds
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Skills
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Quips
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     for _ in 0..3 {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE); // on to Smart Paste
@@ -3679,6 +3754,7 @@ fn settings_show_justimagine_behind_github_and_where_it_runs() {
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE);
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Sounds
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Skills
+    key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Quips
     key(&mut a, KeyCode::BackTab, KeyModifiers::NONE); // Integrations
     let _ = draw(&mut a);
     let sha = "0a50ae7c5f0e7c2b1d1e9f8a7b6c5d4e3f2a1b0c";
@@ -4501,7 +4577,7 @@ fn settings_sections_open_from_the_left_or_say_where_they_sit() {
     let mut small = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, H)).unwrap();
     small.draw(|f| a.draw(f)).unwrap();
     let s = testkit::dump(small.backend().buffer());
-    assert!(s.contains("Updates  12 of 12") && !s.contains("SETTINGS"), "{s}");
+    assert!(s.contains("Updates  13 of 13") && !s.contains("SETTINGS"), "{s}");
 }
 
 fn tabs_on(a: &mut App) {
@@ -5258,7 +5334,7 @@ fn focus_mode_sends_pictures_where_they_were_and_switches_models_in_both_agents(
     assert!(rows.iter().any(|r| r.label == "Opus 5.5" && r.detail.is_some()));
     let sonnet = rows.iter().position(|r| r.label == "Sonnet 5.5").unwrap();
     key(&mut a, KeyCode::Down, none);
-    assert_eq!(a.focus.drafts[&id].menu.map(|m| m.sel), Some(1), "the keys move in the open list");
+    assert_eq!(a.focus.drafts[&id].menu.as_ref().map(|m| m.sel), Some(1), "the keys move in the open list");
     a.focus_pick(id, MenuKind::Model, sonnet);
     assert!(a.focus.drafts[&id].menu.is_none());
     assert!(sent(&mut a, id).starts_with("/model claude-sonnet-5-5"));
@@ -5298,6 +5374,84 @@ fn focus_mode_sends_pictures_where_they_were_and_switches_models_in_both_agents(
     a.after_events();
     a.focus_pick(cx, MenuKind::Thinking, 0);
     assert!(sent(&mut a, cx).starts_with("/model") && !a.focus_view(cx));
+}
+
+#[test]
+fn every_session_switches_its_model_among_what_it_runs_on() {
+    use crate::focus::MenuKind;
+    let none = KeyModifiers::NONE;
+    let mut a = app(true);
+    a.focus.on = true;
+    let id = a.focused().unwrap();
+    term_of(&mut a, id).demo_activity = Some(Activity::Idle);
+    // proxy mode: Claude Code on every signed-in Claude login is Claude Code as ever, with its own models
+    term_of(&mut a, id).meta.route_id = Some("kshared".into());
+    assert!(a.focus_menu_rows(id, MenuKind::Model).iter().any(|r| r.label == "Sonnet 5.5"), "a session through bro's proxy still switches");
+    // on an API provider: that provider's models (searched as you type), and Claude Code's thinking levels
+    term_of(&mut a, id).launch_spec = Some(bro_core::launch::LaunchSpec {
+        harness: bro_core::Harness::Claude,
+        profile_id: None,
+        provider_id: Some("openrouter".into()),
+        model: Some("moonshotai/kimi-k2".into()),
+        cwd: std::path::PathBuf::new(),
+        resume: None,
+        permission: Default::default(),
+        browser: Default::default(),
+        extra_args: vec![],
+        orchestrator: false,
+    });
+    term_of(&mut a, id).meta.model = Some("moonshotai/kimi-k2".into());
+    let row = |id: &str, name: &str| bro_core::catalogue::ModelRow { id: id.into(), name: name.into(), context: Some(262_144), pricing: None, reasoning: false, created: None };
+    let mut listed: Vec<_> = (0..12).map(|i| row(&format!("acme/model-{i}"), &format!("Acme {i}"))).collect();
+    listed.push(row("moonshotai/kimi-k2", "Kimi K2"));
+    a.svc.update(|st| {
+        st.models.insert("openrouter".into(), listed);
+    });
+    let rows = a.focus_menu_rows(id, MenuKind::Model);
+    assert_eq!(rows.len(), 13);
+    assert!(rows.iter().any(|r| r.label == "Kimi K2" && r.current && r.detail.as_deref() == Some("moonshotai/kimi-k2 · 262K context")), "{rows:?}");
+    a.focus_toggle_menu(id, MenuKind::Model);
+    for c in "model-11".chars() {
+        key(&mut a, KeyCode::Char(c), none);
+    }
+    assert_eq!(a.focus_menu_rows(id, MenuKind::Model).iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["Acme 11"], "typing narrows the list");
+    assert_eq!(a.focus.drafts[&id].area.text(), "", "and doesn't go in the box");
+    key(&mut a, KeyCode::Enter, none);
+    term_of(&mut a, id).flush_outbox();
+    let sent = String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap();
+    assert!(sent.starts_with("/model acme/model-11"), "{sent:?}");
+    assert_eq!(a.focus_running_on(id).0.as_deref(), Some("acme/model-11"));
+    assert!(a.focus_menu_rows(id, MenuKind::Thinking).iter().any(|r| r.label == "Max"));
+}
+
+#[test]
+fn mobile_focus_controls_keep_a_new_codex_thinking_choice_until_startup_facts_arrive() {
+    use bro_bridge::FocusControlChange;
+    let mut a = app(true);
+    let id = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness == Some(bro_core::Harness::Codex))).map(|(id, _)| *id).unwrap();
+    term_of(&mut a, id).meta.model = None;
+    term_of(&mut a, id).set_demo_transcript("");
+    term_of(&mut a, id).demo_activity = Some(Activity::Idle);
+    let initial = a.focus_remote_controls(id, None).unwrap();
+    assert!(initial["model"].is_null());
+    assert!(initial["levels"].as_array().is_some_and(|levels| levels.iter().any(|l| l["id"] == "high")));
+    a.focus.draft(id).area.set_text("Keep this draft");
+    let chosen = a.focus_remote_controls(id, Some(FocusControlChange::Thinking { value: "high".into() })).unwrap();
+    assert_eq!(chosen["effort"], "high");
+    assert_eq!(chosen["pending"], true);
+    a.after_events();
+    assert!(a.focus_change_waits(id), "a new transcript must not discard the choice");
+    term_of(&mut a, id).set_demo_transcript(&[
+        serde_json::json!({"type":"session_meta","payload":{"cli_version":"0.165.0"}}),
+        serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5.2-codex","effort":"medium"}}),
+    ].iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"));
+    a.after_events();
+    term_of(&mut a, id).flush_outbox();
+    let sent = String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap();
+    assert!(sent.contains("/model gpt-5.2-codex --reasoning=high"), "{sent:?}");
+    assert_eq!(a.focus.drafts[&id].area.text(), "Keep this draft");
+    assert!(a.focus_remote_controls(id, Some(FocusControlChange::Thinking { value: "invalid".into() })).is_err());
+    assert!(a.focus_remote_controls(id, Some(FocusControlChange::Model { value: "invalid".into() })).is_err());
 }
 
 #[test]
@@ -5369,4 +5523,214 @@ fn focus_mode_writes_replies_and_answers_choices_through_the_session() {
     // shells keep their terminal
     let shell = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness.is_none())).map(|(id, _)| *id).unwrap();
     assert!(!a.focus_view(shell));
+}
+
+#[test]
+fn quips_complete_expand_with_pictures_and_recall_without_instructions() {
+    use crate::focus::{Part, visible};
+    let mut a = app(true);
+    a.focus.on = true;
+    let id = a.focused().unwrap();
+    let none = KeyModifiers::NONE;
+    let sent = |a: &mut App| {
+        term_of(a, id).flush_outbox();
+        String::from_utf8(std::mem::take(&mut term_of(a, id).sent)).unwrap()
+    };
+    a.focus_paste(id, "Explain :plain");
+    assert_eq!(a.focus_quip_rows(id).len(), 1);
+    key(&mut a, KeyCode::Tab, none);
+    assert_eq!(a.focus.drafts[&id].area.text(), "Explain :plain-english ");
+    assert_eq!(sent(&mut a), "", "choosing a Quip never sends the message");
+    a.focus_attach(id, vec![std::path::PathBuf::from("C:/quip-shot.png")]);
+    a.focus_paste(id, " :keep-it-short :plain-english");
+    // A completed token is still a completion until a space or Esc closes the picker.
+    key(&mut a, KeyCode::Esc, none);
+    key(&mut a, KeyCode::Enter, none);
+    let wire = sent(&mut a);
+    assert!(wire.contains("Use everyday language."));
+    assert_eq!(wire.matches("Use everyday language.").count(), 1, "a Quip is expanded once across picture boundaries too");
+    assert!(wire.contains("Keep it brief and specific."));
+    assert!(wire.contains("quip-shot.png"));
+    assert!(!wire.contains("Do not ask questions."), "unused Quips stay local");
+    let short = crate::quips::collapse(&a.focus.drafts[&id].sent[0].text);
+    assert!(short.contains(":plain-english") && short.contains(":keep-it-short"));
+    key(&mut a, KeyCode::Up, none);
+    assert_eq!(a.focus.drafts[&id].area.text(), short);
+    assert!(!visible(a.focus.drafts[&id].area.text()).contains("<bro-quip"));
+    assert!(a.focus.drafts[&id].parts().iter().all(|p| matches!(p, Part::Text(_))));
+    a.focus.draft(id).area.set_text("Do it :full-send :full-stop ");
+    a.focus_attach(id, vec![std::path::PathBuf::from("C:/keep-me.png")]);
+    a.focus_submit(id);
+    assert_eq!(sent(&mut a), "");
+    assert!(a.focus.drafts[&id].area.text().contains(":full-send"));
+    assert_eq!(a.focus.drafts[&id].attachments.len(), 1, "conflicts keep the entire draft");
+}
+
+#[test]
+fn quips_editor_routes_keys_and_pastes_and_can_save_edit_and_delete() {
+    let mut a = app(true);
+    let id = a.focused().unwrap();
+    let none = KeyModifiers::NONE;
+    a.run_act(Act::Quips);
+    assert!(!a.focus.on && matches!(a.overlay, Overlay::Quips(owner) if owner == id), "the palette opens the library without changing the session view");
+    a.focus_edit_quip(id, None);
+    a.focus_paste(id, "My Quip");
+    key(&mut a, KeyCode::Tab, none);
+    a.focus_paste(id, "my-quip");
+    key(&mut a, KeyCode::Tab, none);
+    a.focus_paste(id, "Use my own instructions.");
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let index = a.focus.quips.items.len() - 1;
+    assert_eq!(a.focus.quips.items[index].trigger, "my-quip");
+    assert!(a.focus.drafts[&id].quips.editor.is_none());
+    a.focus_edit_quip(id, Some(index));
+    a.focus.draft(id).quips.editor.as_mut().unwrap().fields[2].set_text("Updated instructions.");
+    a.focus_save_quip(id);
+    a.focus.draft(id).quips.search = "my-quip".into();
+    assert_eq!(a.focus_quip_rows(id), [index]);
+    a.focus_delete_quip(id);
+    assert!(a.focus.drafts[&id].quips.delete_armed);
+    assert_eq!(a.focus.quips.items[index].instructions, "Updated instructions.");
+    a.focus_delete_quip(id);
+    assert!(a.focus_quip_rows(id).is_empty());
+    key(&mut a, KeyCode::Esc, none);
+    assert!(!a.focus.drafts[&id].quips.open);
+    assert!(a.focus.drafts[&id].area.text().is_empty());
+}
+
+#[test]
+fn quips_can_be_managed_from_settings_without_switching_to_an_agent() {
+    let mut a = app(true);
+    a.run_act(Act::Settings);
+    let settings = a.focused().unwrap();
+    assert!(a.panes[&settings].as_term_ref().is_none());
+    let count = a.focus.quips.items.len();
+    for _ in 0..9 { key(&mut a, KeyCode::Tab, KeyModifiers::NONE); }
+    assert!(draw(&mut a).contains("Manage Quips"));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::Quips(id) if id == settings));
+    assert!(!a.focus.on, "managing the library does not switch conversation mode on");
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    a.paste("My settings Quip");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    a.paste("settings-quip");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    a.paste("Use these instructions.");
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    assert_eq!(a.focus.quips.items.len(), count + 1);
+    assert_eq!(a.focus.quips.items.last().unwrap().trigger, "settings-quip");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.focus.drafts[&settings].quips.editor.is_some(), "Enter edits when there is no agent to insert into");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(matches!(a.overlay, Overlay::None));
+    assert_eq!(a.focused(), Some(settings));
+    assert!(a.focus.drafts[&settings].area.text().is_empty());
+    a.panes.clear();
+    a.tabs.clear();
+    a.run_act(Act::Quips);
+    assert!(matches!(a.overlay, Overlay::Quips(0)), "the library also opens with no sessions at all");
+}
+
+#[test]
+fn terminal_quips_keep_tags_local_and_append_only_selected_instructions_on_send() {
+    let mut a = app(true);
+    let id = a.focused().unwrap();
+    assert!(!a.focus.on);
+    let none = KeyModifiers::NONE;
+    let sent = |a: &mut App| String::from_utf8(std::mem::take(&mut term_of(a, id).sent)).unwrap();
+    for c in "Explain this :plain".chars() { key(&mut a, KeyCode::Char(c), none); }
+    assert_eq!(sent(&mut a), "Explain this ");
+    assert_eq!(a.terminal_quip_rows(id).len(), 1);
+    key(&mut a, KeyCode::Tab, none);
+    assert_eq!(a.focus.drafts[&id].terminal_quips.pending[0].trigger, "plain-english");
+    assert_eq!(sent(&mut a), "", "choosing a Quip never sends text to the terminal or submits");
+    for c in ":keep-it-short".chars() { key(&mut a, KeyCode::Char(c), none); }
+    key(&mut a, KeyCode::Char(' '), none);
+    assert_eq!(a.focus.drafts[&id].terminal_quips.pending.len(), 2);
+    // Changing the library after selection does not change the instructions already attached.
+    let index = a.focus.quips.items.iter().position(|q| q.trigger == "plain-english").unwrap();
+    a.focus.quips.items[index].instructions = "Edited later.".into();
+    key(&mut a, KeyCode::Enter, none);
+    let wire = sent(&mut a);
+    assert!(wire.contains("Use everyday language.") && wire.contains("Keep it brief and specific."), "{wire:?}");
+    assert!(!wire.contains("Edited later.") && !wire.contains("Do not ask questions."));
+    assert!(!wire.contains('\u{15}'), "the native editor is never cleared or reconstructed");
+    assert!(a.focus.drafts[&id].terminal_quips.pending.is_empty());
+    assert!(!a.focus.on, "Quips keep the terminal view");
+}
+
+#[test]
+fn terminal_quips_preserve_literal_colons_commands_and_shell_keys() {
+    let mut a = app(true);
+    let id = a.focused().unwrap();
+    let none = KeyModifiers::NONE;
+    for c in "Visit https://example.com at 12:30 :unknown".chars() { key(&mut a, KeyCode::Char(c), none); }
+    key(&mut a, KeyCode::Esc, none);
+    let wire = String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap();
+    assert_eq!(wire, "Visit https://example.com at 12:30 :unknown");
+    assert!(a.focus.drafts[&id].terminal_quips.pending.is_empty());
+    for c in " `example :full-send ` ".chars() { key(&mut a, KeyCode::Char(c), none); }
+    assert!(a.focus.drafts[&id].terminal_quips.query.is_none(), "typed code stays literal too");
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    term_of(&mut a, id).sent.clear();
+    a.paste("/model ");
+    for c in ":plain-english".chars() { key(&mut a, KeyCode::Char(c), none); }
+    let wire = String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap();
+    assert_eq!(wire, "/model :plain-english");
+    assert!(a.focus.drafts[&id].terminal_quips.query.is_none());
+    let shell = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness.is_none())).map(|(id, _)| *id).unwrap();
+    a.focus_pane(shell);
+    for c in ":plain-english".chars() { key(&mut a, KeyCode::Char(c), none); }
+    assert_eq!(String::from_utf8(std::mem::take(&mut term_of(&mut a, shell).sent)).unwrap(), ":plain-english");
+}
+
+#[test]
+fn terminal_quips_support_pastes_removal_conflicts_and_permission_prompts() {
+    let mut a = app(true);
+    let id = a.focused().unwrap();
+    a.paste("Explain :plain-english :keep-it-short");
+    assert_eq!(a.focus.drafts[&id].terminal_quips.pending.len(), 2);
+    let text = String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap();
+    assert_eq!(text, "Explain  ");
+    a.terminal_remove_quip(id, 1);
+    assert_eq!(a.focus.drafts[&id].terminal_quips.pending.len(), 1);
+    term_of(&mut a, id).demo_activity = Some(Activity::Blocked);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap(), "\r", "a permission answer receives no instructions");
+    assert_eq!(a.focus.drafts[&id].terminal_quips.pending.len(), 1);
+    term_of(&mut a, id).demo_activity = Some(Activity::Idle);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    term_of(&mut a, id).sent.clear();
+    assert!(a.focus.drafts[&id].terminal_quips.pending.is_empty());
+    a.paste(":full-send :full-stop");
+    assert!(term_of(&mut a, id).sent.is_empty(), "a conflicting paste is not partly sent");
+    assert!(a.focus.drafts[&id].terminal_quips.pending.is_empty());
+    a.paste("Keep `:full-send` and C:/files/file.txt literal");
+    assert!(a.focus.drafts[&id].terminal_quips.pending.is_empty());
+    assert!(String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap().contains("`:full-send`"));
+    a.paste(" `");
+    a.paste(":full-send");
+    assert!(a.focus.drafts[&id].terminal_quips.pending.is_empty(), "a pasted code span can continue across multiple pastes");
+    a.paste("` :plain-english");
+    assert_eq!(a.focus.drafts[&id].terminal_quips.pending.iter().map(|q| q.trigger.as_str()).collect::<Vec<_>>(), ["plain-english"], "shortcuts work again after the code span closes");
+}
+
+#[test]
+fn terminal_quips_use_bracketed_paste_for_codex_and_keep_multiline_input_intact() {
+    use crate::panes::term::Term;
+    let mut a = app(true);
+    let mut meta = a.panes[&a.focused().unwrap()].as_term_ref().unwrap().meta.clone();
+    meta.harness = Some(bro_core::Harness::Codex);
+    let id = a.new_tab(Box::new(Term::fixed(meta, "\x1b[?2004h› ", a.svc.clone())));
+    a.paste("Keep this\nmultiline draft ");
+    a.paste(":second-look");
+    assert_eq!(a.focus.drafts[&id].terminal_quips.pending.len(), 1);
+    let native = String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap();
+    assert!(native.contains("Keep this\rmultiline draft ") && native.contains("\x1b[200~"));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let wire = String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap();
+    assert!(wire.contains("\x1b[200~\n\n<bro-quip") && wire.contains("Review your answer or work before finishing."), "{wire:?}");
+    assert!(wire.ends_with("\x1b[201~"), "the existing delayed Enter follows the entire paste");
+    assert!(!wire.contains("Keep this"), "the native draft is never sent a second time");
 }

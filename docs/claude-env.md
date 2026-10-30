@@ -46,8 +46,9 @@ touches them, and switching presets keeps what you picked:
 |---|---|---|
 | Agent teams | **on** (bro's default) / off (Claude's default) | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` |
 | Teammate model | **lead's** / Opus / Sonnet / Haiku | `CLAUDE_CODE_SUBAGENT_MODEL`: what teammates and subagents run on when Claude doesn't name a model. A third-party backend pins every model slot, this one included. |
+| Skip agent summaries | **off** / on | Skips Claude's periodic background-agent status summaries. Saves the tokens used by those summaries; the agent panel's short status text stops refreshing. Agents keep working. |
 
-`r` on either switch goes back to bro's default. With agent teams on, a subagent that Claude names launches as a
+`r` on any of these switches goes back to bro's default. With agent teams on, a subagent that Claude names launches as a
 teammate, so teams can form without being asked for. Turn the switch off if you'd rather keep subagents.
 
 While a session leads a team, bro shows the team live, read from Claude Code's own files in the session's config dir
@@ -63,6 +64,36 @@ While a session leads a team, bro shows the team live, read from Claude Code's o
 
 To talk to one teammate, go to the lead and use Claude's agent panel (↑/↓ picks a teammate, enter opens it). Teammates
 run in-process inside the lead's pane. Claude Code's split-pane mode needs tmux or iTerm2, which bro's terminals aren't.
+
+### Skip agent summaries
+
+Turn on **Settings → Claude Code → Agent teams → Skip agent summaries** to use Bro's bundled adaptation of
+[Flamerix AI's no-agent-summary preload](https://gist.github.com/flamerix-ai/c3905705cc4205e5de3011fa2e74efce).
+It is off by default, independent of the Agent teams switch, and stays as you picked it when you change presets.
+The source credit under the setting links to the original post by Flamerix AI; in the terminal UI,
+select the setting and press `o` to open it.
+The setting is saved as `skip_agent_summaries = "on"` under `[claude_env.overrides]` in `~/.bro/v2.toml`.
+
+Bro writes a versioned script and its MIT notice into `~/.bro/claude-preloads`, adds it to `BUN_OPTIONS` for new
+Claude launches, and preserves any existing Bun options. The preload only installs in an opted-in Claude Code
+runtime, including the native Windows executable. It works independently of Bro's Claude mod and proxy settings.
+
+Only timers whose callback source contains Claude's agent-summary markers are suppressed. Ordinary timers,
+agents and teammates keep running. This is an unofficial runtime hook: a Claude update that changes those
+markers can restore summaries. The hook requires Claude Code's native Bun runtime.
+An unwritable preload cache leaves the Claude launch working with summaries enabled. Bun requires a preload
+path without whitespace; Bro uses Windows short paths when needed. If no usable path exists, the launch keeps
+its usual behavior.
+
+Running sessions keep their current behavior. An existing Claude daemon or prewarmed session may have the old
+environment; restart that daemon after its work ends if its agent statuses still refresh. Bro never stops it.
+Turning the setting off restores normal behavior for new Claude launches.
+
+For a local compatibility check after updating Claude, set `BRO_CLAUDE_AGENT_SUMMARY_LOG` to an absolute log
+file path in `[claude_env.extra]`. New launches append a `preload active` line, then log each suppressed summary
+timer (up to 20 per process) and an exit count. An active line confirms loading; a suppressed line confirms a
+timer matched. No prompts or transcripts are logged. The hook tests run with
+`node --test crates/bro-core/src/agent_summaries/preload.test.cjs`.
 
 ## Built in: the Settings view's switches
 
@@ -85,6 +116,7 @@ run in-process inside the lead's pane. Claude Code's split-pane mode needs tmux 
 | Shell command time limit | `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_TIMEOUT_MS` |
 | Prompt cache lifetime | `CLAUDE_CODE_PROMPT_CACHE_TTL`, `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` / `FORCE_PROMPT_CACHING_5M` |
 | Auto-compact | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` / `DISABLE_AUTO_COMPACT` |
+| Co-author lines | Off by default: no `Co-Authored-By` trailer on Claude's commits and no "Generated with Claude Code" line on its PRs. bro passes `"attribution": { "commit": "", "pr": "" }` and `"includeCoAuthoredBy": false` in each launch's `--settings` file and keeps them in every Claude login's own `settings.json` (`~/.claude` and each pool account, at startup, on launch and when the switch changes), so sessions started outside bro follow too. Claude default takes out exactly what bro added; attribution wording of your own stays. |
 | Tool search via proxy | `ENABLE_TOOL_SEARCH=true`, on by default for launches through bro-proxy to a Claude upstream (pool, Claude logins with compression, Anthropic providers). Claude Code otherwise turns tool search off behind any proxy and loads every MCP tool definition into context up front. |
 | Claude renderer | `CLAUDE_CODE_NO_FLICKER` (fullscreen) / `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` (classic) |
 

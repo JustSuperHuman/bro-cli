@@ -4,8 +4,9 @@
 //!
 //! Each [`Knob`] has options; the first is the default and is usually "Claude's default",
 //! which sets nothing. The `standard` preset leaves Claude Code as it ships apart from
-//! [`ALWAYS`] (the fullscreen renderer), agent teams, focus view, tool search behind the proxy, and
-//! messages between sessions kept to their project ([`crate::peers`]).
+//! [`ALWAYS`] (the fullscreen renderer), agent teams, focus view, no co-author lines on commits and PRs
+//! ([`crate::coauthor`]), tool search behind the proxy, and messages between sessions kept to their project
+//! ([`crate::peers`]).
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -105,6 +106,17 @@ pub const KNOBS: &[Knob] = &[
             Opt { id: "opus", label: "Opus", vars: &[("CLAUDE_CODE_SUBAGENT_MODEL", "opus")], settings: &[] },
             Opt { id: "sonnet", label: "Sonnet", vars: &[("CLAUDE_CODE_SUBAGENT_MODEL", "sonnet")], settings: &[] },
             Opt { id: "haiku", label: "Haiku", vars: &[("CLAUDE_CODE_SUBAGENT_MODEL", "haiku")], settings: &[] },
+        ],
+    },
+    Knob {
+        id: crate::agent_summaries::KNOB,
+        label: "Skip agent summaries",
+        group: Group::Teams,
+        help: "Skips Claude's periodic background-agent status summaries to save tokens. Status text stops refreshing; agents keep working.",
+        when: When::Always,
+        options: &[
+            Opt { id: "off", label: "off", vars: &[], settings: &[] },
+            Opt { id: "on", label: "on", vars: &[], settings: &[] },
         ],
     },
     Knob {
@@ -280,6 +292,17 @@ pub const KNOBS: &[Knob] = &[
         ],
     },
     Knob {
+        id: crate::coauthor::KNOB,
+        label: "Co-author lines",
+        group: Group::Features,
+        help: "Off: no Co-Authored-By trailer on Claude's commits, no \"Generated with Claude Code\" on its PRs. Kept in each login's settings.json too.",
+        when: When::Always,
+        options: &[
+            Opt { id: "off", label: "off", vars: &[], settings: crate::coauthor::SETTINGS },
+            Opt { id: "default", label: "Claude default", vars: &[], settings: &[] },
+        ],
+    },
+    Knob {
         id: "spinner_tips",
         label: "Spinner tips",
         group: Group::Features,
@@ -442,9 +465,19 @@ impl ClaudeEnvSettings {
         out
     }
 
+    /// Claude's commits and PRs leave out its co-author lines (see [`crate::coauthor`]).
+    pub fn coauthor_hidden(&self) -> bool {
+        knob(crate::coauthor::KNOB).is_some_and(|k| k.options[self.choice(k).0].id == "off")
+    }
+
     /// New Claude sessions can form agent teams.
     pub fn agent_teams(&self) -> bool {
         knob(AGENT_TEAMS).is_some_and(|k| k.options[self.choice(k).0].id == "on")
+    }
+
+    /// Skip only Claude Code's periodic agent status summary timers, using Bro's Bun preload.
+    pub fn skip_agent_summaries(&self) -> bool {
+        knob(crate::agent_summaries::KNOB).is_some_and(|k| k.options[self.choice(k).0].id == "on")
     }
 
     /// Short status for toasts and the sidebar: "Private" or "Private + 2 changes".
@@ -467,13 +500,17 @@ mod tests {
     }
 
     #[test]
-    fn standard_sets_the_renderer_agent_teams_focus_view_no_tips_and_proxy_tool_search() {
+    fn standard_sets_the_renderer_agent_teams_focus_view_no_coauthor_lines_no_tips_and_proxy_tool_search() {
         let s = ClaudeEnvSettings::default();
         let flicker = ("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
         let teams = ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(), "1".to_string());
         assert_eq!(s.vars(false), vec![flicker.clone(), teams.clone()]);
         assert_eq!(s.vars(true), vec![flicker, teams, ("ENABLE_TOOL_SEARCH".to_string(), "true".to_string())]);
-        assert_eq!(serde_json::Value::Object(s.settings()), serde_json::json!({ "viewMode": "focus", "spinnerTipsEnabled": false }));
+        assert_eq!(
+            serde_json::Value::Object(s.settings()),
+            serde_json::json!({ "viewMode": "focus", "attribution": { "commit": "", "pr": "" }, "includeCoAuthoredBy": false, "spinnerTipsEnabled": false })
+        );
+        assert!(s.coauthor_hidden());
     }
 
     #[test]
@@ -481,7 +518,9 @@ mod tests {
         let mut s = ClaudeEnvSettings::default();
         s.set_choice(knob("focus").unwrap(), 1);
         s.set_choice(knob("spinner_tips").unwrap(), 1);
+        s.set_choice(knob(crate::coauthor::KNOB).unwrap(), 1);
         assert!(s.settings().is_empty());
+        assert!(!s.coauthor_hidden());
         s.extra.insert("CLAUDE_CODE_NO_FLICKER".into(), "0".into());
         assert_eq!(get(&s.vars(false), "CLAUDE_CODE_NO_FLICKER"), Some("0"));
     }
@@ -550,6 +589,26 @@ agent_teams = \"on\"
         assert!(!s.agent_teams() && get(&s.vars(false), "CLAUDE_CODE_SUBAGENT_MODEL") == Some("sonnet"), "a preset leaves agent teams as they were");
         assert_eq!(s.preset_changes(), 0);
         assert!(KNOBS.iter().take_while(|k| k.group == Group::Teams).count() == KNOBS.iter().filter(|k| k.group == Group::Teams).count(), "team knobs come first");
+    }
+
+    #[test]
+    fn skipping_agent_summaries_is_opt_in_and_survives_presets() {
+        let mut s = ClaudeEnvSettings::default();
+        let k = knob(crate::agent_summaries::KNOB).unwrap();
+        assert!(!s.skip_agent_summaries());
+        s.set_choice(k, 1);
+        assert!(s.skip_agent_summaries());
+        for preset in PRESETS {
+            s.use_preset(preset.id);
+            assert!(s.skip_agent_summaries(), "{} must preserve the opt-in", preset.id);
+            assert_eq!(s.preset_changes(), 0);
+        }
+        let saved = toml::to_string(&s).unwrap();
+        let mut restored: ClaudeEnvSettings = toml::from_str(&saved).unwrap();
+        assert!(restored.skip_agent_summaries());
+        restored.set_choice(k, 0);
+        assert!(!restored.skip_agent_summaries());
+        assert!(!restored.overrides.contains_key(k.id));
     }
 
     #[test]

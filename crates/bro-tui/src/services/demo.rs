@@ -604,9 +604,27 @@ pub fn conversation(i: usize) -> Option<String> {
             // a screenshot you pasted, which it then looks at
             let shot = screenshot().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
             let prompt = if shot.is_empty() { "fix the flaky workout timer test".to_string() } else { format!("\"{shot}\" fix the flaky workout timer test, it failed again on CI") };
-            vec![
+            // a sound it made you, which plays right there in focus mode
+            let chime = chime().map(|p| p.to_string_lossy().into_owned());
+            let mut lines = vec![
             json!({"type":"user","timestamp":ts(0),"gitBranch":"fix/timer-clock","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat</local-command-caveat>"}}),
             asked("claude-sonnet-5", "medium"),
+            ];
+            // a workout from the JustGains connector, which shows as its own card (an MCP app) once its page is read
+            lines.extend(workout(&ts));
+            if let Some(chime) = chime {
+                lines.extend([
+                    you(0, "make a short, bright finish chime for the workout timer"),
+                    call(1, "c0", "tc", "Bash", json!({"command":"node justimagine.mjs run chime.json","description":"Make the finish chime"})),
+                    ok(2, "tc", json!({"stdout":chime})),
+                    said(2, "c1", &format!("Here's the finish chime: four notes rising (C, E, G, C), 2.6 seconds, ringing out at the end.
+
+`{chime}`
+
+Drop it in `assets/sounds/` and the timer plays it on the last rep.")),
+                ]);
+            }
+            lines.extend([
             you(0, &prompt),
             call(3, "m0", "t9", "Read", json!({"file_path":shot})),
             ok(4, "t9", json!({})),
@@ -621,11 +639,75 @@ pub fn conversation(i: usize) -> Option<String> {
             ok(70, "t3", json!({"stdout":"14 passed"})),
             said(72, "m3", "All 14 timer tests pass now, ten runs in a row. Pushing the branch so CI can confirm."),
             call(73, "m3", "t4", "Bash", json!({"command":"git push -u origin fix/timer-clock","description":"Push the fix for CI"})),
-            ]
+            ]);
+            lines
         }
         _ => return None,
     };
     Some(lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n"))
+}
+
+/// The JustGains connector making a workout, as Claude Code records it: the call, its result (what JustGains
+/// sent back: the workout, in pounds) with the page it shows in, and what Claude said of it. The card shows the
+/// page when bro has read it before (`~/.bro/mcp-apps`); without it, the demo shows the step alone.
+fn workout(ts: &dyn Fn(u32) -> String) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let result: serde_json::Value = serde_json::from_str(include_str!("demo_workout.json")).unwrap_or_default();
+    let sc = result.get("structuredContent").cloned().unwrap_or_default();
+    vec![
+        json!({"type":"user","timestamp":ts(0),"message":{"role":"user","content":"make me a 30 minute upper body dumbbell workout for tonight"}}),
+        json!({"type":"assistant","timestamp":ts(1),"message":{"id":"w0","content":[{"type":"tool_use","id":"tw","name":"mcp__claude_ai_JustGains__generate_workout","input":{"prompt":"30 minute upper body dumbbell workout"}}]}}),
+        json!({"type":"user","timestamp":ts(2),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tw","content":sc.to_string()}]},"toolUseResult":sc.to_string(),"mcpMeta":result}),
+        json!({"type":"assistant","timestamp":ts(3),"message":{"id":"w1","content":[{"type":"text","text":"Here's **Upper Body Dumbbell Finisher**: about 26 minutes, 15 sets across seven moves. It warms your shoulders up first, then pairs presses with rows so chest and back get equal work, and finishes on curls and overhead extensions. It's saved to your JustGains templates."}]}}),
+        json!({"type":"system","subtype":"turn_duration","durationMs":9_000,"timestamp":ts(3)}),
+    ]
+}
+
+/// A sound for the demo's conversations, made here rather than read from anywhere: a bright rising chime (C, E, G,
+/// C), 16-bit mono WAV. Written once to the demo's own temp folder.
+pub fn chime() -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join("bro-demo");
+    let path = dir.join("finish-chime.wav");
+    if path.is_file() {
+        return Some(path);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    let rate = 44_100u32;
+    let n = (rate as f32 * 2.6) as usize;
+    let notes = [1046.5f32, 1318.5, 1568.0, 2093.0];
+    let samples: Vec<i16> = (0..n)
+        .map(|i| {
+            let t = i as f32 / rate as f32;
+            let v: f32 = notes
+                .iter()
+                .enumerate()
+                .map(|(k, f)| {
+                    let at = t - k as f32 * 0.18;
+                    if at < 0.0 {
+                        return 0.0;
+                    }
+                    // a quick attack, a long ring, a soft octave over it
+                    let env = (at / 0.004).min(1.0) * (-at / 0.55).exp();
+                    let w = std::f32::consts::TAU * f * at;
+                    env * (w.sin() + 0.25 * (2.0 * w).sin())
+                })
+                .sum();
+            (v * 0.22 * 32_767.0).clamp(-32_767.0, 32_767.0) as i16
+        })
+        .collect();
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut out = Vec::with_capacity(44 + data.len());
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    for v in [16u32.to_le_bytes().to_vec(), 1u16.to_le_bytes().to_vec(), 1u16.to_le_bytes().to_vec(), rate.to_le_bytes().to_vec(), (rate * 2).to_le_bytes().to_vec(), 2u16.to_le_bytes().to_vec(), 16u16.to_le_bytes().to_vec()] {
+        out.extend_from_slice(&v);
+    }
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&data);
+    std::fs::write(&path, out).ok()?;
+    Some(path)
 }
 
 /// A harmless command for a demo session: print the transcript, then an interactive shell.

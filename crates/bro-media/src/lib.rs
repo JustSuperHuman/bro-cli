@@ -31,7 +31,7 @@ use std::time::Duration;
 pub use ffmpeg::{ffmpeg_available, set_search_dirs};
 pub use kind::{MediaKind, is_executable, kind_of};
 pub use player::Player;
-pub use still::{Image, load_image};
+pub use still::{Image, is_animated, load_image};
 
 /// Straight-alpha RGBA8, sRGB.
 #[derive(Clone, Default, PartialEq, Eq)]

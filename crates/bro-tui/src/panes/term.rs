@@ -297,6 +297,9 @@ pub struct Term {
     launch: Option<Spawn>,
     /// While a prompt is on screen: its question line ("Do you want to proceed?").
     prompt_title: Option<String>,
+    /// A currently rendered provider limit; this outranks a busy footer or transcript.
+    limit: Option<bro_core::sessions::limits::UsageLimit>,
+    cleared_limit_error: Option<String>,
     /// Types `continue` for an agent that stopped on an API error.
     resume: super::auto_resume::AutoResume,
     /// Input from you so far (auto-resume backs off when this moves).
@@ -393,6 +396,8 @@ impl Term {
             insights: None,
             launch: None,
             prompt_title: None,
+            limit: None,
+            cleared_limit_error: None,
             resume: Default::default(),
             typed: 0,
             enter_at: None,
@@ -883,6 +888,15 @@ impl Term {
         self.prompt_title.as_deref()
     }
 
+    pub fn limit_warning(&self) -> Option<bro_core::sessions::limits::UsageLimit> {
+        self.limit.clone().or_else(|| {
+            let snap = self.insights()?;
+            let error = snap.facts.as_ref()?.api_error.as_ref()?;
+            if self.cleared_limit_error.as_deref() == Some(error.id.as_str()) { return None; }
+            bro_core::sessions::limits::UsageLimit::from_error(error.code.as_deref(), &error.text)
+        })
+    }
+
     /// The program and environment this session was launched with.
     pub fn launch_spawn(&self) -> Option<&Spawn> {
         self.launch.as_ref()
@@ -986,6 +1000,20 @@ impl Term {
         self.write(bytes);
     }
 
+    /// Remote composed input needs an answer before it starts its paste-settle timer.
+    pub(crate) fn send_confirmed(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if self.exited.load(Ordering::SeqCst) {
+            return Err("The session has exited.".into());
+        }
+        self.typed += 1;
+        self.scroll = 0;
+        #[cfg(test)]
+        self.sent.extend_from_slice(bytes);
+        let mut writer = self.writer.lock();
+        let writer = writer.as_mut().ok_or("The session input is not available.")?;
+        writer.write_all(bytes).and_then(|_| writer.flush()).map_err(|error| format!("The session could not receive input: {error}"))
+    }
+
     /// Type `text` as one message and press Enter a moment later (a separate write, so the program doesn't
     /// read the Enter as part of a paste).
     pub fn submit(&mut self, text: &str) {
@@ -1010,6 +1038,15 @@ impl Term {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         self.write(format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", "")).as_bytes());
         self.enter_at = Some(Instant::now() + Duration::from_millis(300));
+    }
+
+    /// The native editor's character before its caret, for a word-boundary shortcut.
+    pub(crate) fn input_before_cursor(&self) -> Option<char> {
+        let parser = self.parser.try_lock()?;
+        let screen = parser.screen();
+        let (row, col) = screen.cursor_position();
+        if col == 0 { return Some(' '); }
+        screen.cell(row, col - 1)?.contents().chars().next_back()
     }
 
     /// Type a slash command key by key, let the program's command menu settle on it, then Enter. A command after
@@ -1410,14 +1447,16 @@ impl Term {
     /// Read the bottom of the screen for an agent's tell-tale lines: "esc to interrupt" while it works, a
     /// permission prompt or question when it's waiting on you.
     fn scan(&mut self) {
-        let (text, question) = {
+        let (text, question, limit) = {
             let Some(p) = self.parser.try_lock() else { return };
             let s = p.screen();
             let (_, cols) = s.size();
             let rows: Vec<String> = s.rows(0, cols).collect();
             let tail: Vec<&String> = rows.iter().rev().filter(|r| !r.trim().is_empty()).take(14).collect();
-            (tail.iter().rev().map(|r| r.to_lowercase()).collect::<Vec<_>>().join("\n"), prompt_question(&tail))
+            // contents() joins soft-wrapped rows, preserving words and reset dates at narrow widths.
+            (tail.iter().rev().map(|r| r.as_str()).collect::<Vec<_>>().join("\n"), prompt_question(&tail), bro_core::sessions::limits::UsageLimit::from_screen(&s.contents()))
         };
+        let text = text.to_lowercase();
         let working = ["esc to interrupt", "esc to cancel", "ctrl+c to interrupt", "ctrl-c to interrupt"].iter().any(|m| text.contains(m));
         let blocked = ["do you want to", "do you want me to", "allow this", "allow once", "approve this", "(y/n)", "[y/n]", "❯ 1. yes", "› 1. yes", "enter to confirm", "enter to select", "waiting for your approval"]
             .iter()
@@ -1425,12 +1464,18 @@ impl Term {
         if working || blocked {
             self.agent = true;
         }
+        // A provider may leave its last synthetic error in the transcript until the next reply is written.
+        // Once its live banner clears and work resumes, that old record must not keep the warning alive.
+        if self.limit.is_some() && limit.is_none() && working {
+            self.cleared_limit_error = self.insights().and_then(|s| s.facts).and_then(|f| f.api_error.as_ref().map(|error| error.id.clone()));
+        }
+        self.limit = self.agent.then_some(limit).flatten();
         if !self.agent {
             return;
         }
         let quiet_ms = (self.born.elapsed().as_millis() as u64).saturating_sub(self.last_output.load(Ordering::Relaxed));
         self.prompt_title = if blocked { question } else { None };
-        self.status = Some(if blocked {
+        self.status = Some(if blocked || self.limit.is_some() {
             Activity::Blocked
         } else if working || quiet_ms < 1500 {
             Activity::Working
@@ -1441,6 +1486,9 @@ impl Term {
 
     /// Retry an agent that stopped on an API error: see [`super::auto_resume`].
     fn auto_resume(&mut self, cx: &mut Cx) {
+        // The harness owns a provider retry wait. Never inject an extra `continue` or Enter into it.
+        let limit = self.limit_warning();
+        if limit.as_ref().is_some_and(|limit| limit.is_retrying()) { self.enter_at = None; return; }
         if let Some(at) = self.enter_at
             && Instant::now() >= at
         {
@@ -1454,7 +1502,8 @@ impl Term {
         let cfg = self.svc.settings().auto_resume;
         let now = chrono::Local::now();
         let quiet_ms = (self.born.elapsed().as_millis() as u64).saturating_sub(self.last_output.load(Ordering::Relaxed));
-        let seen = super::auto_resume::Seen { activity: self.activity(), quiet: Duration::from_millis(quiet_ms), stall: self.stall(now), typed: self.typed };
+        let activity = if limit.is_some() { Some(Activity::Idle) } else { self.activity() };
+        let seen = super::auto_resume::Seen { activity, quiet: Duration::from_millis(quiet_ms), stall: self.stall(now), typed: self.typed };
         for step in self.resume.step(now, &seen, &cfg) {
             match step {
                 super::auto_resume::Step::Send(text) => {
@@ -1468,7 +1517,7 @@ impl Term {
 
     /// Answer Yes to a Claude permission prompt ("Do you want to proceed?") when the setting is on.
     fn auto_approve(&mut self, cx: &mut Cx) {
-        if self.meta.harness != Some(Harness::Claude) || self.svc.is_demo() || self.status != Some(Activity::Blocked) || !self.svc.settings().auto_approve {
+        if self.meta.harness != Some(Harness::Claude) || self.svc.is_demo() || self.status != Some(Activity::Blocked) || self.limit_warning().is_some() || !self.svc.settings().auto_approve {
             return;
         }
         // let the prompt finish drawing, and give the last answer time to clear it
@@ -1661,6 +1710,7 @@ impl Pane for Term {
         if self.queued.is_some() {
             return Some(Activity::Working);
         }
+        if self.limit_warning().is_some() { return Some(Activity::Blocked); }
         let screen = self.demo_activity.or(self.status);
         // A question tool waiting for its answer means the agent needs you, whatever the screen
         // markers say (Claude's question menu shows "esc to cancel", which reads as working).
@@ -1949,6 +1999,44 @@ mod title_tests {
         assert!(super::looks_like_exe_path(r"C:\Program Files\PowerShell\7\pwsh.exe"));
         assert!(super::looks_like_exe_path("/usr/bin/bash"));
         assert!(!super::looks_like_exe_path("✳ Fix the flaky test"));
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn the_reported_weekly_limit_blocks_a_busy_footer_and_preserves_retry_details() {
+        crate::testkit::isolate();
+        let root = tempfile::tempdir().unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = Services::offline(Default::default(), tx);
+        let meta = Meta { sid: "limit-fixture".into(), harness: Some(Harness::Claude), profile: None, store: None, model: None,
+            label: "Claude".into(), name: None, renamed: false, cwd: root.path().into(), project: svc.project_for(root.path()),
+            started: Instant::now(), route_id: None, cleanup: vec![], orchestrator: false };
+        let screen = "\x1b[31m✻ Weekly limit reached · Retrying in 5h (Nov 1, 7pm) · attempt 1/30\x1b[0m\r\nYou've used 99% of your weekly limit\r\n❯\r\n⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt";
+        let mut term = Term::fixed(meta, screen, svc);
+        term.scan();
+        assert_eq!(crate::pane::Pane::activity(&term), Some(Activity::Blocked));
+        assert!(!crate::pane::Pane::busy(&term));
+        let error = serde_json::json!({"type":"assistant","uuid":"limited-turn","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[{"type":"text","text":"Weekly limit reached · Retrying in 5h (Nov 1, 7pm)"}]}});
+        term.set_insights(super::super::insights::Insights::fixed_transcript(Harness::Claude, &error.to_string()));
+        assert_eq!(term.limit_warning().unwrap().retry.as_deref(), Some("Retrying in 5h (Nov 1, 7pm)"));
+        for cols in [24, 40, 80, 140] {
+            {
+                let mut parser = term.parser.lock();
+                parser.screen_mut().set_size(40, cols);
+                parser.process(b"\x1b[2J\x1b[H");
+                parser.process(screen.as_bytes());
+            }
+            term.scan();
+            assert_eq!(term.limit_warning().unwrap().retry.as_deref(), Some("Retrying in 5h (Nov 1, 7pm)"), "columns: {cols}");
+        }
+        term.parser.lock().process(b"\x1b[2J\x1b[HWorking again\r\nesc to interrupt");
+        term.scan();
+        assert_eq!(crate::pane::Pane::activity(&term), Some(Activity::Working));
+        assert!(term.limit_warning().is_none());
     }
 }
 

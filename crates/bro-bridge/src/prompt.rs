@@ -3,6 +3,8 @@ use crate::model::TerminalSessionSummary;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+mod codex;
+
 fn stable_id(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     format!("prompt-{:x}", digest)[..31].to_string()
@@ -53,6 +55,9 @@ fn parse_options(text: &str) -> Vec<Value> {
 }
 
 pub(crate) fn detect_prompt(text: &str) -> Option<Value> {
+    if let Some(prompt) = codex::detect(text) {
+        return Some(prompt);
+    }
     let tail = text
         .lines()
         .rev()
@@ -135,13 +140,16 @@ pub fn input_context(
         None => ("terminal", "Terminal"),
     };
     let prompt = observation.agent.and_then(|_| detect_prompt(text));
+    let limit = observation.agent.and_then(|_| bro_core::sessions::limits::UsageLimit::from_screen(text))
+        .or_else(|| session.attention.as_ref().and_then(|attention| attention.limit.clone()));
     json!({
         "sessionId": session.id, "status": session.status, "at": crate::model::iso_now(),
         "pasteSafe": bracketed_paste || observation.agent.is_some(),
         "agent": agent,
         "agentLabel": label,
         "cwd": session.cwd,
-        "busy": observation.busy,
+        "busy": observation.busy && limit.is_none(),
+        "limit": limit,
         // A confident agent detection implies paste support even when this
         // mirror never saw the mode switch (a host restart starts it empty).
         "bracketedPaste": bracketed_paste || observation.agent.is_some(),
@@ -153,9 +161,13 @@ pub fn input_context(
 pub fn prompt_response_bytes(context: &Value, body: &Value) -> Result<String, &'static str> {
     let prompt = context
         .get("prompt")
+        .filter(|prompt| prompt.get("id").and_then(Value::as_str).is_some())
         .ok_or("No actionable prompt is currently rendered.")?;
     if body.get("promptId").and_then(Value::as_str) != prompt.get("id").and_then(Value::as_str) {
         return Err("The prompt changed before the response was delivered.");
+    }
+    if prompt.get("protocol").and_then(Value::as_str).is_some_and(|p| p.starts_with("codex-question")) {
+        return codex::response(prompt, body);
     }
     let action = body
         .get("action")

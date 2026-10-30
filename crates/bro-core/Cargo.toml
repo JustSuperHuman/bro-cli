@@ -19,9 +19,12 @@ rand.workspace = true
 chrono.workspace = true
 ureq.workspace = true
 memchr.workspace = true
+regex.workspace = true
 url.workspace = true
 argon2.workspace = true
 chacha20poly1305.workspace = true
+# sound files' waveforms (`audio`): pure-Rust decoding, the same set bro-voice reads
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "adpcm", "mp3", "ogg", "vorbis", "flac", "isomp4", "aac"] }
 
 [dev-dependencies]
 tempfile.workspace = true

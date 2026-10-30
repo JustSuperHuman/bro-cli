@@ -52,6 +52,7 @@ fn ctx() -> LaunchCtx {
     let mut claude_env = crate::claude_env::ClaudeEnvSettings::default();
     claude_env.set_choice(crate::claude_env::knob("focus").unwrap(), 1);
     claude_env.set_choice(crate::claude_env::knob("spinner_tips").unwrap(), 1);
+    claude_env.set_choice(crate::claude_env::knob(crate::coauthor::KNOB).unwrap(), 1);
     LaunchCtx { proxy_base: Some(PROXY.into()), proxy_token: Some("tok".into()), route_native: false, claude_env, ..Default::default() }
 }
 
@@ -98,6 +99,67 @@ fn setup() -> Sandbox {
     )
     .unwrap();
     sb
+}
+
+#[test]
+fn agent_summary_preload_is_opt_in_and_only_wires_claude_launches() {
+    let sb = setup();
+    let mut context = ctx();
+    let disabled = build(&spec(Harness::Claude, None, None, None), &context).unwrap();
+    assert_eq!(env(&disabled, crate::agent_summaries::ENABLED), Some("0"));
+    assert_eq!(env(&disabled, "BUN_OPTIONS"), None);
+    assert!(!sb.bro().join("claude-preloads").exists());
+
+    context.claude_env.set_choice(crate::claude_env::knob(crate::agent_summaries::KNOB).unwrap(), 1);
+    for (profile, provider) in [(Some("claude:work"), None), (None, None), (None, Some("zai")), (None, Some("openai")), (None, Some("pool"))] {
+        let command = build(&spec(Harness::Claude, profile, provider, Some("test-model")), &context).unwrap();
+        assert_eq!(env(&command, crate::agent_summaries::ENABLED), Some("1"));
+        let options = env(&command, "BUN_OPTIONS").unwrap();
+        let file = Path::new(options.strip_prefix("--preload=").unwrap());
+        assert!(file.is_absolute() && file.is_file(), "{options}");
+        assert!(std::fs::read_to_string(file).unwrap().contains("[AgentSummary] Timer fired"));
+        assert!(file.parent().unwrap().join("NOTICE").is_file());
+    }
+    for harness in [Harness::Codex, Harness::Pi, Harness::Omp] {
+        let command = build(&spec(harness, None, Some("openai"), Some("test-model")), &context).unwrap();
+        assert_eq!(env(&command, crate::agent_summaries::ENABLED), None);
+        assert_eq!(env(&command, "BUN_OPTIONS"), None);
+    }
+}
+
+#[test]
+fn agent_summary_preload_preserves_options_and_disables_inherited_hooks() {
+    let _sb = setup();
+    // SAFETY: setup holds the shared environment lock; Sandbox restores these on drop.
+    unsafe {
+        std::env::set_var("BUN_OPTIONS", "--smol --preload=/user/hook.cjs");
+        std::env::set_var(crate::agent_summaries::ENABLED, "1");
+    }
+    let mut context = ctx();
+    let s = spec(Harness::Claude, None, None, None);
+    let disabled = build(&s, &context).unwrap();
+    assert_eq!(env(&disabled, crate::agent_summaries::ENABLED), Some("0"));
+    context.claude_env.set_choice(crate::claude_env::knob(crate::agent_summaries::KNOB).unwrap(), 1);
+    let command = build(&s, &context).unwrap();
+    let options = env(&command, "BUN_OPTIONS").unwrap();
+    assert!(options.starts_with("--smol --preload=/user/hook.cjs --preload="));
+
+    // An explicit launch env wins over the inherited BUN_OPTIONS and stays idempotent.
+    context.claude_env.extra.insert("BUN_OPTIONS".into(), options.into());
+    assert_eq!(env(&build(&s, &context).unwrap(), "BUN_OPTIONS"), Some(options));
+    context.claude_env.extra.insert("BUN_OPTIONS".into(), "--preload=/provider/hook.cjs".into());
+    assert!(env(&build(&s, &context).unwrap(), "BUN_OPTIONS").unwrap().starts_with("--preload=/provider/hook.cjs --preload="));
+}
+
+#[test]
+fn agent_summary_preload_write_failure_keeps_claude_launchable() {
+    let sb = setup();
+    std::fs::write(sb.bro().join("claude-preloads"), "a file blocks the cache directory").unwrap();
+    let mut context = ctx();
+    context.claude_env.set_choice(crate::claude_env::knob(crate::agent_summaries::KNOB).unwrap(), 1);
+    let command = build(&spec(Harness::Claude, None, None, None), &context).unwrap();
+    assert_eq!(env(&command, crate::agent_summaries::ENABLED), Some("0"));
+    assert_eq!(env(&command, "BUN_OPTIONS"), None);
 }
 
 #[test]
@@ -635,10 +697,34 @@ fn claude_runs_fullscreen_in_focus_view_without_tips_unless_turned_off() {
     let c = build(&spec(Harness::Claude, None, None, None), &cx).unwrap();
     assert_eq!(env(&c, "CLAUDE_CODE_NO_FLICKER"), Some("1"));
     let settings: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").unwrap()).unwrap()).unwrap();
-    assert_eq!(settings, serde_json::json!({ "viewMode": "focus", "spinnerTipsEnabled": false }), "caveman off: no hooks");
+    assert_eq!(
+        settings,
+        serde_json::json!({ "viewMode": "focus", "attribution": { "commit": "", "pr": "" }, "includeCoAuthoredBy": false, "spinnerTipsEnabled": false }),
+        "caveman off: no hooks"
+    );
     let c = build(&spec(Harness::Claude, None, None, None), &ctx()).unwrap();
     assert!(c.args.iter().all(|a| a != "--settings"), "{:?}", c.args);
     assert_eq!(env(&c, "CLAUDE_CODE_NO_FLICKER"), Some("1"));
+}
+
+#[test]
+fn claude_leaves_out_coauthor_lines_in_the_launch_and_the_logins_own_settings_until_turned_back_on() {
+    let _sb = setup();
+    let work = crate::paths::claude_accounts_dir().join("work");
+    std::fs::write(work.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+    let mut cx = ctx();
+    cx.claude_env = Default::default();
+    let c = build(&spec(Harness::Claude, Some("claude:work"), None, None), &cx).unwrap();
+    let settings: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--settings").unwrap()).unwrap()).unwrap();
+    assert_eq!(settings["attribution"], serde_json::json!({ "commit": "", "pr": "" }));
+    assert_eq!(settings["includeCoAuthoredBy"], false);
+    // sessions started outside bro read the login's own file
+    let own: Value = serde_json::from_str(&std::fs::read_to_string(work.join("settings.json")).unwrap()).unwrap();
+    assert_eq!(own, serde_json::json!({ "model": "opus", "attribution": { "commit": "", "pr": "" }, "includeCoAuthoredBy": false }));
+    // Claude's default again: bro takes out what it put in
+    build(&spec(Harness::Claude, Some("claude:work"), None, None), &ctx()).unwrap();
+    let own: Value = serde_json::from_str(&std::fs::read_to_string(work.join("settings.json")).unwrap()).unwrap();
+    assert_eq!(own, serde_json::json!({ "model": "opus" }));
 }
 
 #[test]

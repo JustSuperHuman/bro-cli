@@ -6,6 +6,7 @@ const MODE_APPLICATION_CURSOR: u8 = 0b0000_0010;
 const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
+const MODE_NO_WRAP: u8 = 0b0010_0000;
 
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
@@ -386,6 +387,11 @@ impl Screen {
     }
 
     fn write_input_mode_formatted(&self, contents: &mut Vec<u8>) {
+        contents.extend_from_slice(if self.auto_wrap() {
+            b"\x1b[?7h"
+        } else {
+            b"\x1b[?7l"
+        });
         crate::term::ApplicationKeypad::new(
             self.mode(MODE_APPLICATION_KEYPAD),
         )
@@ -419,6 +425,13 @@ impl Screen {
     }
 
     fn write_input_mode_diff(&self, contents: &mut Vec<u8>, prev: &Self) {
+        if self.auto_wrap() != prev.auto_wrap() {
+            contents.extend_from_slice(if self.auto_wrap() {
+                b"\x1b[?7h"
+            } else {
+                b"\x1b[?7l"
+            });
+        }
         if self.mode(MODE_APPLICATION_KEYPAD)
             != prev.mode(MODE_APPLICATION_KEYPAD)
         {
@@ -492,6 +505,12 @@ impl Screen {
     pub fn cursor_position(&self) -> (u16, u16) {
         let pos = self.grid().pos();
         (pos.row, pos.col)
+    }
+
+    /// Whether characters reaching the right margin wrap onto the next row (DECAWM).
+    #[must_use]
+    pub fn auto_wrap(&self) -> bool {
+        !self.mode(MODE_NO_WRAP)
     }
 
     /// Returns terminal escape sequences sufficient to set the current
@@ -752,7 +771,17 @@ impl Screen {
                 wrap = true;
             }
         }
-        self.grid_mut().col_wrap(width, wrap);
+        if self.auto_wrap() {
+            self.grid_mut().col_wrap(width, wrap);
+        } else if width > 0 {
+            // The cursor may be just beyond the margin while a wrap is pending.
+            // With DECAWM reset, further characters overwrite the last cell.
+            self.grid_mut().col_set(pos.col.min(size.cols - 1));
+            if width > size.cols - self.grid().pos().col {
+                self.grid_mut().col_inc(1);
+                return; // A wide character cannot fit in the last cell.
+            }
+        }
         let pos = self.grid().pos();
 
         if width == 0 {
@@ -1157,6 +1186,7 @@ impl Screen {
             match param {
                 [1] => self.set_mode(MODE_APPLICATION_CURSOR),
                 [6] => self.grid_mut().set_origin_mode(true),
+                [7] => self.clear_mode(MODE_NO_WRAP),
                 [9] => self.set_mouse_mode(MouseProtocolMode::Press),
                 [25] => self.clear_mode(MODE_HIDE_CURSOR),
                 [47] => self.enter_alternate_grid(),
@@ -1194,6 +1224,7 @@ impl Screen {
             match param {
                 [1] => self.clear_mode(MODE_APPLICATION_CURSOR),
                 [6] => self.grid_mut().set_origin_mode(false),
+                [7] => self.set_mode(MODE_NO_WRAP),
                 [9] => self.clear_mouse_mode(MouseProtocolMode::Press),
                 [25] => self.set_mode(MODE_HIDE_CURSOR),
                 [47] => {

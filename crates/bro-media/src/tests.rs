@@ -3,7 +3,7 @@
 
 use crate::audio::{Resampler, remix};
 use crate::decode::Backend;
-use crate::{Image, MediaKind, Player, Rgba, is_executable, kind_of, load_image, thumbnail};
+use crate::{Image, MediaKind, Player, Rgba, is_animated, is_executable, kind_of, load_image, thumbnail};
 use image::{Delay, Frame, RgbaImage};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -167,6 +167,24 @@ fn animated_gif_keeps_every_frame_and_delay() {
         let p = frame.pixel(10, 5);
         assert!(p.iter().zip(c).all(|(a, b)| a.abs_diff(b) <= 8), "{p:?} vs {c:?}");
     }
+    assert!(is_animated(&path), "told without decoding every frame");
+}
+
+#[test]
+fn stills_are_not_animations() {
+    let dir = tempdir();
+    let png = save_png(dir.path(), "still.png", &RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255])));
+    assert!(!is_animated(&png));
+    // a GIF of one frame is a still too
+    let gif = dir.path().join("one.gif");
+    {
+        let file = std::fs::File::create(&gif).expect("create gif");
+        let mut encoder = image::codecs::gif::GifEncoder::new(file);
+        encoder.encode_frames([Frame::new(RgbaImage::from_pixel(8, 8, image::Rgba([9, 9, 9, 255])))]).expect("encode gif");
+    }
+    assert!(!is_animated(&gif));
+    assert!(!is_animated(&write(dir.path(), "notes.txt", b"not a picture")));
+    assert!(!is_animated(&dir.path().join("missing.gif")));
 }
 
 #[test]

@@ -214,6 +214,10 @@ pub struct BridgeSettings {
     /// How long the minimum is kept after the last remote viewer leaves, so a phone that
     /// briefly backgrounds the app doesn't make the session resize back and forth.
     pub remote_min_grace_secs: u64,
+    /// The phone (and web) opens only media tied to the work: pictures, videos, sounds and PDFs in a session's
+    /// folders or a project's, the ones agents sent, made or looked at, attached, opened or named in a
+    /// conversation. Off: media anywhere on this computer. Code and text stay in the session's folders either way.
+    pub protect_media: bool,
 }
 
 /// bro's session server (`bro host`, see the bro-host crate).
@@ -238,13 +242,15 @@ impl Default for ServerSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InsightsSettings {
+    /// Unread completion and input indicators on session cards and connected clients.
+    pub attention_indicators: bool,
     /// Ask Claude for a `/recap` of a pane left waiting unseen for 3 minutes (a few cents each).
     pub generate_recaps: bool,
 }
 
 impl Default for InsightsSettings {
     fn default() -> Self {
-        Self { generate_recaps: true }
+        Self { generate_recaps: true, attention_indicators: true }
     }
 }
 
@@ -449,6 +455,7 @@ impl Default for BridgeSettings {
             remote_min_cols: 80,
             remote_min_rows: 50,
             remote_min_grace_secs: 15,
+            protect_media: true,
         }
     }
 }
@@ -647,6 +654,7 @@ mod tests {
         std::fs::write(paths::settings_path(), "[bridge]\nport = 10002\nremote_min_rows = 0\n").unwrap();
         let bridge = Settings::load().bridge;
         assert_eq!((bridge.port, bridge.remote_min_cols, bridge.remote_min_rows, bridge.remote_min_grace_secs), (10002, 80, 0, 15));
+        assert!(bridge.protect_media, "the phone keeps to the work's media unless you say otherwise");
         std::fs::write(paths::settings_path(), "theme = 3").unwrap();
         assert_eq!(Settings::load().theme, "graphite");
     }

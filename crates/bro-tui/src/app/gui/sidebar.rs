@@ -396,6 +396,7 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
             ui.label_in(Rect { w: path_w, ..l2 }, &crate::util::short_path(root, chars), Style::new(size::CAPTION, weight::REGULAR, t.muted), Align::Left);
         }
         Row::Live { info, n } => {
+            let notice = app.session_notice(info.pane);
             let is_focus = focus_pane == Some(info.pane);
             let stacked = app.stack.contains(&info.pane);
             let renaming = app.renaming.as_ref().filter(|(id, _)| *id == info.pane).map(|(_, s)| s.clone());
@@ -412,6 +413,10 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
                 ui.round(r, radius::CONTROL, t.text.with_alpha(0.035));
             } else if hot > 0.0 {
                 ui.round(r, radius::CONTROL, t.hover.fade(hot));
+            }
+            if let Some(notice) = notice.filter(|n| n.unread) {
+                let ink = match notice.kind { bro_bridge::insights::NoticeKind::Input => t.warn, bro_bridge::insights::NoticeKind::Finished => t.good };
+                ui.round(r, radius::CONTROL, ink.with_alpha(if t.light { 0.065 } else { 0.08 }));
             }
             ui.hit(r, Action::Side(SideHit::Row(i)));
             let line = Rect::new(r.x + 8.0, r.y + 6.0, r.w - 16.0, 20.0);
@@ -446,7 +451,14 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
                 ui.label(Point::new(right - w, mid - 7.5), &a, st);
                 right -= w + 6.0;
             }
-            if matches!(info.activity, Some(Activity::Working | Activity::Blocked)) || info.done {
+            if let Some(notice) = notice {
+                let (glyph, ink) = if !notice.unread { ("\u{F012C}", t.faint) } else { match notice.kind {
+                    bro_bridge::insights::NoticeKind::Input => ("\u{F0026}", t.warn),
+                    bro_bridge::insights::NoticeKind::Finished => ("\u{F012C}", t.good),
+                }};
+                ui.icon(Rect::new(right - 15.0, mid - 8.0, 16.0, 16.0), glyph, 14.0, ink);
+                right -= 18.0;
+            } else if matches!(info.activity, Some(Activity::Working | Activity::Blocked)) || info.done {
                 status_dot(ui, Point::new(right - 7.0, mid), info.activity, info.done);
                 right -= 18.0;
             }

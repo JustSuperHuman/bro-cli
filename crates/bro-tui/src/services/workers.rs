@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 pub(super) fn spawn_all(svc: &Services) {
     spawn_usage_loop(svc);
     spawn_data(svc);
+    spawn_coauthor_sync(svc.settings().claude_env.coauthor_hidden());
     svc.check_justtools();
     svc.spawn_update_checks();
     svc.spawn_skill_syncs();
@@ -45,6 +46,14 @@ pub(super) fn spawn_guest(svc: &Services) {
     svc.update(|st| {
         st.proxy.status = Avail::Unavailable(note.into());
         st.bridge.status = Avail::Unavailable(note.into());
+    });
+}
+
+/// Every Claude login's settings.json follows the co-author knob ([`bro_core::coauthor`]), so sessions started
+/// outside bro leave the lines out (or keep them) as bro's do.
+pub(super) fn spawn_coauthor_sync(hidden: bool) {
+    std::thread::spawn(move || {
+        let _ = guard("coauthor::sync_all", || bro_core::coauthor::sync_all(hidden));
     });
 }
 
@@ -589,6 +598,7 @@ pub(super) fn spawn_bridge(svc: &Services) {
         });
         // panels, schedules and stop / fresh start go to bro's orchestrator session, not Hugh's own Claude Code
         let _ = guard("bridge::route_orchestrator", || b.route_orchestrator(true));
+        let _ = guard("bridge::set_media_anywhere", || b.set_media_anywhere(!s.protect_media));
         let w_svc = svc.clone();
         let _ = guard("bridge::on_watchdog_update", || b.on_watchdog_update(Box::new(move |u| w_svc.on_watchdog_update(u))));
         let qr = guard("bridge::pairing_qr", || b.pairing_qr()).ok().flatten();

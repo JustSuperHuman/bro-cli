@@ -20,6 +20,7 @@ pub const SENT_KEEP: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Default)]
 pub struct Focus {
+    pub quips: crate::quips::Library,
     /// focus mode is on (the window's switch, remembered in its prefs)
     pub on: bool,
     /// sessions showing their terminal while focus mode is on
@@ -34,6 +35,8 @@ pub struct Focus {
 #[derive(Default)]
 pub struct Lists {
     pub models: HashMap<PathBuf, Arc<Vec<ModelChoice>>>,
+    /// a provider's models as switch choices, with how many its catalogue listed then
+    pub providers: HashMap<String, (usize, Arc<Vec<ModelChoice>>)>,
     pub commands: HashMap<String, (Instant, Arc<Vec<Command>>)>,
     /// being read now
     pub asking: HashSet<String>,
@@ -51,6 +54,8 @@ pub enum Scroll {
 /// The reply box of one session, and what you sent from it.
 #[derive(Default)]
 pub struct Draft {
+    pub terminal_quips: crate::quips::Terminal,
+    pub quips: crate::quips::Picker,
     pub area: TextArea,
     /// the box's width in cells as last drawn (up and down move by the rows you see)
     pub cols: usize,
@@ -108,11 +113,13 @@ pub enum MenuKind {
     Thinking,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Menu {
     pub kind: MenuKind,
     /// the row the keys are on
     pub sel: usize,
+    /// what's typed while it's open: it narrows the list (a provider can have hundreds of models)
+    pub query: String,
 }
 
 /// A model or thinking change picked in the footer.
@@ -375,10 +382,16 @@ impl Draft {
 
     /// The message in pieces: its text split where the pictures' tokens are, with a space either side of each
     /// picture, the ends trimmed.
+    #[cfg(test)]
     pub fn parts(&self) -> Vec<Part> {
+        self.parts_with_text(self.area.text())
+    }
+
+    /// Split expanded text with the same picture anchors, without changing the editable draft.
+    pub fn parts_with_text(&self, source: &str) -> Vec<Part> {
         let mut parts: Vec<Part> = vec![];
         let mut text = String::new();
-        for c in self.area.text().chars() {
+        for c in source.chars() {
             match self.attachments.iter().find(|a| a.token == c) {
                 Some(a) => {
                     if !text.is_empty() {

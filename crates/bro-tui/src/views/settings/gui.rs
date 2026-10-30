@@ -9,7 +9,7 @@
 //! on a row selects it while a click on the selected row steps it (the terminal UI's mouse). The wheel scrolls the
 //! page and the selection follows it, so it always stays in view.
 
-use super::{Block, BroOpt, CaveOpt, HostOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, SkillOpt, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, live_mode, rows, team_knob};
+use super::{Block, BroOpt, CaveOpt, HostOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, SkillOpt, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, live_mode, open_source, rows, source_link, team_knob};
 use bro_core::config::Material;
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::brand::{self, Mark};
@@ -46,6 +46,8 @@ const RESET: usize = 400;
 const PRESS: usize = 500;
 /// `PICK + i * 16 + j`: option `j` of a segmented setting `i`.
 const PICK: usize = 1000;
+/// A source credit beneath a setting; distinct from all segmented control targets.
+const SOURCE: usize = 10_000;
 
 // ---------------------------------------------------------------------------------------------- metrics
 
@@ -96,6 +98,7 @@ fn glyph(s: Section) -> &'static str {
         Section::Mod => "\u{F0431}",
         Section::Integrations => "\u{F0463}",
         Section::Skills => "\u{F0335}",
+        Section::Quips => "\u{F0674}",
         Section::Sounds => "\u{F057E}",
         Section::Updates => "\u{F02DA}",
     }
@@ -255,6 +258,9 @@ pub(crate) fn draw(v: &mut SettingsView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
             Row::Watch(_) | Row::Voice(VoiceOpt::Key | VoiceOpt::Mode | VoiceOpt::Speaker) => hints.push(("r", "bro's default")),
             _ => {}
         }
+        if source_link(v.row()).is_some() {
+            hints.push(("o", "original post"));
+        }
         let y = area.bottom() - 26.0;
         ui.hline(left, y - 13.0, col_w, t.hairline);
         let mut x = left;
@@ -279,6 +285,7 @@ pub(crate) fn click(v: &mut SettingsView, n: usize, _p: Point, _mods: KeyModifie
     match n {
         BG | NAV_BG => {}
         n if (NAV..NAV + SECTIONS.len()).contains(&n) => v.go(SECTIONS[n - NAV]),
+        n if (SOURCE..SOURCE + last + 1).contains(&n) => open_source(rows()[n - SOURCE], cx),
         // the terminal UI's mouse: a click selects, a click on the selected setting changes it
         n if (ROW..DEC).contains(&n) && n - ROW <= last => {
             if n - ROW == v.sel {
@@ -600,9 +607,9 @@ fn control(v: &SettingsView, it: &Item, ui: &Ui, st: &Settings, cx: &Cx) -> Ctl 
         // Claude's models: Claude's logo beside them
         Row::Watch(WatchOpt::Model) => seg(crate::watchdog::MODEL_CHOICES.iter().map(|m| m.to_string()).collect(), Some(brand::harness(Harness::Claude))),
         // agent teams: a switch, as the terminal UI draws it
-        Row::Knob(k) if KNOBS[k].id == bro_core::claude_env::AGENT_TEAMS => switch(),
+        Row::Knob(k) if matches!(KNOBS[k].id, bro_core::claude_env::AGENT_TEAMS | bro_core::agent_summaries::KNOB) => switch(),
         Row::Knob(k) => seg(KNOBS[k].options.iter().map(|o| o.label.to_string()).collect(), None),
-        Row::Watch(WatchOpt::Prompt) | Row::Tool(ToolOpt::QuickInstall | ToolOpt::Sounds | ToolOpt::PeonPing) | Row::Skill(SkillOpt::Manage) => Ctl::Link { value, ink: vink.value(t) },
+        Row::Quips | Row::Watch(WatchOpt::Prompt) | Row::Tool(ToolOpt::QuickInstall | ToolOpt::Sounds | ToolOpt::PeonPing) | Row::Skill(SkillOpt::Manage) => Ctl::Link { value, ink: vink.value(t) },
         Row::Tool(ToolOpt::SoundsOn) => Ctl::Switch { on: text.starts_with('●'), live: true },
         _ if text.starts_with('●') || text.starts_with('○') => switch(),
         row => {
@@ -618,6 +625,7 @@ fn control(v: &SettingsView, it: &Item, ui: &Ui, st: &Settings, cx: &Cx) -> Ctl 
 /// A line under a setting: text, or a job's progress (one segment per step).
 enum Note {
     Text(TextBox),
+    Source(TextBox),
     Progress { at: usize, of: usize, text: TextBox },
 }
 
@@ -625,6 +633,7 @@ impl Note {
     fn h(&self) -> f32 {
         match self {
             Note::Text(b) => b.h,
+            Note::Source(b) => b.h.max(24.0),
             Note::Progress { text, .. } => text.h + 8.0 + 6.0,
         }
     }
@@ -821,6 +830,9 @@ fn lay_item(v: &SettingsView, ui: &mut Ui, it: Item, w: f32, y: f32, all: &[Row]
             notes.push(Note::Text(ui.rich(&spans, size::SMALL, Some(inner), true, LINES)));
         }
     }
+    if let Some((credit, _)) = source_link(it.row) {
+        notes.push(Note::Source(ui.para(credit, Style::new(size::SMALL, weight::REGULAR, t.muted), (inner - 20.0).max(40.0), LINES)));
+    }
     let notes_h: f32 = notes.iter().map(|n| 8.0 + n.h()).sum();
     let h = PAD_Y + text_h.max(CTRL_H) + notes_h + PAD_Y;
     Laid { i, y, h, label, tag, help, notes, ctl, ctl_w, reset, text_h, progress }
@@ -961,6 +973,20 @@ fn item(ui: &mut Ui, it: &Laid, r: Rect, selected: bool, focused: bool, id: Pane
         ny += 8.0;
         match n {
             Note::Text(b) => ui.draw(b, Point::new(x, ny)),
+            Note::Source(b) => {
+                let r = Rect::new(x, ny, (b.w + 20.0).min(r.w - 2.0 * PAD_X), n.h());
+                let hot = ui.hover_amount(("settings-source", id, it.i), r);
+                let by = ny + (r.h - b.h) / 2.0;
+                ui.draw(b, Point::new(x, by));
+                ui.icon(Rect::new(x + b.w + 4.0, by, 14.0, b.h), "\u{F03CC}", size::SMALL, t.muted.mix(t.accent, hot));
+                if hot > 0.0 {
+                    ui.hline(x, by + b.h, b.w, t.accent.fade(hot));
+                    if let Some((_, url)) = source_link(rows()[it.i]) {
+                        widgets::tooltip(ui, r, url);
+                    }
+                }
+                ui.hit_with(r, Action::View(id, SOURCE + it.i), Cursor::Pointer);
+            }
             Note::Progress { at, of, text } => {
                 ui.spinner(Point::new(x + 5.0, ny + text.h / 2.0), 4.5, 2.2, t.accent);
                 ui.draw(text, Point::new(x + 16.0, ny));
@@ -1188,6 +1214,54 @@ mod tests {
         assert_eq!(option(Row::Knob(k), &st), Some(1));
         assert_eq!(resettable(Row::Knob(k), &st), Some("reset to preset · r"));
         assert_eq!(resettable(Row::Preset, &st), Some("reset to preset · r"));
+    }
+
+    #[test]
+    fn skip_agent_summaries_uses_the_shared_switch_in_both_states() {
+        let k = KNOBS.iter().position(|k| k.id == bro_core::agent_summaries::KNOB).unwrap();
+        for on in [false, true] {
+            let mut settings = Settings::default();
+            settings.claude_env.set_choice(&KNOBS[k], usize::from(on));
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let svc = crate::services::Services::offline(settings, tx.clone());
+            let theme = crate::theme::get("graphite");
+            let mut actions = vec![];
+            let cx = Cx { id: 1, theme: &theme, svc: &svc, tx: &tx, actions: &mut actions, focused: true };
+            let v = SettingsView::default();
+            let st = svc.settings();
+            with_ui(|ui| {
+                let page = lay_out(&v, ui, Section::Claude, 6, 700.0, true, &rows(), &st, &cx);
+                let item = laid(&page, Row::Knob(k));
+                assert!(matches!(item.ctl, Ctl::Switch { on: value, .. } if value == on));
+                assert_eq!(item.notes.len(), if on { 2 } else { 1 });
+                assert!(matches!(item.notes.last(), Some(Note::Source(_))), "credit stays visible in either state");
+            });
+            assert_eq!(resettable(Row::Knob(k), &st), on.then_some("bro's default · r"));
+        }
+    }
+
+    #[test]
+    fn source_credit_click_and_keyboard_open_the_original_post_without_toggling() {
+        use crate::pane::Pane;
+        use crossterm::event::{KeyCode, KeyEvent};
+        let k = KNOBS.iter().position(|k| k.id == bro_core::agent_summaries::KNOB).unwrap();
+        let row = rows().iter().position(|r| *r == Row::Knob(k)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(Settings::default(), tx.clone());
+        let theme = crate::theme::get("graphite");
+        let mut actions = vec![];
+        let mut cx = Cx { id: 1, theme: &theme, svc: &svc, tx: &tx, actions: &mut actions, focused: true };
+        let mut view = SettingsView::default();
+        click(&mut view, SOURCE + row, Point::new(0.0, 0.0), KeyModifiers::NONE, 1, &mut cx);
+        assert_eq!(view.sel, 0, "the credit doesn't select or change the setting");
+        view.sel = row;
+        assert!(view.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE), &mut cx));
+        assert!(!svc.settings().claude_env.skip_agent_summaries());
+        let links: Vec<_> = rx.try_iter().filter_map(|event| match event {
+            crate::pane::Event::OpenLink(url) => Some(url),
+            _ => None,
+        }).collect();
+        assert_eq!(links, [bro_core::agent_summaries::SOURCE_URL, bro_core::agent_summaries::SOURCE_URL]);
     }
 
     #[test]

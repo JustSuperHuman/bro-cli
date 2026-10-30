@@ -111,6 +111,7 @@ impl App {
         if self.focus_view(id) {
             return self.focus_key(id, k);
         }
+        if self.terminal_quip_key(id, k) { return; }
         let used = self.with_pane(id, |p, cx| p.key(k, cx)).unwrap_or(false);
         let terminal = self.panes.get(&id).is_some_and(|p| p.is_terminal());
         if !used && !terminal {
@@ -219,6 +220,7 @@ impl App {
             }
             Overlay::Watchdog(_) => self.watchdog_key(k),
             Overlay::WatchdogPrompt(_) => self.watchdog_prompt_key(k),
+            Overlay::Quips(id) => { let id = *id; self.focus_quips_key(id, k); }
         }
     }
 

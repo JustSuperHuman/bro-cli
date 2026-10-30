@@ -71,6 +71,8 @@ pub enum Act {
     Sounds,
     /// Skills: the Skill Issue marketplace to search and install agent skills from.
     Skills,
+    /// Local prompt shortcuts in the desktop conversation view.
+    Quips,
     /// The setup guide: install an agent, add a login, launch.
     Setup,
     Help,
@@ -144,7 +146,7 @@ impl Act {
         v.extend((0..=9).map(ShowTab));
         v.extend([LastTab, NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, Focus, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleProxyMode, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Sounds, Skills, Setup, RefreshUsage, Media]);
+        v.extend([Usage, UsageDetails, Stats, Profiles, Proxy, ToggleProxyMode, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Sounds, Quips, Skills, Setup, RefreshUsage, Media]);
         v.extend([Palette, Help, Themes, ToggleIcons, ToggleProjectTabs, ToggleAutoResume, ToggleCaveman, RestartServer, Quit]);
         v
     }
@@ -199,6 +201,7 @@ impl Act {
             QuickInstall => "quick_install".into(),
             Sounds => "sounds".into(),
             Skills => "skills".into(),
+            Quips => "quips".into(),
             Setup => "setup".into(),
             Help => "help".into(),
             Rename => "rename".into(),
@@ -282,6 +285,7 @@ impl Act {
             QuickInstall => "quick install: JustTools, Git, Node.js, Bun, Python, .NET and the coding agents".into(),
             Sounds => "sounds: PeonPing voice lines when a session starts, finishes or needs you · browse sound packs".into(),
             Skills => "skills: every skill your agents have, by source and by project; watch repos; find more on Skill Issue".into(),
+            Quips => "Quips: quick instructions for your prompt; browse, create, and edit local shortcuts".into(),
             Setup => "setup guide: install Claude Code / Codex, add your logins, launch".into(),
             Help => "keys and help".into(),
             Rename => "rename the focused session".into(),
@@ -316,7 +320,7 @@ impl Act {
             NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Reload | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Team | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | ShowTab(_) | LastTab | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | Focus | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleProxyMode | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Sounds | Skills | Setup | RefreshUsage | Media => Group::Views,
+            Usage | UsageDetails | Stats | Profiles | Proxy | ToggleProxyMode | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Sounds | Quips | Skills | Setup | RefreshUsage | Media => Group::Views,
             Palette | Help | Themes | ToggleIcons | ToggleProjectTabs | ToggleAutoResume | ToggleCaveman | RestartServer | Quit => Group::App,
         }
     }
@@ -435,7 +439,7 @@ impl Act {
             QuickInstall => vec!["I"],
             Setup => vec!["e"],
             Media => vec!["m"],
-            Split | Focus | ShowTab(_) | ToggleProjectTabs | ToggleProxyMode | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder | Sounds | Skills | RestartServer => vec![],
+            Split | Focus | ShowTab(_) | ToggleProjectTabs | ToggleProxyMode | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder | Sounds | Quips | Skills | RestartServer => vec![],
         }
     }
 }

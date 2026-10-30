@@ -238,18 +238,56 @@ pub fn cursor_icon(c: Cursor) -> CursorIcon {
     }
 }
 
-/// Put text on the system clipboard.
-pub fn set_clipboard(text: &str) {
-    // one clipboard for the app's life: on X11 and Wayland what we copied lives only as long as it does
+/// `f` with the app's clipboard: one for the app's life, as on X11 and Wayland what we copied lives only as long
+/// as it does. None when there's no clipboard to be had.
+fn with_clipboard<R>(f: impl FnOnce(&mut arboard::Clipboard) -> R) -> Option<R> {
     static CLIPBOARD: std::sync::Mutex<Option<arboard::Clipboard>> = std::sync::Mutex::new(None);
-    let Ok(mut slot) = CLIPBOARD.lock() else { return };
+    let mut slot = CLIPBOARD.lock().ok()?;
     if slot.is_none() {
         *slot = arboard::Clipboard::new().ok();
     }
-    if let Some(c) = slot.as_mut() {
+    slot.as_mut().map(f)
+}
+
+/// Put text on the system clipboard.
+pub fn set_clipboard(text: &str) {
+    with_clipboard(|c| {
         let _ = c.set_text(text.to_string());
+    });
+}
+
+/// Put a picture on the system clipboard, for pasting into apps, chats and editors. `png`: its PNG when one is at
+/// hand (Windows passes those bytes on as they are). Blocking: call it from a background thread.
+pub fn set_clipboard_picture(pic: crate::clip::Picture, png: Option<Vec<u8>>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::clip::put_picture(&pic, png)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = png;
+        let image = arboard::ImageData { width: pic.w as usize, height: pic.h as usize, bytes: pic.px.into() };
+        with_clipboard(|c| c.set_image(image).map_err(|e| e.to_string())).unwrap_or_else(|| Err(NO_CLIPBOARD.into()))
     }
 }
+
+/// Put files on the system clipboard as the file manager copies them. Blocking: call it from a background thread.
+pub fn set_clipboard_files(paths: &[std::path::PathBuf]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // as Explorer names them: whole, without the `\\?\` long-path prefix
+        let names: Option<Vec<String>> =
+            paths.iter().map(|p| crate::util::strip_verbatim(std::path::absolute(p).unwrap_or_else(|_| p.clone())).to_str().map(str::to_string)).collect();
+        crate::clip::put_files(&names.ok_or("the file's name can't go on the clipboard")?)
+    }
+    #[cfg(not(windows))]
+    {
+        with_clipboard(|c| c.set().file_list(paths).map_err(|e| e.to_string())).unwrap_or_else(|| Err(NO_CLIPBOARD.into()))
+    }
+}
+
+#[cfg(not(windows))]
+const NO_CLIPBOARD: &str = "bro can't reach the clipboard here";
 
 /// Leave the console: whenever this process has one, start `args` as a copy with a hidden console of its own and
 /// return true (this one exits). That covers a shell's console (started from a terminal) and our own (bro.exe

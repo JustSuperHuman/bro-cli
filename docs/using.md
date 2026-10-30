@@ -3,6 +3,20 @@
 Press **F1** inside bro to see every key binding. You need at least one agent installed (Claude Code, Codex, Pi or
 omp); bro launches the ones it finds, and `bro install agents` installs them.
 
+## Quips
+
+Open **Settings → Quips → Manage Quips** to browse, edit, or create shortcuts. The library opens even with no agent session running.
+
+In the desktop app, type `:` in an agent session to find a Quip. Pick one with **↑/↓**, then **Tab** or **Enter**. This works in conversation view and the regular terminal view. Sending is a separate step. Try `Explain this bill :plain-english :keep-it-short`.
+
+In conversation view, recognized shortcuts light up in your message. In terminal view, selected Quips stay in small removable tags below the editor; Bro adds their instructions when you press **Enter** to send. **Esc** clears the tags. If a colon starts ordinary text, keep typing or press **Esc** to put it in the terminal as written. Shell sessions keep their own keys.
+
+Quips are Bro's quick, local alternative to loading a skill. Bro expands each shortcut when you send, so your AI gets the instructions directly without choosing or opening a skill. Unused Quips add nothing to context. The instructions you send still use prompt tokens. Your conversation keeps the short form.
+
+**Full-Send** tells the AI to make reasonable assumptions, finish and check the task without questions, and carry a pull request through to merge. **Full-Stop** does the work and checks it, then leaves the final action to you, including merging a pull request. These two are inspired by [TStack](https://github.com/t3dotgg/tstack); Bro keeps their instructions short and lets you edit them. Use one per message.
+
+The other starters are **Plain English**, **Keep It Short**, **Step by Step**, **Make a Plan**, **Second Look**, and **Check the Facts**. In Settings, choose **Edit** to see or change a Quip's instructions, or **New** to write your own. Custom Quips stay on this computer in `~/.bro/quips.json`.
+
 ## Profiles
 
 Choose **Manage profiles** in the new-session picker, or press **Alt+O**, to add
@@ -107,7 +121,7 @@ change. bro picks up each save as you make it.
 - **Switches accounts** — multiple Claude and Codex profiles, with usage meters for each. Or turn on [proxy mode](#proxy-mode) and stop choosing: every signed-in login shares the work, and a login at its limit hands off to the next.
 - **Resumes anything** — pick up a past session, or fork it into another profile.
 - **Mixes models** — a built-in proxy lets Claude Code run on OpenAI-format models, and Codex / Pi / omp run on Claude.
-- **Reaches your phone** — a built-in bridge lets the Just Terminal mobile and web clients connect.
+- **Reaches your phone** — a built-in bridge lets the Just Terminal mobile and web clients connect. The phone opens the pictures, videos and sounds that belong to your work, even outside the session's folder: the ones in your projects, the ones your agents made, sent, looked at or named, and the ones you attached. Its gallery lists them for a chat or for all of them. Code and text never leave the session's folders. To let the phone open any media on this computer, turn off **Protect phone media** in Settings › Session server.
 - **Sets how Claude Code runs** — pick a preset (Quiet, Private, Lockdown, Incognito, Presenter, Marathon) in Settings (the ⚙ in the sidebar, `alt+,` or prefix `A`), next to theme, icons, auto-resume, recaps and compression, to control telemetry, updates, retries and more for every launch. See [docs/claude-env.md](claude-env.md).
 - **Keeps projects apart** — Claude sessions only find and message sessions in their own project and the orchestrator. Claude Code on its own lets any session reach any other. Change it under Settings › Claude Code › Messages between sessions. See [docs/claude-env.md](claude-env.md#messages-between-sessions).
 - **The orchestrator** — one session that runs the others. Start it from New session (the gold ★ orchestrator tab, or `alt+O`) on Claude Code, Codex, Pi or omp. It opens sessions, hands them tasks, waits on them and reports back. Push-to-talk, the phone and web orchestrator panels, watchdog reviews and the reminders it schedules for itself (once, every so often or daily, for this session or across restarts) all go to it. It sits in gold at the top of the sidebar, runs in `~/orchestrator`, and comes back with the same settings when you reopen bro. `bro ctl <tool>` gives any shell the same tools.

@@ -18,8 +18,8 @@ path = "src/bin/bro-app.rs"
 
 [features]
 default = ["gui"]
-# the desktop app (`bro gui`): wgpu renderer, alacritty_terminal screens, photo and video previews, HTML pages
-gui = ["dep:bro-gfx", "dep:bro-media", "dep:winit", "dep:alacritty_terminal", "dep:image", "dep:arboard", "dep:wry", "dep:objc2-foundation", "dep:objc2-web-kit"]
+# the desktop app (`bro gui`): wgpu renderer, alacritty_terminal screens, photo and video previews, HTML pages, MCP apps
+gui = ["dep:bro-gfx", "dep:bro-media", "dep:winit", "dep:alacritty_terminal", "dep:image", "dep:arboard", "dep:wry", "dep:objc2-foundation", "dep:objc2-web-kit", "dep:webview2-com", "dep:windows"]
 
 [dependencies]
 bro-core.workspace = true
@@ -55,7 +55,8 @@ bro-media = { path = "../bro-media", optional = true }
 winit = { version = "0.30.13", optional = true }
 alacritty_terminal = { version = "0.26", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
-arboard = { version = "3.7", default-features = false, optional = true }
+# image-data: the media panel's Copy puts pictures on the clipboard (macOS and Linux; Windows writes its own)
+arboard = { version = "3.7", default-features = false, features = ["image-data"], optional = true }
 
 # the desktop app's HTML previews: the system's web view (WebView2, WKWebView) over the preview card. Linux keeps
 # the source: WebKitGTK would need a GTK loop beside winit's.
@@ -69,6 +70,9 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std"
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"
+# an MCP app's page clipped to the conversation as it scrolls: wry's own WebView2 controller and window
+webview2-com = { version = "0.39", optional = true }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"], optional = true }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_HiDpi"] }
 
 [dev-dependencies]

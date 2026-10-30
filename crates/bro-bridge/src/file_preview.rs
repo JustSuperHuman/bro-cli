@@ -3,7 +3,12 @@
 //! TUI shares [`resolve_path`] and [`read_preview`] for its own preview.
 //!
 //! Everything is canonicalised and must stay inside one of the session's
-//! roots (cwd, project root), so symlinks and `..` cannot escape.
+//! roots (cwd, project root), so symlinks and `..` cannot escape. Media is
+//! the exception ([`resolve_media`]): a picture, video, sound or PDF named by
+//! its absolute path may open outside them, because that's where agents leave
+//! them (a scratchpad, JustImagine's outputs, the phone's own uploads), when
+//! it's tied to the work or bro lets media open from anywhere
+//! ([`crate::media::Access`]). Code and text stay inside the workspace.
 
 use base64::Engine;
 use serde_json::{Value, json};
@@ -20,6 +25,9 @@ const CONTEXT_ABOVE: usize = 20;
 
 pub const NOT_FOUND: &str = "File not found or unavailable.";
 pub const OUTSIDE: &str = "This file is outside the session's workspace.";
+/// Media outside the session's folders that isn't tied to any of the work, while bro keeps the phone to it.
+pub const PROTECTED: &str =
+    "This file isn't part of your projects. To open media from anywhere, turn off Protect phone media in bro's Settings, under Session server.";
 
 /// Where a session's paths may resolve: its cwd and (optionally) its project root.
 #[derive(Debug, Clone, Default)]
@@ -230,6 +238,48 @@ pub fn resolve_path(roots: &ResolveRoots, raw: &str) -> Result<Resolved, String>
     Err(NOT_FOUND.into())
 }
 
+/// A picture, video, sound or PDF, by its extension: what [`resolve_media`] lets out of the workspace and the
+/// phone's gallery lists.
+pub fn is_media(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    extension == "pdf" || image_mime(&extension).is_some() || media_mime(&extension).is_some()
+}
+
+/// [`resolve_path`], except that a media file ([`is_media`]) given by its absolute (or `~/`) path resolves
+/// outside the roots when `allow` says so (it gets the file's canonical path; the bridge asks
+/// [`crate::media::Access`], so it's anywhere or only what's tied to the work). Its `relative` is empty: it
+/// isn't under a root. A media file `allow` turns down is [`PROTECTED`]. Blocking.
+pub fn resolve_media(roots: &ResolveRoots, raw: &str, allow: &dyn Fn(&Path) -> bool) -> Result<Resolved, String> {
+    let confined = resolve_path(roots, raw);
+    let Err(message) = &confined else {
+        return confined;
+    };
+    if message == NOT_FOUND {
+        return confined;
+    }
+    let Ok(path) = normalize(raw) else {
+        return confined;
+    };
+    if !path.is_absolute() || !is_media(&path) {
+        return confined;
+    }
+    match path.canonicalize().map(simplify) {
+        // the extension that counts is the file's own, after any link
+        Ok(canonical) if canonical.is_file() && is_media(&canonical) => {
+            if allow(&canonical) {
+                Ok(Resolved { path: canonical, relative: String::new(), kind: Kind::File })
+            } else {
+                Err(PROTECTED.into())
+            }
+        }
+        _ => confined,
+    }
+}
+
 /// Lowercase language id from the file name (see `docs/file-links.md`).
 pub fn language_for(path: &Path) -> &'static str {
     let name = path
@@ -320,13 +370,44 @@ pub fn image_mime(extension: &str) -> Option<&'static str> {
 }
 
 /// Reads a bounded preview of a resolved file: `kind: "text"` with a line
-/// window, or `kind: "image"` with base64 data. Errors are user-facing.
+/// window, or `kind: "image"` with base64 data (none for a picture over the
+/// size limit: the route gives its `url` to stream). Errors are user-facing.
 pub fn read_preview(
     roots: &ResolveRoots,
     target: &str,
     request: PreviewRequest,
 ) -> Result<Value, String> {
-    let resolved = resolve_path(roots, target)?;
+    read_preview_allowing(roots, target, request, &|_| false)
+}
+
+/// [`read_preview`], with media outside the roots opening when `allow` says so ([`resolve_media`]).
+pub fn read_preview_allowing(
+    roots: &ResolveRoots,
+    target: &str,
+    request: PreviewRequest,
+    allow: &dyn Fn(&Path) -> bool,
+) -> Result<Value, String> {
+    read_preview_impl(roots, target, request, allow, false)
+}
+
+/// Image metadata and a streaming URL, avoiding base64 expansion in mobile previews (SVG stays inline).
+pub(crate) fn read_preview_streaming(
+    roots: &ResolveRoots,
+    target: &str,
+    request: PreviewRequest,
+    allow: &dyn Fn(&Path) -> bool,
+) -> Result<Value, String> {
+    read_preview_impl(roots, target, request, allow, true)
+}
+
+fn read_preview_impl(
+    roots: &ResolveRoots,
+    target: &str,
+    request: PreviewRequest,
+    allow: &dyn Fn(&Path) -> bool,
+    stream_images: bool,
+) -> Result<Value, String> {
+    let resolved = resolve_media(roots, target, allow)?;
     if resolved.kind != Kind::File {
         return Err("This path is not a file.".into());
     }
@@ -351,6 +432,12 @@ pub fn read_preview(
         return Ok(json!({
             "path": display_path, "relativePath": resolved.relative, "kind": kind,
             "mimeType": mime, "bytes": metadata.len(),
+        }));
+    }
+    if let Some(mime) = image_mime(&extension).filter(|_| metadata.len() > MAX_BYTES || (stream_images && extension != "svg")) {
+        return Ok(json!({
+            "path": display_path, "relativePath": resolved.relative, "kind": "image", "mimeType": mime,
+            "bytes": metadata.len(),
         }));
     }
     if metadata.len() > MAX_BYTES {
@@ -587,6 +674,46 @@ mod tests {
         ] {
             assert!(resolve_path(&r, bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn media_opens_outside_the_roots_when_allowed_and_nothing_else_does() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let r = roots(root.path());
+        let shot = elsewhere.path().join("Shot 1.PNG");
+        std::fs::write(&shot, "png").unwrap();
+        std::fs::write(elsewhere.path().join("notes.txt"), "secret").unwrap();
+        std::fs::write(elsewhere.path().join("take.wav"), "wav").unwrap();
+        let anywhere = |_: &Path| true;
+        let asked = std::cell::RefCell::new(vec![]);
+        let nowhere = |p: &Path| {
+            asked.borrow_mut().push(p.to_path_buf());
+            false
+        };
+
+        let found = resolve_media(&r, shot.to_str().unwrap(), &anywhere).unwrap();
+        assert_eq!((found.kind, found.relative.as_str()), (Kind::File, ""));
+        assert_eq!(found.path, simplify(shot.canonicalize().unwrap()));
+        assert!(resolve_media(&r, elsewhere.path().join("take.wav").to_str().unwrap(), &anywhere).is_ok());
+        assert_eq!(resolve_media(&r, shot.to_str().unwrap(), &nowhere).unwrap_err(), PROTECTED, "turned down: says how to open it");
+        assert_eq!(asked.borrow().as_slice(), [found.path.clone()], "asked with the canonical path");
+        assert_eq!(resolve_path(&r, shot.to_str().unwrap()).unwrap_err(), OUTSIDE, "resolve_path stays confined");
+        assert_eq!(resolve_media(&r, elsewhere.path().join("notes.txt").to_str().unwrap(), &anywhere).unwrap_err(), OUTSIDE);
+        assert_eq!(resolve_media(&r, elsewhere.path().join("gone.png").to_str().unwrap(), &anywhere).unwrap_err(), NOT_FOUND);
+        assert!(resolve_media(&r, "../x.png", &anywhere).is_err(), "a relative path never climbs out");
+        assert!(resolve_media(&r, elsewhere.path().to_str().unwrap(), &anywhere).is_err(), "a folder isn't media");
+
+        let preview = read_preview_allowing(&r, shot.to_str().unwrap(), at(1), &anywhere).unwrap();
+        assert_eq!((preview["kind"].as_str(), preview["data"].as_str()), (Some("image"), Some("cG5n")));
+        assert!(read_preview(&r, shot.to_str().unwrap(), at(1)).is_err(), "the TUI's own preview keeps to the roots");
+        // a picture too big to inline is described, for the client to stream
+        let big = elsewhere.path().join("big.jpg");
+        std::fs::write(&big, vec![0u8; MAX_BYTES as usize + 1]).unwrap();
+        let preview = read_preview_allowing(&r, big.to_str().unwrap(), at(1), &anywhere).unwrap();
+        assert_eq!((preview["kind"].as_str(), preview["mimeType"].as_str()), (Some("image"), Some("image/jpeg")));
+        assert!(preview.get("data").is_none());
+        assert!(is_media(Path::new("a.PDF")) && is_media(Path::new("a.m4a")) && !is_media(Path::new("a.rs")));
     }
 
     #[test]

@@ -16,17 +16,23 @@ request compression (llmtrim), lives in bro-proxy.
 * **Claude.** Read `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` (`{ sessionId, cwd }`), using the
   pid of the claude process bro spawned. Then use `sessions::find_in_profile(id)` to get
   `projects/<slug>/<id>.jsonl`. Re-check every ~5 s, because `/clear` and `/resume` switch
-  the id. If that fails, fall back to `sessions::latest_for(Claude, profile, cwd, pane_started - 5s)`.
-* **Codex.** For a resume or fork, use `find_by_id`. Otherwise use
-  `latest_for(Codex, profile, cwd, pane_started - 5s)`, re-checked until it is found and
-  then every ~15 s.
+  the id. If that fails, fall back to `sessions::latest_for(Claude, profile, cwd, pane_started - 5s)`,
+  skipping any session another running Claude's session file names: in a folder where another
+  Claude is mid-turn, its transcript is the newest. A transcript found this way is only a guess.
+  Once Claude writes its own session file, a guess that isn't that session is dropped, and the
+  pane shows nothing until its session writes a transcript.
+* **Codex.** Use `latest_for(Codex, profile, cwd, pane_started - 5s)`, counting only rollouts
+  created since then. An older one that's still being written belongs to another Codex. For a
+  resume, use `find_in_profile(id)`. Re-check until it is found, then every ~15 s.
 * **Pi and omp** get nothing for now, and their insights stay empty.
 
 ## 2. Tailing (bro-core `sessions::live`)
 
 The reader is incremental. It keeps a byte offset and a partial-line buffer, and resets
-if the file shrinks or is replaced. The first read looks at the last 4 MB only. It never
-blocks the TUI thread. It produces `AgentFacts`:
+if the file shrinks or is replaced. The first read looks at the last 4 MB only. Focus mode's
+conversation reads a longer transcript from its start (`Conversation::history`, up to 256 MB,
+about 1 ms per MB): most of a long session is tool output and pictures, so its last 4 MB can
+hold just its last few items. None of it blocks the TUI thread. It produces `AgentFacts`:
 
 * **`sent`** (Claude only). Comes from successful `SendUserFile` calls. Prefer
   `toolUseResult.attachments[]`, which gives `path`, `size`, `isImage` and `media_type`.
@@ -134,6 +140,18 @@ empty and published through the existing `session` and `sessions` events:
 ```
 
 The Rust API is `Bridge::set_insights(id, SessionInsights { attention, recap, files })`.
+`attention.notice`, when present, is `{ eventId, kind: "input" | "finished", unread, enabled }`.
+It describes an attention event independently of live `attention.state`: a checked prompt stays blocked until
+it is answered. `POST /api/sessions/{id}/seen` with `{ "eventId": "…" }` checks exactly that event and returns
+the session summary. Receipts publish to connected viewers and reach the owning app without moving its focus.
+Old receipts and late host snapshots cannot check a new event or restore an already checked event.
+When a provider limit stops a turn, `attention.state` is `blocked` and its optional
+`limit` object carries `title`, `message`, and `retry` (when the provider supplies one).
+Focus view shows that warning in place of thinking, including the provider's reset or
+retry wording. A near-limit percentage is informational and leaves the working state
+alone. New work clears the warning; Bro does not inject auto-resume input while the
+harness is already retrying.
+
 It is a no-op for unknown ids. It publishes only when something changed, debounced to
 ≤ 2/s per session.
 
@@ -154,6 +172,31 @@ counts go into `agentFiles` in the summary.
   allows them.
 * A session with no data returns `{ sent: [], touched: [] }`. An unknown session
   returns 404.
+
+`GET /api/sessions/{id}/conversation[?since=<rev>&limit=<n>]` is the session as the
+desktop's focus mode reads it (`bro_core::sessions::conversation`), built from the same
+transcript and tailed per session: the first request reads the whole conversation, each one
+after only the new bytes. The phone's chat view polls it:
+
+```json
+{ "rev": "3.120", "ready": true, "harness": "claude", "model": "claude-opus-5-5", "effort": "high",
+  "cwd": "F:\\…", "branch": "main", "thought": { "text": "Planning the fix", "at": 1761… }, "total": 230,
+  "items": [
+    { "kind": "you", "key": "you:1761…", "text": "…", "images": 0, "pictures": [], "command": false, "at": 1761… },
+    { "kind": "said", "key": "said:1761…", "text": "markdown…", "at": 1761… },
+    { "kind": "did", "key": "did:toolu_…", "steps": [ { "id": "toolu_…", "kind": "edit", "label": "Edited live.rs",
+        "detail": "crates/…/live.rs", "state": "done", "added": 14, "removed": 3, "line": 120, "at": 1761… } ] },
+    { "kind": "note", "key": "note:worked:1761…", "note": "worked", "text": "4m 5s", "at": 1761… } ] }
+```
+
+* `items` holds the latest `limit` (default 150, at most 400) of `total`. Keys stay
+  with their items as the conversation grows.
+* `?since=` with the current `rev` answers `{ "rev": …, "unchanged": true }`.
+* Before bro binds a transcript: `{ "rev": "0", "ready": false, "total": 0, "items": [] }`.
+  bro tells the bridge which transcript a session has again whenever a session is announced
+  to it, so a bridge that starts after the window's sessions attach still has every one.
+  An unknown session returns 404 with a message; a host without the route returns a bare
+  404, and clients show the terminal instead.
 
 ## 5. Clients
 

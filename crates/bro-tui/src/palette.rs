@@ -67,7 +67,7 @@ fn icon_for(a: Act) -> &'static str {
         Bridge => "bridge",
         Settings | QuickInstall => "settings",
         Sounds => "sound",
-        Skills => "skills",
+        Skills | Quips => "skills",
         Setup => "rocket",
         Themes => "theme",
         Help => "help",

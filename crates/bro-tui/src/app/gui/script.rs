@@ -139,7 +139,7 @@ pub fn step(g: &mut Gui) {
             }
             Step::Wheel(p, lines) => {
                 g.pointer = Some(p);
-                super::mouse::wheel(g, p, 0.0, lines);
+                super::mouse::wheel(g, p, super::scroll::Wheel::Lines(lines));
             }
             Step::Shot(path) => {
                 g.frame();

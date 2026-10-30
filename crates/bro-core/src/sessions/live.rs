@@ -5,7 +5,7 @@
 //!
 //! Everything here does blocking file I/O: call it from a worker thread, never the TUI thread.
 //! Pi/omp panes are not bound (their insights stay empty).
-use super::{find_in_profile, latest_for};
+use super::{find_in_profile, latest_for_where};
 use crate::util::{parse_iso_ms, path_key, read_json, same_path};
 use crate::{Harness, paths, profiles};
 use serde_json::Value;
@@ -158,8 +158,18 @@ pub struct Binder {
     session_id: Option<String>,
     /// Claude: the pid of the session file that matched (the real agent, when bro spawned a shim)
     status_pid: Option<u32>,
+    /// Claude: `path` is the folder's newest transcript, bound before Claude said which session it runs
+    guessed: bool,
     next: Option<Instant>,
     attempts: u32,
+}
+
+/// What a search found.
+enum Found {
+    /// the transcript, and the session's id when known
+    Transcript(PathBuf, Option<String>),
+    /// Claude: the session the agent runs, which has written nothing yet (no message sent)
+    Unwritten(String),
 }
 
 /// Slack for clocks and file systems that round mtimes when matching "started after".
@@ -177,6 +187,7 @@ impl Binder {
             path: None,
             session_id: None,
             status_pid: None,
+            guessed: false,
             next: None,
             attempts: 0,
         }
@@ -218,7 +229,7 @@ impl Binder {
     }
 
     /// Re-check when due. Returns true when the bound transcript changed (the caller then
-    /// starts a fresh [`Tail`] and [`AgentFacts`]).
+    /// starts a fresh [`Tail`] and [`AgentFacts`], or drops them when [`path`](Self::path) is None).
     pub fn poll(&mut self, now: Instant) -> bool {
         if self.next.is_some_and(|n| now < n) {
             return false;
@@ -226,7 +237,7 @@ impl Binder {
         let (found, every) = match self.spec.harness {
             Harness::Claude => (self.find_claude(), CLAUDE_EVERY),
             Harness::Codex => {
-                let found = self.find_codex();
+                let found = self.find_codex().map(|(p, id)| Found::Transcript(p, id));
                 self.attempts += 1;
                 let every = if found.is_some() || self.attempts > CODEX_FAST_ATTEMPTS {
                     CODEX_BOUND_EVERY
@@ -238,8 +249,18 @@ impl Binder {
             Harness::Pi | Harness::Omp => (None, Duration::from_secs(3600)),
         };
         self.next = Some(now + every);
-        let Some((path, id)) = found else {
-            return false;
+        let (path, id) = match found {
+            None => return false,
+            // A guess made before Claude wrote its session file is another session in the same folder.
+            Some(Found::Unwritten(id)) => {
+                self.session_id = Some(id);
+                if !self.guessed {
+                    return false;
+                }
+                self.guessed = false;
+                return self.path.take().is_some();
+            }
+            Some(Found::Transcript(path, id)) => (path, id),
         };
         if id.is_some() {
             self.session_id = id;
@@ -272,7 +293,7 @@ impl Binder {
             .unwrap_or(self.spec.started)
     }
 
-    fn find_claude(&mut self) -> Option<(PathBuf, Option<String>)> {
+    fn find_claude(&mut self) -> Option<Found> {
         let dir = self.config_dir();
         // 1. the process's own session file
         let by_pid = self
@@ -297,43 +318,63 @@ impl Binder {
                 self.status_pid = Some(f.pid);
             }
             let cwd = f.cwd.clone().unwrap_or_else(|| self.spec.cwd.clone());
-            if let Some(p) = claude_transcript_path(&dir, &f.session_id, Some(&cwd)) {
-                return Some((p, Some(f.session_id)));
-            }
-            // Not written yet (no message sent): remember the id, keep the old binding.
-            self.session_id = Some(f.session_id);
-            return None;
+            return Some(match claude_transcript_path(&dir, &f.session_id, Some(&cwd)) {
+                Some(p) => {
+                    self.guessed = false;
+                    Found::Transcript(p, Some(f.session_id))
+                }
+                None => Found::Unwritten(f.session_id),
+            });
         }
-        // 3. the resumed session, 4. the newest transcript for this cwd
-        let resumed = self.spec.resume_id.as_deref().and_then(|id| {
-            claude_transcript_path(&dir, id, Some(&self.spec.cwd))
-                .map(|p| (p, Some(id.to_string())))
-        });
-        resumed.or_else(|| {
-            latest_for(
-                Harness::Claude,
-                self.spec.profile_id.as_deref(),
-                &self.spec.cwd,
-                self.since(),
-            )
-            .map(|s| (s.path, Some(s.id)))
-        })
-    }
-
-    fn find_codex(&mut self) -> Option<(PathBuf, Option<String>)> {
-        latest_for(
-            Harness::Codex,
+        // 3. the resumed session
+        if let Some(id) = self.spec.resume_id.as_deref()
+            && let Some(p) = claude_transcript_path(&dir, id, Some(&self.spec.cwd))
+        {
+            self.guessed = false;
+            return Some(Found::Transcript(p, Some(id.to_string())));
+        }
+        // 4. the newest transcript for this cwd that no other running Claude has
+        let others: Vec<String> = list_claude_session_files(&dir)
+            .into_iter()
+            .filter(|f| Some(f.pid) != self.spec.pid)
+            .map(|f| f.session_id)
+            .collect();
+        let s = latest_for_where(
+            Harness::Claude,
             self.spec.profile_id.as_deref(),
             &self.spec.cwd,
             self.since(),
+            |s| !others.contains(&s.id),
+        )?;
+        self.guessed = true;
+        Some(Found::Transcript(s.path, Some(s.id)))
+    }
+
+    fn find_codex(&mut self) -> Option<(PathBuf, Option<String>)> {
+        // a rollout begun before the pane is another Codex's (a resumed one is found by its id below)
+        let since = self.since();
+        latest_for_where(
+            Harness::Codex,
+            self.spec.profile_id.as_deref(),
+            &self.spec.cwd,
+            since,
+            |s| begun_since(&s.path, since),
         )
         .map(|s| (s.path, Some(s.id)))
         .or_else(|| {
             let id = self.spec.resume_id.as_deref()?;
-            find_in_profile(Harness::Codex, id, self.spec.profile_id.as_deref())
-                .map(|s| (s.path, Some(s.id)))
+            let login = self.spec.profile_id.as_deref().unwrap_or("codex:local");
+            find_in_profile(Harness::Codex, id, Some(login)).map(|s| (s.path, Some(s.id)))
         })
     }
+}
+
+/// `path` was created at or after `since` (true where the file system doesn't keep creation times).
+fn begun_since(path: &Path, since: SystemTime) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.created())
+        .ok()
+        .is_none_or(|c| c >= since)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -357,6 +398,10 @@ pub struct TailRead {
     /// (`lines` then start from the new file).
     pub reset: bool,
     pub lines: Vec<String>,
+    /// Where this read began when it was the file's first (after `new` or a reset): 0 at the file's start, else
+    /// [`FIRST_READ_MAX`] before its end, the earlier lines left out (a conversation reads them back:
+    /// [`Conversation::history`](super::conversation::Conversation::history)).
+    pub began: Option<u64>,
 }
 
 impl Tail {
@@ -377,6 +422,11 @@ impl Tail {
     /// Bytes consumed so far (including a pending partial line).
     pub fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// Where the next line starts: the end of the last complete line read.
+    pub fn lines_end(&self) -> u64 {
+        self.offset - self.partial.len() as u64
     }
 
     /// New complete lines since the last call. The first call starts at most
@@ -404,6 +454,7 @@ impl Tail {
                 self.offset = len - FIRST_READ_MAX;
                 skip_first = true;
             }
+            out.began = Some(self.offset);
         }
         if len <= self.offset {
             return Ok(out);
@@ -2220,6 +2271,7 @@ mod tests {
             "the cut-off line is dropped"
         );
         assert_eq!(first.lines.last().unwrap(), "{\"marker\":1}");
+        assert_eq!(first.began, Some(body.len() as u64 - FIRST_READ_MAX), "where the first read began");
         assert_eq!(t.offset(), body.len() as u64);
 
         // a partial line waits for its newline
@@ -2237,6 +2289,7 @@ mod tests {
         let r = t.read().unwrap();
         assert!(r.reset);
         assert_eq!(r.lines, ["{\"new\":1}"]);
+        assert_eq!(r.began, Some(0), "a new file is read from its start");
     }
 
     #[test]
@@ -2316,6 +2369,104 @@ mod tests {
         });
         assert!(!b3.poll(Instant::now()));
         assert!(b3.path().is_none());
+    }
+
+    #[test]
+    fn a_new_claude_pane_never_shows_another_sessions_conversation() {
+        let sb = sandbox();
+        let cfg = sb.home().join(".claude");
+        let cwd = PathBuf::from(if cfg!(windows) { "F:\\proj" } else { "/proj" });
+        let busy = "33333333-3333-4333-8333-333333333333";
+        let quiet = "44444444-4444-4444-8444-444444444444";
+        let ours = "55555555-5555-4555-8555-555555555555";
+        let sessions = cfg.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let write = |id: &str| {
+            let user = json!({"type": "user", "cwd": cwd, "sessionId": id, "message": {"content": "on it"}});
+            crate::sessions::tests::write_claude_session(&cfg, &claude_project_slug(&cwd), id, &[user]);
+        };
+        // another Claude in the same folder, mid-turn
+        write(busy);
+        std::fs::write(
+            sessions.join("9001.json"),
+            json!({"pid": 9001, "sessionId": busy, "cwd": cwd, "status": "busy", "startedAt": 1}).to_string(),
+        )
+        .unwrap();
+        // this pane's Claude hasn't written its session file yet
+        let mut b = Binder::new(BindSpec {
+            harness: Harness::Claude,
+            profile_id: None,
+            config_dir: Some(cfg.clone()),
+            pid: Some(4343),
+            cwd: cwd.clone(),
+            started: SystemTime::now(),
+            resume_id: None,
+        });
+        let t0 = Instant::now();
+        assert!(!b.poll(t0), "the busy session's transcript is that session's");
+        assert!(b.path().is_none());
+
+        // A transcript no running Claude names is a guess, dropped once Claude names its own session.
+        write(quiet);
+        assert!(b.poll(t0 + CLAUDE_EVERY));
+        assert!(b.path().unwrap().ends_with(format!("{quiet}.jsonl")));
+        std::fs::write(
+            sessions.join("4343.json"),
+            json!({"pid": 4343, "sessionId": ours, "cwd": cwd, "status": "idle"}).to_string(),
+        )
+        .unwrap();
+        assert!(b.poll(t0 + CLAUDE_EVERY * 2), "the guess is dropped");
+        assert!(b.path().is_none());
+        assert_eq!(b.session_id(), Some(ours));
+        assert!(!b.poll(t0 + CLAUDE_EVERY * 3), "nothing written yet");
+        write(ours);
+        assert!(b.poll(t0 + CLAUDE_EVERY * 4));
+        assert!(b.path().unwrap().ends_with(format!("{ours}.jsonl")));
+    }
+
+    #[test]
+    fn a_new_codex_pane_passes_over_rollouts_begun_before_it() {
+        let sb = sandbox();
+        let day = sb.home().join(".codex").join("sessions").join("2026").join("10").join("02");
+        std::fs::create_dir_all(&day).unwrap();
+        let cwd = PathBuf::from(if cfg!(windows) { "F:\\tools" } else { "/tools" });
+        let busy = "019a0000-0000-7000-8000-000000000002";
+        let lines = [
+            json!({"type": "session_meta", "payload": {"id": busy, "cwd": cwd, "originator": "codex-tui"}}),
+            json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "busy codex"}]}}),
+            json!({"type": "pad", "x": "y".repeat(600)}),
+        ];
+        let path = day.join(format!("rollout-2026-10-02T09-00-00-{busy}.jsonl"));
+        std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        if std::fs::metadata(&path).and_then(|m| m.created()).is_err() {
+            return; // no creation times here
+        }
+        // the pane opens after that rollout began, while the other Codex keeps writing it
+        let started = SystemTime::now() + Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(started + Duration::from_secs(5))
+            .unwrap();
+        let mut b = Binder::new(BindSpec {
+            harness: Harness::Codex,
+            profile_id: None,
+            config_dir: None,
+            pid: None,
+            cwd: cwd.clone(),
+            started,
+            resume_id: None,
+        });
+        assert!(!b.poll(Instant::now()));
+        assert!(b.path().is_none());
+        // resuming it: found by its id
+        let mut r = Binder::new(BindSpec {
+            resume_id: Some(busy.into()),
+            ..b.spec().clone()
+        });
+        assert!(r.poll(Instant::now()));
+        assert_eq!(r.session_id(), Some(busy));
     }
 
     #[test]

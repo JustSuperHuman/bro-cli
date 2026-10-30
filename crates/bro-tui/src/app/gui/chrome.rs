@@ -62,7 +62,8 @@ pub struct Painted {
     pub card_links: Vec<(Rect, PaneId, String)>,
 }
 
-pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, focused_window: bool, media: &mut super::media::Media) -> Painted {
+#[allow(clippy::too_many_arguments)]
+pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, focused_window: bool, media: &mut super::media::Media, apps: &mut super::apps::Apps) -> Painted {
     let mut out = Painted::default();
     if layout.all_minimized {
         ui.label_in(layout.body, "All sessions minimized · show minimized in the sidebar", Style::new(size::BODY, weight::MEDIUM, ui.t.muted), Align::Center);
@@ -75,7 +76,7 @@ pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashM
     app.flips.retain(|id, flip| app.panes.contains_key(id) && (flip.back || flip.turning(now)));
     // the card with the keyboard last, so its edge stays whole where tiles share a line
     for b in layout.panes.iter().filter(|b| !b.focused).chain(layout.panes.iter().filter(|b| b.focused)) {
-        draw_card(app, ui, layout, b, panes, canvas, &pal, focused_window, &mut out, media);
+        draw_card(app, ui, layout, b, panes, canvas, &pal, focused_window, &mut out, media, apps);
     }
     // where tiles share a line there's no gutter: the line itself is grabbed to move the edge (the mouse finds the
     // tile edge under it, as in a gutter)
@@ -129,11 +130,16 @@ fn draw_group(app: &App, ui: &mut Ui, g: &GroupBox) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, pal: &Palette, focused_window: bool, out: &mut Painted, media: &mut super::media::Media) {
+fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, pal: &Palette, focused_window: bool, out: &mut Painted, media: &mut super::media::Media, apps: &mut super::apps::Apps) {
     let id = b.id;
     let Some(p) = app.panes.get(&id) else { return };
     let t = ui.t;
     let term = p.as_term_ref();
+    let notice = app.session_notice(id);
+    let notice_ink = notice.filter(|n| n.unread).map(|n| match n.kind {
+        bro_bridge::insights::NoticeKind::Input => t.warn,
+        bro_bridge::insights::NoticeKind::Finished => t.good,
+    });
     let orchestrator = term.is_some_and(|t| t.meta.orchestrator);
     // the project's colour, as the terminal UI's session frame; the orchestrator stands out in gold
     let accent = match term {
@@ -173,7 +179,8 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
         // the card is a surface of the window (as see-through as the rest of it over a material), its edge isn't
         let px = ui.px(shown);
         let w = ui.scale.round().max(1.0);
-        ui.scene.glass_quad(bro_gfx::Quad::new(px, t.surface).corners(corners.scale(ui.scale)));
+        let surface = notice_ink.map_or(t.surface, |ink| t.surface.mix(ink, if t.light { 0.045 } else { 0.055 }));
+        ui.scene.glass_quad(bro_gfx::Quad::new(px, surface).corners(corners.scale(ui.scale)));
         ui.scene.quad(bro_gfx::Quad::new(px, bro_gfx::Color::TRANSPARENT).corners(corners.scale(ui.scale)).border(w, border));
     }
     ui.clip(shown, if b.joined.any() { 0.0 } else { radius::OVERLAY });
@@ -229,12 +236,18 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
             }
             let st = panes.entry(id).or_default();
             st.drawn = Default::default();
-            super::focus::draw(app, ui, id, content, b.focused && focused_window, &mut st.focus, media);
+            super::focus::draw(app, ui, id, content, b.focused && focused_window, &mut st.focus, media, apps);
             app.perf.pane_rendered(id, started.elapsed());
-        } else if let Some(term) = app.panes.get_mut(&id).and_then(|p| p.as_term()) {
-            let started = Instant::now();
-            draw_terminal(waker, ui, term, b, content, panes, pal, focused_window, accent);
-            app.perf.pane_rendered(id, started.elapsed());
+        } else {
+            let tags = super::focus::terminal_quips_height(app, id);
+            if let Some(term) = app.panes.get_mut(&id).and_then(|p| p.as_term()) {
+                let started = Instant::now();
+                draw_terminal(waker, ui, term, b, Rect { h: (content.h - tags).max(40.0), ..content }, panes, pal, focused_window, accent);
+                app.perf.pane_rendered(id, started.elapsed());
+            }
+            let state = panes.entry(id).or_default();
+            let input = state.drawn.cursor.map(|(row, col)| Rect::new(state.drawn.origin.x + col as f32 * state.drawn.cell_w, state.drawn.origin.y + row as f32 * state.drawn.cell_h, state.drawn.cell_w, state.drawn.cell_h));
+            super::focus::draw_terminal_quips(app, ui, id, content, b.focused && focused_window, input, &mut state.focus);
         }
     } else if super::views::draw(app, ui, id, super::layout::inset(content, 6.0), b.focused) {
         // drawn natively by the view's own module
@@ -275,6 +288,9 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
         } else {
             st.face_at = None;
         }
+    }
+    if let Some(ink) = notice_ink {
+        ui.top_fill(content, 0.0, ink.with_alpha(if t.light { 0.025 } else { 0.035 }));
     }
     ui.unclip();
 }
@@ -364,7 +380,16 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
     if let Some(term) = p.as_term_ref() {
         // status: the indicator alone (spinner, alert); the header never says "done" (the sidebar and the tabs do).
         // In focus mode it says what the agent is doing in words, since the terminal that shows it is out of sight.
-        if app.focus_view(id) {
+        if let Some(notice) = app.session_notice(id).filter(|n| n.unread) {
+            let (label, glyph, ink) = match notice.kind {
+                bro_bridge::insights::NoticeKind::Input => (if term.limit_warning().is_some() { "Paused" } else { "Needs input" }, "\u{F0026}", t.warn),
+                bro_bridge::insights::NoticeKind::Finished => ("Finished", "\u{F012C}", t.good),
+            };
+            let text = ui.line(label, Style::new(size::SMALL, weight::MEDIUM, ink), Some((r.w * 0.32).max(60.0)));
+            ui.draw(&text, Point::new(right - text.w, mid - text.h / 2.0));
+            ui.icon(Rect::new(right - text.w - 22.0, mid - 8.0, 16.0, 16.0), glyph, 14.0, ink);
+            right -= text.w + 34.0;
+        } else if app.focus_view(id) {
             let room = (r.w * 0.36).clamp(120.0, 340.0);
             if let Some(w) = super::focus::header_status(app, ui, id, view, Point::new(right - 4.0, mid), room) {
                 right -= w + 14.0;

@@ -35,6 +35,7 @@ mod pane;
 mod paste_burst;
 mod perf;
 mod priority;
+mod quips;
 mod projects;
 mod install_cmd;
 mod open_cmd;

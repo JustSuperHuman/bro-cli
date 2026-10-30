@@ -65,9 +65,9 @@ typescript, tsx, javascript, jsx, json, toml, yaml, markdown, python, go,
 java, kotlin, swift, c, cpp, csharp, css, scss, html, xml, sql, shell,
 powershell, dockerfile, makefile, ruby, php, lua, diff, ini, plaintext.
 
-Image response: `{ "kind": "image", "path", "relativePath"*, "mimeType", "data" (base64), "bytes"* }`.
+Image response: `{ "kind": "image", "path", "relativePath"*, "mimeType", "data" (base64), "bytes"*, "url"* }`.
 Images are png, jpg/jpeg, gif, webp, bmp, ico, avif and **svg**. Clients must render SVG only as an `<img>` or
-`Image`, never inline.
+`Image`, never inline. A picture over 2 MB comes without `data`. Show it from `url` (`/raw`, as below).
 
 Video/audio response, with no size limit and no file bytes in the JSON:
 
@@ -107,6 +107,28 @@ AVPlayer and Safari are strict:
 * Auth is the usual header, Bearer, or `?token=`, and loopback is exempt.
 
 This is also the download endpoint for every file kind.
+
+### `GET /api/media[?session=<id>]`
+
+The phone's gallery, the desktop app's media panel for clients. It lists pictures, videos,
+sounds and PDFs that are still on disk:
+
+* what the agent sent you or made (wrote, created, edited, moved), or looked at;
+* what was opened for you (`open`);
+* what you attached (`attachments`) or sent in a message;
+* what a reply names by its path.
+
+One session's, or every session's without `session`. Newest first, each file once with its
+strongest reason, at most 300.
+
+```json
+{ "items": [ { "path": "C:\\out\\take.wav", "name": "take.wav", "kind": "audio", "mimeType": "audio/wav",
+  "source": "sent", "at": "2026-10-28T21:40:00.000Z", "bytes": 247004, "sessionId": "s1", "caption": "…" } ] }
+```
+
+`kind` is `image`, `video`, `audio` or `pdf`. `source` is one of `opened`, `sent`, `made`,
+`viewed`, `attached` or `pasted`. `caption` appears only when the agent gave one. The files
+stream from `/raw`. An unknown session is `404`.
 
 ### `POST /api/sessions/{id}/open`
 
@@ -155,6 +177,26 @@ the git root above cwd). Resolution tries, in order:
 
 Everything is canonicalised and must `starts_with` a root (symlinks cannot
 escape). Control characters, UNC paths and non-`file` URLs are rejected.
+
+Media is the one exception, because agents leave it outside the workspace: a scratchpad,
+JustImagine's outputs, the phone's own uploads. A picture, video, sound or PDF given by its
+absolute (or `~/`) path also resolves outside the roots when it's tied to the work. That means
+it is any of these:
+
+* in any session's cwd or project root, or a folder bro knows you work in (open projects,
+  recent launch folders, past sessions' projects);
+* in the phone's uploads folder;
+* a file an agent sent, made or looked at, or one attached or opened;
+* named in a conversation: a picture sent with a message, or a path in a reply.
+
+`open` from this computer (an agent's `bro open`) counts as that tie itself. Settings ›
+Session server › **Protect phone media** (`[bridge] protect_media`, on by default) turned off
+lets media resolve wherever it is (`Bridge::set_media_anywhere`). A file the rule turns down
+is `403` with a message that says so.
+
+The rule applies to `/file`, `/raw`, `/waveform`, `links/resolve` and `open`; such a file has an
+empty `relativePath`. The file's own extension decides, after any link, and a relative path
+never climbs out. Code and text stay inside the roots either way.
 
 ## 5. Desktop (bro TUI)
 

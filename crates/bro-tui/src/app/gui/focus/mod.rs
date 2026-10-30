@@ -10,9 +10,13 @@
 //! app's ([`crate::focus::Draft`]); this keeps only layout and motion ([`View`]).
 
 mod markdown;
+mod pixels;
+mod sound;
+mod quips;
 
 use super::actions::Action;
 use super::kit::{Cursor, Style, TextBox, Ui, radius, size, weight, widgets};
+use super::apps::{Apps, FIRST_HEIGHT, Page, Want};
 use super::media::{Media, Thumbnail};
 use super::Gui;
 use crate::app::App;
@@ -22,7 +26,7 @@ use crate::layout::PaneId;
 use crate::pane::Activity;
 use bro_bridge::file_links::{FileLinkMatch, find_file_links, split_location};
 use bro_core::Harness;
-use bro_core::sessions::conversation::{Conversation, Item, NoteKind, Step, StepKind, StepState, Thought};
+use bro_core::sessions::conversation::{Conversation, Item, McpApp, NoteKind, Step, StepKind, StepState, Thought};
 use bro_gfx::text::{Align, Span as GSpan, TextOpts};
 use bro_gfx::{Color, Fill, Point, Quad, Rect};
 use markdown::{Block, Mark, Span};
@@ -59,6 +63,12 @@ const COPY: usize = 100_000;
 const LINK: usize = 1_000_000;
 /// + a picture's index this frame
 const PICTURE: usize = 2_000_000;
+/// + a failed MCP app card's index this frame: read its page again
+const APP_RETRY: usize = 20;
+const APP_RETRY_END: usize = 100;
+/// + a sound card's index this frame: its play button, its waveform (plays from where it's clicked)
+const SOUND: usize = 3_000_000;
+const SOUND_AT: usize = 4_000_000;
 
 /// Body text line height, as a multiple of its size.
 const LINE: f32 = 1.62;
@@ -74,6 +84,12 @@ const DONE_SHOWS: f32 = 8.0;
 const SHOT: (f32, f32) = (132.0, 96.0);
 const SHOWN: (f32, f32) = (84.0, 64.0);
 const ATTACHED: f32 = 60.0;
+/// An MCP app's card: its corners, the room above it, and where its page sits inside it (clear of the corners)
+const APP_RADIUS: f32 = 12.0;
+const APP_GAP: f32 = 10.0;
+const APP_INSET: (f32, f32) = (2.0, 7.0);
+/// The tallest a card's page grows (a taller page scrolls inside it)
+const APP_MAX: f32 = 3000.0;
 
 /// What the agent is up to, as focus mode says it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +110,7 @@ pub struct View {
     /// the conversation's height and the room it had, last frame
     total: f32,
     room: f32,
+    line_height: f32,
     /// laid-out items by identity (the item itself is kept, so its address can't be reused while cached)
     cache: HashMap<usize, Cached>,
     /// items whose steps are open (a long message of yours shown whole), by identity
@@ -101,6 +118,8 @@ pub struct View {
     /// this frame's links and pictures (their targets)
     links: Vec<String>,
     pictures: Vec<PathBuf>,
+    /// this frame's sound cards: the file, and where its waveform is
+    sounds: Vec<(PathBuf, Rect)>,
     /// where the reply box's text sat (a click puts the caret under it)
     geo: Option<BoxGeo>,
     /// the mood and since when (the header says "Done" a while; thinking counts from it)
@@ -114,8 +133,19 @@ pub struct View {
     /// the picture in the reply box whose popover is open, and where the popover was (the pointer can cross to it)
     pop: Option<usize>,
     pop_rect: Option<Rect>,
-    /// the commands list's first row shown
+    /// the commands list's first row shown, and the model list's
     command_top: usize,
+    menu_top: usize,
+    quip_fields: [Option<quips::FieldGeo>; 3],
+    /// the pixel mark of a session with nothing said yet, while it shows
+    mark: Option<pixels::Play>,
+    /// MCP apps' cards drawn this frame (the call, the app, where its page goes: laid over them once the frame
+    /// is drawn), the failed ones (a click reads them again) and the part of the window the pages may show in
+    cards: Vec<(String, Arc<McpApp>, Rect)>,
+    retry: Vec<Arc<McpApp>>,
+    clip: Rect,
+    /// a list or a popover is open over the conversation: the pages hide under it
+    popup: bool,
 }
 
 impl Default for View {
@@ -125,10 +155,12 @@ impl Default for View {
             follow: true,
             total: 0.0,
             room: 0.0,
+            line_height: 30.0,
             cache: HashMap::new(),
             open: HashSet::new(),
             links: vec![],
             pictures: vec![],
+            sounds: vec![],
             geo: None,
             mood: None,
             choice: None,
@@ -137,6 +169,13 @@ impl Default for View {
             pop: None,
             pop_rect: None,
             command_top: 0,
+            menu_top: 0,
+            quip_fields: [None; 3],
+            mark: None,
+            cards: vec![],
+            retry: vec![],
+            clip: Rect::new(0.0, 0.0, 0.0, 0.0),
+            popup: false,
         }
     }
 }
@@ -248,6 +287,7 @@ struct Seen {
     harness: Option<Harness>,
     conv: Option<Arc<Conversation>>,
     activity: Option<Activity>,
+    limit: Option<bro_core::sessions::limits::UsageLimit>,
     done: bool,
     /// the step running now, if the transcript says
     running: Option<Step>,
@@ -270,6 +310,7 @@ fn seen(app: &App, id: PaneId) -> Option<Seen> {
     Some(Seen {
         harness: term.meta.harness,
         activity: p.activity(),
+        limit: term.limit_warning(),
         done: app.done.contains(&id),
         running: conv.as_ref().and_then(|c| c.running().cloned()),
         last_ms: facts.as_ref().and_then(|f| f.last_activity_ms),
@@ -283,6 +324,7 @@ fn seen(app: &App, id: PaneId) -> Option<Seen> {
 
 /// The mood the session is in, `prev` the last frame's: a turn that just ended reads as done a while, watched or not.
 fn mood_of(seen: &Seen, prev: Option<(Mood, Instant)>, now: Instant) -> Mood {
+    if seen.limit.is_some() { return Mood::Blocked; }
     let finished = prev.is_some_and(|(m, at)| m == Mood::Done && now.saturating_duration_since(at).as_secs_f32() < DONE_SHOWS);
     match seen.activity {
         Some(Activity::Working) => Mood::Working,
@@ -296,6 +338,7 @@ fn mood_of(seen: &Seen, prev: Option<(Mood, Instant)>, now: Instant) -> Mood {
 /// it's been at it ("Thinking", "Still thinking", "Deep in thought"), with the time once it's been a while.
 /// `working` is how long it has been working (seconds), for when the transcript hasn't caught up.
 fn thinking(seen: &Seen, now_ms: i64, working: i64) -> String {
+    if let Some(limit) = &seen.limit { return limit.title.clone(); }
     // since the transcript's newest line, when it has this turn (else since it was seen to start)
     let secs = match seen.last_ms {
         Some(t) if !seen.sending => ((now_ms - t) / 1000).max(0),
@@ -316,6 +359,7 @@ fn thinking(seen: &Seen, now_ms: i64, working: i64) -> String {
 
 /// What it's doing right now, in words: the step it's running (and for how long), else how its thinking is going.
 fn doing(seen: &Seen, now_ms: i64, working: i64) -> String {
+    if let Some(limit) = &seen.limit { return limit.title.clone(); }
     match &seen.running {
         Some(s) => {
             let secs = s.at_ms.map_or(0, |t| (now_ms - t) / 1000);
@@ -338,7 +382,7 @@ pub fn header_status(app: &App, ui: &mut Ui, id: PaneId, view: Option<&View>, ri
     let t = ui.t;
     let (words, ink) = match mood {
         Mood::Working => (doing(&seen, crate::util::now_ms(), working_secs(prev, ui.now)), t.text.mix(t.muted, 0.35)),
-        Mood::Blocked => ("Needs you".to_string(), t.danger),
+        Mood::Blocked => (seen.limit.as_ref().map_or_else(|| "Needs you".to_string(), |limit| limit.title.clone()), t.danger),
         Mood::Done => ("Done".to_string(), t.good),
         Mood::Idle => return None,
     };
@@ -350,8 +394,8 @@ pub fn header_status(app: &App, ui: &mut Ui, id: PaneId, view: Option<&View>, ri
     match mood {
         Mood::Working => ui.spinner(Point::new(x + 7.0, mid), 4.6, 1.6, t.accent),
         Mood::Blocked => {
-            ui.ticking = true;
-            let k = 0.7 + 0.3 * ((ui.time * 4.0).sin() as f32 * 0.5 + 0.5);
+            ui.ticking |= seen.limit.is_none();
+            let k = if seen.limit.is_some() { 1.0 } else { 0.7 + 0.3 * ((ui.time * 4.0).sin() as f32 * 0.5 + 0.5) };
             ui.icon(Rect::new(x, mid - 8.0, 14.0, 16.0), "\u{F0026}", 13.0, t.danger.fade(k));
         }
         Mood::Done => ui.icon(Rect::new(x, mid - 8.0, 14.0, 16.0), "\u{F012C}", 14.0, t.good),
@@ -367,10 +411,11 @@ pub fn header_status(app: &App, ui: &mut Ui, id: PaneId, view: Option<&View>, ri
 // ------------------------------------------------------------------------------------------------- the view
 
 /// Draw `id`'s conversation in `content` (the card under its header).
-pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool, v: &mut View, media: &mut Media) {
+#[allow(clippy::too_many_arguments)]
+pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool, v: &mut View, media: &mut Media, apps: &mut Apps) {
     let Some(seen) = seen(app, id) else { return };
     // the choice on screen: read when the screen is free, kept while it waits on you
-    if seen.activity == Some(Activity::Blocked) {
+    if seen.limit.is_none() && seen.activity == Some(Activity::Blocked) {
         if let Some(c) = app.focus_choice(id) {
             v.choice = Some(c);
         }
@@ -398,8 +443,9 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool
     let avail = (content.w - 48.0).max(120.0);
     let body = (avail / 44.0).clamp(14.0, 19.0);
     let mut c = Typo::new(ui, body);
-    c.waiting = mood == Mood::Blocked;
+    c.waiting = seen.limit.is_none() && mood == Mood::Blocked;
     c.working = mood == Mood::Working;
+    v.line_height = c.lh;
     let measure = avail.min((c.adv * 76.0).round());
     let mx = content.x + (content.w - measure) / 2.0;
     // the reply box at the foot, the choice it waits on over it, the conversation over both
@@ -410,11 +456,20 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool
     let bottom = if choice_h > 0.0 { choice_r.y } else { box_r.y };
     // a little room under the header: the text scrolls away under a fade, not against its line
     let area = Rect::new(content.x, content.y + 6.0, content.w, (bottom - 8.0 - content.y - 6.0).max(0.0));
-    conversation(app, ui, id, area, Rect::new(mx, area.y, measure, area.h), &c, &seen, v, mood, media);
+    conversation(app, ui, id, area, Rect::new(mx, area.y, measure, area.h), &c, &seen, v, mood, media, apps);
     if let Some(ch) = v.choice.clone() {
         draw_choice(ui, id, &c, &ch, choice_r);
     }
     reply_box(app, ui, id, box_r, focused, &c, &seen, mood, v, media);
+    // the apps' pages go over their cards once the frame is drawn, unless a list over the box covers them
+    let cards = std::mem::take(&mut v.cards);
+    let sid = app.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone());
+    if let Some(sid) = sid.filter(|_| !v.popup) {
+        let fill = card_fill(ui);
+        for (call, a, rect) in cards {
+            apps.want(Want { key: (id, call), sid: sid.clone(), app: a, rect, clip: v.clip, fill, max_h: APP_MAX });
+        }
+    }
 }
 
 // --------------------------------------------------------------------------------------- links and pictures
@@ -429,13 +484,33 @@ struct Paint<'a> {
     id: PaneId,
     links: Vec<String>,
     pictures: Vec<PathBuf>,
+    sounds: Vec<(PathBuf, Rect)>,
     media: Option<&'a mut Media>,
     resolve: Option<Resolve<'a>>,
+    apps: AppPaint<'a>,
+}
+
+/// The MCP apps' cards an item draws: their pages and heights by call (none: no cards), and what it drew (the
+/// cards whose pages go over them, the failed ones a click reads again).
+#[derive(Default)]
+struct AppPaint<'a> {
+    cards: Option<&'a HashMap<String, Card>>,
+    drawn: Vec<(String, Arc<McpApp>, Rect)>,
+    retry: Vec<Arc<McpApp>>,
+}
+
+/// An MCP app's card this frame: its page as far as it's read, how tall the page is and whether it has said so,
+/// and what its server is called.
+struct Card {
+    page: Page,
+    h: f32,
+    sized: bool,
+    name: String,
 }
 
 impl Paint<'_> {
-    fn measuring(id: PaneId) -> Paint<'static> {
-        Paint { draw: false, id, links: vec![], pictures: vec![], media: None, resolve: None }
+    fn measuring<'b>(id: PaneId) -> Paint<'b> {
+        Paint { draw: false, id, links: vec![], pictures: vec![], sounds: vec![], media: None, resolve: None, apps: AppPaint::default() }
     }
 
     fn resolve(&mut self, m: &FileLinkMatch) -> Option<Arc<str>> {
@@ -544,7 +619,7 @@ fn step_pictures(steps: &[Step]) -> Vec<PathBuf> {
 
 /// The conversation, scrolled, in `area` (`col` the text column inside it).
 #[allow(clippy::too_many_arguments)]
-fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c: &Typo, seen: &Seen, v: &mut View, mood: Mood, media: &mut Media) {
+fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c: &Typo, seen: &Seen, v: &mut View, mood: Mood, media: &mut Media, apps: &mut Apps) {
     let t = ui.t;
     let items: Vec<Arc<Item>> = seen.conv.as_ref().map(|c| c.items.clone()).unwrap_or_default();
     let sent: Vec<(String, f32, bool, Vec<PathBuf>, usize)> = app
@@ -603,6 +678,26 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
             _ => vec![],
         })
         .collect();
+    // the MCP apps' cards: their pages as far as they're read (the first look starts reading one), and how tall
+    // each page says it is
+    let sid = app.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()).unwrap_or_default();
+    let mut cards: HashMap<String, Card> = HashMap::new();
+    for it in &items[skip..] {
+        let Item::Did { steps } = it.as_ref() else { continue };
+        for s in steps {
+            let Some(a) = &s.app else { continue };
+            let page = match apps.unavailable() {
+                Some(e) => Page::Failed(e.to_string()),
+                // no web view on this system: the step alone
+                None if !Apps::available() => Page::Failed(String::new()),
+                None => apps.page(&app.svc, &sid, a),
+            };
+            let key = (id, s.id.clone());
+            let h = apps.height(&key).unwrap_or(FIRST_HEIGHT).min(APP_MAX);
+            let h = ui.ease(("focus-app", id, &s.id), h, 180.0);
+            cards.insert(s.id.clone(), Card { page, h, sized: apps.sized(&key), name: app_name(&a.server) });
+        }
+    }
     let gap = c.lh.round();
     let intro_h = intro_height(c);
     let earlier_h = if skip > 0 { 44.0 } else { 0.0 };
@@ -617,11 +712,14 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
         let k = Arc::as_ptr(it) as usize;
         let open = v.open.contains(&k);
         let e = v.cache.get(&k);
+        // an app's card grows as its page says (no height kept)
+        let app = matches!(it.as_ref(), Item::Did { steps } if steps.iter().any(|s| s.app.is_some()));
         let h = match e.and_then(|e| e.h) {
-            Some((w, s, o, n, h)) if (w - col.w).abs() < 0.5 && (s - c.body).abs() < 0.01 && o == open && n == narration[i] => h,
+            Some((w, s, o, n, h)) if !app && (w - col.w).abs() < 0.5 && (s - c.body).abs() < 0.01 && o == open && n == narration[i] => h,
             _ => {
                 let blocks = e.and_then(|e| e.blocks.clone());
                 let mut p = Paint::measuring(id);
+                p.apps.cards = Some(&cards);
                 let h = item(ui, c, it, blocks.as_deref(), &pics[i], i, Point::new(col.x, 0.0), col.w, open, narration[i], &mut p);
                 if let Some(e) = v.cache.get_mut(&k) {
                     e.h = Some((col.w, c.body, open, narration[i], h));
@@ -636,7 +734,8 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
     // where the agent read it
     let sent_at: Vec<usize> = sent.iter().map(|s| s.4.clamp(skip, items.len())).collect();
     let working_line = mood == Mood::Working && seen.running.is_none();
-    let tail_h = if working_line { c.lh + gap } else { 0.0 };
+    let limit_box = seen.limit.as_ref().filter(|_| !items.is_empty() || !sent.is_empty()).map(|limit| lay(ui, &[(limit.message.clone(), Style::mono(c.small, t.danger))], c.small, 1.6, (col.w - 26.0).max(80.0), None));
+    let tail_h = limit_box.as_ref().map_or_else(|| if working_line { c.lh + gap } else { 0.0 }, |b| b.h + gap + 8.0);
     let total = top_pad + heights.iter().filter(|h| **h > 0.0).map(|h| h + gap).sum::<f32>() + sent_hs.iter().map(|h| h + gap).sum::<f32>() + tail_h + 8.0;
     let room = area.h;
     let max = (total - room).max(0.0);
@@ -673,7 +772,7 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
     let term = app.panes.get(&id).and_then(|p| p.as_term_ref());
     let mut lookup = term.map(|t| t.file_cache().lookup());
     let mut resolve = |m: &FileLinkMatch| lookup.as_mut().and_then(|l| l.get(m));
-    let mut p = Paint { draw: true, id, links: vec![], pictures: vec![], media: Some(media), resolve: Some(&mut resolve) };
+    let mut p = Paint { draw: true, id, links: vec![], pictures: vec![], sounds: vec![], media: Some(media), resolve: Some(&mut resolve), apps: AppPaint { cards: Some(&cards), ..AppPaint::default() } };
     ui.clip(area, 0.0);
     let mut y = area.y + 18.0 - offset;
     intro(ui, c, seen, Point::new(col.x, y), col.w, &mut p);
@@ -713,20 +812,28 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
         you(ui, c, text, pics.len(), pics, false, Point::new(col.x, y), col.w, false, Some(sent_state(*age, *queued)), &mut p);
         y += sent_hs[n] + gap;
     }
-    if working_line {
+    if let Some(b) = &limit_box {
+        ui.icon(Rect::new(col.x, y + 2.0, 15.0, 16.0), "\u{F0026}", 14.0, t.danger);
+        ui.draw(b, Point::new(col.x + 24.0, y));
+    } else if working_line {
         // how its thinking is going, at the end of what it's said
         ui.spinner(Point::new(col.x + 7.0, y + c.lh / 2.0), 4.6, 1.6, t.accent);
         let words = thinking(seen, c.now_ms, working_secs(v.mood, ui.now));
         let b = ui.line(&words, Style::mono(c.small, c.muted), Some(col.w - 26.0));
         ui.draw(&b, Point::new(col.x + 22.0, y + (c.lh - b.h) / 2.0));
     }
-    let (links, pictures) = (std::mem::take(&mut p.links), std::mem::take(&mut p.pictures));
+    let (links, pictures, sounds) = (std::mem::take(&mut p.links), std::mem::take(&mut p.pictures), std::mem::take(&mut p.sounds));
+    let (drawn, retry) = (std::mem::take(&mut p.apps.drawn), std::mem::take(&mut p.apps.retry));
     drop(p);
+    v.cards = drawn;
+    v.retry = retry;
+    v.clip = area;
     if let Some(l) = lookup {
         l.finish(Some(waker));
     }
     v.links = links;
     v.pictures = pictures;
+    v.sounds = sounds;
     // more above / below: the text fades under the edge
     let surface = t.surface;
     if offset > 0.5 {
@@ -747,6 +854,8 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
         let st = Style::mono(size::SMALL, t.text).weight(weight::MEDIUM);
         let w = ui.measure(label, st) + 40.0;
         let pr = Rect::new(col.x + (col.w - w) / 2.0, area.bottom() - 42.0, w, 28.0);
+        // an app's page stops short of it (a page is a window of its own, over anything drawn)
+        v.clip.h = (pr.y - 8.0 - area.y).max(0.0);
         let hot = ui.hover_amount(("focus-latest", id), pr);
         ui.shadow(pr, radius::OVERLAY, 12.0, 3.0, t.shadow.fade(0.6));
         ui.panel(pr, radius::OVERLAY, t.raised.mix(t.text, 0.04 * hot), t.border);
@@ -756,7 +865,9 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
         ui.set_layer(prev);
     }
     if items.is_empty() && sent.is_empty() {
-        empty(ui, c, seen, Rect::new(col.x, area.y + intro_h + 18.0, col.w, (area.h - intro_h - 18.0).max(0.0)));
+        empty(ui, c, seen, Rect::new(col.x, area.y + intro_h + 18.0, col.w, (area.h - intro_h - 18.0).max(0.0)), &mut v.mark);
+    } else {
+        v.mark = None;
     }
 }
 
@@ -807,12 +918,32 @@ fn intro(ui: &mut Ui, c: &Typo, seen: &Seen, at: Point, w: f32, p: &mut Paint) {
     ui.hline(at.x, at.y + row_h + 8.0, w, t.hairline);
 }
 
-/// A session with nothing said yet: its mark and an invitation.
-fn empty(ui: &mut Ui, c: &Typo, seen: &Seen, r: Rect) {
+/// A session with nothing said yet: its mark and an invitation. Claude's and Codex's marks are their logos in
+/// pixels that come alive as it opens (see [`pixels`]); with too little room, and for the other agents, the plain
+/// mark.
+fn empty(ui: &mut Ui, c: &Typo, seen: &Seen, r: Rect, play: &mut Option<pixels::Play>) {
     let t = ui.t;
-    let cy = r.y + r.h * 0.4;
-    let mark = super::chrome::harness_mark(seen.harness);
-    ui.mark(mark, Rect::new(r.x + (r.w - 44.0) / 2.0, cy - 64.0, 44.0, 44.0), 40.0, Some(t.text.with_alpha(0.22)));
+    if let Some(limit) = &seen.limit {
+        let b = lay(ui, &[(limit.message.clone(), Style::mono(c.body, t.danger))], c.body, 1.6, r.w.max(80.0), None);
+        ui.draw(&b, Point::new(r.x, r.y + (r.h - b.h).max(0.0) * 0.35));
+        return;
+    }
+    // the pixel mark as big as the room over the words allows; the words come down a little under a big one
+    let side = ((r.h * 0.4 - 28.0) / 0.75).min(88.0);
+    let cy = match pixels::logo(seen.harness).filter(|_| side >= 40.0) {
+        Some(logo) => {
+            let cy = r.y + r.h * 0.4 + side * 0.25;
+            let play = play.get_or_insert_with(|| pixels::Play::new(ui.time));
+            pixels::draw(ui, logo, Point::new(r.x + r.w / 2.0, cy - 24.0 - side / 2.0), side, seen.activity == Some(Activity::Working), play);
+            cy
+        }
+        None => {
+            let cy = r.y + r.h * 0.4;
+            let mark = super::chrome::harness_mark(seen.harness);
+            ui.mark(mark, Rect::new(r.x + (r.w - 44.0) / 2.0, cy - 64.0, 44.0, 44.0), 40.0, Some(t.text.with_alpha(0.22)));
+            cy
+        }
+    };
     let words = match seen.activity {
         Some(Activity::Working) => format!("{} is getting ready.", agent_name(seen.harness)),
         _ => "What should we work on?".to_string(),
@@ -824,9 +955,23 @@ fn empty(ui: &mut Ui, c: &Typo, seen: &Seen, r: Rect) {
     ui.draw(&hint, Point::new(r.x + (r.w - hint.w) / 2.0, cy + b.h + 10.0));
 }
 
-/// Measure (and with `p.draw`, draw) item `i` at `at`, `w` wide: its height (0 for nothing to show).
+/// Measure (and with `p.draw`, draw) item `i` at `at`, `w` wide: its height (0 for nothing to show). The sound
+/// files it names get a card each under it, to play them there (see [`sound`]).
 #[allow(clippy::too_many_arguments)]
 fn item(ui: &mut Ui, c: &Typo, it: &Item, blocks: Option<&Vec<Block>>, pics: &[PathBuf], i: usize, at: Point, w: f32, open: bool, narration: bool, p: &mut Paint) -> f32 {
+    let h = item_body(ui, c, it, blocks, pics, i, at, w, open, narration, p);
+    let sounds = if h > 0.0 { sound::sounds_of(it) } else { vec![] };
+    if sounds.is_empty() {
+        return h;
+    }
+    if p.draw {
+        sound::cards(ui, c, p.id, &sounds, Point::new(at.x, at.y + h), w, SOUND, SOUND_AT, &mut p.sounds);
+    }
+    h + sound::height(sounds.len())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn item_body(ui: &mut Ui, c: &Typo, it: &Item, blocks: Option<&Vec<Block>>, pics: &[PathBuf], i: usize, at: Point, w: f32, open: bool, narration: bool, p: &mut Paint) -> f32 {
     let id = p.id;
     match it {
         Item::You { text, command: true, .. } if setting(text).is_some() => {
@@ -884,6 +1029,8 @@ fn setting(text: &str) -> Option<String> {
 /// (a message on its way).
 #[allow(clippy::too_many_arguments)]
 fn you(ui: &mut Ui, c: &Typo, text: &str, images: usize, pics: &[PathBuf], command: bool, at: Point, w: f32, open: bool, state: Option<&str>, p: &mut Paint) -> f32 {
+    let short = crate::quips::collapse(text);
+    let text = short.as_str();
     let t = ui.t;
     let max_w = (w * 0.86).max(120.0);
     let (px, py) = (16.0, 11.0);
@@ -1138,7 +1285,63 @@ fn step_icon(kind: StepKind) -> &'static str {
         StepKind::Plan => "\u{F0756}",
         StepKind::Ask => "\u{F0625}",
         StepKind::Send => "\u{F048A}",
+        StepKind::Skill => "\u{F0674}",
+        StepKind::Mcp => "\u{F1425}",
         StepKind::Other => "\u{F05B7}",
+    }
+}
+
+/// What a skill or an MCP tool is about, by the words its name starts with, and its icon. The first that fits
+/// wins: a voice before a generator, a click before the web.
+const ABOUT: &[(&[&str], &str)] = &[
+    (&["voice", "speech", "speak", "tts", "narrat", "audio", "sound", "podcast"], "\u{F036C}"),
+    (&["music", "song", "melod"], "\u{F0387}"),
+    (&["video", "clip", "film", "movie", "reel", "animat"], "\u{F0567}"),
+    (&["image", "picture", "photo", "draw", "illustrat", "art", "sticker", "emote", "logo", "thumbnail", "meme"], "\u{F02E9}"),
+    (&["screenshot", "snapshot", "screen", "capture"], "\u{F0E51}"),
+    (&["click", "tap", "press", "type", "fill", "select", "swipe", "scroll", "hover", "drag"], "\u{F0CFD}"),
+    (&["javascript", "script", "exec", "eval", "console", "shell", "command", "terminal"], "\u{F018D}"),
+    (&["navigate", "browse", "page", "tab", "url", "web", "site", "chrome"], "\u{F059F}"),
+    (&["upload"], "\u{F0552}"),
+    (&["download"], "\u{F01DA}"),
+    (&["search", "find", "query", "history", "research"], "\u{F0349}"),
+    (&["pdf"], "\u{F0226}"),
+    (&["docx", "word", "document", "doc", "memo"], "\u{F0219}"),
+    (&["xlsx", "excel", "sheet", "spreadsheet", "csv"], "\u{F021B}"),
+    (&["pptx", "slide", "deck", "powerpoint", "presentation"], "\u{F0227}"),
+    (&["deploy", "release", "ship", "publish", "launch"], "\u{F14DE}"),
+    (&["commit", "git", "branch", "merge"], "\u{F0718}"),
+    (&["test"], "\u{F0096}"),
+    (&["design", "theme", "style", "palette", "colour", "color"], "\u{F0E0C}"),
+    (&["workout", "fitness", "exercise", "gains"], "\u{F01E6}"),
+    (&["schedule", "cron", "remind", "wait", "timer", "loop"], "\u{F0150}"),
+    (&["notif", "alert"], "\u{F009C}"),
+    (&["message", "chat", "email", "mail", "reply"], "\u{F036A}"),
+    (&["connect", "device", "phone", "android"], "\u{F011C}"),
+    (&["read", "get", "list", "fetch", "show", "view", "inspect"], "\u{F06D0}"),
+    (&["create", "generate", "make", "write", "new", "build"], "\u{F0674}"),
+];
+
+/// A step's own icon: a skill's or an MCP tool's by what it's about ("Generate voice" a microphone, "Click
+/// element" a pointer, "Navigate" the web), else its kind's.
+fn step_glyph(s: &Step) -> &'static str {
+    // a tool's name, not what it was given (an upload of photo.png is an upload)
+    let name = s.label.split(" · ").next().unwrap_or_default().to_lowercase();
+    let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let about = |keys: &[&str]| keys.iter().any(|k| words.iter().any(|w| w.starts_with(k)));
+    match s.kind {
+        StepKind::Skill | StepKind::Mcp => ABOUT.iter().find(|(keys, _)| about(keys)).map_or(step_icon(s.kind), |(_, glyph)| *glyph),
+        StepKind::Other if about(&["notif"]) => "\u{F009C}",
+        kind => step_icon(kind),
+    }
+}
+
+/// A step's label as runs: what it did in `ink`, and what follows its " · " (where it went, how far along) in
+/// `rest`.
+fn label_runs(label: &str, ink: Color, rest: Color, size: f32) -> Vec<(String, Style)> {
+    match label.split_once(" · ") {
+        Some((what, more)) => vec![(what.to_string(), Style::mono(size, ink)), (format!(" · {more}"), Style::mono(size, rest))],
+        None => vec![(label.to_string(), Style::mono(size, ink))],
     }
 }
 
@@ -1161,18 +1364,34 @@ fn summary(steps: &[Step], now_ms: i64, working: bool) -> String {
         1 => Some(one.to_string()),
         k => Some(many.replace('#', &k.to_string())),
     };
-    [
-        n(count(&|k| k == StepKind::Read), "Read a file", "Read # files"),
-        n(count(&|k| matches!(k, StepKind::Edit | StepKind::Create | StepKind::Delete)), "Changed a file", "Changed # files"),
-        n(count(&|k| k == StepKind::Run), "Ran a command", "Ran # commands"),
-        n(count(&|k| matches!(k, StepKind::Search | StepKind::Web)), "Searched once", "Searched # times"),
-        n(count(&|k| k == StepKind::Agent), "Asked a helper", "Asked # helpers"),
-        n(count(&|k| matches!(k, StepKind::Plan | StepKind::Ask | StepKind::Send | StepKind::Other)), "Used a tool", "Used # tools"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" · ")
+    // a skill it used leads: the rest was its doing
+    let skills: Vec<&Step> = steps.iter().filter(|s| s.kind == StepKind::Skill).collect();
+    let skill = match skills.as_slice() {
+        [] => None,
+        [one] => Some(one.label.clone()),
+        many => Some(format!("Used {} skills", many.len())),
+    };
+    // an MCP server's tools by the server, when they're all one's
+    let mcp: Vec<&str> = steps.iter().filter(|s| s.kind == StepKind::Mcp).map(|s| s.detail.as_deref().unwrap_or("a server")).collect();
+    let server = match mcp.as_slice() {
+        [] => None,
+        [one] => Some(format!("Used {one}")),
+        [first, rest @ ..] if rest.iter().all(|s| s == first) => Some(format!("Used {first} {} times", mcp.len())),
+        many => Some(format!("Used {} tools", many.len())),
+    };
+    // the rest in the order it happened: what it did first, first
+    let first = |f: &dyn Fn(StepKind) -> bool| steps.iter().position(|s| f(s.kind)).unwrap_or(usize::MAX);
+    let mut rest: Vec<(usize, Option<String>)> = vec![
+        (first(&|k| k == StepKind::Read), n(count(&|k| k == StepKind::Read), "Read a file", "Read # files")),
+        (first(&|k| matches!(k, StepKind::Edit | StepKind::Create | StepKind::Delete)), n(count(&|k| matches!(k, StepKind::Edit | StepKind::Create | StepKind::Delete)), "Changed a file", "Changed # files")),
+        (first(&|k| k == StepKind::Run), n(count(&|k| k == StepKind::Run), "Ran a command", "Ran # commands")),
+        (first(&|k| matches!(k, StepKind::Search | StepKind::Web)), n(count(&|k| matches!(k, StepKind::Search | StepKind::Web)), "Searched once", "Searched # times")),
+        (first(&|k| k == StepKind::Agent), n(count(&|k| k == StepKind::Agent), "Asked a helper", "Asked # helpers")),
+        (first(&|k| k == StepKind::Mcp), server),
+        (first(&|k| matches!(k, StepKind::Plan | StepKind::Ask | StepKind::Send | StepKind::Other)), n(count(&|k| matches!(k, StepKind::Plan | StepKind::Ask | StepKind::Send | StepKind::Other)), "Used a tool", "Used # tools")),
+    ];
+    rest.sort_by_key(|(at, _)| *at);
+    skill.into_iter().chain(rest.into_iter().filter_map(|(_, said)| said)).collect::<Vec<_>>().join(" · ")
 }
 
 /// The file a step was about, as a link the session can open (at its line): what it read, changed or sent.
@@ -1194,7 +1413,11 @@ fn did(ui: &mut Ui, c: &Typo, steps: &[Step], i: usize, at: Point, w: f32, open:
     let row_h = (c.small * 1.9).round();
     let shots = step_pictures(steps);
     let shots_h = if shots.is_empty() { 0.0 } else { SHOWN.1 + 10.0 };
-    let mut h = row_h + shots_h;
+    // its MCP apps' cards, under the line
+    let all = p.apps.cards;
+    let cards: Vec<(&Step, &Card)> = steps.iter().filter(|s| s.app.is_some()).filter_map(|s| all.and_then(|a| a.get(&s.id)).map(|c| (s, c))).filter(|(_, c)| card_height(c) > 0.0).collect();
+    let cards_h: f32 = cards.iter().map(|(_, c)| APP_GAP + card_height(c)).sum();
+    let mut h = row_h + shots_h + cards_h + if cards.is_empty() { 0.0 } else { 4.0 };
     if open {
         h += steps.len() as f32 * row_h + 4.0;
     }
@@ -1218,9 +1441,9 @@ fn did(ui: &mut Ui, c: &Typo, steps: &[Step], i: usize, at: Point, w: f32, open:
         ui.icon(ir, "\u{F03E4}", c.small + 1.0, t.danger);
     } else if running {
         ui.spinner(Point::new(at.x + 8.0, mid), 4.4, 1.5, t.accent);
-    } else {
-        let kind = steps.last().map_or(StepKind::Other, |s| s.kind);
-        ui.icon(ir, step_icon(kind), c.small + 1.0, c.faint);
+    } else if let Some(lead) = steps.iter().find(|s| s.kind == StepKind::Skill).or(steps.last()) {
+        // the skill it used when it used one, else what it did last
+        ui.icon(ir, step_glyph(lead), c.small + 1.0, c.faint);
     }
     // the counts on the right: lines added and removed, then the chevron
     let mut right = at.x + w;
@@ -1242,7 +1465,14 @@ fn did(ui: &mut Ui, c: &Typo, steps: &[Step], i: usize, at: Point, w: f32, open:
         Some(s) if c.waiting => format!("{} · waiting for you", s.label),
         _ => summary(steps, c.now_ms, c.working),
     };
-    let mut spans = vec![(what, if running && c.waiting { Style::mono(c.small, c.text.mix(c.muted, 0.2)) } else { quiet })];
+    let mut spans = if running && c.waiting {
+        vec![(what, Style::mono(c.small, c.text.mix(c.muted, 0.2)))]
+    } else if !running && steps.iter().any(|s| s.kind == StepKind::Skill) {
+        // the skill's name, a shade above the rest
+        label_runs(&what, c.text.mix(c.muted, 0.35), c.muted, c.small)
+    } else {
+        vec![(what, quiet)]
+    };
     if failed > 0 && !running {
         spans.push((format!(" · {failed} failed"), Style::mono(c.small, t.danger)));
     }
@@ -1270,6 +1500,15 @@ fn did(ui: &mut Ui, c: &Typo, steps: &[Step], i: usize, at: Point, w: f32, open:
         }
         y += SHOWN.1 + 4.0;
     }
+    for (s, card) in &cards {
+        y += APP_GAP;
+        let ch = card_height(card);
+        app_card(ui, c, p, s, card, Rect::new(at.x, y, w, ch));
+        y += ch;
+    }
+    if !cards.is_empty() {
+        y += 4.0;
+    }
     if open {
         y += 2.0;
         for s in steps {
@@ -1284,32 +1523,117 @@ fn did(ui: &mut Ui, c: &Typo, steps: &[Step], i: usize, at: Point, w: f32, open:
                 ui.hit(sr, Action::Focus(id, LINK + p.links.len()));
                 p.links.push(uri.clone());
             }
-            let (glyph, color) = match s.state {
-                StepState::Running if c.waiting => ("\u{F03E4}", t.danger),
-                StepState::Running => ("", t.accent),
-                StepState::Done => ("\u{F012C}", t.good.mix(c.muted, 0.4)),
-                StepState::Failed => ("\u{F0156}", t.danger),
+            // each by its own icon: spinning while it runs, a cross when it failed
+            let icon = Rect::new(at.x + 26.0, m - 8.0, 16.0, 16.0);
+            match s.state {
+                StepState::Running if c.waiting => ui.icon(icon, "\u{F03E4}", c.small, t.danger),
+                StepState::Running if c.working => ui.spinner(Point::new(at.x + 34.0, m), 4.0, 1.4, t.accent),
+                StepState::Failed => ui.icon(icon, "\u{F0156}", c.small, t.danger),
+                _ => ui.icon(icon, step_glyph(s), c.small, c.faint),
+            }
+            // on the right, quietly: the skill or server it used, the lines it added and removed
+            let mut right = at.x + w;
+            let tag = match s.kind {
+                StepKind::Skill => Some("skill"),
+                StepKind::Mcp => s.detail.as_deref(),
+                _ => None,
             };
-            if s.state == StepState::Running && c.working {
-                ui.spinner(Point::new(at.x + 34.0, m), 4.0, 1.4, color);
-            } else {
-                ui.icon(Rect::new(at.x + 26.0, m - 8.0, 16.0, 16.0), glyph, c.small, color);
+            if let Some(tag) = tag {
+                let tb = ui.line(tag, Style::mono(c.small, c.faint), Some(160.0));
+                ui.draw(&tb, Point::new(right - tb.w, m - tb.h / 2.0));
+                right -= tb.w + 14.0;
+            }
+            for (n, sign, ink) in [(s.removed, "−", t.danger), (s.added, "+", t.good)] {
+                if n > 0 {
+                    let nb = ui.line(&format!("{sign}{n}"), Style::mono(c.small, ink.mix(c.muted, 0.35)), None);
+                    ui.draw(&nb, Point::new(right - nb.w, m - nb.h / 2.0));
+                    right -= nb.w + 8.0;
+                }
             }
             let lx = at.x + 50.0;
-            let mut runs = vec![(s.label.clone(), Style::mono(c.small, c.text.mix(c.muted, 0.3)))];
-            if let Some(d) = s.detail.as_deref().map(|d| d.lines().next().unwrap_or_default()).filter(|d| !d.is_empty() && !s.label.contains(*d)) {
+            let ink = if s.kind == StepKind::Skill { c.text } else { c.text.mix(c.muted, 0.3) };
+            let mut runs = label_runs(&s.label, ink, c.muted, c.small);
+            // what it was done to, after it (a server's name is the tag)
+            let detail = if s.kind == StepKind::Mcp { None } else { s.detail.as_deref() };
+            if let Some(d) = detail.map(|d| d.lines().next().unwrap_or_default()).filter(|d| !d.is_empty() && !s.label.contains(*d)) {
                 let d = match s.line.filter(|_| file.is_some()) {
                     Some(l) => format!("{d}:{l}"),
                     None => d.to_string(),
                 };
                 runs.push((format!("   {d}"), Style::mono(c.small, c.faint)));
             }
-            let b = ui.rich(&runs, c.small, Some((w - (lx - at.x)).max(20.0)), false, Some(1));
+            let b = ui.rich(&runs, c.small, Some((right - 8.0 - lx).max(20.0)), false, Some(1));
             ui.draw(&b, Point::new(lx, m - b.h / 2.0));
             y += row_h;
         }
     }
     h
+}
+
+/// How tall an MCP app's card is: its page, or a line saying it's opening or why it can't (a page that can't be
+/// had for no reason worth saying, as the demo's without it, shows no card).
+fn card_height(card: &Card) -> f32 {
+    match &card.page {
+        Page::Ready(_) => card.h + 2.0 * APP_INSET.1,
+        Page::Reading => 64.0,
+        Page::Failed(why) if why.is_empty() => 0.0,
+        Page::Failed(_) => 76.0,
+    }
+}
+
+/// What an MCP app's card is filled with: solid, as its page sits on it.
+fn card_fill(ui: &Ui) -> Color {
+    let t = ui.t;
+    t.raised.over(t.surface).over(t.bg).with_alpha(1.0)
+}
+
+/// What an app's server is called: `claude_ai_JustGains` (a claude.ai connector) is "JustGains", `my_server` "my
+/// server".
+fn app_name(server: &str) -> String {
+    server.strip_prefix("claude_ai_").unwrap_or(server).replace('_', " ")
+}
+
+/// An MCP app's card: its page (laid over it once the frame is drawn), and until the page shows, a line saying
+/// it's opening, or why it can't.
+fn app_card(ui: &mut Ui, c: &Typo, p: &mut Paint, s: &Step, card: &Card, r: Rect) {
+    let t = ui.t;
+    let Some(app) = &s.app else { return };
+    ui.shadow(r, APP_RADIUS, 18.0, 4.0, t.shadow.fade(0.22));
+    ui.panel(r, APP_RADIUS, card_fill(ui), t.border);
+    let opening = |ui: &mut Ui| {
+        let mid = r.y + 32.0;
+        ui.spinner(Point::new(r.x + 26.0, mid), 5.0, 1.6, t.accent);
+        let b = ui.line(&format!("Opening {}…", card.name), Style::mono(c.small, c.muted), Some((r.w - 64.0).max(20.0)));
+        ui.draw(&b, Point::new(r.x + 44.0, mid - b.h / 2.0));
+    };
+    match &card.page {
+        Page::Ready(_) => {
+            // under the page until it shows (once it has said how tall it is)
+            if !card.sized {
+                opening(ui);
+            }
+            let pr = Rect::new(r.x + APP_INSET.0, r.y + APP_INSET.1, r.w - 2.0 * APP_INSET.0, card.h);
+            p.apps.drawn.push((s.id.clone(), app.clone(), pr));
+        }
+        Page::Reading => opening(ui),
+        Page::Failed(why) => {
+            let label = "Try again";
+            let bw = widgets::button_width(ui, label);
+            let br = Rect::new(r.right() - 18.0 - bw, r.y + (r.h - 32.0) / 2.0, bw, 32.0);
+            if p.apps.retry.len() < APP_RETRY_END - APP_RETRY {
+                widgets::button(ui, br, label, widgets::Kind::Secondary, Action::Focus(p.id, APP_RETRY + p.apps.retry.len()));
+                p.apps.retry.push(app.clone());
+            }
+            ui.icon(Rect::new(r.x + 18.0, r.y + 18.0, 18.0, 18.0), "\u{F0028}", c.small + 3.0, t.warn);
+            let x = r.x + 46.0;
+            let room = (br.x - 18.0 - x).max(40.0);
+            let title = ui.line(&format!("{} didn't open here", card.name), Style::mono(c.small, c.text).weight(weight::MEDIUM), Some(room));
+            ui.draw(&title, Point::new(x, r.y + 16.0));
+            let first = why.lines().next().unwrap_or_default().trim();
+            let reason = ui.rich(&[(first.to_string(), Style::mono(c.small, c.muted))], c.small, Some(room), false, Some(1));
+            ui.draw(&reason, Point::new(x, r.y + 16.0 + title.h + 4.0));
+        }
+    }
 }
 
 fn note(ui: &mut Ui, c: &Typo, kind: NoteKind, text: &str, at: Point, w: f32, draw: bool) -> f32 {
@@ -1450,14 +1774,17 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
     let levels = app.focus_levels(id);
     let waits = app.focus_change_waits(id);
     let commands = app.focus_command_rows(id);
-    let menu = app.focus.drafts.get(&id).and_then(|d| d.menu);
-    let menu_rows: Vec<MenuRow> = menu.map(|m| app.focus_menu_rows(id, m.kind)).unwrap_or_default();
+    let quip_rows = app.focus_quip_rows(id);
+    let quip_open = focused && (app.focus.drafts.get(&id).is_some_and(|d| d.quips.open || d.quips.editor.is_some()) || !quip_rows.is_empty());
+    let menu = app.focus.drafts.get(&id).and_then(|d| d.menu.clone());
+    let menu_rows: Vec<MenuRow> = menu.as_ref().map(|m| app.focus_menu_rows(id, m.kind)).unwrap_or_default();
     let Some(d) = app.focus.drafts.get_mut(&id) else { return };
     let attachments: Vec<PathBuf> = d.attachments.iter().map(|a| a.path.clone()).collect();
     let cols = d.cols.max(8);
     let rows = d.area.rows(cols);
     let text = d.area.text().to_string();
     let cur = d.area.cursor();
+    let quip_matches: Vec<_> = app.focus.quips.matches(&text).into_iter().map(|(r, q)| (r, q.instructions.clone())).collect();
     let blank = d.blank();
     let command_sel = d.command.min(commands.len().saturating_sub(1));
     // the pictures going with it; the one under the pointer opens its popover, which stays while the pointer
@@ -1465,7 +1792,7 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
     let mut top = r.y + pad_y;
     let mut thumbs: Vec<Rect> = vec![];
     if !attachments.is_empty() {
-        let mut p = Paint { draw: true, id, links: vec![], pictures: std::mem::take(&mut v.pictures), media: Some(&mut *media), resolve: None };
+        let mut p = Paint { draw: true, id, links: vec![], pictures: std::mem::take(&mut v.pictures), sounds: vec![], media: Some(&mut *media), resolve: None, apps: AppPaint::default() };
         for (n, path) in attachments.iter().enumerate() {
             let pr = Rect::new(r.x + pad_x + n as f32 * (ATTACHED + 8.0), top, ATTACHED, ATTACHED);
             if pr.right() > r.right() - pad_x {
@@ -1507,7 +1834,28 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
     for (n, &(s, e)) in rows.iter().enumerate().skip(first).take(room) {
         let y = origin.y + n as f32 * c.lh;
         let b = ui.line(&visible(&text[s..e]), st, None);
-        ui.draw(&b, Point::new(origin.x, y + (c.lh - b.h) / 2.0));
+        let at = Point::new(origin.x, y + (c.lh - b.h) / 2.0);
+        for (range, instructions) in &quip_matches {
+            let start = range.start.max(s);
+            let end = range.end.min(e);
+            if start < end {
+                let local = visible(&text[s..start]).len()..visible(&text[s..end]).len();
+                for rect in range_rects(&b, at, &local, ui.scale) {
+                    ui.round(rect.outset(2.0), 4.0, t.accent.with_alpha(0.14));
+                    if ui.hovered(rect) { widgets::tooltip(ui, rect, instructions); }
+                }
+            }
+        }
+        ui.draw(&b, at);
+        for (range, _) in &quip_matches {
+            let start = range.start.max(s);
+            let end = range.end.min(e);
+            if start < end {
+                let prefix = ui.measure(&visible(&text[s..start]), st);
+                let mark = ui.line(&visible(&text[start..end]), st.weight(weight::SEMIBOLD).color(t.accent), None);
+                ui.draw(&mark, Point::new(origin.x + prefix, at.y));
+            }
+        }
         if n == crow {
             caret_at = Some(Point::new(origin.x + b.layout.caret_x(visible(&text[s..cur]).len()) / ui.scale, y));
         }
@@ -1525,7 +1873,7 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
         ("enter", "run", SEND)
     } else if !blank || !attachments.is_empty() {
         ("enter", "send", SEND)
-    } else if mood == Mood::Working {
+    } else if mood == Mood::Working || seen.limit.as_ref().is_some_and(|limit| limit.is_retrying()) {
         ("esc", "stop", STOP)
     } else {
         ("", "", 0)
@@ -1549,25 +1897,25 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
     let later = if waits { " · Codex switches when this turn ends" } else { "" };
     let mut x = foot.x;
     let mut anchors: [Option<Rect>; 2] = [None, None];
-    if let Some(m) = model.as_deref() {
+    if let Some(m) = model.as_deref().filter(|_| right - x > 64.0) {
         let name = models.as_ref().and_then(|ms| ms.iter().find(|c| same_model(m, c))).map_or_else(|| model_name(m), |c| c.name.clone());
-        let open = menu.is_some_and(|m| m.kind == MenuKind::Model);
+        let open = menu.as_ref().is_some_and(|m| m.kind == MenuKind::Model);
         let cr = chip(ui, id, c, Point::new(x, fmid), &name, MODEL_CHIP, models.is_some(), open, right - x);
         if !open && ui.hovered(cr) {
-            let tip = if models.is_some() { format!("Switch the model{later}") } else { format!("{name} · bro's route set it when the session started") };
+            let tip = if models.is_some() { format!("Switch the model{later}") } else { format!("{name} · bro has no list of this provider's models yet") };
             widgets::tooltip(ui, cr, &tip);
         }
         anchors[0] = Some(cr);
         x = cr.right() + 2.0;
     }
-    if levels.is_some() || effort.is_some() {
+    if (levels.is_some() || effort.is_some()) && right - x > 100.0 {
         if anchors[0].is_some() {
             let dot = ui.line("·", Style::mono(c.small, t.faint), None);
             ui.draw(&dot, Point::new(x + 4.0, fmid - dot.h / 2.0));
             x += dot.w + 16.0;
         }
         let label = effort.as_deref().map_or_else(|| "thinking".to_string(), |e| format!("thinking {}", level_name(e)));
-        let open = menu.is_some_and(|m| m.kind == MenuKind::Thinking);
+        let open = menu.as_ref().is_some_and(|m| m.kind == MenuKind::Thinking);
         let cr = chip(ui, id, c, Point::new(x, fmid), &label, THINKING_CHIP, levels.is_some(), open, right - x);
         if !open && ui.hovered(cr) && levels.is_some() {
             widgets::tooltip(ui, cr, &format!("How hard it thinks{later}"));
@@ -1576,16 +1924,22 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
     }
     // the lists, over everything (they slide in)
     let k = ui.ease(("focus-menu", id), if menu.is_some() { 1.0 } else { 0.0 }, 120.0);
-    if let Some(m) = menu
+    if let Some(m) = menu.as_ref()
         && let Some(anchor) = anchors[if m.kind == MenuKind::Model { 0 } else { 1 }]
-        && !menu_rows.is_empty()
+        && (!menu_rows.is_empty() || !m.query.is_empty())
     {
         let title = if m.kind == MenuKind::Model { "Model" } else { "Thinking" };
-        pick_menu(ui, id, title, waits.then_some("Codex switches when this turn ends"), &menu_rows, m.sel, anchor, k);
+        // a provider's long list searches as you type
+        let searchable = m.kind == MenuKind::Model && models.as_ref().is_some_and(|ms| ms.len() > 8);
+        let note = waits.then_some("Codex switches when this turn ends");
+        pick_menu(ui, id, title, note, &menu_rows, m.sel, &m.query, searchable, anchor, k, &mut v.menu_top);
     }
     let kc = ui.ease(("focus-commands", id), if commands.is_empty() { 0.0 } else { 1.0 }, 120.0);
     if !commands.is_empty() {
         commands_list(ui, id, c, &commands, command_sel, r, v, kc);
+    }
+    if quip_open {
+        quips::draw(app, ui, id, r, &quip_rows, v);
     }
     v.pop_rect = None;
     if let Some(n) = v.pop
@@ -1593,6 +1947,7 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
     {
         v.pop_rect = Some(attachment_popover(ui, id, path, n, *anchor, media));
     }
+    v.popup = quip_open || menu.is_some() || !commands.is_empty() || v.pop_rect.is_some();
 }
 
 /// A quiet word in the reply box's footer, at `at` (its left, centred on its line) and at most `room` wide, that
@@ -1618,24 +1973,49 @@ fn chip(ui: &mut Ui, id: PaneId, c: &Typo, at: Point, label: &str, target: usize
 }
 
 /// The model or thinking list over its word in the footer: each row its name and what it's for, a check on what
-/// it runs on, the keys' row lit. On a layer of its own, `k` of the way in.
+/// it runs on, the keys' row lit. What's typed narrows it (`searchable`: a provider's long list says so), and it
+/// scrolls eight rows at a time. On a layer of its own, `k` of the way in.
 #[allow(clippy::too_many_arguments)]
-fn pick_menu(ui: &mut Ui, id: PaneId, title: &str, note: Option<&str>, rows: &[MenuRow], sel: usize, anchor: Rect, k: f32) {
+fn pick_menu(ui: &mut Ui, id: PaneId, title: &str, note: Option<&str>, rows: &[MenuRow], sel: usize, query: &str, searchable: bool, anchor: Rect, k: f32, top: &mut usize) {
     let t = ui.t;
     let prev = ui.layer();
     let detail = rows.iter().any(|r| r.detail.is_some());
     let row_h = if detail { 48.0 } else { 34.0 };
+    let shown = rows.len().clamp(1, 8);
+    let sel = sel.min(rows.len().saturating_sub(1));
+    if sel < *top {
+        *top = sel;
+    } else if sel >= *top + shown {
+        *top = sel + 1 - shown;
+    }
+    *top = (*top).min(rows.len().saturating_sub(shown));
     let (head, foot) = (32.0, if note.is_some() { 28.0 } else { 0.0 });
-    let w = 330.0f32.min(ui.screen.w - 16.0);
-    let h = head + rows.len() as f32 * row_h + foot + 6.0;
+    let w = if searchable { 380.0f32 } else { 330.0 }.min(ui.screen.w - 16.0);
+    let h = head + shown as f32 * row_h + foot + 6.0;
     let x = anchor.x.min(ui.screen.right() - w - 8.0).max(ui.screen.x + 8.0);
     let y = (anchor.y - 8.0 - h).max(ui.screen.y + 8.0) + (1.0 - k) * 8.0;
     let r = Rect::new(x, y, w, h);
     widgets::card(ui, r, radius::OVERLAY);
     let tb = ui.line(title, Style::new(size::SMALL, weight::SEMIBOLD, t.muted), None);
     ui.draw(&tb, Point::new(r.x + 14.0, r.y + (head - tb.h) / 2.0 + 1.0));
+    // what's typed, at the top's right
+    if searchable || !query.is_empty() {
+        let (text, ink) = if query.is_empty() { ("type to search", t.faint) } else { (query, t.text) };
+        let qb = ui.line(text, Style::mono(size::SMALL, ink), Some(r.w - tb.w - 64.0));
+        let qx = r.right() - 14.0 - qb.w - if query.is_empty() { 0.0 } else { 3.0 };
+        ui.icon(Rect::new(qx - 20.0, r.y + (head - 16.0) / 2.0 + 1.0, 16.0, 16.0), "\u{F0349}", 13.0, t.faint);
+        ui.draw(&qb, Point::new(qx, r.y + (head - qb.h) / 2.0 + 1.0));
+        if !query.is_empty() {
+            ui.top_fill(Rect::new(qx + qb.w + 1.0, r.y + (head - 14.0) / 2.0 + 1.0, 1.5, 14.0), 0.5, t.accent);
+        }
+    }
     let mut ry = r.y + head;
-    for (n, row) in rows.iter().enumerate() {
+    if rows.is_empty() {
+        let nb = ui.line(&format!("Nothing matches “{query}”"), Style::new(size::SMALL, weight::REGULAR, t.muted), Some(r.w - 28.0));
+        ui.draw(&nb, Point::new(r.x + 14.0, ry + (row_h - nb.h) / 2.0));
+        ry += row_h;
+    }
+    for (n, row) in rows.iter().enumerate().skip(*top).take(shown) {
         let rr = Rect::new(r.x + 4.0, ry, r.w - 8.0, row_h);
         widgets::row(ui, rr, ("focus-menu-row", id, n), n == sel, Action::Focus(id, MENU_ROW + n));
         let lb = ui.line(&row.label, Style::new(size::BODY, if row.current { weight::SEMIBOLD } else { weight::REGULAR }, t.text), Some(rr.w - 64.0));
@@ -1653,6 +2033,10 @@ fn pick_menu(ui: &mut Ui, id: PaneId, title: &str, note: Option<&str>, rows: &[M
             ui.icon(Rect::new(rr.right() - 30.0, rr.y + (row_h - 18.0) / 2.0, 18.0, 18.0), "\u{F012C}", 16.0, t.accent);
         }
         ry += row_h;
+    }
+    if rows.len() > shown {
+        let list = shown as f32 * row_h;
+        widgets::scrollbar(ui, Rect::new(r.right() - 9.0, r.y + head, 6.0, list), rows.len() as f32 * row_h, list, *top as f32 * row_h, 0.7);
     }
     if let Some(note) = note {
         ui.hline(r.x + 10.0, ry + 3.0, r.w - 20.0, t.hairline);
@@ -1771,16 +2155,32 @@ fn byte_at(ta: &crate::textarea::TextArea, g: &BoxGeo, p: Point, ui_measure: &mu
 
 // --------------------------------------------------------------------------------------------- the mouse
 
+pub(super) fn draw_quips_overlay(app: &mut App, ui: &mut Ui, id: PaneId, window: Rect) {
+    quips::draw_overlay(app, ui, id, window);
+}
+
+pub(super) fn terminal_quips_height(app: &App, id: PaneId) -> f32 {
+    if app.focus.drafts.get(&id).is_some_and(|d| !d.terminal_quips.pending.is_empty()) { 34.0 } else { 0.0 }
+}
+
+pub(super) fn draw_terminal_quips(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool, input: Option<Rect>, view: &mut View) {
+    quips::draw_terminal(app, ui, id, content, focused, input, view);
+}
+
 /// Target `n` of `id`'s focus view was clicked.
 pub fn click(g: &mut Gui, id: PaneId, n: usize, p: Point, count: u32) {
     let _ = count;
     focus_pane(g, id);
+    if quips::click(g, id, n, p, count) { return; }
     // a click anywhere but its list (or the word that opened it) closes the model or thinking list
     if !(MENU_ROW..COMMAND_ROW).contains(&n) && n != MODEL_CHIP && n != THINKING_CHIP {
         g.app.focus.draft(id).menu = None;
     }
     match n {
-        AREA => {}
+        AREA => {
+            let d = g.app.focus.draft(id);
+            d.quips.dismissed = Some((d.area.text().into(), d.area.cursor()));
+        }
         BOX => {
             let geo = g.panes.get(&id).and_then(|st| st.focus.geo);
             if let Some(geo) = geo {
@@ -1835,12 +2235,20 @@ pub fn click(g: &mut Gui, id: PaneId, n: usize, p: Point, count: u32) {
                 g.show_media(&path);
             }
         }
+        n if (APP_RETRY..APP_RETRY_END).contains(&n) => {
+            let a = g.panes.get(&id).and_then(|st| st.focus.retry.get(n - APP_RETRY).cloned());
+            let sid = g.app.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone());
+            if let (Some(a), Some(sid)) = (a, sid) {
+                let svc = g.app.svc.clone();
+                g.apps.retry(&svc, &sid, &a);
+            }
+        }
         n if (MENU_ROW..COMMAND_ROW).contains(&n) => {
-            if let Some(m) = g.app.focus.drafts.get(&id).and_then(|d| d.menu) {
+            if let Some(m) = g.app.focus.drafts.get(&id).and_then(|d| d.menu.clone()) {
                 g.app.focus_pick(id, m.kind, n - MENU_ROW);
             }
         }
-        n if (COMMAND_ROW..OPEN).contains(&n) => {
+        n if (COMMAND_ROW..quips::BASE).contains(&n) => {
             let picked = g.app.focus_command_rows(id).get(n - COMMAND_ROW).cloned();
             if let Some(cmd) = picked {
                 g.app.focus_complete(id, &cmd, true);
@@ -1877,6 +2285,16 @@ pub fn click(g: &mut Gui, id: PaneId, n: usize, p: Point, count: u32) {
                 super::mouse::open_link(g, id, &uri);
             }
         }
+        n if (SOUND..SOUND_AT).contains(&n) => {
+            if let Some((path, _)) = g.panes.get(&id).and_then(|st| st.focus.sounds.get(n - SOUND).cloned()) {
+                sound::toggle(&path);
+            }
+        }
+        n if n >= SOUND_AT => {
+            if let Some((path, r)) = g.panes.get(&id).and_then(|st| st.focus.sounds.get(n - SOUND_AT).cloned()) {
+                sound::seek(&path, (p.x - r.x) / r.w.max(1.0));
+            }
+        }
         n if n >= PICTURE => {
             let path = g.panes.get(&id).and_then(|st| st.focus.pictures.get(n - PICTURE).cloned());
             if let Some(path) = path {
@@ -1901,21 +2319,82 @@ fn focus_pane(g: &mut Gui, id: PaneId) {
 }
 
 /// The wheel over `id`'s conversation: it scrolls (and stops following the newest once you go up).
-pub fn wheel(g: &mut Gui, id: PaneId, dy: f32) {
+pub fn wheel(g: &mut Gui, id: PaneId, delta: super::scroll::Wheel) {
+    if quips::wheel(g, id, delta.units()) { return; }
     let Some(st) = g.panes.get_mut(&id) else { return };
     let v = &mut st.focus;
-    let max = (v.total - v.room).max(0.0);
-    v.top = (v.top - dy * 56.0).clamp(0.0, max);
-    v.follow = v.top >= max - 2.0;
+    v.scroll_pixels(delta.pixels(v.line_height));
     g.dirty = true;
+}
+
+impl View {
+    pub(super) fn scroll_rows(&mut self, rows: f32) {
+        self.scroll_pixels(rows * self.line_height);
+    }
+
+    fn scroll_pixels(&mut self, up: f32) {
+        let max = (self.total - self.room).max(0.0);
+        let top = if self.follow { max } else { self.top };
+        self.top = (top - up).clamp(0.0, max);
+        self.follow = self.top >= max;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn precise_scrolling_holds_the_reading_position_and_follows_again_at_the_bottom() {
+        let mut view = View { top: 800.0, total: 1000.0, room: 200.0, line_height: 30.0, ..Default::default() };
+        view.scroll_pixels(0.25);
+        assert_eq!(view.top, 799.75);
+        assert!(!view.follow, "even a small touchpad movement leaves the live edge");
+        view.scroll_pixels(-0.25);
+        assert!(view.follow);
+        view.scroll_rows(1.0);
+        assert_eq!(view.top, 770.0);
+        assert!(!view.follow);
+        view.scroll_pixels(super::super::scroll::Wheel::Pixels(2.5).pixels(view.line_height));
+        assert_eq!(view.top, 767.5);
+        view.total = 1100.0;
+        assert_eq!(view.top, 767.5, "new output must not pull you down while reading history");
+        view.scroll_rows(100.0);
+        assert_eq!(view.top, 0.0);
+        view.scroll_rows(-100.0);
+        assert_eq!(view.top, 900.0);
+        assert!(view.follow);
+        view.total = 1200.0;
+        view.scroll_rows(1.0);
+        assert_eq!(view.top, 970.0, "scroll from the newest output when following");
+        assert!(!view.follow);
+    }
+
+    #[test]
+    fn ctrl_shift_arrows_scroll_the_active_conversation_without_editing_its_reply() {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(crate::services::fallback_settings(), tx.clone());
+        let mut app = App::new(svc, tx, crate::app::Opts { demo: true, fixed_demo: true, load_recents: false });
+        let id = app.focused().unwrap();
+        app.focus.on = true;
+        app.focus.draft(id).area.set_text("An unsent reply");
+        let mut panes = HashMap::new();
+        panes.entry(id).or_insert_with(super::super::PaneState::default).focus = View {
+            top: 800.0, total: 1000.0, room: 200.0, line_height: 30.0, ..Default::default()
+        };
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        assert!(super::super::scroll::key(&mut app, &mut panes, KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL | KeyModifiers::SHIFT)));
+        assert_eq!(panes[&id].focus.top, 770.0);
+        assert!(!panes[&id].focus.follow);
+        assert_eq!(app.focus.draft(id).area.text(), "An unsent reply");
+        assert!(super::super::scroll::key(&mut app, &mut panes, KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT)));
+        assert_eq!(panes[&id].focus.top, 800.0);
+        assert!(panes[&id].focus.follow);
+    }
+
     fn step(kind: StepKind, label: &str, state: StepState) -> Step {
-        Step { id: label.into(), kind, label: label.into(), detail: None, state, added: 0, removed: 0, line: None, at_ms: None }
+        Step { id: label.into(), kind, label: label.into(), detail: None, state, added: 0, removed: 0, line: None, at_ms: None, app: None }
     }
 
     #[test]
@@ -1929,6 +2408,30 @@ mod tests {
         long.at_ms = Some(1_000);
         assert_eq!(summary(std::slice::from_ref(&long), 43_000, true), "Run the tests · 42s", "a step that's been running a while says for how long");
         assert_eq!(summary(&[long], 43_000, false), "Run the tests", "one left behind in a session that isn't working has no clock");
+    }
+
+    #[test]
+    fn a_skill_leads_its_steps_and_a_server_goes_by_name() {
+        use StepKind::*;
+        use StepState::*;
+        let browse = |label: &str| Step { detail: Some("JustBrowse".into()), ..step(Mcp, label, Done) };
+        let voice = [step(Skill, "Generate voice", Done), step(Run, "Find cast members with voices", Done), step(Run, "Make the voice-over", Done)];
+        assert_eq!(summary(&voice, 0, true), "Generate voice · Ran 2 commands", "what the rest was for comes first");
+        assert_eq!(summary(&[step(Skill, "Generate voice", Done), step(Skill, "Generate images", Done)], 0, true), "Used 2 skills");
+        assert_eq!(summary(&[browse("Navigate · figma.com"), browse("Screenshot"), browse("Click element")], 0, true), "Used JustBrowse 3 times");
+        assert_eq!(summary(&[browse("Navigate · figma.com"), browse("Screenshot"), step(Run, "Pushed main", Done)], 0, true), "Used JustBrowse 2 times · Ran a command", "in the order it happened");
+        assert_eq!(summary(&[step(Run, "Ran the tests", Done), step(Read, "Read a.rs", Done), step(Edit, "Edited a.rs", Done)], 0, true), "Ran a command · Read a file · Changed a file");
+        // each by what it's about
+        assert_eq!(step_glyph(&voice[0]), "\u{F036C}", "a voice skill is a microphone");
+        assert_eq!(step_glyph(&step(Skill, "Generate images", Done)), "\u{F02E9}");
+        assert_eq!(step_glyph(&step(Skill, "JustGains app deployment", Done)), "\u{F14DE}");
+        assert_eq!(step_glyph(&step(Skill, "Reverse engineer anything", Done)), "\u{F0674}", "any other skill is a skill");
+        assert_eq!(step_glyph(&browse("Navigate · figma.com")), "\u{F059F}");
+        assert_eq!(step_glyph(&browse("Click element")), "\u{F0CFD}");
+        assert_eq!(step_glyph(&browse("Upload file · photo.png")), "\u{F0552}", "by the tool, not what it was given");
+        assert_eq!(step_glyph(&browse("Handle dialog · dismiss")), "\u{F1425}", "any other tool is a connector's");
+        assert_eq!(step_glyph(&step(Run, "Generate the sound", Done)), "\u{F018D}", "a command stays a command");
+        assert_eq!(label_runs("Navigate · figma.com", Color::WHITE, Color::BLACK, 12.0).len(), 2, "what it did, then where");
     }
 
     #[test]
@@ -1955,7 +2458,7 @@ mod tests {
     }
 
     fn seen_at(last_ms: Option<i64>, thought: Option<Thought>) -> Seen {
-        Seen { harness: Some(Harness::Claude), conv: None, activity: Some(Activity::Working), done: false, running: None, last_ms, cwd: PathBuf::from("/x"), branch: None, thought, sending: false }
+        Seen { harness: Some(Harness::Claude), conv: None, activity: Some(Activity::Working), limit: None, done: false, running: None, last_ms, cwd: PathBuf::from("/x"), branch: None, thought, sending: false }
     }
 
     #[test]
@@ -1973,10 +2476,21 @@ mod tests {
     }
 
     #[test]
+    fn provider_limits_outrank_busy_thinking_and_running_steps() {
+        let mut seen = seen_at(Some(0), Some(Thought { text: "Deep in thought".into(), at_ms: Some(0) }));
+        seen.limit = bro_core::sessions::limits::UsageLimit::from_screen("✻ Weekly limit reached · Retrying in 5h (Nov 1, 7pm) · attempt 1/30");
+        assert_eq!(mood_of(&seen, Some((Mood::Working, Instant::now())), Instant::now()), Mood::Blocked);
+        assert_eq!(thinking(&seen, 3_600_000, 3600), "Weekly limit reached");
+        assert_eq!(doing(&seen, 3_600_000, 3600), "Weekly limit reached");
+        seen.limit = None;
+        assert_eq!(mood_of(&seen, Some((Mood::Blocked, Instant::now())), Instant::now()), Mood::Working);
+    }
+
+    #[test]
     fn links_are_web_addresses_and_the_files_the_session_finds() {
         let spans = markdown::inline("see [docs](https://docs.rs/x), `src/focus.rs:12` and notes.txt");
         let mut found = |m: &FileLinkMatch| (m.path == "src/focus.rs").then(|| Arc::<str>::from(format!("file:///F:/app/{}#L{}", m.path, m.line.unwrap_or(0)).as_str()));
-        let mut p = Paint { draw: true, id: 1, links: vec![], pictures: vec![], media: None, resolve: Some(&mut found) };
+        let mut p = Paint { draw: true, id: 1, links: vec![], pictures: vec![], sounds: vec![], media: None, resolve: Some(&mut found), apps: AppPaint::default() };
         let links = link_ranges(&spans, &mut p);
         let text = markdown::plain(&spans);
         let got: Vec<(&str, &str)> = links.iter().map(|(r, t)| (&text[r.clone()], t.as_str())).collect();

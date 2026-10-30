@@ -17,8 +17,9 @@ pub struct Described {
     pub interactive: bool,
 }
 
-/// Wrapper text Claude Code injects around slash commands, hook output and images.
-pub(crate) const CLAUDE_NOISE: [&str; 10] = [
+/// Wrapper text Claude Code injects around slash commands, hook output and images, and around what
+/// another Claude session sent it (a teammate, a subagent, a peer session): user records nobody typed.
+pub(crate) const CLAUDE_NOISE: [&str; 14] = [
     "<local-command-caveat>",
     "<command-name>",
     "<command-message>",
@@ -29,6 +30,10 @@ pub(crate) const CLAUDE_NOISE: [&str; 10] = [
     "<bash-stdout>",
     "Caveat: The messages below",
     "Base directory for this skill:",
+    "Another Claude session sent a message",
+    "<teammate-message",
+    "<agent-message",
+    "<cross-session-message",
 ];
 
 /// Text Codex injects around the conversation.

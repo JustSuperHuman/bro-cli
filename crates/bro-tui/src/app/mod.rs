@@ -408,7 +408,10 @@ impl App {
             _theme_watcher: None,
             perf: Default::default(),
             flips: HashMap::new(),
-            focus: crate::focus::Focus::default(),
+            focus: crate::focus::Focus {
+                quips: if opts.demo || cfg!(test) { crate::quips::Library::default() } else { crate::quips::Library::load(crate::quips::path()) },
+                ..crate::focus::Focus::default()
+            },
             alt_down: None,
             probe: if cfg!(test) { Default::default() } else { crate::devprobe::Probe::start(tx.clone()) },
             card_links: vec![],
@@ -1208,6 +1211,7 @@ impl App {
             Overlay::Launcher(l) => return l.paste(s),
             Overlay::Watchdog(v) => return v.paste(s),
             Overlay::WatchdogPrompt(e) => return e.paste(s),
+            Overlay::Quips(id) => { let id = *id; return self.focus_paste(id, s); }
             Overlay::Palette(p) => {
                 p.query.extend(s.chars().filter(|c| !c.is_control()));
                 p.sel = 0;
@@ -1236,6 +1240,7 @@ impl App {
             if self.focus_view(id) {
                 return self.focus_paste(id, s);
             }
+            if self.terminal_quip_paste(id, s) { return; }
             self.with_pane(id, |p, cx| p.paste(s, cx));
         }
     }

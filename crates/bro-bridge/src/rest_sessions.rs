@@ -2,22 +2,32 @@
 //! reference host; actions become [`crate::BridgeCommand`]s for bro.
 
 use crate::BridgeCommand;
-use crate::commands::{compose_payload, launch_terminal, submit_settle, write_paced};
-use crate::prompt;
+use crate::commands::{compose_input, compose_payload, launch_terminal};
 use crate::rest::api_error;
 use crate::state::{AppState, COMMAND_INPUT, COMMAND_KILL, COMMAND_RESIZE};
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::rejection::ExtensionRejection;
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 const UNKNOWN_SESSION: &str = "Unknown terminal session.";
+
+pub(crate) async fn seen(Path(id): Path<String>, State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    if state.summary(&id).is_none() { return api_error(StatusCode::NOT_FOUND, UNKNOWN_SESSION); }
+    let Some(event) = body.get("eventId").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        return api_error(StatusCode::BAD_REQUEST, "eventId is required.");
+    };
+    state.acknowledge_attention(&id, event);
+    Json(state.summary(&id)).into_response()
+}
 /// Largest attachment accepted.
 pub(crate) const MAX_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 
@@ -163,22 +173,20 @@ pub(crate) async fn prompt_response(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Response {
-    let Some(context) = state.input_context(&id) else {
+    let Some(_) = state.input_context(&id) else {
         return api_error(StatusCode::NOT_FOUND, UNKNOWN_SESSION);
     };
-    match prompt::prompt_response_bytes(&context, &body) {
-        Ok(data) => match state.dispatch(&id, COMMAND_INPUT, &data, 0, 0) {
-            Ok(()) => Json(
+    match crate::commands::answer_prompt(&state, &id, &body).await {
+        Ok(()) => Json(
                 json!({ "accepted": true, "promptId": body["promptId"], "action": body["action"] }),
             )
             .into_response(),
-            Err(message) => api_error(StatusCode::INTERNAL_SERVER_ERROR, message),
-        },
         Err(message) if message.contains("changed") => (
             StatusCode::CONFLICT,
             Json(json!({ "message": message, "stale": true })),
         )
             .into_response(),
+        Err(message) if message.contains("already") => api_error(StatusCode::CONFLICT, message),
         Err(message) => api_error(StatusCode::BAD_REQUEST, message),
     }
 }
@@ -189,6 +197,8 @@ pub(crate) struct ComposeBody {
     pub text: String,
     #[serde(default = "default_true")]
     pub submit: bool,
+    #[serde(default, rename = "expandQuips")]
+    pub expand_quips: bool,
 }
 
 fn default_true() -> bool {
@@ -203,32 +213,35 @@ pub(crate) async fn compose(
     let Some(context) = state.input_context(&id) else {
         return api_error(StatusCode::NOT_FOUND, UNKNOWN_SESSION);
     };
-    let bracketed = context
+    // Slash commands need the agent's command parser, as on the desktop. Paste brackets turn them into messages.
+    let command = matches!(context["agent"].as_str(), Some("claude" | "codex"))
+        && !body.text.contains(['\r', '\n']) && body.text.trim_start().starts_with(['/', '!']);
+    let bracketed = !command && context
         .get("bracketedPaste")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let data = compose_payload(&body.text, bracketed);
-    let result = async {
-        write_paced(&state, &id, &data).await?;
-        if body.submit {
-            // Enter must be its own write, after the paste has been read. Sent
-            // in the same chunk, Claude Code and Codex see it as part of the
-            // paste burst and insert a newline instead of submitting.
-            if !data.is_empty() {
-                tokio::time::sleep(submit_settle(data.len())).await;
-            }
-            state.dispatch(&id, COMMAND_INPUT, "\r", 0, 0)?;
+    let original_text = body.text.clone();
+    let text = if body.expand_quips && matches!(context["agent"].as_str(), Some("claude" | "codex")) && !body.text.trim_start().starts_with(['/', '!']) {
+        let source = body.text;
+        match tokio::task::spawn_blocking(move || bro_core::quips::Library::load(bro_core::quips::path()).expand(&source)).await {
+            Ok(Ok(text)) => text,
+            Ok(Err(message)) => return api_error(StatusCode::BAD_REQUEST, message),
+            Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "Your Quips could not be read."),
         }
-        Ok::<(), String>(())
-    }
-    .await;
+    } else { body.text };
+    let data = compose_payload(&text, bracketed);
+    let result = compose_input(&state, &id, &data, body.submit).await;
     match result {
-        Ok(()) => Json(json!({
-            "method": if data.is_empty() { "none" } else if bracketed { "paste" } else { "raw" },
-            "bytes": data.len(),
-            "submitted": body.submit
-        }))
-        .into_response(),
+        Ok(()) => {
+            let mut receipt = json!({
+                "method": if data.is_empty() { "none" } else if bracketed { "paste" } else { "raw" },
+                "bytes": data.len(),
+                "submitted": body.submit
+            });
+            // The phone keeps the text you wrote in its bubble, and matches the expanded text for its receipt.
+            if text != original_text { receipt["text"] = json!(text); }
+            Json(receipt).into_response()
+        }
         Err(message) => api_error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
 }
@@ -369,6 +382,7 @@ pub(crate) async fn attachment(
     if let Err(error) = tokio::fs::write(&path, body).await {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
+    state.note_media(&id, path.clone(), crate::media::Source::Attached);
     let mut pasted = false;
     if query.get("paste").map(String::as_str) == Some("1") {
         let path_text = path.to_string_lossy();
@@ -457,14 +471,21 @@ pub(crate) async fn file_preview(
         start: query_number(&query, "start"),
         limit: query_number(&query, "limit"),
     };
+    let access = state.media_access();
+    let stream_images = query.get("stream").is_some_and(|value| value == "1");
     match tokio::task::spawn_blocking(move || {
-        crate::file_preview::read_preview(&roots, &target, request)
+        if stream_images {
+            crate::file_preview::read_preview_streaming(&roots, &target, request, &|p| access.allows(p))
+        } else {
+            crate::file_preview::read_preview_allowing(&roots, &target, request, &|p| access.allows(p))
+        }
     })
     .await
     {
         Ok(Ok(mut preview)) => {
-            if matches!(preview["kind"].as_str(), Some("video" | "audio")) {
-                // Host-relative and token-free; clients append `token=` for media elements.
+            if matches!(preview["kind"].as_str(), Some("video" | "audio" | "image")) {
+                // Host-relative and token-free; clients append `token=` for media elements (and a picture too
+                // big to inline streams from it).
                 let path: String = url::form_urlencoded::byte_serialize(
                     preview["path"].as_str().unwrap_or_default().as_bytes(),
                 )
@@ -477,6 +498,7 @@ pub(crate) async fn file_preview(
             }
             Json(preview).into_response()
         }
+        Ok(Err(message)) if message == crate::file_preview::PROTECTED => api_error(StatusCode::FORBIDDEN, message),
         Ok(Err(message)) => api_error(StatusCode::BAD_REQUEST, message),
         Err(_) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -523,11 +545,12 @@ pub(crate) async fn resolve_links(
                 .collect()
         })
         .unwrap_or_default();
+    let access = state.media_access();
     let resolved =
         tokio::task::spawn_blocking(move || {
             candidates
             .into_iter()
-            .map(|path| match crate::file_preview::resolve_path(&roots, &path) {
+            .map(|path| match crate::file_preview::resolve_media(&roots, &path, &|p| access.allows(p)) {
                 Ok(found) => json!({
                     "path": path, "exists": true, "kind": found.kind.as_str(),
                     "resolved": found.path.to_string_lossy(), "relativePath": found.relative,
@@ -554,12 +577,17 @@ struct OpenTarget {
 }
 
 /// Shared by `open` and `open-in-editor`: the body's file, which must exist.
-/// A `path:line[:col]` suffix is honoured when `line` is not given.
+/// A `path:line[:col]` suffix is honoured when `line` is not given. Media
+/// outside the session's folders opens for a caller on this computer (an
+/// agent's `bro open`: that it showed you the file is what ties it to the
+/// work); for a remote one, as the media rule says ([`crate::media::Access`]).
 async fn open_target(
     state: &AppState,
     id: &str,
     body: &Value,
+    peer: &Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
 ) -> Result<OpenTarget, (StatusCode, String)> {
+    let local = peer.as_ref().ok().is_none_or(|ConnectInfo(peer)| crate::auth::is_loopback(*peer));
     let roots = state
         .file_roots(id)
         .ok_or((StatusCode::NOT_FOUND, UNKNOWN_SESSION.to_owned()))?;
@@ -580,8 +608,9 @@ async fn open_target(
         }
     }
     let lookup = given.clone();
+    let access = state.media_access();
     let resolved =
-        tokio::task::spawn_blocking(move || crate::file_preview::resolve_path(&roots, &lookup))
+        tokio::task::spawn_blocking(move || crate::file_preview::resolve_media(&roots, &lookup, &|p| local || access.allows(p)))
             .await
             .map_err(|_| {
                 (
@@ -590,10 +619,10 @@ async fn open_target(
                 )
             })?
             .map_err(|message| {
-                let status = if message == crate::file_preview::NOT_FOUND {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::BAD_REQUEST
+                let status = match message.as_str() {
+                    crate::file_preview::NOT_FOUND => StatusCode::NOT_FOUND,
+                    crate::file_preview::PROTECTED => StatusCode::FORBIDDEN,
+                    _ => StatusCode::BAD_REQUEST,
                 };
                 (status, message)
             })?;
@@ -612,9 +641,10 @@ async fn open_target(
 pub(crate) async fn open_file(
     Path(id): Path<String>,
     State(state): State<AppState>,
+    peer: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
     Json(body): Json<Value>,
 ) -> Response {
-    let target = match open_target(&state, &id, &body).await {
+    let target = match open_target(&state, &id, &body, &peer).await {
         Ok(target) => target,
         Err((status, message)) => return api_error(status, message),
     };
@@ -622,6 +652,7 @@ pub(crate) async fn open_file(
         .as_str()
         .filter(|source| !source.is_empty())
         .unwrap_or("agent");
+    state.note_media(&id, target.resolved.path.clone(), crate::media::Source::Opened);
     state.publish(crate::model::ServerEvent::session(
         json!({
             "type": "openFile", "sessionId": id, "path": target.given,
@@ -645,9 +676,10 @@ pub(crate) async fn open_file(
 pub(crate) async fn open_in_editor(
     Path(id): Path<String>,
     State(state): State<AppState>,
+    peer: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
     Json(body): Json<Value>,
 ) -> Response {
-    match open_target(&state, &id, &body).await {
+    match open_target(&state, &id, &body, &peer).await {
         Ok(target) => {
             state.send_command(BridgeCommand::OpenInEditor {
                 id,

@@ -92,6 +92,14 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
         }
         return;
     }
+    // the media panel's open menu: its lines run (below), its card between them does nothing, anywhere else (what's
+    // drawn over its scrim: toasts, the window's buttons) only closes it
+    if g.media.menu_open() && !matches!(hit, Some(Action::Media(_))) {
+        if !g.media.on_menu(p) {
+            g.media.close_menu();
+        }
+        return;
+    }
     if cb == CButton::Right && !g.app.overlay.is_open() && g.app.renaming.is_none()
         && let Some(Action::Pane(id, _)) = &hit
         && g.layout.panes.iter().any(|pane| pane.id == *id && pane.header.contains(p))
@@ -112,10 +120,14 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
         g.last_press = Some((Instant::now(), p, count));
     }
     if g.media.expanded && !g.app.overlay.is_open() {
-        if cb == CButton::Left && let Some(Action::Media(n)) = hit {
-            let focus = g.focused_owner();
-            let ask = g.media.click(n, p, count, focus.as_ref());
-            g.media_ask(ask);
+        if let Some(Action::Media(n)) = hit {
+            if cb == CButton::Left {
+                let focus = g.focused_owner();
+                let ask = g.media.click(n, p, count, focus.as_ref());
+                g.media_ask(ask);
+            } else if cb == CButton::Right {
+                g.media.context(n, p);
+            }
         }
         return;
     }
@@ -174,6 +186,8 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
             let ask = g.media.click(n, p, count, focus.as_ref());
             g.media_ask(ask);
         }
+        // a right-click: the menu of the picture, video or song under it
+        Some(Action::Media(n)) if cb == CButton::Right => g.media.context(n, p),
         Some(Action::Side(h)) => side_click(g, h, cb, m),
         // beside the open launcher the sidebar's blank spots don't take the keyboard (it keeps it)
         Some(Action::SideFilter) if cb == CButton::Left && !g.app.overlay.is_open() => {
@@ -213,7 +227,12 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
         }
         Some(Action::Focus(id, n)) if cb == CButton::Left => super::focus::click(g, id, n, p, count),
         Some(Action::Focus(id, _)) => focus(&mut g.app, id),
-        Some(Action::Pane(id, act)) => pane_press(g, id, act, p, cb, m, count),
+        Some(Action::Pane(id, act)) => {
+            if matches!(act, PaneAct::Body) && g.app.focus.drafts.get(&id).is_some_and(|d| d.terminal_quips.query.is_some()) {
+                g.app.terminal_flush_quip_query(id);
+            }
+            pane_press(g, id, act, p, cb, m, count);
+        }
         // a blank spot on the sidebar takes the keyboard there
         _ if on_side => {
             if cb == CButton::Left && !g.app.overlay.is_open() {
@@ -755,8 +774,9 @@ pub fn moved(g: &mut Gui, p: Point) {
     }
 }
 
-pub fn wheel(g: &mut Gui, p: Point, _dx: f32, dy: f32) {
-    if dy == 0.0 {
+pub fn wheel(g: &mut Gui, p: Point, delta: super::scroll::Wheel) {
+    let dy = delta.units();
+    if !dy.is_finite() || dy == 0.0 {
         return;
     }
     // a turn of the wheel while the summary screensaver shows only wakes it
@@ -817,8 +837,8 @@ pub fn wheel(g: &mut Gui, p: Point, _dx: f32, dy: f32) {
     }
     match hit {
         Some(Action::Side(SideHit::Strip(_))) => g.app.strip_wheel(down),
-        Some(Action::Focus(id, _)) => super::focus::wheel(g, id, dy),
-        Some(Action::Pane(id, _)) => pane_wheel(g, id, p, dy, m),
+        Some(Action::Focus(id, _)) => super::focus::wheel(g, id, delta),
+        Some(Action::Pane(id, _)) => pane_wheel(g, id, p, delta, m),
         Some(Action::Media(n)) => g.media.wheel(n, p, dy),
         Some(Action::View(id, n)) => {
             for _ in 0..(dy.abs().round().max(1.0) as usize).min(5) {
@@ -829,8 +849,9 @@ pub fn wheel(g: &mut Gui, p: Point, _dx: f32, dy: f32) {
     }
 }
 
-fn pane_wheel(g: &mut Gui, id: PaneId, p: Point, dy: f32, m: KeyModifiers) {
+fn pane_wheel(g: &mut Gui, id: PaneId, p: Point, delta: super::scroll::Wheel, m: KeyModifiers) {
     let Some(pane) = g.app.panes.get(&id) else { return };
+    let dy = delta.units();
     let down = dy < 0.0;
     let kind = if down { MouseEventKind::ScrollDown } else { MouseEventKind::ScrollUp };
     if pane.as_term_ref().is_none() {
@@ -851,7 +872,8 @@ fn pane_wheel(g: &mut Gui, id: PaneId, p: Point, dy: f32, m: KeyModifiers) {
     if wants && !m.contains(KeyModifiers::SHIFT) {
         if let Some((r, c)) = drawn.cell_at(p) {
             let area = ratatui::layout::Rect::new(0, 0, drawn.cols as u16, drawn.rows as u16);
-            for _ in 0..(dy.abs().round().max(1.0) as usize).min(5) {
+            let ticks = g.panes.entry(id).or_default().program_scroll_acc.take(delta.notches(drawn.cell_h));
+            for _ in 0..(ticks.unsigned_abs() as usize).min(5) {
                 g.app.with_pane(id, |pn, cx| pn.mouse(cell_event(kind, c as u16, r as u16, m), area, cx));
             }
         }
@@ -860,12 +882,10 @@ fn pane_wheel(g: &mut Gui, id: PaneId, p: Point, dy: f32, m: KeyModifiers) {
     // the alternate screen (full-screen programs) has no history: the wheel moves the cursor instead
     let alt_screen = drawn.mode.is_some_and(|md| md.contains(alacritty_terminal::term::TermMode::ALT_SCREEN) && md.contains(alacritty_terminal::term::TermMode::ALTERNATE_SCROLL));
     let st = g.panes.entry(id).or_default();
-    st.scroll_acc += dy * 3.0;
-    let lines = st.scroll_acc.trunc() as i32;
+    let lines = st.scroll_acc.take(delta.rows(drawn.cell_h));
     if lines == 0 {
         return;
     }
-    st.scroll_acc -= lines as f32;
     if alt_screen {
         let key = if lines > 0 { "\x1b[A" } else { "\x1b[B" };
         if let Some(t) = g.app.panes.get_mut(&id).and_then(|p| p.as_term()) {
@@ -875,11 +895,7 @@ fn pane_wheel(g: &mut Gui, id: PaneId, p: Point, dy: f32, m: KeyModifiers) {
         }
         return;
     }
-    if let Some(t) = g.app.panes.get_mut(&id).and_then(|p| p.as_term()) {
-        let cur = t.scroll_offset() as i32;
-        let next = (cur + lines).clamp(0, drawn.history as i32);
-        t.set_scroll_offset(next as usize);
-    }
+    super::scroll::history(&mut g.app, id, drawn.history, lines);
 }
 
 /// Text typed with an input method: into the focused terminal as typed text, else where pastes go.

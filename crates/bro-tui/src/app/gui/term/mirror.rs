@@ -254,7 +254,14 @@ mod tests {
         let mut out = String::new();
         for line in 0..grid.screen_lines() {
             let row = &grid[alacritty_terminal::index::Line(line as i32)];
-            let text: String = (0..grid.columns()).map(|c| row[alacritty_terminal::index::Column(c)].c).collect();
+            let mut text = String::new();
+            for c in 0..grid.columns() {
+                let cell = &row[alacritty_terminal::index::Column(c)];
+                text.push(cell.c);
+                if let Some(chars) = cell.zerowidth() {
+                    text.extend(chars);
+                }
+            }
             out.push_str(text.trim_end());
             out.push('\n');
         }
@@ -274,6 +281,55 @@ mod tests {
         // a title
         m.feed(b"\x1b]0;Fix the timer\x07");
         assert_eq!(m.take_requests().title, Some(Some("Fix the timer".into())));
+    }
+
+    #[test]
+    fn hosted_snapshot_keeps_narrow_input_repaints_in_the_same_rows() {
+        let live = Mirror::standalone();
+        let attached = Mirror::standalone();
+        live.resize(4, 10);
+        attached.resize(4, 10);
+        let mut host = vt100::Parser::new(4, 10, 0);
+        let initial = b"\x1b[?7l\x1b[2;1H> hello";
+        live.feed(initial);
+        host.process(initial);
+        attached.feed(&host.screen().contents_formatted());
+        attached.feed(&host.screen().input_mode_formatted());
+        for next in [b"\r> 1234567890123".as_slice(), b"\r> edited\x1b[K", b"\r> final\x1b[K"] {
+            live.feed(next);
+            attached.feed(next);
+        }
+        assert_eq!(screen_text(&attached), screen_text(&live));
+        assert_eq!(screen_text(&live), "\n> final\n\n\n");
+    }
+
+    #[test]
+    fn hosted_screen_and_desktop_agree_at_narrow_input_margins() {
+        for cols in [10, 24, 40] {
+            let desktop = Mirror::standalone();
+            desktop.resize(5, cols);
+            let mut host = vt100::Parser::new(5, cols, 0);
+            let long = "x".repeat(usize::from(cols) + 7);
+            let cases = [
+                "\x1b[?7l\x1b[2;1H".to_string(),
+                format!("> {long}"),
+                "\r> shorter\x1b[K".to_string(),
+                format!("\r{}界\u{301}", "a".repeat(usize::from(cols) - 1)),
+                "\r> final\x1b[K".to_string(),
+                "\x1b[?7h\r\n".to_string(),
+                long,
+            ];
+            for chunk in cases {
+                desktop.feed(chunk.as_bytes());
+                host.process(chunk.as_bytes());
+                let expected = host.screen().rows(0, cols).map(|row| row.trim_end().to_string()).collect::<Vec<_>>().join("\n");
+                assert_eq!(screen_text(&desktop).trim_end(), expected.trim_end(), "width {cols}, chunk {chunk:?}");
+                let s = desktop.lock();
+                let cursor = s.term.grid().cursor.point;
+                let (row, col) = host.screen().cursor_position();
+                assert_eq!((cursor.line.0 as u16, cursor.column.0 as u16), (row, col.min(cols - 1)), "width {cols}, chunk {chunk:?}");
+            }
+        }
     }
 
     #[test]

@@ -20,6 +20,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// What the app remembers per agent pane between event batches.
 pub(crate) struct Track {
+    notice: Option<bro_bridge::insights::AttentionNotice>,
+    wait_key: Option<String>,
     state: AttentionState,
     /// When it entered `state`
     since: Instant,
@@ -30,6 +32,9 @@ pub(crate) struct Track {
     sent: Option<u64>,
     /// (facts revision, transcript) of the files last given to the bridge
     files_sent: Option<(u64, Option<PathBuf>)>,
+    /// [`Services::bridge_announcements`](crate::services::Services::bridge_announcements) when they were: a
+    /// session the bridge learned of since (it started after the pane) has neither, so both are given again
+    announced: u64,
     /// The wait (its `since`) a recap was already tried for: never twice for the same wait
     recap_tried: Option<Instant>,
 }
@@ -138,14 +143,17 @@ pub(crate) struct View {
     pub state: AttentionState,
     pub reason: Option<String>,
     pub recap: Option<recap::Recap>,
+    pub limit: Option<bro_core::sessions::limits::UsageLimit>,
 }
 
 impl View {
     pub(crate) fn of(state: AttentionState, term: &Term, snap: Option<&Snapshot>) -> View {
         let facts = snap.and_then(|s| s.facts.as_deref());
-        let reason = reason_for(state, facts, term.prompt_title());
+        let limit = term.limit_warning();
+        let state = if limit.is_some() { AttentionState::Blocked } else { state };
+        let reason = limit.as_ref().map(|l| l.message.clone()).or_else(|| reason_for(state, facts, term.prompt_title()));
         let recap = facts.and_then(|f| recap::choose(f, snap.and_then(|s| s.generated.as_ref())));
-        View { state, reason, recap }
+        View { state, reason, recap, limit }
     }
 
     pub(crate) fn note(&self) -> Option<String> {
@@ -156,6 +164,7 @@ impl View {
         let mut h = DefaultHasher::new();
         format!("{:?}", self.state).hash(&mut h);
         self.reason.hash(&mut h);
+        self.limit.hash(&mut h);
         since.hash(&mut h);
         if let Some(r) = &self.recap {
             r.text.hash(&mut h);
@@ -172,7 +181,7 @@ impl View {
             recap::Source::LastMessage => RecapSource::LastMessage,
         };
         SessionInsights {
-            attention: Some(Attention { state: self.state, reason: self.reason.clone(), since: iso_wall(since) }),
+            attention: Some(Attention { state: self.state, reason: self.reason.clone(), since: iso_wall(since), limit: self.limit.clone(), notice: None }),
             recap: self.recap.as_ref().map(|r| bro_bridge::Recap { text: r.text.clone(), at: iso(r.at_ms), source: source(r.source) }),
         }
     }
@@ -193,6 +202,20 @@ fn recap_job(term: &Term, snap: &Snapshot) -> Option<RecapJob> {
 }
 
 impl App {
+    pub(crate) fn session_notice(&self, id: PaneId) -> Option<&bro_bridge::insights::AttentionNotice> {
+        if !self.svc.settings().insights.attention_indicators { return None; }
+        self.tracks.get(&id)?.notice.as_ref()
+    }
+
+    pub(crate) fn acknowledge_session(&mut self, id: PaneId, event: &str) {
+        if let Some(track) = self.tracks.get_mut(&id)
+            && let Some(notice) = track.notice.as_mut().filter(|n| n.event_id == event) {
+            notice.unread = false;
+            track.sent = None;
+            self.done.remove(&id);
+        }
+    }
+
     /// The reason and recap text for pane `id` right now (toasts).
     pub(crate) fn pane_view(&self, id: PaneId) -> Option<View> {
         let p = self.panes.get(&id)?;
@@ -206,8 +229,9 @@ impl App {
     /// where one is due.
     pub(crate) fn update_insights(&mut self) {
         let now = Instant::now() + self.recaps.skew;
-        let visible = self.visible();
+        let focused = self.focused().filter(|_| self.term_focused && !self.side_focus && !self.overlay.is_open());
         let generate = self.svc.settings().insights.generate_recaps;
+        let announced = self.svc.bridge_announcements();
         let ids: Vec<PaneId> = self.panes.keys().copied().collect();
         let mut start: Option<(RecapJob, Insights)> = None;
         for id in ids {
@@ -223,8 +247,31 @@ impl App {
                 Some(n) => self.notes.insert(id, n),
                 None => self.notes.remove(&id),
             };
-            let seen = visible.contains(&id) && self.term_focused;
-            let track = self.tracks.entry(id).or_insert_with(|| Track { state, since: now, since_wall: SystemTime::now(), last_seen: None, sent: None, files_sent: None, recap_tried: None });
+            let seen = focused == Some(id);
+            let track = self.tracks.entry(id).or_insert_with(|| Track { notice: None, wait_key: None, state, since: now, since_wall: SystemTime::now(), last_seen: None, sent: None, files_sent: None, announced, recap_tried: None });
+            let wait_key = if state == AttentionState::Blocked { Some(view.limit.as_ref().map(|l| l.title.clone()).unwrap_or_else(|| {
+                let at = snap.as_ref().and_then(|s| s.facts.as_deref()).and_then(|f| f.pending.as_ref().and_then(|p| p.at_ms).or_else(|| f.last_assistant.as_ref().and_then(|a| a.at_ms)));
+                format!("{}:{at:?}", view.reason.as_deref().unwrap_or_default())
+            })) } else { None };
+            let new_kind = if wait_key.is_some() && (track.wait_key != wait_key || track.notice.is_none()) {
+                Some(bro_bridge::insights::NoticeKind::Input)
+            } else if (track.state == AttentionState::Working && matches!(state, AttentionState::Idle | AttentionState::Done))
+                || (state == AttentionState::Done && track.notice.is_none()) {
+                Some(bro_bridge::insights::NoticeKind::Finished)
+            } else { None };
+            track.wait_key = wait_key;
+            if state == AttentionState::Working { track.notice = None; }
+            if let Some(kind) = new_kind {
+                track.notice = Some(bro_bridge::insights::AttentionNotice { event_id: uuid::Uuid::new_v4().to_string(), kind, unread: true, enabled: true });
+            }
+            if let Some(notice) = &mut track.notice {
+                if seen { notice.unread = false; }
+                notice.enabled = self.svc.settings().insights.attention_indicators;
+            }
+            if track.announced != announced {
+                track.announced = announced;
+                (track.sent, track.files_sent) = (None, None);
+            }
             if track.state != state {
                 track.state = state;
                 track.since = now;
@@ -234,10 +281,15 @@ impl App {
                 track.last_seen = Some(now);
             }
             // the bridge: attention + recap, then the file lists when the facts moved
-            let print = view.fingerprint(track.since_wall);
+            let mut hash = DefaultHasher::new();
+            view.fingerprint(track.since_wall).hash(&mut hash);
+            track.notice.hash(&mut hash);
+            let print = hash.finish();
             if track.sent != Some(print) {
                 track.sent = Some(print);
-                self.svc.bridge_set_insights(&t.meta.sid, view.insights(track.since_wall));
+                let mut insights = view.insights(track.since_wall);
+                if let Some(attention) = &mut insights.attention { attention.notice = track.notice.clone(); }
+                self.svc.bridge_set_insights(&t.meta.sid, insights);
             }
             if let Some(s) = &snap {
                 let key = (s.facts.as_ref().map_or(0, |f| f.revision), s.transcript.clone());
@@ -357,6 +409,55 @@ fn run_recap(job: &RecapJob) -> Result<(String, Option<f64>), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn attention_events_survive_tiling_clear_on_focus_and_rearm_for_new_work() {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(crate::services::fallback_settings(), tx.clone());
+        let mut app = App::new(svc, tx, crate::app::Opts { demo: true, fixed_demo: true, load_recents: false });
+        let id = app.focused().unwrap();
+        app.term_focused = false;
+        let set = |app: &mut App, state| app.panes.get_mut(&id).unwrap().as_term().unwrap().set_screen_status(Some(state));
+        set(&mut app, Activity::Working);
+        app.update_insights();
+        assert!(app.session_notice(id).is_none());
+        set(&mut app, Activity::Idle);
+        app.update_insights();
+        let first = app.session_notice(id).unwrap().clone();
+        assert!(first.unread);
+        assert_eq!(first.kind, bro_bridge::insights::NoticeKind::Finished);
+        app.update_insights();
+        assert_eq!(app.session_notice(id).unwrap().event_id, first.event_id);
+        app.term_focused = true;
+        app.side_focus = false;
+        app.update_insights();
+        assert!(!app.session_notice(id).unwrap().unread);
+        app.term_focused = false;
+        set(&mut app, Activity::Working);
+        app.update_insights();
+        set(&mut app, Activity::Blocked);
+        app.update_insights();
+        let question = app.session_notice(id).unwrap().clone();
+        assert!(question.unread);
+        assert_ne!(question.event_id, first.event_id);
+        app.acknowledge_session(id, &first.event_id);
+        assert!(app.session_notice(id).unwrap().unread, "a delayed receipt cannot check a new event");
+        let sid = app.panes[&id].as_term_ref().unwrap().meta.sid.clone();
+        let focused = app.focused();
+        app.bridge_command(bro_bridge::BridgeCommand::Seen { id: sid, event_id: question.event_id.clone() });
+        assert_eq!(app.focused(), focused, "checking on mobile must not move the desktop keyboard");
+        app.update_insights();
+        assert!(!app.session_notice(id).unwrap().unread);
+        assert_eq!(app.panes[&id].activity(), Some(Activity::Blocked), "checking is not answering");
+        let mut settings = app.svc.settings();
+        settings.insights.attention_indicators = false;
+        app.svc.set_settings_unsaved(settings.clone());
+        assert!(app.session_notice(id).is_none());
+        settings.insights.attention_indicators = true;
+        app.svc.set_settings_unsaved(settings);
+        assert!(!app.session_notice(id).unwrap().unread, "turning the visuals back on retains the receipt");
+    }
+
     #[cfg(windows)]
     #[test]
     fn closing_session_cancels_active_recap_and_its_descendants() {
@@ -440,11 +541,11 @@ mod tests {
         assert_eq!(files.touched.len(), 1);
         assert_eq!(files.touched[0].kind, TouchKind::Create);
         assert!(files.touched[0].at.as_deref().is_some_and(|a| a.starts_with("2026-10-02T10:00") && a.ends_with('Z')));
-        let view = View { state: AttentionState::Done, reason: Some("Ship it?".into()), recap: None };
+        let view = View { state: AttentionState::Done, reason: Some("Ship it?".into()), recap: None, limit: None };
         let ins = view.insights(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000));
         let att = ins.attention.unwrap();
         assert_eq!((att.state, att.reason.as_deref(), att.since.as_deref()), (AttentionState::Done, Some("Ship it?"), Some("2023-11-14T22:13:20.000Z")));
-        assert_ne!(view.fingerprint(SystemTime::UNIX_EPOCH), View { state: AttentionState::Done, reason: None, recap: None }.fingerprint(SystemTime::UNIX_EPOCH));
+        assert_ne!(view.fingerprint(SystemTime::UNIX_EPOCH), View { state: AttentionState::Done, reason: None, recap: None, limit: None }.fingerprint(SystemTime::UNIX_EPOCH));
     }
 
     #[test]

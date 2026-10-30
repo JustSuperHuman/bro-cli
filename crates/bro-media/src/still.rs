@@ -184,6 +184,22 @@ fn open(path: &Path) -> Result<BufReader<File>, String> {
     File::open(path).map(BufReader::new).map_err(|e| read_error(path, e))
 }
 
+/// The file is an animation: a GIF with a second frame, an animated WebP, an APNG. Reads no further than it needs
+/// to tell (a GIF's first two frames, the others' headers). A GIF too big to look into counts as one.
+pub fn is_animated(path: &Path) -> bool {
+    let format = ImageReader::open(path).and_then(|r| r.with_guessed_format()).ok().and_then(|r| r.format());
+    let Ok(file) = open(path) else { return false };
+    match format {
+        Some(ImageFormat::Gif) => GifDecoder::new(file).is_ok_and(|mut d| {
+            let (w, h) = d.dimensions();
+            check_size(w, h, CANVAS_BYTES_PER_PX).is_err() || (d.set_limits(limits()).is_ok() && d.into_frames().take(2).count() > 1)
+        }),
+        Some(ImageFormat::WebP) => WebPDecoder::new(file).is_ok_and(|d| d.has_animation()),
+        Some(ImageFormat::Png) => PngDecoder::new(file).is_ok_and(|d| d.is_apng().unwrap_or(false)),
+        _ => false,
+    }
+}
+
 /// An animation's canvas, the frame being composed and the one kept for disposal: about 8 bytes a pixel.
 const CANVAS_BYTES_PER_PX: u64 = 8;
 

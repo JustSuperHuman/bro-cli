@@ -132,6 +132,43 @@ mod tests {
     }
 
     #[test]
+    fn narrow_input_repaints_do_not_wrap_when_the_program_disables_wrapping() {
+        let mut s = Screen::new(4, 10);
+        feed(&mut s, b"\x1b[?7l\x1b[2;1H> abcdefghijk\r> edited\x1b[K");
+        assert_eq!(s.parser.screen().contents(), "\n> edited");
+        assert_eq!(feed(&mut s, b"\x1b[6n"), b"\x1b[2;9R");
+        // A newly attached window must keep the same wrapping rule while typing continues.
+        let mut p = rebuilt(&mut s);
+        let next = b"\r> 1234567890123\r> final\x1b[K";
+        feed(&mut s, next);
+        p.process(next);
+        assert_eq!(p.screen().contents(), "\n> final");
+        assert_eq!(p.screen().contents(), s.parser.screen().contents());
+    }
+
+    #[test]
+    fn cursor_reports_stay_inside_the_terminal_at_the_right_margin() {
+        let mut s = Screen::new(4, 10);
+        assert_eq!(feed(&mut s, b"1234567890\x1b[6n"), b"\x1b[1;10R");
+        assert_eq!(feed(&mut s, b"x\x1b[6n"), b"\x1b[2;2R");
+    }
+
+    #[test]
+    fn wrapping_can_be_queried_restored_and_reset_after_a_resize() {
+        let mut s = Screen::new(4, 20);
+        assert_eq!(feed(&mut s, b"\x1b[?7$p\x1b[?7l\x1b[?7$p"), b"\x1b[?7;1$y\x1b[?7;2$y");
+        s.resize(4, 10);
+        feed(&mut s, "123456789界\u{301}".as_bytes());
+        assert_eq!(s.parser.screen().cursor_position(), (0, 10));
+        assert_eq!(feed(&mut s, b"\x1b[6n"), b"\x1b[1;10R");
+        let mut p = rebuilt(&mut s);
+        assert!(!p.screen().auto_wrap());
+        p.process(b"\x1b[?7h\r1234567890x");
+        assert_eq!(p.screen().cursor_position(), (1, 1));
+        assert_eq!(feed(&mut s, b"\x1bc\x1b[?7$p"), b"\x1b[?7;1$y");
+    }
+
+    #[test]
     fn a_replay_rebuilds_screen_scrollback_modes_and_title() {
         let mut s = Screen::new(5, 20);
         for i in 0..12 {

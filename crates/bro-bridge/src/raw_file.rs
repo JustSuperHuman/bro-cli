@@ -1,7 +1,9 @@
 //! `GET|HEAD /api/sessions/{id}/raw?path=[&download=1]`: a workspace file's
 //! bytes streamed from disk with HTTP Range support, for `<video>`/`<audio>`
 //! (iOS AVPlayer insists on exact 206s), images and downloads. Same resolver
-//! and root checks as `/file`; no size limit; never buffers the whole file.
+//! and root checks as `/file` (media tied to the work or anywhere, as bro
+//! says; the rest inside the workspace); no size limit; never buffers the
+//! whole file.
 
 use crate::file_preview::{self, Kind};
 use crate::rest::api_error;
@@ -140,8 +142,9 @@ pub(crate) async fn raw(
         return api_error(StatusCode::NOT_FOUND, "Unknown terminal session.");
     };
     let target = query.get("path").cloned().unwrap_or_default();
+    let access = state.media_access();
     let resolved = match tokio::task::spawn_blocking(move || {
-        file_preview::resolve_path(&roots, &target)
+        file_preview::resolve_media(&roots, &target, &|p| access.allows(p))
     })
     .await
     {
@@ -150,7 +153,7 @@ pub(crate) async fn raw(
         Ok(Err(message)) => {
             let status = match message.as_str() {
                 file_preview::NOT_FOUND => StatusCode::NOT_FOUND,
-                file_preview::OUTSIDE => StatusCode::FORBIDDEN,
+                file_preview::OUTSIDE | file_preview::PROTECTED => StatusCode::FORBIDDEN,
                 _ => StatusCode::BAD_REQUEST,
             };
             return api_error(status, message);
@@ -162,6 +165,12 @@ pub(crate) async fn raw(
             );
         }
     };
+    if let Some(side) = query.get("thumbnail") {
+        let Ok(side) = side.parse::<u32>() else {
+            return api_error(StatusCode::BAD_REQUEST, "The thumbnail size is invalid.");
+        };
+        return crate::thumbnail::serve(method, resolved.path, side, headers).await;
+    }
     let Ok(mut file) = tokio::fs::File::open(&resolved.path).await else {
         return api_error(StatusCode::NOT_FOUND, file_preview::NOT_FOUND);
     };

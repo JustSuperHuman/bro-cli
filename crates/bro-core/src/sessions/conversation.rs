@@ -13,10 +13,16 @@ use super::live::{TouchKind, parse_apply_patch};
 use crate::Harness;
 use crate::util::parse_iso_ms;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
+
+mod wording;
 
 /// At most this many items are kept (the oldest go first).
 pub const ITEMS_MAX: usize = 400;
+/// [`Conversation::history`] reads at most this much of a transcript, from its end.
+pub const HISTORY_MAX: u64 = 256 * 1024 * 1024;
 /// A step's detail (a command, a path, a query) is cut to this many characters.
 const DETAIL_MAX: usize = 600;
 /// A step's label keeps this much of what it names.
@@ -40,6 +46,10 @@ pub enum StepKind {
     Ask,
     /// a file sent to you
     Send,
+    /// a skill it used: `label` is the skill's name in words ("Generate voice"), `detail` what it asked of it
+    Skill,
+    /// an MCP server's tool: `label` says what it did ("Navigate · figma.com"), `detail` names the server
+    Mcp,
     Other,
 }
 
@@ -67,6 +77,25 @@ pub struct Step {
     /// the line it was about: the first changed one of an edit, where a read started
     pub line: Option<u32>,
     pub at_ms: Option<i64>,
+    /// the page its result shows in, when its MCP server made it an app
+    pub app: Option<Arc<McpApp>>,
+}
+
+/// An MCP App: a tool call whose server gave its result a page of its own (a `ui://` resource, MCP Apps'
+/// `_meta.ui.resourceUri` or the Apps SDK's `openai/outputTemplate`), drawn in the conversation with the call's
+/// input and result. The page itself is the server's: only the session's harness can read it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpApp {
+    /// the server as its tools' names spell it (`claude_ai_JustGains` of `mcp__claude_ai_JustGains__show_workout`)
+    pub server: String,
+    /// the tool's own name on it (`show_workout`)
+    pub tool: String,
+    /// the page (`ui://widget/workout.html`)
+    pub resource: String,
+    /// what the call was given
+    pub input: Value,
+    /// the result as the server sent it: `content`, `structuredContent`, `_meta`, `isError`
+    pub result: Value,
 }
 
 /// Something about the conversation itself.
@@ -123,11 +152,13 @@ pub struct Conversation {
     pub revision: u64,
     /// Codex: `item_completed` events describe the steps (tool calls in `response_item`s are left alone)
     codex_items: bool,
+    /// MCP calls waiting on their results, by id: what they were given (an app shows it)
+    mcp_calls: HashMap<String, Value>,
 }
 
 impl Conversation {
     pub fn new(harness: Harness) -> Conversation {
-        Conversation { harness, items: vec![], model: None, effort: None, cwd: None, branch: None, thought: None, version: None, revision: 0, codex_items: false }
+        Conversation { harness, items: vec![], model: None, effort: None, cwd: None, branch: None, thought: None, version: None, revision: 0, codex_items: false, mcp_calls: HashMap::new() }
     }
 
     /// Set one of the session's facts (model, effort, cwd, branch) when it says something new.
@@ -192,6 +223,47 @@ impl Conversation {
             }
         }
         changed
+    }
+
+    /// The conversation in the transcript at `path` up to byte `end` (where a [`Tail`](super::live::Tail) goes on
+    /// from), read from the file's start, or [`HISTORY_MAX`] before `end`. A tail's first read of a long transcript
+    /// holds only its last [`FIRST_READ_MAX`](super::live::FIRST_READ_MAX): most of a long session is tool output
+    /// and pictures, so that can be its last few items. A line still being written at `end` is left to the tail.
+    /// Blocking: call it from a worker thread (about a millisecond per megabyte).
+    pub fn history(harness: Harness, path: &Path, end: u64) -> std::io::Result<Conversation> {
+        Self::read_back(harness, path, end, HISTORY_MAX)
+    }
+
+    /// [`Conversation::history`] from at most `max` bytes before `end`.
+    fn read_back(harness: Harness, path: &Path, end: u64, max: u64) -> std::io::Result<Conversation> {
+        use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path)?;
+        let end = end.min(file.metadata()?.len());
+        let start = end.saturating_sub(max);
+        // begun inside a line: that line is cut off
+        let mut cut = false;
+        if start > 0 {
+            let mut before = [0u8];
+            file.seek(SeekFrom::Start(start - 1))?;
+            file.read_exact(&mut before)?;
+            cut = before[0] != b'\n';
+        }
+        let mut reader = BufReader::with_capacity(1 << 20, file.take(end - start));
+        let mut c = Conversation::new(harness);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line)? == 0 || line.last() != Some(&b'\n') {
+                break;
+            }
+            if std::mem::take(&mut cut) {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line)) {
+                c.ingest(&v);
+            }
+        }
+        Ok(c)
     }
 
     // ---- building ------------------------------------------------------------------------
@@ -348,7 +420,14 @@ impl Conversation {
                             let input = b.get("input").cloned().unwrap_or(Value::Null);
                             let (kind, label, detail) = claude_step(name, &input);
                             let line = (kind == StepKind::Read).then(|| input.get("offset").and_then(Value::as_u64)).flatten().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0);
-                            self.step(Step { id: id.to_string(), kind, label, detail, state: StepState::Running, added: 0, removed: 0, line, at_ms: at });
+                            if name.starts_with("mcp__") && !id.is_empty() {
+                                // its server may give the result a page, which shows what it was given
+                                if self.mcp_calls.len() >= 64 {
+                                    self.mcp_calls.clear();
+                                }
+                                self.mcp_calls.insert(id.to_string(), serde_json::json!({ "name": name, "input": input }));
+                            }
+                            self.step(Step { id: id.to_string(), kind, label, detail, state: StepState::Running, added: 0, removed: 0, line, at_ms: at, app: None });
                         }
                         _ => {}
                     }
@@ -373,10 +452,14 @@ impl Conversation {
                         let (added, removed) = structured.map(patch_counts).unwrap_or((0, 0));
                         let created = structured.and_then(|s| s.get("type")).and_then(Value::as_str) == Some("create");
                         let changed = structured.and_then(patch_line);
+                        let app = self.mcp_calls.remove(&id).and_then(|call| mcp_app(&call, r, v.get("mcpMeta"), failed)).map(Arc::new);
                         self.update_step(&id, |s| {
                             s.state = if failed { StepState::Failed } else { StepState::Done };
                             s.added = added;
                             s.removed = removed;
+                            if app.is_some() {
+                                s.app = app;
+                            }
                             if changed.is_some() {
                                 s.line = changed;
                             }
@@ -652,6 +735,7 @@ impl Conversation {
             removed,
             line: None,
             at_ms: at,
+            app: None,
         };
         match item.get("type").and_then(Value::as_str) {
             Some("UserMessage") => {
@@ -699,8 +783,12 @@ impl Conversation {
                 self.step(st);
             }
             Some("McpToolCall") => {
-                let tool = s("tool").unwrap_or("a tool");
-                let st = step(StepKind::Other, format!("Used {}", words(tool)), s("server").map(str::to_string), failed_status, 0, 0);
+                let args = match item.get("arguments") {
+                    Some(Value::String(a)) => serde_json::from_str(a).unwrap_or(Value::Null),
+                    Some(a) => a.clone(),
+                    None => Value::Null,
+                };
+                let st = step(StepKind::Mcp, wording::tool_label(s("tool").unwrap_or_default(), &args), s("server").map(wording::server_name), failed_status, 0, 0);
                 self.step(st);
             }
             Some("ImageView") => {
@@ -717,7 +805,7 @@ impl Conversation {
                 self.step(st);
             }
             Some("SubAgentActivity") if s("kind") == Some("started") => {
-                let who = s("agent_path").map(|p| words(p.rsplit('/').next().unwrap_or(p))).unwrap_or_else(|| "a helper".to_string());
+                let who = s("agent_path").map(|p| wording::name(p.rsplit('/').next().unwrap_or(p))).unwrap_or_else(|| "a helper".to_string());
                 let st = step(StepKind::Agent, format!("Started a helper: {who}"), s("model").map(str::to_string), failed_status, 0, 0);
                 self.step(st);
             }
@@ -790,25 +878,6 @@ fn web(query: &str) -> String {
         return format!("Read {host}");
     }
     format!("Searched the web for “{}”", line(q, LABEL_MAX))
-}
-
-/// `snake_case` and `camelCase` tool names as words: "chrome_navigate" → "chrome navigate".
-fn words(name: &str) -> String {
-    let mut out = String::new();
-    let mut prev_lower = false;
-    for c in name.chars() {
-        if c == '_' || c == '-' {
-            out.push(' ');
-            prev_lower = false;
-            continue;
-        }
-        if c.is_uppercase() && prev_lower {
-            out.push(' ');
-        }
-        prev_lower = c.is_lowercase();
-        out.push(c.to_ascii_lowercase());
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The paths to pictures in what you wrote (quoted when they hold spaces, as bro pastes them), and the text
@@ -961,14 +1030,17 @@ fn claude_step(name: &str, input: &Value) -> (StepKind, String, Option<String>) 
         "Write" => (Edit, format!("Wrote {}", file_name()), detail(file)),
         "Bash" | "PowerShell" => {
             let cmd = s("command");
-            let label = match s("description") {
-                Some(d) => line(d, LABEL_MAX),
-                None => ran(cmd.unwrap_or("a command")),
+            // its own words for it, else the command's when it's one of the usual ones
+            let (kind, label) = match s("description") {
+                Some(d) => (Run, line(d, LABEL_MAX)),
+                None => cmd.and_then(wording::command_label).unwrap_or_else(|| (Run, ran(cmd.unwrap_or("a command")))),
             };
-            (Run, label, detail(cmd))
+            (kind, label, detail(cmd))
         }
+        "Monitor" => (Run, s("description").map_or("Watching a command".to_string(), |d| line(&format!("Watching {d}"), LABEL_MAX)), detail(s("command"))),
         "BashOutput" => (Run, "Checked on a command".into(), None),
         "KillShell" | "KillBash" => (Run, "Stopped a command".into(), None),
+        "TaskStop" => (Run, "Stopped a background task".into(), None),
         "Grep" => (Search, format!("Searched for “{}”", line(s("pattern").unwrap_or_default(), LABEL_MAX)), detail(s("path"))),
         "Glob" => (Search, format!("Looked for {}", line(s("pattern").unwrap_or("files"), LABEL_MAX)), detail(s("path"))),
         "LS" => (Read, format!("Listed {}", file_name()), detail(file)),
@@ -979,27 +1051,117 @@ fn claude_step(name: &str, input: &Value) -> (StepKind, String, Option<String>) 
             (Web, format!("Read {host}"), detail(Some(url)))
         }
         "Task" | "Agent" => {
-            let what = s("description").map(|d| line(d, LABEL_MAX)).unwrap_or_else(|| "a task".to_string());
-            (Agent, format!("Helper: {what}"), detail(s("prompt")))
+            let what = s("description").map(|d| line(d, LABEL_MAX)).unwrap_or_else(|| "A helper".to_string());
+            // a helper of a kind of its own says which
+            let label = match s("subagent_type").filter(|t| !matches!(*t, "general-purpose" | "claude" | "fork")) {
+                Some(t) => line(&format!("{what} · {}", wording::name(t)), LABEL_MAX),
+                None => what,
+            };
+            (Agent, label, detail(s("prompt")))
         }
-        "TodoWrite" => (Plan, "Updated the plan".into(), None),
+        "SendMessage" => {
+            let to = s("to").map_or("a session".to_string(), |t| if t == "*" { "everyone".to_string() } else { line(t, 40) });
+            (Agent, format!("Messaged {to}"), detail(s("message")))
+        }
+        "ListAgents" => (Agent, "Checked on the sessions".into(), None),
+        "Workflow" => (Agent, s("name").map_or("Ran a workflow".to_string(), |n| format!("Ran the {} workflow", line(n, 40))), None),
+        "TodoWrite" => {
+            let (label, now) = wording::plan_progress(input.get("todos"), &["activeForm", "content"]);
+            (Plan, label, detail(now.as_deref()))
+        }
+        "EnterPlanMode" => (Plan, "Started planning".into(), None),
         "ExitPlanMode" => (Plan, "Proposed a plan".into(), detail(s("plan"))),
+        "ScheduleWakeup" => {
+            let when = input.get("delaySeconds").and_then(Value::as_f64).map_or("later".to_string(), |secs| format!("in {}", wording::wait(secs)));
+            (Plan, format!("Checks back {when}"), detail(s("reason")))
+        }
+        "CronCreate" => (Plan, s("prompt").map_or("Scheduled a prompt".to_string(), |p| format!("Scheduled “{}”", line(p, 50))), detail(s("cron"))),
+        "CronDelete" => (Plan, "Removed a schedule".into(), None),
+        "CronList" => (Plan, "Listed the schedules".into(), None),
+        "ReportFindings" => {
+            let label = match input.get("findings").and_then(Value::as_array).map_or(0, Vec::len) {
+                0 => "Found nothing to report".to_string(),
+                1 => "Reported a finding".to_string(),
+                n => format!("Reported {n} findings"),
+            };
+            (Plan, label, None)
+        }
         "AskUserQuestion" => {
             let q = input.get("questions").and_then(Value::as_array).and_then(|q| q.first()).and_then(|q| q.get("question")).and_then(Value::as_str).or_else(|| s("question"));
             (Ask, format!("Asked you: {}", line(q.unwrap_or("a question"), LABEL_MAX)), None)
         }
         "SendUserFile" => (Send, format!("Sent you {}", file_name()), detail(file)),
-        "Skill" => (Other, format!("Used the {} skill", line(s("skill").or_else(|| s("command")).unwrap_or("a"), LABEL_MAX)), None),
+        "PushNotification" => (Other, "Notified you".into(), detail(s("message").or_else(|| s("title")))),
+        "Artifact" => match s("action") {
+            // a page it published opens from its file, as a file it sent you does
+            None | Some("publish") => (Send, s("file_path").map_or("Published a page".to_string(), |f| format!("Published {}", basename(f))), detail(s("file_path"))),
+            Some(action) => {
+                let label = match action {
+                    "read" => "Read a page",
+                    "list" => "Listed its pages",
+                    "open" => "Opened a page",
+                    "delete" => "Deleted a page",
+                    "quickstart" => "Looked up page types",
+                    "pin" => "Pinned a page",
+                    "unpin" => "Unpinned a page",
+                    _ => "Used a page",
+                };
+                (Other, label.to_string(), None)
+            }
+        },
+        "Skill" => (Skill, wording::skill_name(s("skill").or_else(|| s("command")).unwrap_or_default()), detail(s("args"))),
         "SlashCommand" => (Run, format!("Ran {}", line(s("command").unwrap_or("a command"), LABEL_MAX)), None),
-        "ToolSearch" => (Other, "Looked up its tools".into(), None),
+        "ToolSearch" => (Other, wording::tool_search(s("query").unwrap_or_default()), None),
+        "EnterWorktree" => (Other, "Moved into a worktree".into(), detail(s("name"))),
+        "ExitWorktree" => (Other, "Left the worktree".into(), None),
+        "StructuredOutput" => (Other, "Gave its answer".into(), None),
         n if n.starts_with("mcp__") => {
             let mut parts = n.splitn(3, "__").skip(1);
             let server = parts.next().unwrap_or_default();
             let tool = parts.next().unwrap_or(server);
-            (Other, format!("Used {}", words(tool)), (!server.is_empty()).then(|| server.to_string()))
+            (Mcp, wording::tool_label(tool, input), (!server.is_empty()).then(|| wording::server_name(server)))
         }
-        n => (Other, format!("Used {}", words(n)), None),
+        n => (Other, wording::name(n), None),
     }
+}
+
+/// The page an MCP tool's result names for itself, if any: MCP Apps' `ui.resourceUri` (or its draft's
+/// `ui/resourceUri`), else the Apps SDK's `openai/outputTemplate`.
+pub fn app_resource(meta: &Value) -> Option<&str> {
+    [meta.pointer("/ui/resourceUri"), meta.get("ui/resourceUri"), meta.get("openai/outputTemplate")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|u| u.starts_with("ui://"))
+}
+
+/// An MCP call's result as an app, when its server gave it a page: `call` is what the call was (`name`, `input`),
+/// `block` its `tool_result`, `mcp` the record's `mcpMeta` (where Claude Code keeps the result's `_meta` and
+/// `structuredContent`).
+fn mcp_app(call: &Value, block: &Value, mcp: Option<&Value>, failed: bool) -> Option<McpApp> {
+    let meta = mcp?.get("_meta")?;
+    let resource = app_resource(meta)?.to_string();
+    let name = call.get("name").and_then(Value::as_str)?;
+    let mut parts = name.strip_prefix("mcp__")?.splitn(2, "__");
+    let (server, tool) = (parts.next()?.to_string(), parts.next()?.to_string());
+    // what the model read, as MCP content blocks (Claude's pictures carry their bytes in a `source`)
+    let content: Vec<Value> = match block.get("content") {
+        Some(Value::String(s)) => vec![serde_json::json!({ "type": "text", "text": s })],
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .map(|b| match (b.get("type").and_then(Value::as_str), b.get("source")) {
+                (Some("image"), Some(src)) => serde_json::json!({ "type": "image", "data": src.get("data"), "mimeType": src.get("media_type") }),
+                _ => b.clone(),
+            })
+            .collect(),
+        _ => vec![],
+    };
+    let mut result = serde_json::json!({ "content": content, "_meta": meta, "isError": failed });
+    if let Some(sc) = mcp.and_then(|m| m.get("structuredContent")).filter(|v| !v.is_null()) {
+        result["structuredContent"] = sc.clone();
+    }
+    Some(McpApp { server, tool, resource, input: call.get("input").cloned().unwrap_or(Value::Null), result })
 }
 
 /// A command as text: an argv array (a shell's `-c`/`-Command` script taken out of it) or a string.
@@ -1020,11 +1182,25 @@ fn command_text(v: &Value) -> String {
     }
 }
 
-/// Codex's own reading of a command (`parsed_cmd`): reads and searches say so, the rest ran.
+/// The skill whose instructions `text` (a path, or a command that reads one) names: `…/skills/justui/SKILL.md`.
+fn skill_of(text: &str) -> Option<String> {
+    let at = text.to_ascii_lowercase().find("skill.md")?;
+    let dir = text[..at].trim_end_matches(['/', '\\']);
+    let mut up = dir.rsplit(['/', '\\']);
+    let name = up.next()?.trim_matches(['"', '\'']);
+    // one of the skills folders' own, not any file of that name
+    (!name.is_empty() && up.next().is_some_and(|p| p.eq_ignore_ascii_case("skills"))).then(|| name.to_string())
+}
+
+/// Codex's own reading of a command (`parsed_cmd`): reads and searches say so (a skill's instructions read are the
+/// skill in use), the usual commands say what they did, the rest ran.
 fn parsed_label(parsed: &[&Value], cmd: &str) -> (StepKind, String) {
     let types: Vec<&str> = parsed.iter().filter_map(|c| c.get("type").and_then(Value::as_str)).collect();
     let field = |c: &Value, k: &str| c.get(k).and_then(Value::as_str).map(str::to_string);
     if !types.is_empty() && types.iter().all(|t| *t == "read") {
+        if let Some(skill) = parsed.iter().find_map(|c| field(c, "path").or_else(|| field(c, "cmd")).and_then(|p| skill_of(&p))) {
+            return (StepKind::Skill, wording::skill_name(&skill));
+        }
         let names: Vec<String> = parsed.iter().filter_map(|c| field(c, "name").or_else(|| field(c, "path").map(|p| basename(&p)))).collect();
         return (StepKind::Read, match names.as_slice() {
             [one] => format!("Read {one}"),
@@ -1043,7 +1219,7 @@ fn parsed_label(parsed: &[&Value], cmd: &str) -> (StepKind, String) {
         let path = parsed.first().and_then(|c| field(c, "path")).map(|p| basename(&p)).unwrap_or_else(|| "files".to_string());
         return (StepKind::Read, format!("Listed {path}"));
     }
-    (StepKind::Run, ran(cmd))
+    wording::command_label(cmd).unwrap_or_else(|| (StepKind::Run, ran(cmd)))
 }
 
 /// "Edited chrome.rs", "Created 2 files", "Changed 5 files" for one change or many.
@@ -1082,14 +1258,15 @@ fn codex_call(p: &Value, at: Option<i64>) -> Option<Step> {
         _ if ptype == "web_search_call" => StepState::Done,
         _ => StepState::Running,
     };
-    let make = |kind, label: String, detail: Option<String>| Some(Step { id: id.clone(), kind, label, detail: detail.map(|d| cut(&d, DETAIL_MAX)), state, added: 0, removed: 0, line: None, at_ms: at });
+    let make = |kind, label: String, detail: Option<String>| Some(Step { id: id.clone(), kind, label, detail: detail.map(|d| cut(&d, DETAIL_MAX)), state, added: 0, removed: 0, line: None, at_ms: at, app: None });
     if ptype == "web_search_call" {
         let q = p.get("action").and_then(|a| a.get("query")).and_then(Value::as_str).unwrap_or_default();
         return make(StepKind::Web, web(q), None);
     }
     if ptype == "local_shell_call" {
         let cmd = p.get("action").and_then(|a| a.get("command")).map(command_text).unwrap_or_default();
-        return make(StepKind::Run, ran(&cmd), Some(cmd));
+        let (kind, label) = parsed_label(&[], &cmd);
+        return make(kind, label, Some(cmd));
     }
     match name {
         "shell" | "local_shell" | "exec_command" | "shell_command" | "container.exec" => {
@@ -1117,7 +1294,10 @@ fn codex_call(p: &Value, at: Option<i64>) -> Option<Step> {
             step.removed = removed;
             Some(step)
         }
-        "update_plan" => make(StepKind::Plan, "Updated the plan".into(), None),
+        "update_plan" => {
+            let (label, now) = wording::plan_progress(input.get("plan"), &["step"]);
+            make(StepKind::Plan, label, now)
+        }
         "view_image" => {
             let path = input.get("path").and_then(Value::as_str).unwrap_or_default();
             make(StepKind::Read, format!("Looked at {}", basename(path)), Some(path.to_string()))
@@ -1131,14 +1311,21 @@ fn codex_call(p: &Value, at: Option<i64>) -> Option<Step> {
         "exec" => {
             let script = input.as_str().unwrap_or_default();
             match script_command(script) {
-                Some(cmd) => make(StepKind::Run, ran(&cmd), Some(cmd)),
+                Some(cmd) => {
+                    let (kind, label) = wording::command_label(&cmd).unwrap_or_else(|| (StepKind::Run, ran(&cmd)));
+                    make(kind, label, Some(cmd))
+                }
                 None => make(StepKind::Run, "Ran a script".into(), Some(script.to_string())),
             }
         }
         "spawn_agent" => make(StepKind::Agent, "Started a helper".into(), None),
         "send_message" | "followup_task" | "wait" | "list_agents" => None,
         "" => None,
-        n => make(StepKind::Other, format!("Used {}", words(n.rsplit("__").next().unwrap_or(n))), None),
+        n => match n.strip_prefix("mcp__").unwrap_or(n).split_once("__") {
+            // an MCP server's tool, as Codex names them (`server__tool`)
+            Some((server, tool)) => make(StepKind::Mcp, wording::tool_label(tool, &input), Some(wording::server_name(server))),
+            None => make(StepKind::Other, wording::name(n), None),
+        },
     }
 }
 
@@ -1224,6 +1411,89 @@ mod tests {
         json!({"type":"user","timestamp":"2026-10-28T10:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":call,"content":"ok","is_error":error}]},"toolUseResult":structured})
     }
 
+    fn app_of(c: &Conversation, call: &str) -> Option<Arc<McpApp>> {
+        c.items.iter().find_map(|i| match i.as_ref() {
+            Item::Did { steps } => steps.iter().find(|s| s.id == call).map(|s| s.app.clone()),
+            _ => None,
+        })?
+    }
+
+    #[test]
+    fn an_mcp_result_with_a_page_is_an_app() {
+        // as Claude Code 2.1.312 records a claude.ai connector's call (JustGains' generate_workout)
+        let sc = json!({"workoutId": "w1", "title": "Upper Body"});
+        let c = claude(&[
+            tool("m1", "t1", "mcp__claude_ai_JustGains__generate_workout", json!({"prompt": "30 minute upper body"})),
+            json!({"type":"user","timestamp":"2026-10-28T10:00:03Z",
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":sc.to_string()}]},
+                "toolUseResult": sc.to_string(),
+                "mcpMeta": {"_meta": {"ui": {"resourceUri": "ui://widget/workout-v84.html"}, "openai/outputTemplate": "ui://widget/workout-v84.html", "workoutId": "w1"}, "structuredContent": sc}}),
+        ]);
+        let app = app_of(&c, "t1").expect("an app");
+        assert_eq!((app.server.as_str(), app.tool.as_str(), app.resource.as_str()), ("claude_ai_JustGains", "generate_workout", "ui://widget/workout-v84.html"));
+        assert_eq!(app.input, json!({"prompt": "30 minute upper body"}));
+        assert_eq!(app.result["structuredContent"], sc);
+        assert_eq!(app.result["content"][0]["text"], sc.to_string());
+        assert_eq!(app.result["_meta"]["workoutId"], "w1");
+        assert_eq!(app.result["isError"], false);
+    }
+
+    #[test]
+    fn only_a_ui_page_makes_an_app() {
+        let meta = |m: Value| {
+            let mut c = claude(&[tool("m1", "t1", "mcp__srv__tool", json!({}))]);
+            c.ingest(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"hi"}]}]},"mcpMeta":{"_meta": m}}));
+            app_of(&c, "t1").map(|a| a.resource.clone())
+        };
+        assert_eq!(meta(json!({"openai/outputTemplate": "ui://widget/a.html"})).as_deref(), Some("ui://widget/a.html"), "the Apps SDK's template");
+        assert_eq!(meta(json!({"ui/resourceUri": "ui://b"})).as_deref(), Some("ui://b"), "the draft's key");
+        assert_eq!(meta(json!({"ui": {"resourceUri": "https://example.com/page"}})), None, "only ui:// pages");
+        assert_eq!(meta(json!({"progressToken": 1})), None);
+        // a built-in tool's result never is one
+        let mut c = claude(&[tool("m1", "t1", "Read", json!({"file_path": "a"}))]);
+        c.ingest(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]},"mcpMeta":{"_meta":{"ui":{"resourceUri":"ui://x"}}}}));
+        assert_eq!(app_of(&c, "t1"), None);
+    }
+
+    #[test]
+    fn a_long_transcript_is_read_back_from_its_start() {
+        use super::super::live::{FIRST_READ_MAX, Tail};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("long.jsonl");
+        // a turn whose tool output is more than a tail's first read takes, as screenshots and big files make it
+        let output = "x".repeat(FIRST_READ_MAX as usize + 4096);
+        let lines = [
+            user("Make the logo pixel art"),
+            tool("m1", "t1", "Read", json!({"file_path": "F:\\site\\logo.svg"})),
+            result("t1", false, json!({ "file": { "content": output } })),
+            text("m2", "Done: the logo is pixel art now."),
+        ];
+        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        // and a line still being written
+        std::fs::write(&p, format!("{body}{{\"type\":\"user\",")).unwrap();
+        let mut tail = Tail::new(&p);
+        let first = tail.read().unwrap();
+        assert!(first.began.is_some_and(|b| b > 0), "the first read starts near the end");
+        let mut latest = Conversation::new(Harness::Claude);
+        latest.ingest_lines(&first.lines);
+        assert_eq!(kinds(&latest), ["said"], "the last lines alone lose the turn");
+        assert_eq!(tail.lines_end(), body.len() as u64);
+        let c = Conversation::history(Harness::Claude, &p, tail.lines_end()).unwrap();
+        assert_eq!(kinds(&c), ["you", "did", "said"]);
+        let Item::Did { steps } = c.items[1].as_ref() else { panic!() };
+        assert_eq!((steps[0].label.as_str(), steps[0].state), ("Read logo.svg", StepState::Done));
+        // begun inside a line, it's left out; begun at one's start, it's in
+        let answer = format!("{}\n", lines[3]);
+        let c = Conversation::read_back(Harness::Claude, &p, tail.lines_end(), answer.len() as u64 + 10).unwrap();
+        assert_eq!(kinds(&c), ["said"]);
+        let c = Conversation::read_back(Harness::Claude, &p, tail.lines_end(), answer.len() as u64).unwrap();
+        assert_eq!(kinds(&c), ["said"]);
+        let c = Conversation::read_back(Harness::Claude, &p, tail.lines_end(), answer.len() as u64 - 1).unwrap();
+        assert_eq!(kinds(&c), Vec::<&str>::new());
+        // later reads aren't first ones
+        assert_eq!(tail.read().unwrap().began, None);
+    }
+
     #[test]
     fn a_claude_turn_reads_as_you_said_did_said() {
         let c = claude(&[
@@ -1270,6 +1540,25 @@ mod tests {
         assert_eq!(*images, 2);
         assert_eq!(pictures, &[r"C:\Users\me\.bro\paste\paste-1793204344367.png".to_string(), r"C:\My Shots\a b.PNG".to_string()]);
         assert_eq!(you, [("/model opus".to_string(), 0, true), ("what's wrong here?".to_string(), 1, false), ("! git status".to_string(), 0, true)]);
+    }
+
+    #[test]
+    fn what_other_sessions_send_isnt_you() {
+        let c = claude(&[
+            user("spawn the pop-* teammates"),
+            text("m1", "Spawned six."),
+            // a teammate's message: a plain user record, no isMeta and no origin
+            user("Another Claude session sent a message:\n<teammate-message teammate_id=\"pop-held\" color=\"purple\" summary=\"heads-up\">\npop-held: someone else is editing held.ts\n</teammate-message>\n\nThis came from another Claude session — not typed by your user"),
+            text("m2", "Noted."),
+            user("<teammate-message teammate_id=\"pop-wear\" color=\"cyan\">\n{\"type\":\"idle_notification\"}\n</teammate-message>"),
+            user("<agent-message from=\"a560080e21d258320\">\nfound it\n</agent-message>"),
+            json!({"type":"user","message":{"content":[{"type":"text","text":"<system-reminder>\n<tools-used-before-summary>WebSearch</tools-used-before-summary>\n</system-reminder>\n"},{"type":"text","text":"Another Claude session sent a message:\n<agent-message from=\"popculture\">\n17 new pieces\n</agent-message>"}]}}),
+            text("m3", "All in."),
+        ]);
+        assert_eq!(kinds(&c), ["you", "said"], "{:?}", c.items);
+        let Item::Said { text, .. } = c.items[1].as_ref() else { panic!() };
+        assert_eq!(text, "Spawned six.\n\nNoted.\n\nAll in.", "its replies to them read on from the last");
+        assert_eq!(super::super::describe::claude_prompt(Some(&json!("Another Claude session sent a message:\n<cross-session-message from=\"x\">hi</cross-session-message>"))), None, "nor the session's last prompt");
     }
 
     #[test]
@@ -1324,7 +1613,7 @@ mod tests {
         assert_eq!(kinds(&c), ["you", "did", "note", "note", "note"]);
         let Item::Did { steps } = c.items[1].as_ref() else { panic!() };
         assert_eq!(steps[0].state, StepState::Failed, "the interrupted command never finished");
-        assert_eq!(steps[0].label, "Ran sleep 100");
+        assert_eq!(steps[0].label, "Waited 1m 40s");
         assert!(matches!(c.items[3].as_ref(), Item::Note { kind: NoteKind::Error, text, .. } if text.contains("529")));
         assert!(matches!(c.items[4].as_ref(), Item::Note { kind: NoteKind::Compacted, .. }), "one note for the boundary and its summary");
     }
@@ -1391,10 +1680,61 @@ mod tests {
 
     #[test]
     fn mcp_and_unknown_tools_read_as_words() {
-        assert_eq!(claude_step("mcp__justbrowse__chrome_navigate", &json!({})).1, "Used chrome navigate");
-        assert_eq!(claude_step("mcp__justbrowse__chrome_navigate", &json!({})).2.as_deref(), Some("justbrowse"));
-        assert_eq!(claude_step("NotebookRead", &json!({})).1, "Used notebook read");
+        let navigate = claude_step("mcp__justbrowse__chrome_navigate", &json!({"url":"https://www.figma.com/design/gW6z/Just-Gains","background":true}));
+        assert_eq!(navigate, (StepKind::Mcp, "Navigate · figma.com".to_string(), Some("JustBrowse".to_string())), "what it did and to what; its server by name");
+        assert_eq!(claude_step("mcp__claude_ai_JustGains__generate_workout", &json!({"prompt":"30 minute upper body"})).2.as_deref(), Some("JustGains"));
+        assert_eq!(claude_step("NotebookRead", &json!({})).1, "Notebook read");
         assert_eq!(claude_step("WebFetch", &json!({"url":"https://docs.rs/wgpu"})).1, "Read docs.rs");
+    }
+
+    #[test]
+    fn a_skill_reads_as_its_name() {
+        assert_eq!(claude_step("Skill", &json!({"skill":"generate-voice"})), (StepKind::Skill, "Generate voice".to_string(), None));
+        let asked = claude_step("Skill", &json!({"skill":"justgains-app-deployment","args":"ship the beta"}));
+        assert_eq!(asked, (StepKind::Skill, "JustGains app deployment".to_string(), Some("ship the beta".to_string())));
+        // Codex reads a skill's instructions itself
+        let read = json!({"type":"read","cmd":"cat /home/j/.codex/skills/generate-voice/SKILL.md","name":"SKILL.md"});
+        assert_eq!(parsed_label(&[&read], "cat /home/j/.codex/skills/generate-voice/SKILL.md"), (StepKind::Skill, "Generate voice".to_string()));
+        let win = json!({"type":"read","cmd":"Get-Content 'C:\\Users\\j\\.codex\\skills\\justui\\SKILL.md'","name":"SKILL.md"});
+        assert_eq!(parsed_label(&[&win], "").1, "JustUI");
+        let other = json!({"type":"read","cmd":"cat docs/SKILL.md","name":"SKILL.md"});
+        assert_eq!(parsed_label(&[&other], "cat docs/SKILL.md"), (StepKind::Read, "Read SKILL.md".to_string()), "any file of that name isn't a skill");
+    }
+
+    #[test]
+    fn claude_codes_other_tools_say_what_they_did() {
+        // as Claude Code 2.1.312 records them
+        let label = |n: &str, i: Value| claude_step(n, &i).1;
+        assert_eq!(label("SendMessage", json!({"to":"pop-head","message":"Main session here: someone edited compose.ts"})), "Messaged pop-head");
+        assert_eq!(label("ToolSearch", json!({"query":"select:WebSearch","max_results":1})), "Loaded WebSearch");
+        assert_eq!(label("TaskStop", json!({"task_id":"bw0akmxbl"})), "Stopped a background task");
+        assert_eq!(label("Monitor", json!({"description":"EAS builds: iOS production a716cf1b","command":"while true; do sleep 30; done"})), "Watching EAS builds: iOS production a716cf1b");
+        assert_eq!(label("ScheduleWakeup", json!({"delaySeconds":1200,"reason":"fallback in case the emulator screenshot agent stalls"})), "Checks back in 20m");
+        assert_eq!(label("Agent", json!({"description":"Arms: light-bend rubber hose","subagent_type":"general-purpose","prompt":"…"})), "Arms: light-bend rubber hose");
+        assert_eq!(label("Agent", json!({"description":"Find the route code","subagent_type":"Explore"})), "Find the route code · Explore");
+        let todos = json!({"todos":[{"content":"Write it","status":"completed"},{"content":"Test it","status":"in_progress","activeForm":"Testing it"}]});
+        assert_eq!(claude_step("TodoWrite", &todos), (StepKind::Plan, "Updated the plan · 1/2 done".to_string(), Some("Testing it".to_string())));
+        assert_eq!(claude_step("Artifact", &json!({"file_path":"C:/x/report.html","icon":"chart"})), (StepKind::Send, "Published report.html".to_string(), Some("C:/x/report.html".to_string())));
+        assert_eq!(label("Artifact", json!({"action":"quickstart","intent":"other"})), "Looked up page types");
+        // a command with no words of its own reads as what it did
+        assert_eq!(claude_step("Bash", &json!({"command":"cargo test -p bro-tui"})), (StepKind::Run, "Tested bro-tui".to_string(), Some("cargo test -p bro-tui".to_string())));
+        assert_eq!(label("Bash", json!({"command":"cargo test","description":"Run the launcher tests"})), "Run the launcher tests", "its own words win");
+        assert_eq!(label("PowerShell", json!({"command":"./build.ps1 -Fast"})), "Ran ./build.ps1 -Fast");
+    }
+
+    #[test]
+    fn codex_mcp_calls_and_commands_read_as_words() {
+        let mut c = Conversation::new(Harness::Codex);
+        for l in [
+            json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"check the page"}]}}}),
+            json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","id":"m1","server":"justbrowse","tool":"chrome_navigate","arguments":{"url":"https://example.com/a"},"status":"completed"}}}),
+            json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"x1","command":["bash","-lc","git push origin main"],"parsed_cmd":[{"type":"unknown","cmd":"git push origin main"}],"status":"completed","exit_code":0}}}),
+        ] {
+            c.ingest(&l);
+        }
+        let Item::Did { steps } = c.items.last().unwrap().as_ref() else { panic!("{:?}", c.items) };
+        assert_eq!((steps[0].kind, steps[0].label.as_str(), steps[0].detail.as_deref()), (StepKind::Mcp, "Navigate · example.com", Some("JustBrowse")));
+        assert_eq!((steps[1].kind, steps[1].label.as_str()), (StepKind::Run, "Pushed main"));
     }
 
     #[test]
@@ -1418,7 +1758,7 @@ mod tests {
         assert_eq!(kinds(&c), ["you", "said", "did"]);
         let Item::Did { steps } = c.items[2].as_ref() else { panic!() };
         let got: Vec<(&str, StepState)> = steps.iter().map(|s| (s.label.as_str(), s.state)).collect();
-        assert_eq!(got, [("Read a.jsonl", StepState::Done), ("Ran cargo test -p bro-proxy", StepState::Failed), ("Edited golden.rs", StepState::Done), ("Searched the web for “responses api streaming”", StepState::Done)], "the script's own call is left to the items");
+        assert_eq!(got, [("Read a.jsonl", StepState::Done), ("Tested bro-proxy", StepState::Failed), ("Edited golden.rs", StepState::Done), ("Searched the web for “responses api streaming”", StepState::Done)], "the script's own call is left to the items");
         assert_eq!((steps[2].added, steps[2].removed), (2, 1));
     }
 
@@ -1436,7 +1776,7 @@ mod tests {
         assert_eq!(kinds(&c), ["you", "did", "note"]);
         let Item::Did { steps } = c.items[1].as_ref() else { panic!() };
         let got: Vec<(&str, StepState)> = steps.iter().map(|s| (s.label.as_str(), s.state)).collect();
-        assert_eq!(got, [("Ran cargo test", StepState::Done), ("Created new.rs", StepState::Failed)]);
+        assert_eq!(got, [("Ran the tests", StepState::Done), ("Created new.rs", StepState::Failed)]);
     }
 
     #[test]

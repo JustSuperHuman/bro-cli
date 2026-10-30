@@ -41,12 +41,47 @@ pub enum AttentionState {
 #[serde(rename_all = "camelCase")]
 pub struct Attention {
     pub state: AttentionState,
-    /// "Bash: npm publish", "Question: Which database?" … (≤ 80 chars)
+    /// "Bash: npm publish", "Question: Which database?" … (≤ 80 chars; provider limits keep up to 320).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// ISO-8601 time the state began.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
+    /// A provider quota/retry wait, rather than a question that needs an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<bro_core::sessions::limits::UsageLimit>,
+    /// The latest attention event, independently of whether the agent is still blocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<AttentionNotice>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttentionNotice {
+    pub event_id: String,
+    pub kind: NoticeKind,
+    pub unread: bool,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoticeKind { Input, Finished }
+
+impl AppState {
+    /// Acknowledge exactly the event the viewer read; an old request cannot clear a newer event.
+    pub(crate) fn acknowledge_attention(&self, id: &str, event_id: &str) -> bool {
+        let changed = {
+            let mut inner = self.inner.lock();
+            let Some(session) = inner.sessions.get_mut(id) else { return false };
+            session.acknowledge_attention(event_id)
+        };
+        if changed {
+            self.publish_session(id);
+            self.send_command(crate::BridgeCommand::Seen { id: id.into(), event_id: event_id.into() });
+        }
+        changed
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,10 +236,10 @@ impl AppState {
             let Some(session) = inner.sessions.get_mut(session_id) else {
                 return;
             };
-            if session.summary.attention == insights.attention && session.summary.recap == insights.recap {
+            let changed = session.set_attention(insights.attention);
+            if !changed && session.summary.recap == insights.recap {
                 return;
             }
-            session.summary.attention = insights.attention;
             session.summary.recap = insights.recap;
         }
         self.publish_insights(session_id);
@@ -330,7 +365,7 @@ mod unit {
     #[test]
     fn wire_shapes_are_camel_case_and_omit_empty_fields() {
         let insights = SessionInsights {
-            attention: Some(Attention { state: AttentionState::Blocked, reason: Some("Bash: npm publish".into()), since: None }),
+            attention: Some(Attention { state: AttentionState::Blocked, reason: Some("Bash: npm publish".into()), since: None, limit: None, notice: None }),
             recap: Some(Recap { text: "Shipped it".into(), at: None, source: RecapSource::LastMessage }),
         };
         let value = serde_json::to_value(&insights).unwrap();

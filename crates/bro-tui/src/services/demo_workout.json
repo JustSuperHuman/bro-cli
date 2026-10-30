@@ -1,0 +1,645 @@
+{
+ "structuredContent": {
+  "measurementSystem": "imperial",
+  "workoutId": "14b723e5-b8d7-4557-9eac-5c3c510649a1",
+  "title": "Upper Body Dumbbell Finisher",
+  "summary": "Bro, I put together a balanced 30-minute upper body dumbbell session targeting your chest, back, shoulders, and arms efficiently. This routine hits all the major pushing and pulling patterns so you can get a great pump without wasting any time.",
+  "workout": {
+   "workoutId": "14b723e5-b8d7-4557-9eac-5c3c510649a1",
+   "workoutTitle": "Upper Body Dumbbell Finisher",
+   "workoutDescription": null,
+   "workoutType": "Template",
+   "isMyWorkout": true,
+   "sourceWorkoutId": null,
+   "workoutBackgroundImage": {
+    "fileUrl": "https://m.justgains.com/WorkoutCardGallery/4e990ac5-9696-4e20-8abe-e66e9649b663.webp"
+   },
+   "workoutSummary": {
+    "exerciseCount": 7,
+    "estimatedDuration": 1560,
+    "totalReps": 120,
+    "totalSets": 15,
+    "totalVolume": 0,
+    "totalDistance": 0,
+    "estimatedCalories": 0
+   },
+   "equipmentList": [
+    {
+     "equipmentCode": "DUMBBELLS",
+     "equipmentName": "Dumbbells",
+     "thumbnailUrl": "https://m.justgains.com/media/images/b2e3cd15-c43c-4389-a54a-79639bd6b07d.webp"
+    },
+    {
+     "equipmentCode": "EXERCISE_BENCH",
+     "equipmentName": "Exercise Bench",
+     "thumbnailUrl": "https://m.justgains.com/media/images/70671b06-5c55-4028-a01e-ee4bbcbe7784.webp"
+    }
+   ],
+   "muscleUsage": [
+    {
+     "muscleCode": "SHOULDERS",
+     "muscleGroupCode": "SHOULDERS",
+     "muscleGroupName": "Shoulders",
+     "isPrimary": true,
+     "targetPercentage": 147,
+     "thumbnailUrl": "https://m.justgains.com/uploads/dd5009f5-eff7-4fb2-be10-9bb652a5dd36.svg"
+    },
+    {
+     "muscleCode": "BACK",
+     "muscleGroupCode": "BACK",
+     "muscleGroupName": "Back",
+     "isPrimary": true,
+     "targetPercentage": 100,
+     "thumbnailUrl": "https://m.justgains.com/uploads/fa479fd2-af2c-4fc8-ad67-7b0281cb9bde.svg"
+    },
+    {
+     "muscleCode": "BICEPS",
+     "muscleGroupCode": "BICEPS",
+     "muscleGroupName": "Biceps",
+     "isPrimary": true,
+     "targetPercentage": 87,
+     "thumbnailUrl": "https://m.justgains.com/uploads/59f91f2d-9ef4-4144-a1b6-f3d37ec7f7e1.svg"
+    },
+    {
+     "muscleCode": "CHEST",
+     "muscleGroupCode": "CHEST",
+     "muscleGroupName": "Chest",
+     "isPrimary": true,
+     "targetPercentage": 80,
+     "thumbnailUrl": "https://m.justgains.com/uploads/48aa78c5-3a2b-4b00-ab00-3ac867c0f156.svg"
+    },
+    {
+     "muscleCode": "TRICEPS",
+     "muscleGroupCode": "TRICEPS",
+     "muscleGroupName": "Triceps",
+     "isPrimary": true,
+     "targetPercentage": 77,
+     "thumbnailUrl": "https://m.justgains.com/uploads/053413d5-ad04-43d7-befb-06d3730898f7.svg"
+    },
+    {
+     "muscleCode": "TRAPEZIUS",
+     "muscleGroupCode": "TRAPEZIUS",
+     "muscleGroupName": "Trapezius",
+     "isPrimary": false,
+     "targetPercentage": 30,
+     "thumbnailUrl": "https://m.justgains.com/uploads/47ec6bac-9b27-49b4-9532-b377d2180964.svg"
+    },
+    {
+     "muscleCode": "FOREARMS",
+     "muscleGroupCode": "FOREARMS",
+     "muscleGroupName": "Forearms",
+     "isPrimary": false,
+     "targetPercentage": 20,
+     "thumbnailUrl": "https://m.justgains.com/uploads/e8b98a8e-ccad-428a-b5fc-58b6aa1e7d3d.svg"
+    },
+    {
+     "muscleCode": "CORE",
+     "muscleGroupCode": "CORE",
+     "muscleGroupName": "Core",
+     "isPrimary": false,
+     "targetPercentage": 10,
+     "thumbnailUrl": "https://m.justgains.com/uploads/80ed8c57-83d8-4dfb-9ad6-63bd1308e347.svg"
+    }
+   ],
+   "creatorProfile": {
+    "creatorProfileId": "00000000-0000-0000-0000-00000000c002",
+    "userName": "claude",
+    "displayName": "Claude",
+    "creatorProfileType": "system",
+    "followerCount": 0,
+    "profilePhoto": {
+     "fileUrl": "https://m.justgains.com/seed/assets/anthropic.png"
+    }
+   },
+   "workoutData": [
+    {
+     "exerciseCode": "ARM.CIRCLES",
+     "exerciseName": "Forward Arm Circles",
+     "exerciseNotes": "Get the shoulder joints loose and ready.",
+     "exerciseThumbnailUrl": "https://m.justgains.com/just-exercise-videos/v2/circles-arm-grey-female.webp",
+     "exerciseVideoUrl": "https://m.justgains.com/just-exercise-videos/v2/circles-arm-grey-female.mp4",
+     "exerciseData": [
+      {
+       "setNumber": 1,
+       "setType": "warmup",
+       "setMeasurements": [
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 60
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 5
+        }
+       ]
+      }
+     ],
+     "exerciseOrder": 0,
+     "exerciseGroupId": 1,
+     "exerciseGroupType": "WARMUP",
+     "additionalData": {
+      "generatedTargetsVersion": 1,
+      "exerciseLink": null,
+      "caption": null,
+      "message": null,
+      "alertType": null,
+      "workoutImportEntryId": null,
+      "exerciseListId": null,
+      "exerciseListSlotCode": null,
+      "exerciseListName": null,
+      "isImportedExerciseList": null,
+      "exerciseListOptions": null,
+      "selectedExerciseCode": null,
+      "selectedExerciseName": null,
+      "selectedExerciseThumbnailUrl": null
+     }
+    },
+    {
+     "exerciseCode": "DUMBBELL.STANDING.OVERHEAD.PRESS",
+     "exerciseName": "Dumbbell Overhead Press",
+     "exerciseNotes": "Light warm-up set to prime the pressing muscles.",
+     "exerciseThumbnailUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-standing-overhead-press-grey-female.webp",
+     "exerciseVideoUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-standing-overhead-press-grey-female.mp4",
+     "exerciseData": [
+      {
+       "setNumber": 1,
+       "setType": "warmup",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 60
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 5
+        }
+       ]
+      }
+     ],
+     "exerciseOrder": 1,
+     "exerciseGroupId": 1,
+     "exerciseGroupType": "WARMUP",
+     "additionalData": {
+      "generatedTargetsVersion": 1,
+      "exerciseLink": null,
+      "caption": null,
+      "message": null,
+      "alertType": null,
+      "workoutImportEntryId": null,
+      "exerciseListId": null,
+      "exerciseListSlotCode": null,
+      "exerciseListName": null,
+      "isImportedExerciseList": null,
+      "exerciseListOptions": null,
+      "selectedExerciseCode": null,
+      "selectedExerciseName": null,
+      "selectedExerciseThumbnailUrl": null
+     }
+    },
+    {
+     "exerciseCode": "DUMBBELL.BENCH.PRESS",
+     "exerciseName": "Dumbbell Bench Press",
+     "exerciseNotes": "Focus on a strong chest contraction at the top.",
+     "exerciseThumbnailUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-bench-press-grey-female.webp",
+     "exerciseVideoUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-bench-press-grey-female.mp4",
+     "exerciseData": [
+      {
+       "setNumber": 1,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      },
+      {
+       "setNumber": 2,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      },
+      {
+       "setNumber": 3,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      }
+     ],
+     "exerciseOrder": 2,
+     "exerciseGroupId": null,
+     "exerciseGroupType": null,
+     "additionalData": {
+      "generatedTargetsVersion": 1,
+      "exerciseLink": null,
+      "caption": null,
+      "message": null,
+      "alertType": null,
+      "workoutImportEntryId": null,
+      "exerciseListId": null,
+      "exerciseListSlotCode": null,
+      "exerciseListName": null,
+      "isImportedExerciseList": null,
+      "exerciseListOptions": null,
+      "selectedExerciseCode": null,
+      "selectedExerciseName": null,
+      "selectedExerciseThumbnailUrl": null
+     }
+    },
+    {
+     "exerciseCode": "DUMBBELL.BENT.OVER.ROW",
+     "exerciseName": "Dumbbell Bent-Over Row",
+     "exerciseNotes": "Keep your back flat and pull toward your hips.",
+     "exerciseThumbnailUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-bent-over-row-fullcolor-female.webp",
+     "exerciseVideoUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-bent-over-row-fullcolor-female.mp4",
+     "exerciseData": [
+      {
+       "setNumber": 1,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      },
+      {
+       "setNumber": 2,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      },
+      {
+       "setNumber": 3,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      }
+     ],
+     "exerciseOrder": 3,
+     "exerciseGroupId": null,
+     "exerciseGroupType": null,
+     "additionalData": {
+      "generatedTargetsVersion": 1,
+      "exerciseLink": null,
+      "caption": null,
+      "message": null,
+      "alertType": null,
+      "workoutImportEntryId": null,
+      "exerciseListId": null,
+      "exerciseListSlotCode": null,
+      "exerciseListName": null,
+      "isImportedExerciseList": null,
+      "exerciseListOptions": null,
+      "selectedExerciseCode": null,
+      "selectedExerciseName": null,
+      "selectedExerciseThumbnailUrl": null
+     }
+    },
+    {
+     "exerciseCode": "LATERAL.RAISE",
+     "exerciseName": "Dumbbell Lateral Raise",
+     "exerciseNotes": "Control the descent on every rep.",
+     "exerciseThumbnailUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-standing-lateral-raise-grey-female.webp",
+     "exerciseVideoUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-standing-lateral-raise-grey-female.mp4",
+     "exerciseData": [
+      {
+       "setNumber": 1,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      },
+      {
+       "setNumber": 2,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      },
+      {
+       "setNumber": 3,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      }
+     ],
+     "exerciseOrder": 4,
+     "exerciseGroupId": null,
+     "exerciseGroupType": null,
+     "additionalData": {
+      "generatedTargetsVersion": 1,
+      "exerciseLink": null,
+      "caption": null,
+      "message": null,
+      "alertType": null,
+      "workoutImportEntryId": null,
+      "exerciseListId": null,
+      "exerciseListSlotCode": null,
+      "exerciseListName": null,
+      "isImportedExerciseList": null,
+      "exerciseListOptions": null,
+      "selectedExerciseCode": null,
+      "selectedExerciseName": null,
+      "selectedExerciseThumbnailUrl": null
+     }
+    },
+    {
+     "exerciseCode": "DUMBBELL.BICEPS.CURL",
+     "exerciseName": "Dumbbell Curl",
+     "exerciseNotes": "Squeeze the bicep hard at the top.",
+     "exerciseThumbnailUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-biceps-curl-fullcolor-female.webp",
+     "exerciseVideoUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-biceps-curl-fullcolor-female.mp4",
+     "exerciseData": [
+      {
+       "setNumber": 1,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      },
+      {
+       "setNumber": 2,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      }
+     ],
+     "exerciseOrder": 5,
+     "exerciseGroupId": null,
+     "exerciseGroupType": null,
+     "additionalData": {
+      "generatedTargetsVersion": 1,
+      "exerciseLink": null,
+      "caption": null,
+      "message": null,
+      "alertType": null,
+      "workoutImportEntryId": null,
+      "exerciseListId": null,
+      "exerciseListSlotCode": null,
+      "exerciseListName": null,
+      "isImportedExerciseList": null,
+      "exerciseListOptions": null,
+      "selectedExerciseCode": null,
+      "selectedExerciseName": null,
+      "selectedExerciseThumbnailUrl": null
+     }
+    },
+    {
+     "exerciseCode": "DUMBBELL.STANDING.TRICEPS.EXTENSION",
+     "exerciseName": "Dumbbell Overhead Triceps Extension",
+     "exerciseNotes": "Keep your elbows tucked close to your head.",
+     "exerciseThumbnailUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-standing-triceps-extension-grey-female.webp",
+     "exerciseVideoUrl": "https://m.justgains.com/just-exercise-videos/v2/dumbbell-standing-triceps-extension-grey-female.mp4",
+     "exerciseData": [
+      {
+       "setNumber": 1,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      },
+      {
+       "setNumber": 2,
+       "setType": "normal",
+       "setMeasurements": [
+        {
+         "measurementCode": "WEIGHT"
+        },
+        {
+         "measurementCode": "REPS",
+         "measurementPlaceholder": 8
+        },
+        {
+         "measurementCode": "REST",
+         "measurementPlaceholder": 120
+        },
+        {
+         "measurementCode": "RPE",
+         "measurementPlaceholder": 7
+        }
+       ]
+      }
+     ],
+     "exerciseOrder": 6,
+     "exerciseGroupId": null,
+     "exerciseGroupType": null,
+     "additionalData": {
+      "generatedTargetsVersion": 1,
+      "exerciseLink": null,
+      "caption": null,
+      "message": null,
+      "alertType": null,
+      "workoutImportEntryId": null,
+      "exerciseListId": null,
+      "exerciseListSlotCode": null,
+      "exerciseListName": null,
+      "isImportedExerciseList": null,
+      "exerciseListOptions": null,
+      "selectedExerciseCode": null,
+      "selectedExerciseName": null,
+      "selectedExerciseThumbnailUrl": null
+     }
+    }
+   ]
+  },
+  "timestamp": "2026-10-28T21:28:51.353Z"
+ },
+ "_meta": {
+  "securitySchemes": [
+   {
+    "type": "noauth"
+   }
+  ],
+  "ui": {
+   "resourceUri": "ui://widget/workout-v84.html"
+  },
+  "openai/outputTemplate": "ui://widget/workout-v84.html",
+  "openai/toolInvocation/invoking": "Generating workout...",
+  "openai/toolInvocation/invoked": "Workout generated",
+  "openai/widgetAccessible": false,
+  "openai/resultCanProduceWidget": true,
+  "workoutId": "14b723e5-b8d7-4557-9eac-5c3c510649a1",
+  "title": "Upper Body Dumbbell Finisher",
+  "summary": "Bro, I put together a balanced 30-minute upper body dumbbell session targeting your chest, back, shoulders, and arms efficiently. This routine hits all the major pushing and pulling patterns so you can get a great pump without wasting any time."
+ }
+}

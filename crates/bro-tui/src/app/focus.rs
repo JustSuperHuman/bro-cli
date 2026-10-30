@@ -18,6 +18,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+mod quips;
+mod terminal_quips;
+mod remote;
+
 /// Agents whose transcript bro follows (Pi and omp, shells, a resume still in line and a failed start keep
 /// their terminal).
 pub(crate) fn focusable(t: &Term) -> bool {
@@ -27,6 +31,8 @@ pub(crate) fn focusable(t: &Term) -> bool {
 /// A row of the model or thinking list in the reply box's footer.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MenuRow {
+    /// what picking it switches to (a model's id, a level); empty: nothing (what it runs on now)
+    pub id: String,
     pub label: String,
     pub detail: Option<String>,
     /// what it runs on now
@@ -53,6 +59,52 @@ pub(crate) fn same_model(current: &str, m: &ModelChoice) -> bool {
     c == id || c == m.name.to_ascii_lowercase() || (alias && (id.starts_with(&format!("{c}-")) || id.starts_with(&format!("claude-{c}-"))))
 }
 
+/// What a session's models are, by what it was launched on.
+enum ModelSource {
+    Claude,
+    /// a Codex login's (its home)
+    Codex(PathBuf),
+    /// an API provider's or a Gemini profile's (its id in bro's catalogue)
+    Provider(String),
+}
+
+/// What `t` runs on, for the models it can switch to: its own login (through bro's proxy or not), proxy mode on
+/// its own family and the Claude pool give its agent's own models; the other family's logins give theirs (Claude
+/// Code on your ChatGPT logins switches between GPT models); an API provider gives its own.
+fn model_source(t: &Term, listed: impl Fn(&str) -> bool) -> Option<ModelSource> {
+    use bro_core::launch::{LOGINS_CLAUDE, LOGINS_CODEX};
+    use bro_core::profiles::{ProfileKind, dir_for, parse_id};
+    let harness = t.meta.harness?;
+    let provider = match &t.launch_spec {
+        Some(s) => s.provider_id.as_deref(),
+        // a session the session server kept from before has no launch: its profile says the same when it names a
+        // login, the shared logins, the pool or a provider bro lists models for
+        None => t.meta.profile.as_deref().filter(|p| p.contains(':') || *p == "pool" || listed(p)),
+    }
+    .filter(|p| !p.is_empty());
+    Some(match (harness, provider) {
+        (Harness::Claude, None | Some(LOGINS_CLAUDE | "pool")) => ModelSource::Claude,
+        (Harness::Codex, None | Some(LOGINS_CODEX)) => ModelSource::Codex(t.config_home().unwrap_or_else(bro_core::paths::codex_local_dir)),
+        (_, Some(LOGINS_CLAUDE | "pool")) => ModelSource::Claude,
+        (_, Some(LOGINS_CODEX)) => ModelSource::Codex(bro_core::paths::codex_local_dir()),
+        (_, Some(id)) => match parse_id(id) {
+            Some((ProfileKind::ClaudeLocal | ProfileKind::ClaudeAccount, _)) => ModelSource::Claude,
+            Some((kind @ (ProfileKind::CodexLocal | ProfileKind::CodexProfile), name)) => ModelSource::Codex(dir_for(kind, name)),
+            _ => ModelSource::Provider(id.to_string()),
+        },
+        // Pi and omp keep their terminal
+        (Harness::Pi | Harness::Omp, None) => return None,
+    })
+}
+
+/// A provider's model to switch to: its name, and its id and context window to tell it from the rest.
+fn provider_choice(r: bro_core::catalogue::ModelRow) -> ModelChoice {
+    let context = r.context.map(|c| if c >= 1_000_000 { format!("{}M context", c / 1_000_000) } else { format!("{}K context", c / 1000) });
+    let id = (r.name != r.id).then(|| r.id.clone());
+    let detail = [id, context].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+    ModelChoice { name: r.name, detail: (!detail.is_empty()).then_some(detail), levels: vec![], default_level: None, id: r.id }
+}
+
 /// The models Claude Code switches between (`/model <id>`).
 fn claude_models() -> Arc<Vec<ModelChoice>> {
     static MODELS: OnceLock<Arc<Vec<ModelChoice>>> = OnceLock::new();
@@ -65,6 +117,12 @@ fn codex_takes_arguments(version: Option<&str>) -> bool {
     let mut n = v.trim_start_matches('v').split('.').map(|p| p.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u32>().unwrap_or(0));
     let (major, minor) = (n.next().unwrap_or(0), n.next().unwrap_or(0));
     (major, minor) >= (0, 165)
+}
+
+/// Before its first turn, a transcript can learn its model and level after a choice was queued.
+fn change_matches(change: &Change, said: &(Option<String>, Option<String>)) -> bool {
+    if change.sent.is_some() { return change.was == *said; }
+    (change.was.0.is_none() || change.was.0 == said.0) && (change.was.1.is_none() || change.was.1 == said.1)
 }
 
 /// The commands bro's catalogue knows for `agent` (its own; what's in the folders comes later).
@@ -140,12 +198,12 @@ impl App {
         if let Some(conv) = self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.insights()).and_then(|s| s.conversation) {
             for it in &conv.items {
                 if let Item::You { text, .. } = it.as_ref() {
-                    out.push(text.clone());
+                    out.push(crate::quips::collapse(text));
                 }
             }
         }
         if let Some(d) = self.focus.drafts.get(&id) {
-            out.extend(d.sent.iter().map(|s| s.text.clone()));
+            out.extend(d.sent.iter().map(|s| crate::quips::collapse(&s.text)));
         }
         out.dedup();
         out
@@ -157,7 +215,7 @@ impl App {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         // a list open over the box moves and picks first
-        if self.focus_menu_key(id, k) || self.focus_commands_key(id, k) {
+        if self.focus_quips_key(id, k) || self.focus_menu_key(id, k) || self.focus_commands_key(id, k) {
             return;
         }
         let blank = self.focus.drafts.get(&id).is_none_or(|d| d.blank());
@@ -260,6 +318,15 @@ impl App {
     /// thumbnails, anything else into the text.
     pub(crate) fn focus_paste(&mut self, id: PaneId, text: &str) {
         let d = self.focus.draft(id);
+        if let Some(e) = &mut d.quips.editor {
+            e.fields[e.field].insert(&if e.field < 2 { text.replace(['\n', '\r'], " ") } else { text.to_string() });
+            return;
+        }
+        if d.quips.open {
+            d.quips.search.push_str(&text.replace(['\n', '\r'], " "));
+            d.quips.selected = 0;
+            return;
+        }
         match crate::focus::only_pictures(text) {
             Some(paths) => paths.into_iter().for_each(|p| d.attach(p)),
             None => {
@@ -296,12 +363,21 @@ impl App {
         if text.is_empty() && d.attachments.is_empty() {
             return;
         }
-        let parts = d.parts();
+        let raw = d.area.text().to_string();
+        // Expand before clearing anything: a conflict leaves the draft and all its pictures intact.
+        let expanded = match self.focus.quips.expand(&raw) {
+            Ok(text) => text,
+            Err(e) => { self.toast(Kind::Info, e); return; }
+        };
+        let text = visible(&expanded).trim().to_string();
+        let d = self.focus.draft(id);
+        let parts = d.parts_with_text(&expanded);
         let pictures: Vec<PathBuf> = d.attachments.drain(..).map(|a| a.path).collect();
         d.area.set_text("");
         d.recall = None;
         d.dismissed = None;
         d.menu = None;
+        d.quips = crate::quips::Picker::default();
         d.scroll = Some(Scroll::Bottom);
         let queued = self.panes.get(&id).is_some_and(|p| p.busy());
         let command = pictures.is_empty() && !text.contains('\n') && (text.starts_with('/') || text.starts_with('!'));
@@ -324,6 +400,22 @@ impl App {
             let key = self.keymap.primary(Act::Focus);
             let back = if key.is_empty() { String::new() } else { format!(" · {key} for the conversation") };
             self.toast(Kind::Info, format!("{} opens a screen of its own: here's the terminal{back}", text.split_whitespace().next().unwrap_or(&text)));
+        }
+    }
+
+    /// Send `text` to `id`'s agent as a message from you (an MCP app's page asked to), leaving the box as it is.
+    pub(crate) fn focus_send_text(&mut self, id: PaneId, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let after = self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.insights()).and_then(|s| s.conversation).map_or(0, |c| c.items.len());
+        let queued = self.panes.get(&id).is_some_and(|p| p.busy());
+        let d = self.focus.draft(id);
+        d.sent.push(Sent { text: text.to_string(), at: Instant::now(), after, queued, pictures: vec![] });
+        d.scroll = Some(Scroll::Bottom);
+        if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
+            t.send_message(text);
         }
     }
 
@@ -449,7 +541,7 @@ impl App {
         let said = self.focus_said(id);
         let items = self.focus_items(id);
         match self.focus.drafts.get(&id).and_then(|d| d.change.as_ref()) {
-            Some(c) if c.was == said && c.sent.is_none_or(|n| items <= n + 1) => (c.model.clone().or(said.0), c.effort.clone().or(said.1)),
+            Some(c) if change_matches(c, &said) && c.sent.is_none_or(|n| items <= n + 1) => (c.model.clone().or(said.0), c.effort.clone().or(said.1)),
             _ => said,
         }
     }
@@ -459,22 +551,22 @@ impl App {
         self.focus.drafts.get(&id).and_then(|d| d.change.as_ref()).is_some_and(|c| c.sent.is_none())
     }
 
-    /// The models `id` can switch to: Claude Code's, or the Codex login's own (read off this thread the first time
-    /// they're wanted). None for a session on bro's route (it was started on its model) and until they're read.
+    /// The models `id` can switch to, by what it runs on (see [`model_source`]): Claude Code's; a Codex login's own
+    /// (read off this thread the first time they're wanted); or an API provider's, from bro's catalogue. Each
+    /// switches with the agent's own `/model`: bro's proxy sends a model of the family it talks to as asked. None
+    /// until they're read, and for a provider bro has no list of.
     pub(crate) fn focus_models(&mut self, id: PaneId) -> Option<Arc<Vec<ModelChoice>>> {
         let t = self.panes.get(&id)?.as_term_ref()?;
-        if t.meta.route_id.is_some() || t.launch_spec.as_ref().is_some_and(|s| s.provider_id.is_some()) {
-            return None;
-        }
-        match t.meta.harness? {
-            Harness::Claude => Some(claude_models()),
-            Harness::Codex => {
+        let svc = &self.svc;
+        match model_source(t, |p| svc.state().models.contains_key(p))? {
+            ModelSource::Claude => Some(claude_models()),
+            ModelSource::Codex(home) => {
+                // the demo and tests touch no login: Codex's usual models
                 let demo = self.svc.is_demo() || cfg!(test);
-                let home = if demo { PathBuf::new() } else { t.config_home().unwrap_or_else(bro_core::paths::codex_local_dir) };
+                let home = if demo { PathBuf::new() } else { home };
                 if let Some(m) = self.focus.lists.lock().models.get(&home) {
                     return Some(m.clone());
                 }
-                // the demo and tests touch no login: Codex's usual models
                 if demo {
                     let m = Arc::new(bro_core::catalogue::codex_default_choices());
                     self.focus.lists.lock().models.insert(home, m.clone());
@@ -492,47 +584,63 @@ impl App {
                         let _ = tx.send(Event::Services);
                     });
                 }
-                None
+                Some(Arc::new(bro_core::catalogue::codex_default_choices()))
             }
-            _ => None,
+            ModelSource::Provider(provider) => {
+                // the catalogue's list, made once per version of it (a provider can list hundreds)
+                let listed = self.svc.state().models.get(&provider).map_or(0, Vec::len);
+                if listed == 0 {
+                    return None;
+                }
+                if let Some((n, m)) = self.focus.lists.lock().providers.get(&provider)
+                    && *n == listed
+                {
+                    return Some(m.clone());
+                }
+                let rows = self.svc.state().models.get(&provider).cloned().unwrap_or_default();
+                let m = Arc::new(rows.into_iter().map(provider_choice).collect::<Vec<_>>());
+                self.focus.lists.lock().providers.insert(provider, (listed, m.clone()));
+                Some(m)
+            }
         }
     }
 
-    /// The thinking levels `id` can pick from: its model's, else its agent's usual ones (a session on bro's
-    /// route keeps Claude's, which Claude Code sends whatever the model). With the model's own starting level.
+    /// The thinking levels `id` can pick from: its model's, else its agent's usual ones (Claude Code sends its
+    /// effort whatever the model, and bro's proxy carries it on; Codex on another family's model gets the levels
+    /// every model takes). With the model's own starting level.
     pub(crate) fn focus_levels(&mut self, id: PaneId) -> Option<(Vec<Level>, Option<String>)> {
         let harness = self.panes.get(&id)?.as_term_ref()?.meta.harness?;
         let models = self.focus_models(id);
         let (model, _) = self.focus_running_on(id);
-        if let Some(m) = models.as_ref().and_then(|ms| model.as_deref().and_then(|cur| ms.iter().find(|m| same_model(cur, m)))) {
-            return (!m.levels.is_empty()).then(|| (m.levels.clone(), m.default_level.clone()));
+        if let Some(m) = models.as_ref().and_then(|ms| model.as_deref().and_then(|cur| ms.iter().find(|m| same_model(cur, m))))
+            && !m.levels.is_empty()
+        {
+            return Some((m.levels.clone(), m.default_level.clone()));
         }
         match harness {
             Harness::Claude => claude_models().first().map(|m| (m.levels.clone(), None)),
-            // a Codex model bro can't name: no levels to offer it
-            _ => None,
+            Harness::Codex if model.is_none() => bro_core::catalogue::codex_default_choices().first().map(|m| (m.levels.clone(), m.default_level.clone())),
+            _ => model.is_some().then(|| (["low", "medium", "high"].map(|l| Level { id: l.into(), detail: None }).to_vec(), None)),
         }
     }
 
-    /// The model `id` runs on isn't one it can switch to (an older one): the model list shows it first.
-    fn focus_runs_other(&mut self, id: PaneId) -> bool {
-        let (model, _) = self.focus_running_on(id);
-        model.is_some_and(|cur| self.focus_models(id).is_some_and(|ms| !ms.iter().any(|m| same_model(&cur, m))))
-    }
-
-    /// The rows of `id`'s model or thinking list.
+    /// The rows of `id`'s model or thinking list, narrowed to what's typed in it while it's open. The model list
+    /// names what it runs on now first when that isn't one of its models.
     pub(crate) fn focus_menu_rows(&mut self, id: PaneId, kind: MenuKind) -> Vec<MenuRow> {
         let (model, effort) = self.focus_running_on(id);
-        match kind {
+        let query = self.focus.drafts.get(&id).and_then(|d| d.menu.as_ref()).filter(|m| m.kind == kind).map(|m| m.query.clone()).unwrap_or_default();
+        let mut rows: Vec<MenuRow> = match kind {
             MenuKind::Model => {
                 let mut rows: Vec<MenuRow> = self
                     .focus_models(id)
-                    .map(|ms| ms.iter().map(|m| MenuRow { label: m.name.clone(), detail: m.detail.clone(), current: model.as_deref().is_some_and(|cur| same_model(cur, m)), default: false }).collect())
-                    .unwrap_or_default();
-                if self.focus_runs_other(id)
+                    .iter()
+                    .flat_map(|ms| ms.iter())
+                    .map(|m| MenuRow { id: m.id.clone(), label: m.name.clone(), detail: m.detail.clone(), current: model.as_deref().is_some_and(|cur| same_model(cur, m)), default: false })
+                    .collect();
+                if !rows.iter().any(|r| r.current)
                     && let Some(cur) = model.as_deref()
                 {
-                    rows.insert(0, MenuRow { label: crate::focus::model_name(cur), detail: Some("What it runs on now".into()), current: true, default: false });
+                    rows.insert(0, MenuRow { id: String::new(), label: crate::focus::model_name(cur), detail: Some("What it runs on now".into()), current: true, default: false });
                 }
                 rows
             }
@@ -545,6 +653,7 @@ impl App {
                             let name = level_name(&l.id);
                             let mut chars = name.chars();
                             MenuRow {
+                                id: l.id.clone(),
                                 label: chars.next().map(|f| f.to_uppercase().chain(chars).collect()).unwrap_or_default(),
                                 detail: l.detail.clone(),
                                 current: effort.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(&l.id)),
@@ -554,39 +663,72 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default(),
+        };
+        if !query.trim().is_empty() {
+            let keep = crate::fuzzy::filter(&query, &rows, |r| format!("{} {}", r.label, r.id));
+            rows = keep.into_iter().map(|i| rows[i].clone()).collect();
         }
+        rows
     }
 
     /// Open (or close) `id`'s model or thinking list, the keys on what it runs on now.
     pub(crate) fn focus_toggle_menu(&mut self, id: PaneId, kind: MenuKind) {
-        if self.focus.drafts.get(&id).and_then(|d| d.menu).is_some_and(|m| m.kind == kind) {
+        if self.focus.drafts.get(&id).and_then(|d| d.menu.as_ref()).is_some_and(|m| m.kind == kind) {
             self.focus.draft(id).menu = None;
             return;
         }
+        // a fresh list, unfiltered
+        self.focus.draft(id).menu = None;
         let rows = self.focus_menu_rows(id, kind);
         if rows.is_empty() {
             return;
         }
         let sel = rows.iter().position(|r| r.current).unwrap_or(0);
-        self.focus.draft(id).menu = Some(Menu { kind, sel });
+        self.focus.draft(id).menu = Some(Menu { kind, sel, query: String::new() });
     }
 
-    /// The model and thinking lists' keys: up and down move, enter picks, esc closes. Any other key closes the
-    /// list and does what it does. True when the key was the list's.
+    /// The model and thinking lists' keys: up and down move, enter picks, typing searches (backspace and esc
+    /// take it back), esc closes. Any other key closes the list and does what it does. True when the key was the
+    /// list's.
     fn focus_menu_key(&mut self, id: PaneId, k: KeyEvent) -> bool {
-        let Some(menu) = self.focus.drafts.get(&id).and_then(|d| d.menu) else { return false };
-        let n = self.focus_menu_rows(id, menu.kind).len().max(1);
-        let d = self.focus.draft(id);
-        match k.code {
-            KeyCode::Up => d.menu = Some(Menu { sel: (menu.sel + n - 1) % n, ..menu }),
-            KeyCode::Down | KeyCode::Tab => d.menu = Some(Menu { sel: (menu.sel + 1) % n, ..menu }),
-            KeyCode::Esc => d.menu = None,
-            KeyCode::Enter => self.focus_pick(id, menu.kind, menu.sel),
+        let Some(mut m) = self.focus.drafts.get(&id).and_then(|d| d.menu.clone()) else { return false };
+        let n = self.focus_menu_rows(id, m.kind).len().max(1);
+        let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let open = match k.code {
+            KeyCode::Up => {
+                m.sel = (m.sel.min(n - 1) + n - 1) % n;
+                true
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                m.sel = (m.sel.min(n - 1) + 1) % n;
+                true
+            }
+            KeyCode::Enter => {
+                self.focus_pick(id, m.kind, m.sel.min(n - 1));
+                return true;
+            }
+            KeyCode::Esc if !m.query.is_empty() => {
+                m.query.clear();
+                m.sel = 0;
+                true
+            }
+            KeyCode::Esc => false,
+            KeyCode::Backspace if !m.query.is_empty() => {
+                m.query.pop();
+                m.sel = 0;
+                true
+            }
+            KeyCode::Char(c) if plain => {
+                m.query.push(c);
+                m.sel = 0;
+                true
+            }
             _ => {
-                d.menu = None;
+                self.focus.draft(id).menu = None;
                 return false;
             }
-        }
+        };
+        self.focus.draft(id).menu = open.then_some(m);
         true
     }
 
@@ -594,44 +736,42 @@ impl App {
     /// as they come; Codex takes `/model <model> --reasoning=<level>` between turns (an older Codex, only its own
     /// menu, which shows in the terminal).
     pub(crate) fn focus_pick(&mut self, id: PaneId, kind: MenuKind, n: usize) {
+        let rows = self.focus_menu_rows(id, kind);
         self.focus.draft(id).menu = None;
+        let Some(row) = rows.get(n).filter(|r| !r.current && !r.id.is_empty()).cloned() else { return };
+        self.focus_pick_row(id, kind, row);
+    }
+
+    fn focus_pick_row(&mut self, id: PaneId, kind: MenuKind, row: MenuRow) {
         let Some(t) = self.panes.get(&id).and_then(|p| p.as_term_ref()) else { return };
         let Some(harness) = t.meta.harness else { return };
         let version = t.insights().and_then(|s| s.conversation).and_then(|c| c.version.clone());
         let said = self.focus_said(id);
-        let (model, effort) = self.focus_running_on(id);
-        let models = self.focus_models(id);
-        let levels = self.focus_levels(id);
+        let (_, effort) = self.focus_running_on(id);
         // half a change still on its way (a model picked, then its thinking) stays with the new half
         let mut change = match self.focus.drafts.get(&id).and_then(|d| d.change.clone()) {
-            Some(c) if c.was == said => Change { sent: None, ..c },
+            Some(c) if change_matches(&c, &said) => Change { sent: None, ..c },
             _ => Change { model: None, effort: None, was: said.clone(), sent: None },
         };
-        let other = self.focus_runs_other(id);
         let command = match kind {
             MenuKind::Model => {
-                // the first row is what it runs on now when that isn't one of the list's
-                let Some(m) = n.checked_sub(other as usize).and_then(|n| models.as_ref().and_then(|ms| ms.get(n))).cloned() else { return };
-                if model.as_deref().is_some_and(|cur| same_model(cur, &m)) {
-                    return;
-                }
                 // a thinking level the new model doesn't have becomes its own starting one
-                if harness == Harness::Codex && !effort.as_deref().is_some_and(|e| m.levels.iter().any(|l| l.id.eq_ignore_ascii_case(e))) {
+                if harness == Harness::Codex
+                    && let Some(m) = self.focus_models(id).and_then(|ms| ms.iter().find(|m| m.id == row.id).cloned())
+                    && !m.levels.is_empty()
+                    && !effort.as_deref().is_some_and(|e| m.levels.iter().any(|l| l.id.eq_ignore_ascii_case(e)))
+                {
                     change.effort = m.default_level.clone();
                 }
-                change.model = Some(m.id.clone());
-                format!("/model {}", m.id)
+                change.model = Some(row.id.clone());
+                format!("/model {}", row.id)
             }
             MenuKind::Thinking => {
-                let Some(l) = levels.as_ref().and_then(|(ls, _)| ls.get(n)).cloned() else { return };
-                if effort.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(&l.id)) {
-                    return;
-                }
-                change.effort = Some(l.id.clone());
-                format!("/effort {}", l.id)
+                change.effort = Some(row.id.clone());
+                format!("/effort {}", row.id)
             }
         };
-        if harness == Harness::Codex && !codex_takes_arguments(version.as_deref()) {
+        if harness == Harness::Codex && version.is_some() && !codex_takes_arguments(version.as_deref()) {
             if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
                 t.type_command("/model");
             }
@@ -658,22 +798,23 @@ impl App {
         let busy = self.panes.get(&id).is_none_or(|p| p.busy());
         let Some(d) = self.focus.drafts.get_mut(&id) else { return };
         let Some(c) = d.change.clone() else { return };
-        if c.was != said || c.sent.is_some_and(|n| items > n + 1) {
+        if !change_matches(&c, &said) || c.sent.is_some_and(|n| items > n + 1) {
             d.change = None;
             return;
         }
         if c.sent.is_some() || busy {
             return;
         }
-        let (Some(model), effort) = (c.model.clone().or(said.0), c.effort.clone().or(said.1)) else {
-            d.change = None;
+        let (Some(model), effort) = (c.model.clone().or(said.0.clone()), c.effort.clone().or(said.1.clone())) else {
             return;
         };
+        let version = self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.insights()).and_then(|s| s.conversation).and_then(|c| c.version.clone());
+        if !codex_takes_arguments(version.as_deref()) { return; }
         let command = match effort {
             Some(e) => format!("/model {model} --reasoning={e}"),
             None => format!("/model {model}"),
         };
-        d.change = Some(Change { sent: Some(items), ..c });
+        d.change = Some(Change { sent: Some(items), was: said, ..c });
         if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
             t.type_command(&command);
         }

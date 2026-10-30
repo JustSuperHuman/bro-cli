@@ -60,6 +60,9 @@ pub(crate) struct AppState {
     /// Folders bro knows the user works in (its open projects, recents and
     /// past sessions); the orchestrator resolves spoken project names with them.
     pub known_folders: Arc<RwLock<Vec<String>>>,
+    /// Clients may open media from anywhere on this computer, not only what's tied to the sessions' work
+    /// (see [`crate::media::Access`]). Off until bro says otherwise.
+    pub media_anywhere: Arc<AtomicBool>,
     pub token: Arc<String>,
     pub data_root: Arc<PathBuf>,
     pub config: Arc<BridgeConfig>,
@@ -82,6 +85,10 @@ pub(crate) struct AppState {
     pub shutdown: watch::Sender<bool>,
     /// This bridge's id and the other bridges on this machine (see [`crate::hosts`]).
     pub hosts: Arc<crate::hosts::HostDirectory>,
+    /// Each agent session's conversation, tailed from its transcript (see [`crate::conversation`]).
+    pub conversations: Arc<crate::conversation::Feeds>,
+    /// MCP work for each session's Claude Code mod (see [`crate::mod_jobs`]).
+    pub mod_jobs: Arc<crate::mod_jobs::ModJobs>,
 }
 
 impl AppState {
@@ -109,6 +116,7 @@ impl AppState {
             notifications: Arc::new(Mutex::new(NotificationCenter::default())),
             notification_sinks: Arc::new(RwLock::new(Vec::new())),
             known_folders: Arc::new(RwLock::new(Vec::new())),
+            media_anywhere: Arc::new(AtomicBool::new(false)),
             token: Arc::new(token),
             data_root: Arc::new(data_root),
             config: Arc::new(config),
@@ -122,6 +130,8 @@ impl AppState {
             last_error: Arc::new(Mutex::new(None)),
             shutdown,
             hosts: Arc::new(crate::hosts::HostDirectory::new()),
+            conversations: Arc::new(crate::conversation::Feeds::default()),
+            mod_jobs: Arc::new(crate::mod_jobs::ModJobs::default()),
         }
     }
 
@@ -166,6 +176,10 @@ impl AppState {
                 summary.agent = existing.summary.agent.take();
                 summary.agent_source = existing.summary.agent_source.take();
                 summary.agent_activity = existing.summary.agent_activity.take();
+                // what bro said of it stays until it says otherwise (it doesn't repeat what didn't change)
+                summary.attention = existing.summary.attention.take();
+                summary.recap = existing.summary.recap.take();
+                summary.agent_files = existing.summary.agent_files.take();
                 if (summary.cols, summary.rows) != (existing.summary.cols, existing.summary.rows) {
                     existing.resize(summary.cols, summary.rows);
                 }
@@ -336,6 +350,7 @@ impl AppState {
             return;
         }
         self.notifications.lock().forget(session_id);
+        self.conversations.forget(session_id);
         self.publish_sessions();
         self.reconcile_projects();
     }
@@ -399,8 +414,14 @@ impl AppState {
         self.inner
             .lock()
             .sessions
-            .get(session_id)
-            .map(Session::input_context)
+            .get_mut(session_id)
+            .map(|session| {
+                let context = session.input_context();
+                if context.pointer("/prompt/id").and_then(Value::as_str) != session.answered_prompt.as_deref() {
+                    session.answered_prompt = None;
+                }
+                context
+            })
     }
 
     pub fn session_view(&self, session_id: &str) -> Option<SessionView> {
@@ -597,6 +618,7 @@ impl AppState {
         if let Some(object) = hello.as_object_mut() {
             object.insert("type".into(), json!("hello"));
             object.insert("heartbeat".into(), json!(true));
+            object.insert("thumbnails".into(), json!(true));
         }
         hello
     }

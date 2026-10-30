@@ -9,6 +9,7 @@
 //! API other crates build against. Add freely; do not rename or remove.
 
 pub mod util;
+pub mod audio;
 pub mod http;
 pub mod paths;
 pub mod config;
@@ -31,8 +32,12 @@ pub mod disabled_skills;
 pub mod justtools;
 pub mod claude_shared;
 pub mod catalogue;
+pub mod quips;
 pub mod claude_env;
+pub mod agent_summaries;
+pub mod coauthor;
 pub mod claude_mod;
+pub mod mcp_apps;
 pub mod peers;
 pub mod caveman;
 pub mod agent_install;

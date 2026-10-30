@@ -171,9 +171,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aeb9553e62312c8756a5979254fc6d7da8bbeb5986a1e17037fab932f7037917"
 dependencies = [
  "clipboard-win",
+ "image",
  "log",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
@@ -493,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "bro-bridge"
-version = "2.1.15"
+version = "2.1.20"
 dependencies = [
  "anyhow",
  "axum",
@@ -504,6 +507,7 @@ dependencies = [
  "futures-util",
  "http",
  "if-addrs",
+ "image",
  "json5",
  "parking_lot",
  "qrcode",
@@ -525,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "bro-core"
-version = "2.1.15"
+version = "2.1.20"
 dependencies = [
  "anyhow",
  "argon2",
@@ -538,9 +542,11 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "rand 0.9.5",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
+ "symphonia",
  "tempfile",
  "toml",
  "ureq",
@@ -550,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "bro-gfx"
-version = "2.1.15"
+version = "2.1.20"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -566,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "bro-host"
-version = "2.1.15"
+version = "2.1.20"
 dependencies = [
  "anyhow",
  "bro-core",
@@ -583,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "bro-media"
-version = "2.1.15"
+version = "2.1.20"
 dependencies = [
  "cpal",
  "image",
@@ -595,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "bro-proxy"
-version = "2.1.15"
+version = "2.1.20"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -624,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "bro-tui"
-version = "2.1.15"
+version = "2.1.20"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -663,6 +669,8 @@ dependencies = [
  "url",
  "uuid",
  "vt100",
+ "webview2-com",
+ "windows",
  "windows-sys 0.61.2",
  "winit",
  "winresource",
@@ -671,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "bro-voice"
-version = "2.1.15"
+version = "2.1.20"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

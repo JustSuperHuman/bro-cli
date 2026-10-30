@@ -132,6 +132,7 @@ impl App {
             Act::QuickInstall => self.open_view("quick-install"),
             Act::Sounds => self.open_view("sounds"),
             Act::Skills => self.open_view("skills"),
+            Act::Quips => self.open_quips(),
             Act::Setup => self.open_view("setup"),
             Act::Proxy => self.open_view("proxy"),
             Act::Bridge => self.open_view("bridge"),

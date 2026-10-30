@@ -84,6 +84,7 @@ impl Gui {
         let Gfx { renderer, mut text, scene } = gfx;
         // the HTML preview's web view belongs to the old window: the next frame makes one in the new
         self.pages.reset();
+        self.apps.reset();
         // the old window keeps its renderer until we know the new one starts
         let new = window::create(el, &self.prefs, true).map(Arc::new).and_then(|w| {
             if let Ok(p) = old.outer_position() {

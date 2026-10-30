@@ -77,11 +77,13 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/api/sessions/cleanup", post(rest_sessions::cleanup))
         .route("/api/usage", get(rest::usage))
+        .route("/api/quips", get(crate::focus_controls::quips))
         .route(
             "/api/sessions/{id}",
             patch(rest_sessions::rename).delete(rest_sessions::kill),
         )
         .route("/api/sessions/{id}/text", get(rest_sessions::text))
+        .route("/api/sessions/{id}/seen", post(rest_sessions::seen))
         .route(
             "/api/sessions/{id}/input-context",
             get(rest_sessions::input_context),
@@ -91,6 +93,7 @@ pub(crate) fn router(state: AppState) -> Router {
             post(rest_sessions::prompt_response),
         )
         .route("/api/sessions/{id}/compose", post(rest_sessions::compose))
+        .route("/api/sessions/{id}/focus-controls", get(crate::focus_controls::get).post(crate::focus_controls::set))
         .route("/api/sessions/{id}/write", post(rest_sessions::write))
         .route("/api/sessions/{id}/resize", post(rest_sessions::resize))
         .route("/api/sessions/{id}/export", get(rest_sessions::export))
@@ -102,11 +105,16 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/files", get(rest_sessions::files))
         .route("/api/sessions/{id}/file", get(rest_sessions::file_preview))
         .route("/api/sessions/{id}/agent-files", get(rest_sessions::agent_files))
+        .route("/api/sessions/{id}/conversation", get(crate::conversation::conversation))
+        .route("/api/sessions/{id}/apps/{call}", get(crate::apps::host))
+        .route("/api/sessions/{id}/apps/{call}/ask", post(crate::apps::ask))
         .route(
             "/api/sessions/{id}/links/resolve",
             post(rest_sessions::resolve_links),
         )
         .route("/api/sessions/{id}/raw", get(crate::raw_file::raw))
+        .route("/api/sessions/{id}/waveform", get(crate::waveform::waveform))
+        .route("/api/media", get(crate::media::media))
         .route("/api/sessions/{id}/open", post(rest_sessions::open_file))
         .route(
             "/api/sessions/{id}/open-in-editor",
@@ -158,11 +166,20 @@ pub(crate) fn router(state: AppState) -> Router {
             rest_sessions::MAX_ATTACHMENT_BYTES + 1024,
         ));
 
+    // JSON can dominate a slow mobile link. Leave byte-range/media responses exact.
+    let protected = protected.layer(CompressionLayer::new().gzip(true).compress_when(
+        |status: StatusCode, _: axum::http::Version, headers: &axum::http::HeaderMap, _: &axum::http::Extensions| {
+            status == StatusCode::OK && !headers.contains_key(axum::http::header::ACCEPT_RANGES)
+                && headers.get(axum::http::header::CONTENT_TYPE).and_then(|h| h.to_str().ok())
+                    .is_some_and(|mime| mime.starts_with("application/json"))
+        },
+    ));
     let client = Router::new()
         .fallback(embedded_client)
         .layer(CompressionLayer::new().gzip(true));
     Router::new()
         .merge(protected)
+        .merge(crate::mod_jobs::routes())
         .merge(client)
         .with_state(state)
 }

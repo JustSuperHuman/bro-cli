@@ -243,10 +243,25 @@ impl App {
     /// Execute a command from a remote client.
     pub(super) fn bridge_command(&mut self, c: BridgeCommand) {
         match c {
+            BridgeCommand::FocusControls { id, change, reply } => {
+                let result = self.term_id(&id).ok_or_else(|| "The session is no longer available.".to_string())
+                    .and_then(|pane| self.focus_remote_controls(pane, change));
+                let _ = reply.send(result);
+            }
+            BridgeCommand::Seen { id, event_id } => {
+                if let Some(pane) = self.term_id(&id) { self.acknowledge_session(pane, &event_id); }
+            }
             BridgeCommand::Input { id, data } => {
                 if let Some(t) = self.term_id(&id).and_then(|pid| self.panes.get_mut(&pid)).and_then(|p| p.as_term()) {
                     t.send(&data);
                 }
+            }
+            BridgeCommand::Write { id, data, reply } => {
+                if reply.is_closed() { return; }
+                let result = self.term_id(&id).and_then(|pid| self.panes.get_mut(&pid)).and_then(|p| p.as_term())
+                    .ok_or_else(|| "The session is no longer available.".to_string())
+                    .and_then(|term| term.send_confirmed(&data));
+                let _ = reply.send(result);
             }
             BridgeCommand::Resize { id, cols, rows } => {
                 // the local view wins while the pane is on screen
@@ -863,12 +878,11 @@ impl App {
 
     /// Notice agents finishing or getting stuck while you aren't looking at them.
     pub(super) fn track_agents(&mut self) {
-        let visible = self.visible();
         let mut notes = vec![];
         for (id, p) in &self.panes {
             let Some(a) = p.activity() else { continue };
             let prev = self.agent_state.insert(*id, a);
-            let seen = visible.contains(id) && self.term_focused;
+            let seen = self.focused() == Some(*id) && self.term_focused && !self.side_focus && !self.overlay.is_open();
             if prev == Some(Activity::Working) && a == Activity::Idle && !seen {
                 self.done.insert(*id);
                 notes.push((Kind::AgentDone, *id, format!("{} finished", p.title())));
@@ -876,7 +890,7 @@ impl App {
             if a == Activity::Blocked && prev.is_some_and(|x| x != Activity::Blocked) && !seen {
                 notes.push((Kind::NeedsYou, *id, format!("{} needs you", p.title())));
             }
-            if visible.contains(id) {
+            if seen {
                 self.done.remove(id);
             }
         }
@@ -906,7 +920,8 @@ impl App {
             order.rotate_left(i + 1);
         }
         let pick = |want: &dyn Fn(PaneId) -> bool| order.iter().copied().filter(|id| Some(*id) != cur).find(|id| want(*id));
-        pick(&|id| self.panes.get(&id).and_then(|p| p.activity()) == Some(Activity::Blocked)).or_else(|| pick(&|id| self.done.contains(&id)))
+        pick(&|id| self.panes.get(&id).and_then(|p| p.activity()) == Some(Activity::Blocked) && self.session_notice(id).is_none_or(|n| n.unread))
+            .or_else(|| pick(&|id| self.done.contains(&id)))
     }
 
     /// `bro --demo`: a few sessions across three projects.

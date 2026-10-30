@@ -5,7 +5,7 @@
 
 use super::{cast, chats, context, folders};
 use crate::BridgeCommand;
-use crate::commands::{compose_payload, launch_terminal, submit_settle, write_paced};
+use crate::commands::{compose_input, compose_payload, launch_terminal, write_paced};
 use crate::model::TerminalNotification;
 use crate::prompt;
 use crate::state::{AppState, COMMAND_INPUT, COMMAND_KILL};
@@ -1028,14 +1028,7 @@ async fn type_text(app: &AppState, id: &str, text: &str, submit: bool) -> Result
     // empty).
     let paste = view.bracketed_paste || view.summary.agent.is_some();
     let payload = compose_payload(text, paste);
-    if !payload.is_empty() {
-        write_paced(app, id, &payload).await?;
-    }
-    if submit {
-        tokio::time::sleep(submit_settle(payload.len())).await;
-        app.dispatch(id, COMMAND_INPUT, "\r", 0, 0)?;
-    }
-    Ok(())
+    compose_input(app, id, &payload, submit).await
 }
 
 /// `/clear` (Claude Code) or `/new` (Codex, Pi, omp), then wait for the fresh prompt.

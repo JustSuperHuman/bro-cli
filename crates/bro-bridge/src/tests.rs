@@ -49,9 +49,17 @@ impl Harness {
             let seen = seen.clone();
             let slot = slot.clone();
             move |command: BridgeCommand| match command {
+                BridgeCommand::FocusControls { id, change, reply } => {
+                    let _ = reply.send(Ok(json!({ "sessionId": id, "change": change, "model": null, "effort": null, "models": [], "levels": [{"id":"high"}], "pending": false })));
+                }
+                BridgeCommand::Seen { .. } => {},
                 BridgeCommand::Input { id, data } => seen
                     .lock()
                     .push(Seen::Input(id, String::from_utf8_lossy(&data).into_owned())),
+                BridgeCommand::Write { id, data, reply } => {
+                    seen.lock().push(Seen::Input(id, String::from_utf8_lossy(&data).into_owned()));
+                    let _ = reply.send(Ok(()));
+                }
                 BridgeCommand::Resize { id, cols, rows } => {
                     seen.lock().push(Seen::Resize(id, cols, rows))
                 }
@@ -154,6 +162,13 @@ impl Harness {
 
     fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.port)
+    }
+
+    fn register_codex(&self, id: &str) {
+        use base64::Engine;
+        self.register(id, None, None);
+        let meta = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"v":1,"agent":"codex","state":"active"}"#);
+        self.bridge.output(id, format!("\x1b]1337;TerminalWeb.Agent={meta}\x07").as_bytes());
     }
 
     async fn socket(&self) -> Socket {
@@ -523,7 +538,7 @@ async fn compose_sends_enter_as_its_own_write_after_the_paste() {
         .json()
         .await
         .unwrap();
-    assert!(started.elapsed() >= Duration::from_millis(150));
+    assert!(started.elapsed() >= Duration::from_millis(350));
     assert_eq!(response["method"], "paste");
     assert_eq!(response["submitted"], true);
     assert_eq!(
@@ -533,6 +548,59 @@ async fn compose_sends_enter_as_its_own_write_after_the_paste() {
             Seen::Input("s".into(), "\r".into()),
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mobile_focus_controls_roundtrip_before_a_transcript_exists_and_reject_unknown_sessions() {
+    let harness = Harness::start();
+    harness.register_codex("fresh");
+    let client = reqwest::Client::new();
+    let response = client.get(harness.url("/api/sessions/fresh/focus-controls")).send().await.unwrap();
+    assert!(response.status().is_success());
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["levels"][0]["id"], "high");
+    assert!(body["model"].is_null());
+    let response = client.post(harness.url("/api/sessions/fresh/focus-controls"))
+        .json(&json!({"kind":"thinking","value":"high"})).send().await.unwrap();
+    assert!(response.status().is_success());
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["change"], json!({"kind":"thinking","value":"high"}));
+    assert_eq!(client.get(harness.url("/api/sessions/missing/focus-controls")).send().await.unwrap().status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(client.post(harness.url("/api/sessions/fresh/focus-controls")).json(&json!({"kind":"other","value":"high"})).send().await.unwrap().status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mobile_quips_expand_from_the_hosts_library_only_when_requested_for_an_agent() {
+    let harness = Harness::start();
+    harness.register_codex("agent");
+    harness.register("shell", None, None);
+    let client = reqwest::Client::new();
+    let library: Value = client.get(harness.url("/api/quips")).send().await.unwrap().json().await.unwrap();
+    let Some(quip) = library["quips"].as_array().unwrap().first() else { return };
+    let trigger = quip["trigger"].as_str().unwrap();
+    let short = format!("Please explain :{trigger}");
+    for (id, expand, expected_expansion) in [("agent", true, true), ("agent", false, false), ("shell", true, false)] {
+        harness.seen.lock().clear();
+        let response = client.post(harness.url(&format!("/api/sessions/{id}/compose")))
+            .json(&json!({"text":short,"submit":false,"expandQuips":expand})).send().await.unwrap();
+        assert!(response.status().is_success());
+        let wire = harness.seen.lock().iter().filter_map(|seen| match seen { Seen::Input(_, text) => Some(text.clone()), _ => None }).collect::<String>();
+        assert_eq!(wire.contains("<bro-quip"), expected_expansion, "{wire}");
+        if expected_expansion { assert_eq!(bro_core::quips::collapse(&wire).trim_start_matches("\x1b[200~").trim_end_matches("\x1b[201~"), short); }
+        else { assert_eq!(wire.trim_start_matches("\x1b[200~").trim_end_matches("\x1b[201~"), short); }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mobile_slash_commands_use_raw_input_even_when_the_agent_enabled_bracketed_paste() {
+    let harness = Harness::start();
+    harness.register_codex("s");
+    harness.bridge.output("s", b"\x1b[?2004h> ");
+    let client = reqwest::Client::new();
+    let response: Value = client.post(harness.url("/api/sessions/s/compose"))
+        .json(&json!({"text":"/compact","submit":true,"expandQuips":true})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(response["method"], "raw");
+    assert_eq!(*harness.seen.lock(), vec![Seen::Input("s".into(), "/compact".into()), Seen::Input("s".into(), "\r".into())]);
 }
 
 #[test]
@@ -704,6 +772,67 @@ async fn agent_awaiting_input_raises_needs_input() {
         .await
         .unwrap();
     assert_eq!(stale.status(), 409);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_mobile_questions_submit_one_choice_and_paste_written_answers_before_enter() {
+    let harness = Harness::start();
+    harness.bridge.register(SessionMeta {
+        id: "codex-question".into(), title: "Codex".into(), shell: "codex".into(), args: vec![],
+        cwd: None, project: None, pid: None, cols: 100, rows: 30, agent: Some("codex".into()), kind: None,
+    });
+    harness.bridge.output("codex-question", b"Question 1/2\r\nChoose an environment\r\n\xe2\x80\xba 1. Staging\r\n  2. Production\r\ntab to add notes | enter to submit answer | esc to interrupt");
+    let url = harness.url("/api/sessions/codex-question/prompt-response");
+    let context: Value = reqwest::get(harness.url("/api/sessions/codex-question/input-context")).await.unwrap().json().await.unwrap();
+    assert_eq!(context["prompt"]["protocol"], "codex-question");
+    let body = json!({"promptId":context["prompt"]["id"], "action":"select", "optionId":"option-2"});
+    let client = reqwest::Client::new();
+    assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 200);
+    assert_eq!(harness.wait_seen(1).await, vec![Seen::Input("codex-question".into(), "\x1b[B\r".into())]);
+    assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 409, "a stale mobile card cannot submit twice");
+
+    harness.bridge.output("codex-question", b"\x1b[2J\x1b[HQuestion 2/2\r\nWhere should the files go?\r\n\xe2\x80\xba Type your answer (optional)\r\nenter to submit all | esc to interrupt");
+    assert_eq!(client.post(&url).json(&body).send().await.unwrap().status(), 409, "previous question identity is stale");
+    let context: Value = reqwest::get(harness.url("/api/sessions/codex-question/input-context")).await.unwrap().json().await.unwrap();
+    assert_eq!(context["prompt"]["kind"], "freeform");
+    let started = std::time::Instant::now();
+    assert_eq!(client.post(&url).json(&json!({"promptId":context["prompt"]["id"], "action":"text", "text":"docs/\nnotes"})).send().await.unwrap().status(), 200);
+    assert!(started.elapsed() >= crate::commands::submit_settle(1));
+    assert_eq!(harness.wait_seen(3).await, vec![
+        Seen::Input("codex-question".into(), "\x1b[B\r".into()),
+        Seen::Input("codex-question".into(), "\x1b[200~docs/\nnotes\x1b[201~".into()),
+        Seen::Input("codex-question".into(), "\r".into()),
+    ]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mobile_opens_queued_codex_questions_and_answers_in_the_async_editor() {
+    let harness = Harness::start();
+    harness.bridge.register(SessionMeta { id:"async".into(), title:"Codex".into(), shell:"codex".into(), args:vec![], cwd:None,
+        project:None, pid:None, cols:100, rows:30, agent:Some("codex".into()), kind:None });
+    let client = reqwest::Client::new();
+    let context_url = harness.url("/api/sessions/async/input-context");
+    let response_url = harness.url("/api/sessions/async/prompt-response");
+    harness.bridge.output("async", "? 2 questions · 15s\r\n  ⇧← to answer".as_bytes());
+    let open: Value = client.get(&context_url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(open["prompt"]["canCancel"], false);
+    let answer = json!({"promptId":open["prompt"]["id"],"action":"select","optionId":"open-questions"});
+    assert_eq!(client.post(&response_url).json(&answer).send().await.unwrap().status(), 200);
+    assert_eq!(harness.wait_seen(1).await, vec![Seen::Input("async".into(), "\x1b[1;2D".into())]);
+
+    harness.bridge.output("async", "\x1b[2J\x1b[H1 of 2\r\n\r\nWhich environment?\r\n\r\n› 1. Staging\r\n  2. Production\r\n  3. Other\r\n\r\nenter submit   ⌃] skip   ⇧→ main prompt   ⇧← next question".as_bytes());
+    let choice: Value = client.get(&context_url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(choice["prompt"]["protocol"], "codex-question-async");
+    assert_eq!(client.post(&response_url).json(&json!({"promptId":choice["prompt"]["id"],"action":"select","optionId":"option-2"})).send().await.unwrap().status(), 200);
+    assert_eq!(harness.wait_seen(2).await.last(), Some(&Seen::Input("async".into(), "\x1b[B\r".into())));
+
+    harness.bridge.output("async", "\x1b[2J\x1b[HWhere should files go?\r\n\r\nType your answer\r\n\r\nenter submit   ⌃] skip   ⇧→ main prompt".as_bytes());
+    let written: Value = client.get(&context_url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(written["prompt"]["question"], "Where should files go?");
+    assert_eq!(written["prompt"]["kind"], "freeform");
+    assert_eq!(client.post(&response_url).json(&json!({"promptId":written["prompt"]["id"],"action":"text","text":"docs/"})).send().await.unwrap().status(), 200);
+    assert_eq!(&harness.wait_seen(4).await[2..], &[
+        Seen::Input("async".into(), "\x1b[200~docs/\x1b[201~".into()), Seen::Input("async".into(), "\r".into())]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1514,6 +1643,8 @@ fn blocked(reason: &str) -> crate::SessionInsights {
             state: crate::AttentionState::Blocked,
             reason: Some(reason.into()),
             since: Some("2026-10-02T00:00:00.000Z".into()),
+            limit: None,
+            notice: None,
         }),
         recap: Some(crate::Recap {
             text: "Shipped the build".into(),
@@ -1558,6 +1689,30 @@ async fn insights_publish_on_change_only_and_debounce() {
     harness.bridge.set_insights("ghost", blocked("x"));
     let sessions: Vec<Value> = reqwest::get(harness.url("/api/sessions")).await.unwrap().json().await.unwrap();
     assert_eq!(sessions.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attention_receipts_sync_clients_and_cannot_clear_a_newer_event() {
+    let harness = Harness::start();
+    harness.register("agent", None, None);
+    let mut event = blocked("Question: Which database?");
+    event.attention.as_mut().unwrap().notice = Some(crate::insights::AttentionNotice {
+        event_id: "event-1".into(), kind: crate::insights::NoticeKind::Input, unread: true, enabled: true,
+    });
+    harness.bridge.set_insights("agent", event.clone());
+    let client = reqwest::Client::new();
+    let checked: Value = client.post(harness.url("/api/sessions/agent/seen")).json(&json!({"eventId":"event-1"})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(checked["attention"]["notice"]["unread"], false);
+    assert_eq!(checked["attention"]["state"], "blocked");
+    harness.bridge.set_insights("agent", event.clone());
+    let summary: Vec<Value> = reqwest::get(harness.url("/api/sessions")).await.unwrap().json().await.unwrap();
+    assert_eq!(summary[0]["attention"]["notice"]["unread"], false, "stale host updates cannot undo a receipt");
+    event.attention.as_mut().unwrap().notice.as_mut().unwrap().event_id = "event-2".into();
+    harness.bridge.set_insights("agent", event);
+    let newer: Value = client.post(harness.url("/api/sessions/agent/seen")).json(&json!({"eventId":"event-1"})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(newer["attention"]["notice"]["unread"], true);
+    assert_eq!(newer["attention"]["notice"]["eventId"], "event-2");
+    assert_eq!(client.post(harness.url("/api/sessions/agent/seen")).json(&json!({})).send().await.unwrap().status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1940,4 +2095,476 @@ async fn folders_suggest_bro_projects_and_complete_typed_paths() {
     assert_eq!(named["mode"], "search");
     // (drive folders are candidates too, so only membership is certain here)
     assert!(paths(&named).contains(&code.join("bro-cli-v2").to_string_lossy().into_owned()), "{named}");
+}
+
+// ----- jobs for a session's Claude Code mod (mod_jobs.rs) ----------------------------------------------------
+
+type ModReply = tokio::sync::oneshot::Receiver<(Result<Value, String>, String)>;
+
+/// Asks session `session`'s mod for `job`; the receiver gets the reply and the thread it ran on.
+fn ask_mod(harness: &Harness, session: &str, job: Value) -> ModReply {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    harness.bridge.mod_ask(
+        session,
+        job,
+        Box::new(move |result| {
+            let thread = std::thread::current().name().unwrap_or_default().to_owned();
+            let _ = tx.send((result, thread));
+        }),
+    );
+    rx
+}
+
+async fn mod_reply(reply: ModReply) -> Result<Value, String> {
+    let (result, thread) = tokio::time::timeout(Duration::from_secs(5), reply)
+        .await
+        .expect("the reply never came")
+        .expect("the reply was dropped without running");
+    assert!(thread.starts_with("bro-bridge"), "replies run on a bridge thread, not {thread:?}");
+    result
+}
+
+fn mod_timing(pickup: u64, answer: u64, poll: u64, listening: u64) -> crate::mod_jobs::Timing {
+    crate::mod_jobs::Timing {
+        pickup: Duration::from_millis(pickup),
+        answer: Duration::from_millis(answer),
+        poll: Duration::from_millis(poll),
+        listening: Duration::from_millis(listening),
+    }
+}
+
+async fn mod_jobs_of(response: reqwest::Response) -> Vec<Value> {
+    assert_eq!(response.status(), 200);
+    response.json::<Value>().await.unwrap()["jobs"].as_array().cloned().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mod_jobs_reach_the_sessions_mod_and_its_answer_comes_back() {
+    let harness = Harness::start();
+    harness.bridge.state().mod_jobs.set_timing(mod_timing(5_000, 5_000, 3_000, 40_000));
+    let client = reqwest::Client::new();
+    let answer = |session: &str, id: &str, body: Value| {
+        client.post(harness.url(&format!("/api/mod/{session}/jobs/{id}"))).json(&body).send()
+    };
+    assert!(!harness.bridge.mod_listening("s1"));
+
+    // The mod's poll is open: it counts as listening, and a job reaches it at once, fields beside the id.
+    let poll = tokio::spawn(client.get(harness.url("/api/mod/s1/jobs")).send());
+    for _ in 0..300 {
+        if harness.bridge.mod_listening("s1") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(harness.bridge.mod_listening("s1"));
+    assert!(!harness.bridge.mod_listening("s2"));
+    let asked = std::time::Instant::now();
+    let reply = ask_mod(
+        &harness,
+        "s1",
+        json!({ "kind": "read", "server": "claude_ai_JustGains", "uri": "ui://widget/workout-v84.html" }),
+    );
+    let jobs = mod_jobs_of(poll.await.unwrap().unwrap()).await;
+    assert!(asked.elapsed() < Duration::from_secs(2), "an open poll answers as soon as a job arrives");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["kind"], "read");
+    assert_eq!(jobs[0]["server"], "claude_ai_JustGains");
+    assert_eq!(jobs[0]["uri"], "ui://widget/workout-v84.html");
+    let id = jobs[0]["id"].as_str().unwrap().to_owned();
+
+    // Only that session's mod can answer it, and only ids it was given.
+    assert_eq!(answer("s2", &id, json!({ "ok": true })).await.unwrap().status(), 404);
+    assert_eq!(answer("s1", "nope", json!({ "ok": true })).await.unwrap().status(), 404);
+
+    // The answer can be a widget's worth of HTML.
+    let html = format!("<html>{}</html>", "x".repeat(6 * 1024 * 1024));
+    let contents = json!({ "contents": [{ "uri": "ui://widget/workout-v84.html", "mimeType": "text/html;profile=mcp-app", "text": html }] });
+    let answered = answer("s1", &id, json!({ "ok": true, "result": contents })).await.unwrap();
+    assert_eq!(answered.status(), 200);
+    let result = mod_reply(reply).await.unwrap();
+    assert_eq!(result["contents"][0]["text"].as_str().unwrap().len(), html.len());
+    assert_eq!(result["contents"][0]["mimeType"], "text/html;profile=mcp-app");
+    assert_eq!(answer("s1", &id, json!({ "ok": true })).await.unwrap().status(), 404, "answered once");
+
+    // Jobs queued between polls go out together; the mod's error comes back as the error.
+    let call = ask_mod(&harness, "s1", json!({ "kind": "call", "server": "x", "tool": "show_workout", "arguments": { "id": 7 } }));
+    let odd = ask_mod(&harness, "s1", json!("not an object"));
+    let jobs = mod_jobs_of(client.get(harness.url("/api/mod/s1/jobs")).send().await.unwrap()).await;
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    assert_eq!(jobs[0]["tool"], "show_workout");
+    assert_eq!(jobs[0]["arguments"]["id"], 7);
+    assert_eq!(jobs[1]["job"], "not an object");
+    let (first, second) = (jobs[0]["id"].as_str().unwrap(), jobs[1]["id"].as_str().unwrap());
+    let refused = answer("s1", first, json!({ "ok": false, "error": "no such tool" })).await.unwrap();
+    assert_eq!(refused.status(), 200);
+    assert_eq!(mod_reply(call).await.unwrap_err(), "no such tool");
+    answer("s1", second, json!({ "ok": false })).await.unwrap();
+    assert_eq!(mod_reply(odd).await.unwrap_err(), "the bro mod couldn't do it");
+    let broken = client.post(harness.url("/api/mod/s1/jobs/x")).body("{nope").send().await.unwrap();
+    assert_eq!(broken.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mod_jobs_fail_when_no_mod_takes_or_answers_them() {
+    let harness = Harness::start();
+    let jobs = harness.bridge.state().mod_jobs.clone();
+    let client = reqwest::Client::new();
+    let poll = || client.get(harness.url("/api/mod/s1/jobs")).send();
+
+    // Nobody asks for work: the job fails, saying why.
+    jobs.set_timing(mod_timing(200, 5_000, 3_000, 40_000));
+    let asked = std::time::Instant::now();
+    let error = mod_reply(ask_mod(&harness, "s1", json!({ "kind": "read" }))).await.unwrap_err();
+    assert_eq!(error, crate::mod_jobs::NOT_LISTENING);
+    assert!(asked.elapsed() >= Duration::from_millis(200));
+
+    // Taken but never answered: it times out, and a late answer finds nothing.
+    jobs.set_timing(mod_timing(5_000, 300, 3_000, 40_000));
+    let reply = ask_mod(&harness, "s1", json!({ "kind": "read" }));
+    let taken = mod_jobs_of(poll().await.unwrap()).await;
+    assert_eq!(taken.len(), 1);
+    let error = mod_reply(reply).await.unwrap_err();
+    assert!(error.contains("didn't answer"), "{error}");
+    let id = taken[0]["id"].as_str().unwrap();
+    let late = client.post(harness.url(&format!("/api/mod/s1/jobs/{id}"))).json(&json!({ "ok": true })).send().await.unwrap();
+    assert_eq!(late.status(), 404);
+
+    // A poll with nothing to do comes back empty; the mod counts as listening a while after it stops asking.
+    jobs.set_timing(mod_timing(5_000, 5_000, 300, 600));
+    let waited = std::time::Instant::now();
+    assert!(mod_jobs_of(poll().await.unwrap()).await.is_empty());
+    assert!(waited.elapsed() >= Duration::from_millis(300));
+    assert!(harness.bridge.mod_listening("s1"));
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(!harness.bridge.mod_listening("s1"));
+
+    // Stopping the bridge fails what's left, and anything asked after.
+    jobs.set_timing(mod_timing(60_000, 60_000, 3_000, 40_000));
+    let pending = ask_mod(&harness, "s1", json!({ "kind": "read" }));
+    let bridge = harness.bridge.clone();
+    tokio::task::spawn_blocking(move || bridge.shutdown()).await.unwrap();
+    assert_eq!(mod_reply(pending).await.unwrap_err(), crate::mod_jobs::STOPPED);
+    let after = ask_mod(&harness, "s1", json!({ "kind": "read" }));
+    assert_eq!(mod_reply(after).await.unwrap_err(), crate::mod_jobs::STOPPED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mod_jobs_refuse_callers_from_other_machines() {
+    use axum::extract::connect_info::MockConnectInfo;
+    let harness = Harness::start();
+    let token = harness.bridge.status().token;
+    // The bridge's own router, reached by a peer on the LAN.
+    let lan: std::net::SocketAddr = "192.168.1.9:40000".parse().unwrap();
+    let app = crate::server::router(harness.bridge.state().clone()).layer(MockConnectInfo(lan));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let url = |path: &str| format!("http://127.0.0.1:{port}{path}");
+    let client = reqwest::Client::new();
+
+    // The token opens the rest of the API, never the mod's jobs.
+    let polled = client.get(url("/api/mod/s1/jobs")).header("x-terminal-web-token", &token).send().await.unwrap();
+    assert_eq!(polled.status(), 403);
+    let answered = client
+        .post(url("/api/mod/s1/jobs/x"))
+        .header("x-terminal-web-token", &token)
+        .json(&json!({ "ok": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), 403);
+    assert!(!harness.bridge.mod_listening("s1"), "a refused poll doesn't count as listening");
+    let health = client.get(url("/api/health")).header("x-terminal-web-token", &token).send().await.unwrap();
+    assert_eq!(health.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn waveform_reads_a_sound_files_peaks_and_length() {
+    let harness = Harness::start();
+    let (_project, cwd) = file_workspace(&harness);
+    // a second of 16-bit mono silence, then a second of a loud tone
+    let rate = 8_000u32;
+    let samples: Vec<i16> = (0..rate * 2).map(|i| if i < rate { 0 } else { ((i as f32 * 0.3).sin() * 30_000.0) as i16 }).collect();
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut wav = vec![];
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    for part in [&16u32.to_le_bytes()[..], &1u16.to_le_bytes(), &1u16.to_le_bytes(), &rate.to_le_bytes(), &(rate * 2).to_le_bytes(), &2u16.to_le_bytes(), &16u16.to_le_bytes()] {
+        wav.extend_from_slice(part);
+    }
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&data);
+    std::fs::write(cwd.join("take one.wav"), &wav).unwrap();
+    std::fs::write(cwd.join("notes.txt"), "not a sound").unwrap();
+    let client = reqwest::Client::new();
+
+    let w: Value = client.get(harness.url("/api/sessions/files/waveform?path=take%20one.wav&bars=10")).send().await.unwrap().json().await.unwrap();
+    let peaks: Vec<f64> = w["peaks"].as_array().unwrap().iter().map(|p| p.as_f64().unwrap()).collect();
+    assert_eq!(peaks.len(), 10);
+    assert!(peaks[..4].iter().all(|p| *p < 0.01) && peaks[6..].iter().all(|p| *p > 0.9), "{peaks:?}");
+    assert_eq!(w["durationMs"], 2000);
+
+    let not_sound = client.get(harness.url("/api/sessions/files/waveform?path=notes.txt")).send().await.unwrap();
+    assert_eq!(not_sound.status(), 400);
+    let missing = client.get(harness.url("/api/sessions/files/waveform?path=gone.mp3")).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    let unknown = client.get(harness.url("/api/sessions/ghost/waveform?path=take%20one.wav")).send().await.unwrap();
+    assert_eq!(unknown.status(), 404);
+}
+
+// ----- MCP apps for the phone (apps.rs) ----------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mobile_thumbnails_keep_access_checks_and_original_downloads() {
+    let harness = Harness::start();
+    let (_project, cwd) = file_workspace(&harness);
+    harness.bridge.set_media_anywhere(false);
+    let picture = cwd.join("tile.png");
+    image::RgbImage::from_pixel(1200, 600, image::Rgb([40, 140, 200])).save(&picture).unwrap();
+    std::fs::write(cwd.join("broken.png"), "not a picture").unwrap();
+    std::fs::write(cwd.join(".env"), "TOKEN=private").unwrap();
+    let outside = harness.root.path().join("outside.png");
+    image::RgbImage::from_pixel(10, 10, image::Rgb([0, 0, 0])).save(&outside).unwrap();
+    let client = reqwest::Client::new();
+    let route = harness.url("/api/sessions/files/raw?path=tile.png&thumbnail=256");
+    let response = client.get(&route).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "image/jpeg");
+    let etag = response.headers()["etag"].clone();
+    let bytes = response.bytes().await.unwrap();
+    let image = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((image.width(), image.height()), (256, 128));
+    let unchanged = client.get(&route).header("if-none-match", etag).send().await.unwrap();
+    assert_eq!(unchanged.status(), 304);
+    let original = client.get(harness.url("/api/sessions/files/raw?path=tile.png")).send().await.unwrap();
+    assert_eq!(original.headers()["content-type"], "image/png");
+    assert_eq!(original.bytes().await.unwrap().as_ref(), std::fs::read(&picture).unwrap());
+    for (path, status) in [(".env", 422), ("../../outside.png", 403), ("missing.png", 404), ("broken.png", 422)] {
+        let response = client.get(harness.url(&format!("/api/sessions/files/raw?path={path}&thumbnail=256"))).send().await.unwrap();
+        assert_eq!(response.status(), status, "{path}");
+    }
+    let head = client.head(&route).send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.headers()["content-length"], bytes.len().to_string());
+    assert!(head.bytes().await.unwrap().is_empty());
+    let preview: Value = client.get(harness.url("/api/sessions/files/file?path=tile.png&stream=1")).send().await.unwrap().json().await.unwrap();
+    assert!(preview.get("data").is_none(), "mobile previews must not expand original images into base64 JSON");
+    assert!(preview["url"].as_str().unwrap().contains("/raw?path="));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mobile_json_compresses_while_raw_ranges_stay_exact() {
+    let harness = Harness::start();
+    let (_project, cwd) = file_workspace(&harness);
+    let text = "a long repeated line of code for mobile compression\n".repeat(500);
+    std::fs::write(cwd.join("many.txt"), &text).unwrap();
+    let client = reqwest::Client::new();
+    let compressed = client.get(harness.url("/api/sessions/files/file?path=many.txt"))
+        .header("accept-encoding", "gzip").send().await.unwrap();
+    assert_eq!(compressed.headers()["content-encoding"], "gzip");
+    assert!(compressed.bytes().await.unwrap().len() < text.len() / 10);
+    let range = client.get(harness.url("/api/sessions/files/raw?path=many.txt"))
+        .header("accept-encoding", "gzip").header("range", "bytes=0-19").send().await.unwrap();
+    assert_eq!(range.status(), 206);
+    assert!(!range.headers().contains_key("content-encoding"));
+    assert_eq!(range.bytes().await.unwrap().as_ref(), &text.as_bytes()[..20]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_output_bursts_coalesce_without_delaying_the_visible_session() {
+    let harness = Harness::start();
+    harness.register("visible", None, None);
+    harness.register("offscreen", None, None);
+    let mut socket = harness.socket().await;
+    recv_type(&mut socket, "hello").await;
+    send(&mut socket, json!({ "type": "subscribe", "sessionId": "visible" })).await;
+    recv_type(&mut socket, "snapshot").await;
+    for _ in 0..100 { harness.bridge.output("offscreen", b"a burst of terminal output\r\n"); }
+    harness.bridge.output("visible", b"what you are looking at\r\n");
+    let mut activity = 0;
+    let mut visible = false;
+    loop {
+        let message = recv(&mut socket).await;
+        if message["type"] == "output" {
+            assert_eq!(message["sessionId"], "visible");
+            visible = true;
+        }
+        if message["type"] == "activity" && message["sessionId"] == "offscreen" {
+            activity += 1;
+            if message["seq"] == 100 { break; }
+        }
+    }
+    assert!(visible, "visible output must arrive before the background freshness tick");
+    assert!(activity < 10, "a burst should produce a freshness signal, not 100 frames: {activity}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_app_step_serves_its_page_to_the_phone_and_its_asks_go_to_the_mod() {
+    let harness = Harness::start();
+    harness.bridge.state().mod_jobs.set_timing(mod_timing(200, 200, 3_000, 40_000));
+    harness.register("s1", None, None);
+    let transcript = harness.root.path().join("s1.jsonl");
+    let result = json!({ "workoutId": "w1", "title": "Upper Body" });
+    let lines = [
+        json!({ "type": "assistant", "timestamp": "2026-10-28T10:00:00Z", "message": { "id": "m1", "content": [{ "type": "tool_use", "id": "t1", "name": "mcp__claude_ai_JustGains__show_workout", "input": { "workoutId": "w1" } }] } }),
+        json!({ "type": "user", "timestamp": "2026-10-28T10:00:01Z", "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": result.to_string() }] }, "mcpMeta": { "_meta": { "ui": { "resourceUri": "ui://widget/workout.html" } }, "structuredContent": result } }),
+    ];
+    std::fs::write(&transcript, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    harness.bridge.set_agent_files("s1", crate::AgentFiles { transcript: Some(transcript), ..Default::default() });
+    let client = reqwest::Client::new();
+
+    // The conversation names the step's app.
+    let conversation: Value = client.get(harness.url("/api/sessions/s1/conversation")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(conversation["items"][0]["steps"][0]["app"], json!({ "server": "claude_ai_JustGains", "tool": "show_workout", "resource": "ui://widget/workout.html" }));
+
+    // No page kept, no mod listening: the phone hears why.
+    let missing = client.get(harness.url("/api/sessions/s1/apps/t1")).send().await.unwrap();
+    assert_eq!(missing.status(), 502);
+    assert!(missing.text().await.unwrap().contains("bro mod"));
+
+    // A kept page comes in bro's host page, with the call's input and result, in the phone's theme.
+    let kept = bro_core::mcp_apps::page_path(harness.root.path(), "claude_ai_JustGains", "ui://widget/workout.html");
+    std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    std::fs::write(&kept, "<html><body>WORKOUT CARD</body></html>").unwrap();
+    let page = client.get(harness.url("/api/sessions/s1/apps/t1?theme=light&bg=%23ffffff&width=390")).send().await.unwrap();
+    assert_eq!(page.status(), 200);
+    assert!(page.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
+    let html = page.text().await.unwrap();
+    assert!(html.contains("WORKOUT CARD"), "the page");
+    assert!(html.contains("\"theme\":\"light\"") && html.contains("\"platform\":\"mobile\"") && html.contains("\"width\":390"), "the phone's context");
+    assert!(html.contains("\"workoutId\":\"w1\""), "the call's input and result");
+
+    // A call that isn't there.
+    assert_eq!(client.get(harness.url("/api/sessions/s1/apps/nope")).send().await.unwrap().status(), 404);
+
+    // What the page asks of its server goes to the session's mod (none listens here), and only what a page may ask.
+    let ask = |body: Value| client.post(harness.url("/api/sessions/s1/apps/t1/ask")).json(&body).send();
+    let asked: Value = ask(json!({ "method": "tools/call", "params": { "name": "get_workout", "arguments": {} } })).await.unwrap().json().await.unwrap();
+    assert_eq!(asked["ok"], false);
+    assert!(asked["error"].as_str().unwrap().contains("bro mod"), "{asked}");
+    let refused: Value = ask(json!({ "method": "sampling/createMessage" })).await.unwrap().json().await.unwrap();
+    assert_eq!(refused["ok"], false);
+    assert!(refused["error"].as_str().unwrap().contains("sampling/createMessage"), "{refused}");
+}
+
+// ----- the phone's gallery (media.rs) ------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_gallery_lists_a_sessions_media_newest_first_and_media_tied_to_the_work_opens() {
+    let harness = Harness::start();
+    let (_project, cwd) = file_workspace(&harness);
+    harness.register("other", None, None);
+    let elsewhere = harness.root.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let file = |dir: &std::path::Path, name: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, name).unwrap();
+        path
+    };
+    let chart = file(&elsewhere, "chart.png");
+    file(&cwd, "clip.mp4");
+    let shot = file(&elsewhere, "shot.jpg");
+    let pasted = file(&elsewhere, "pasted one.png");
+    let voice = file(&elsewhere, "voice.mp3");
+    let deleted = file(&elsewhere, "deleted.png");
+    let secret = file(&elsewhere, "secret.txt");
+    let transcript = harness.root.path().join("files.jsonl");
+    let lines = [
+        json!({ "type": "user", "timestamp": "2026-10-02T00:00:04Z", "message": { "role": "user", "content": format!("what about this \"{}\"", pasted.display()) } }),
+        json!({ "type": "assistant", "timestamp": "2026-10-02T00:00:05Z", "message": { "id": "m1", "role": "assistant", "content": [{ "type": "text", "text": format!("Here's the line: `{}`", voice.display()) }] } }),
+    ];
+    std::fs::write(&transcript, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    let at = |s: u32| Some(format!("2026-10-02T00:00:0{s}Z"));
+    let touched = |path: PathBuf, kind, s| crate::TouchedFile { path, kind, at: at(s), line: None };
+    harness.bridge.set_agent_files("files", crate::AgentFiles {
+        transcript: Some(transcript),
+        sent: vec![
+            crate::SentFile { path: chart.clone(), caption: Some("the chart".into()), at: at(3), mime_type: Some("image/png".into()), is_image: true },
+            crate::SentFile { path: elsewhere.join("gone.png"), caption: None, at: at(6), mime_type: None, is_image: true },
+        ],
+        touched: vec![
+            touched(PathBuf::from("clip.mp4"), crate::TouchKind::Write, 2),
+            touched(shot.clone(), crate::TouchKind::Read, 1),
+            touched(deleted, crate::TouchKind::Delete, 7),
+            touched(secret.clone(), crate::TouchKind::Edit, 8),
+            touched(chart.clone(), crate::TouchKind::Read, 0),
+        ],
+    });
+    let client = reqwest::Client::new();
+
+    // the phone attaches a picture, then an agent opens a sound that lives outside the workspace
+    let attached: Value = client
+        .post(harness.url("/api/sessions/files/attachments"))
+        .header("content-type", "image/png")
+        .body(b"png".to_vec())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let attached = PathBuf::from(attached["path"].as_str().unwrap());
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let take = file(&elsewhere, "take.wav");
+    let open = client.post(harness.url("/api/sessions/files/open")).json(&json!({ "path": take.to_string_lossy() })).send().await.unwrap();
+    assert_eq!(open.status(), 200, "media opens from anywhere");
+
+    let body: Value = client.get(harness.url("/api/media?session=files")).send().await.unwrap().json().await.unwrap();
+    let items = body["items"].as_array().unwrap();
+    let field = |key: &str| items.iter().map(|i| i[key].as_str().unwrap_or_default().to_owned()).collect::<Vec<_>>();
+    let attached_name = attached.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(field("name"), ["take.wav", attached_name.as_str(), "voice.mp3", "pasted one.png", "chart.png", "clip.mp4", "shot.jpg"]);
+    assert_eq!(field("source"), ["opened", "attached", "sent", "pasted", "sent", "made", "viewed"], "a file sent and read shows as sent");
+    assert_eq!(field("kind"), ["audio", "image", "audio", "image", "image", "video", "image"]);
+    let chart_item = &items[4];
+    assert_eq!((chart_item["caption"].as_str(), chart_item["mimeType"].as_str()), (Some("the chart"), Some("image/png")));
+    assert_eq!((chart_item["at"].as_str(), chart_item["sessionId"].as_str()), (Some("2026-10-02T00:00:03.000Z"), Some("files")));
+    assert_eq!(chart_item["bytes"], 9);
+
+    // every session's: the other one has none
+    let all: Value = client.get(harness.url("/api/media")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(all["items"].as_array().unwrap().len(), items.len());
+    assert_eq!(client.get(harness.url("/api/media?session=ghost")).send().await.unwrap().status(), 404);
+
+    // what's listed streams and previews from wherever it is; text outside the workspace stays put
+    let encoded = |p: &std::path::Path| url::form_urlencoded::byte_serialize(p.to_string_lossy().as_bytes()).collect::<String>();
+    let raw = client.get(harness.url(&format!("/api/sessions/files/raw?path={}", encoded(&chart)))).send().await.unwrap();
+    assert_eq!(raw.status(), 200);
+    assert_eq!(raw.headers()["content-type"], "image/png");
+    let preview: Value = client.get(harness.url(&format!("/api/sessions/files/file?path={}", encoded(&shot)))).send().await.unwrap().json().await.unwrap();
+    assert_eq!((preview["kind"].as_str(), preview["relativePath"].as_str()), (Some("image"), Some("")));
+    assert!(preview["url"].as_str().unwrap().starts_with("/api/sessions/files/raw?path="));
+    let refused = client.get(harness.url(&format!("/api/sessions/files/raw?path={}", encoded(&secret)))).send().await.unwrap();
+    assert_eq!(refused.status(), 403);
+
+    // media is kept to what's tied to the work: what the agents sent, made or looked at, what a conversation
+    // names, what was attached or opened, and anything in a folder bro knows
+    let raw_status = |p: PathBuf| {
+        let (client, url) = (client.clone(), harness.url(&format!("/api/sessions/files/raw?path={}", encoded(&p))));
+        async move { client.get(url).send().await.unwrap().status().as_u16() }
+    };
+    for tied in [&voice, &pasted, &attached, &take] {
+        assert_eq!(raw_status(tied.clone()).await, 200, "{}", tied.display());
+    }
+    let stray = file(&elsewhere, "stray.png");
+    let protected = client.get(harness.url(&format!("/api/sessions/files/raw?path={}", encoded(&stray)))).send().await.unwrap();
+    assert_eq!(protected.status(), 403);
+    assert!(protected.text().await.unwrap().contains("Protect phone media"), "says how to open it");
+    let wave = client.get(harness.url(&format!("/api/sessions/files/waveform?path={}", encoded(&voice)))).send().await.unwrap();
+    assert_ne!(wave.status(), 403, "a sound a reply names has its waveform");
+    let known = harness.root.path().join("known");
+    std::fs::create_dir_all(&known).unwrap();
+    let in_known = file(&known, "logo.webp");
+    assert_eq!(raw_status(in_known.clone()).await, 403);
+    harness.bridge.set_known_folders(vec![known.clone()]);
+    assert_eq!(raw_status(in_known).await, 200, "a folder bro knows you work in");
+    // bro can let media open from anywhere; text still can't
+    harness.bridge.set_media_anywhere(true);
+    assert_eq!(raw_status(stray.clone()).await, 200);
+    assert_eq!(raw_status(secret.clone()).await, 403);
+    harness.bridge.set_media_anywhere(false);
+    assert_eq!(raw_status(stray).await, 403);
+    let _ = std::fs::remove_file(attached);
 }

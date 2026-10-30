@@ -13,7 +13,7 @@ pub(crate) mod gui;
 
 use crate::keymap::Act;
 use crate::alerts::Kind;
-use crate::pane::{Action, Cx, Pane, Place};
+use crate::pane::{Action, Cx, Event, Pane, Place};
 use crate::services::justimagine::commits;
 use crate::services::justtools::JobKind;
 use crate::services::skills::Bundled;
@@ -29,6 +29,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::Span,
 };
+#[cfg(not(test))]
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -48,12 +49,13 @@ enum BroOpt {
     AutoResume,
     AutoApprove,
     Recaps,
+    Attention,
     /// sessions share every signed-in login of their agent
     ProxyMode,
     Compression,
 }
 
-const BRO_OPTS: [BroOpt; 13] = [
+const BRO_OPTS: [BroOpt; 14] = [
     BroOpt::Theme,
     BroOpt::Font,
     BroOpt::Material,
@@ -67,6 +69,7 @@ const BRO_OPTS: [BroOpt; 13] = [
     BroOpt::Recaps,
     BroOpt::ProxyMode,
     BroOpt::Compression,
+    BroOpt::Attention,
 ];
 
 /// bro's options this window can use: the font only where the terminal can switch it, the window's material only
@@ -110,6 +113,7 @@ impl BroOpt {
             BroOpt::AutoResume => "Auto-resume",
             BroOpt::AutoApprove => "Auto-approve prompts",
             BroOpt::Recaps => "Recaps",
+            BroOpt::Attention => "Session status indicators",
             BroOpt::ProxyMode => "Proxy mode",
             BroOpt::Compression => "Request compression",
         }
@@ -127,6 +131,7 @@ impl BroOpt {
             BroOpt::AutoResume => "types `continue` when an agent stops on an API error or a limit resets",
             BroOpt::AutoApprove => "answers Yes to Claude's \"Do you want to proceed?\" (bypass mode's rm / path safety checks)",
             BroOpt::Recaps => "asks Claude for a /recap of a pane left waiting unseen (a few cents each)",
+            BroOpt::Attention => "tints unread completions and input requests; focusing a session marks it checked",
             BroOpt::ProxyMode => "one pool per agent: every signed-in login serves new sessions, and a spent one hands off to the next",
             BroOpt::Compression => "routes new Claude sessions through bro-proxy to trim requests",
         }
@@ -160,6 +165,7 @@ impl BroOpt {
             BroOpt::AutoResume => on(s.auto_resume.enabled),
             BroOpt::AutoApprove => on(s.auto_approve),
             BroOpt::Recaps => on(s.insights.generate_recaps),
+            BroOpt::Attention => on(s.insights.attention_indicators),
             BroOpt::ProxyMode => on(s.proxy.shared),
             BroOpt::Compression => on(s.proxy.trim),
         }
@@ -231,6 +237,11 @@ impl BroOpt {
             BroOpt::Recaps => {
                 let mut s = cx.svc.settings();
                 s.insights.generate_recaps = !s.insights.generate_recaps;
+                cx.svc.save_settings(s);
+            }
+            BroOpt::Attention => {
+                let mut s = cx.svc.settings();
+                s.insights.attention_indicators = !s.insights.attention_indicators;
                 cx.svc.save_settings(s);
             }
         }
@@ -373,6 +384,8 @@ enum HostOpt {
     Restart,
     /// it starts when you sign in (for your user, no admin)
     Startup,
+    /// the phone opens only media tied to the work (`[bridge] protect_media`)
+    Media,
 }
 
 /// bro's own updates' rows.
@@ -492,6 +505,7 @@ impl ModOpt {
 /// the skills, the sounds, then bro's updates.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
+    Quips,
     Bro(BroOpt),
     Voice(VoiceOpt),
     Cave(CaveOpt),
@@ -509,7 +523,7 @@ fn rows() -> Vec<Row> {
     bro_opts()
         .into_iter()
         .map(Row::Bro)
-        .chain([Row::Host(HostOpt::Keep), Row::Host(HostOpt::Working), Row::Host(HostOpt::Restart), Row::Host(HostOpt::Startup)])
+        .chain([Row::Host(HostOpt::Keep), Row::Host(HostOpt::Working), Row::Host(HostOpt::Restart), Row::Host(HostOpt::Startup), Row::Host(HostOpt::Media)])
         .chain(VOICE_OPTS.map(Row::Voice))
         .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents)])
         .chain(WATCH_OPTS.map(Row::Watch))
@@ -519,7 +533,7 @@ fn rows() -> Vec<Row> {
         .chain(MOD_OPTS.map(Row::Mod))
         .chain([Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justpaste::supported().then_some(Row::Tool(ToolOpt::SmartPaste)))
-        .chain([Row::Tool(ToolOpt::Imagine), Row::Skill(SkillOpt::Manage), Row::Skill(SkillOpt::BroOpen), Row::Tool(ToolOpt::Skill)])
+        .chain([Row::Tool(ToolOpt::Imagine), Row::Quips, Row::Skill(SkillOpt::Manage), Row::Skill(SkillOpt::BroOpen), Row::Tool(ToolOpt::Skill)])
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
         .chain([Row::Skill(SkillOpt::Imagine), Row::Skill(SkillOpt::AutoSync)])
         .chain([Row::Tool(ToolOpt::SoundsOn), Row::Tool(ToolOpt::Sounds), Row::Tool(ToolOpt::PeonPing), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
@@ -534,6 +548,18 @@ fn knobs(teams: bool) -> impl Iterator<Item = usize> {
 /// An agent teams switch: reset goes back to bro's default, not to a preset (no preset touches them).
 fn team_knob(r: Row) -> bool {
     matches!(r, Row::Knob(k) if KNOBS[k].group == Group::Teams)
+}
+
+/// A setting's source credit, shared by the desktop and terminal interfaces.
+fn source_link(r: Row) -> Option<(&'static str, &'static str)> {
+    matches!(r, Row::Knob(k) if KNOBS[k].id == bro_core::agent_summaries::KNOB)
+        .then_some((bro_core::agent_summaries::CREDIT, bro_core::agent_summaries::SOURCE_URL))
+}
+
+fn open_source(r: Row, cx: &Cx) {
+    if let Some((_, url)) = source_link(r) {
+        let _ = cx.tx.send(Event::OpenLink(url.into()));
+    }
 }
 
 /// The agent teams running in sessions here, under the switch: one line each (lead, project, teammates, tasks), or
@@ -578,12 +604,13 @@ enum Section {
     Claude,
     Mod,
     Integrations,
+    Quips,
     Skills,
     Sounds,
     Updates,
 }
 
-const SECTIONS: [Section; 12] = [
+const SECTIONS: [Section; 13] = [
     Section::Appearance,
     Section::Sessions,
     Section::Server,
@@ -593,6 +620,7 @@ const SECTIONS: [Section; 12] = [
     Section::Claude,
     Section::Mod,
     Section::Integrations,
+    Section::Quips,
     Section::Skills,
     Section::Sounds,
     Section::Updates,
@@ -601,6 +629,7 @@ const SECTIONS: [Section; 12] = [
 impl Section {
     fn of(r: Row) -> Section {
         match r {
+            Row::Quips => Section::Quips,
             Row::Bro(o) if o.looks() => Section::Appearance,
             Row::Bro(_) => Section::Sessions,
             Row::Host(_) => Section::Server,
@@ -627,6 +656,7 @@ impl Section {
             Section::Mod => "bro mod",
             Section::Integrations => "Integrations",
             Section::Skills => "Skills",
+            Section::Quips => "Quips",
             Section::Sounds => "Sounds",
             Section::Updates => "Updates",
         }
@@ -644,6 +674,7 @@ impl Section {
             Section::Mod => "mod",
             Section::Integrations => "rocket",
             Section::Skills => "skills",
+            Section::Quips => "skills",
             Section::Sounds => "sound",
             Section::Updates => "history",
         }
@@ -661,6 +692,7 @@ impl Section {
             Section::Mod => "bro's mod for Claude Code: your sessions and limits a keystroke away in /bro, and a chime and a clock on Claude's questions. New sessions pick it up.",
             Section::Integrations => "Tools your agents can call. bro installs them and tells you when GitHub has something newer.",
             Section::Skills => "What your agents know how to do. The Skills view lists every skill they have and where each came from, watches repos for more and finds more on Skill Issue; here, the switches for the skills bro brings.",
+            Section::Quips => "Quick instructions for your prompts. Bro expands your shortcuts when you send a message.",
             Section::Sounds => "Voice lines when a session starts, finishes, fails or needs you, in Claude, Codex, Pi and omp. The sounds and packs are provided by PeonPing.",
             Section::Updates => "New bro releases from GitHub. Nothing installs until you say so.",
         }
@@ -994,6 +1026,7 @@ impl SettingsView {
         let mut s = cx.svc.settings();
         let env = &mut s.claude_env;
         match self.row() {
+            Row::Quips => return cx.act(Action::Run(Act::Quips)),
             Row::Bro(o) => return o.change(dir, cx),
             Row::Voice(o) => return self.voice(o, dir, cx),
             Row::Tool(o) => return self.tool(o, cx),
@@ -1020,6 +1053,7 @@ impl SettingsView {
                 }
             }
             Row::Host(HostOpt::Working) => s.server.keep_working = !s.server.keep_working,
+            Row::Host(HostOpt::Media) => s.bridge.protect_media = !s.bridge.protect_media,
             Row::Host(HostOpt::Restart) => {
                 // the app asks first: restarting ends the sessions it runs
                 cx.act(Action::Run(Act::RestartServer));
@@ -1077,7 +1111,7 @@ impl SettingsView {
         let mut s = cx.svc.settings();
         match self.row() {
             Row::Mod(ModOpt::TimerSecs) => s.claude_mod.timer_secs = bro_core::claude_mod::ClaudeModSettings::default().timer_secs,
-            Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Skill(_) | Row::Update(_) | Row::Host(_) | Row::Mod(_) | Row::Voice(VoiceOpt::On | VoiceOpt::ApiKey) => return,
+            Row::Quips | Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Skill(_) | Row::Update(_) | Row::Host(_) | Row::Mod(_) | Row::Voice(VoiceOpt::On | VoiceOpt::ApiKey) => return,
             Row::Voice(o) => {
                 match o {
                     VoiceOpt::Key => s.voice.hotkey = None,
@@ -1141,6 +1175,9 @@ fn env_parts(env: &ClaudeEnvSettings) -> Vec<String> {
     if let Some(scope) = bro_core::peers::Scope::of(env) {
         parts.push(format!("hooks on SendMessage and ListAgents: bro hook peers {}", scope.id()));
     }
+    if env.skip_agent_summaries() {
+        parts.push("Bun preload: skip periodic agent status summaries".into());
+    }
     parts
 }
 
@@ -1172,6 +1209,9 @@ fn lay_out(s: Section, blocks: Vec<Block>, sel: usize, w: usize, t: &crate::them
                         [one] => block.extend(wrap(&one.content, w.saturating_sub(3)).into_iter().map(|l| vec![bar(), Span::styled(l, one.style)])),
                         _ => block.push(std::iter::once(bar()).chain(n).collect()),
                     }
+                }
+                if let Some((credit, _)) = source_link(it.row) {
+                    block.extend(wrap(&format!("{credit} · o opens the post"), w.saturating_sub(3)).into_iter().map(|l| vec![bar(), Span::styled(l, muted(t))]));
                 }
                 lines.extend(block.into_iter().map(|l| (Some(i), if on { lit(l, w, t) } else { l })));
             }
@@ -1280,11 +1320,14 @@ impl SettingsView {
                     let (o, src) = env.choice(k);
                     let value = match k.id {
                         claude_env::AGENT_TEAMS => switch(teams_on, true, t),
+                        bro_core::agent_summaries::KNOB => switch(env.skip_agent_summaries(), true, t),
                         _ => choice(k.options[o].label, if src == Source::Override { bold(t.shine) } else { muted(t) }, t),
                     };
                     let mut item = Item::new(Row::Knob(k_i), k.label, value, k.help);
                     if k.id == claude_env::AGENT_TEAMS {
                         item.notes = team_notes(teams_on, &cx.svc.live_teams(), t);
+                    } else if k.id == bro_core::agent_summaries::KNOB && env.skip_agent_summaries() {
+                        item.notes.push(vec![Span::styled("New Claude sessions only. Uses an unofficial runtime hook; Claude updates may restore summaries.", muted(t))]);
                     } else if src == Source::Override {
                         item.tag = Some(Span::styled("  changed", fg(t.shine)));
                     }
@@ -1326,6 +1369,15 @@ impl SettingsView {
             }
             Section::Integrations => self.integrations(cx),
             Section::Skills => self.skills(cx),
+            Section::Quips => vec![
+                Block::Item(Item::new(Row::Quips, "Manage Quips", shown("open ›", fg(t.inline)), "Edit the starters or add your own.")),
+                Block::Text(vec![]),
+                Block::Text(vec![Span::styled("Type : in an agent session, then Tab to choose a Quip. Works in conversation and terminal views.", muted(t))]),
+                Block::Text(vec![]),
+                Block::Text(vec![Span::styled("Try: Explain this bill :plain-english :keep-it-short", fg(t.inline))]),
+                Block::Text(vec![]),
+                Block::Text(vec![Span::styled("Quips are local text expanders. Only the instructions you use take prompt tokens.", muted(t))]),
+            ],
             Section::Sounds => self.sounds(cx),
             Section::Server => {
                 let hs = cx.svc.state().host.clone();
@@ -1367,7 +1419,13 @@ impl SettingsView {
                 } else if let Some(p) = &hs.problem {
                     server = server.note(vec![Span::styled(format!("✗ {p}"), fg(t.danger))]);
                 }
-                vec![Block::Item(keep), Block::Item(working), Block::Item(server), Block::Item(startup_item(&hs, t))]
+                let media = Item::new(
+                    Row::Host(HostOpt::Media),
+                    "Protect phone media",
+                    switch(st.bridge.protect_media, true, t),
+                    "your phone opens the pictures, videos and sounds that belong to your work: in your projects, made, sent or looked at by your agents, or attached by you · off: any on this computer",
+                );
+                vec![Block::Item(keep), Block::Item(working), Block::Item(server), Block::Item(startup_item(&hs, t)), Block::Item(media)]
             }
             Section::Updates => {
                 let u = cx.svc.state().updates.clone();
@@ -1682,6 +1740,7 @@ impl SettingsView {
                     },
                 }
             }
+            Section::Quips => Span::styled("local", muted(t)),
             Section::Sounds => match st.peon.on {
                 true => Span::styled("on", fg(t.good)),
                 false => Span::styled("off", muted(t)),
@@ -1766,6 +1825,9 @@ impl Pane for SettingsView {
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
             Row::Watch(_) | Row::Voice(VoiceOpt::Key | VoiceOpt::Mode | VoiceOpt::Speaker) => hints.push(("r", "bro's default")),
             _ => {}
+        }
+        if source_link(row).is_some() {
+            hints.push(("o", "original post"));
         }
         let area = ui::hint_line(f, area, &hints, t);
         let section = Section::of(row);
@@ -1882,6 +1944,7 @@ impl Pane for SettingsView {
             KeyCode::Char('l') | KeyCode::Right => self.step(1, cx),
             KeyCode::Char('h') | KeyCode::Left => self.step(-1, cx),
             KeyCode::Char('r') => self.reset(cx),
+            KeyCode::Char('o') if source_link(self.row()).is_some() => open_source(self.row(), cx),
             _ => return false,
         }
         true
@@ -1929,7 +1992,12 @@ mod tests {
         let mut env = ClaudeEnvSettings::default();
         assert_eq!(
             env_parts(&env),
-            ["CLAUDE_CODE_NO_FLICKER=1", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1", r#"--settings {"viewMode":"focus","spinnerTipsEnabled":false}"#, "hooks on SendMessage and ListAgents: bro hook peers project"]
+            [
+                "CLAUDE_CODE_NO_FLICKER=1",
+                "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1",
+                r#"--settings {"viewMode":"focus","attribution":{"commit":"","pr":""},"includeCoAuthoredBy":false,"spinnerTipsEnabled":false}"#,
+                "hooks on SendMessage and ListAgents: bro hook peers project"
+            ]
         );
         env.use_preset("presenter");
         let p = env_parts(&env);
@@ -1948,7 +2016,8 @@ mod tests {
         assert_eq!(r[n + 1], Row::Host(HostOpt::Working));
         assert_eq!(r[n + 2], Row::Host(HostOpt::Restart));
         assert_eq!(r[n + 3], Row::Host(HostOpt::Startup));
-        let n = n + 4;
+        assert_eq!(r[n + 4], Row::Host(HostOpt::Media));
+        let n = n + 5;
         assert_eq!(r[n], Row::Voice(VoiceOpt::On));
         let n = n + VOICE_OPTS.len();
         assert_eq!(r[n], Row::Cave(CaveOpt::Mode));
@@ -1964,7 +2033,8 @@ mod tests {
         let (paste, watch) = (usize::from(bro_core::justpaste::supported()), usize::from(bro_core::justwatch::supported()));
         assert_eq!(r[tools + 3 + paste], Row::Tool(ToolOpt::Imagine));
         // the skills: the Skills view, bro's, JustTools', JustWatch's, JustImagine's, keeping the repos in sync
-        let skills = tools + 4 + paste;
+        assert_eq!(r[tools + 4 + paste], Row::Quips);
+        let skills = tools + 5 + paste;
         assert_eq!(r[skills], Row::Skill(SkillOpt::Manage));
         assert_eq!(r[skills + 1], Row::Skill(SkillOpt::BroOpen));
         assert_eq!(r[skills + 2], Row::Tool(ToolOpt::Skill));

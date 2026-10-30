@@ -1,5 +1,6 @@
 //! The system clipboard (ported from z4-oriel): copy text out of bro (selections), and grab an image or copied
-//! files from it (ctrl+v pastes text; alt+v pastes an image into Claude Code / Codex as a file path).
+//! files from it (ctrl+v pastes text; alt+v pastes an image into Claude Code / Codex as a file path). On Windows the
+//! desktop app also copies pictures and files onto it ([`put_picture`], [`put_files`]).
 //!
 //! Copy goes two ways at once: OSC 52 (the terminal sets the clipboard; works over SSH too) and the OS tool as a
 //! backup (clip.exe with UTF-16LE, wl-copy, xclip, xsel).
@@ -84,8 +85,8 @@ pub fn copy(text: &str) {
 pub fn grab_text() -> Option<String> {
     #[cfg(windows)]
     {
-        use clipboard_win::{Clipboard, Getter, formats};
-        let _clipboard = Clipboard::new_attempts(10).ok()?;
+        use clipboard_win::{Getter, formats};
+        let _clipboard = open_clipboard()?;
         let mut text = String::new();
         if formats::Unicode.read_clipboard(&mut text).is_ok() && !text.is_empty() {
             return Some(text);
@@ -207,8 +208,8 @@ pub fn grab_image() -> Option<Vec<String>> {
         }
         // copied files
         {
-            use clipboard_win::{Clipboard, Getter, formats};
-            let files = Clipboard::new_attempts(10).ok().and_then(|_c| {
+            use clipboard_win::{Getter, formats};
+            let files = open_clipboard().and_then(|_c| {
                 let mut paths: Vec<String> = vec![];
                 formats::FileList.read_clipboard(&mut paths).ok()?;
                 (!paths.is_empty()).then_some(paths)
@@ -282,9 +283,9 @@ foreach ($f in $files) {{ 'FILE ' + $f }}"#
 /// checks it and gives the thumbnail.
 #[cfg(windows)]
 fn grab_png() -> Option<(Vec<u8>, Picture)> {
-    use clipboard_win::{Clipboard, raw};
+    use clipboard_win::raw;
     let candidates = {
-        let _clipboard = Clipboard::new_attempts(10).ok()?;
+        let _clipboard = open_clipboard()?;
         ["PNG", "image/png"].into_iter().filter_map(|name| {
             let format = raw::register_format(name)?.get();
             let size = raw::size(format)?.get();
@@ -301,10 +302,10 @@ fn grab_png() -> Option<(Vec<u8>, Picture)> {
 /// The clipboard's bitmap (CF_DIB), read directly.
 #[cfg(windows)]
 fn grab_dib() -> Option<Picture> {
-    use clipboard_win::{Clipboard, raw};
+    use clipboard_win::raw;
     const CF_DIB: u32 = 8;
     let bytes = {
-        let _clipboard = Clipboard::new_attempts(10).ok()?;
+        let _clipboard = open_clipboard()?;
         let size = raw::size(CF_DIB)?.get();
         if size > 512 * 1024 * 1024 {
             return None;
@@ -320,9 +321,23 @@ fn grab_dib() -> Option<Picture> {
 /// The clipboard has a bitmap of some kind (one bro may not read itself).
 #[cfg(windows)]
 fn has_bitmap() -> bool {
-    use clipboard_win::{Clipboard, raw};
+    use clipboard_win::raw;
     const FORMATS: [u32; 3] = [2, 8, 17]; // CF_BITMAP, CF_DIB, CF_DIBV5
-    Clipboard::new_attempts(10).is_ok_and(|_c| FORMATS.iter().any(|f| raw::is_format_avail(*f)))
+    open_clipboard().is_some_and(|_c| FORMATS.iter().any(|f| raw::is_format_avail(*f)))
+}
+
+/// Open the clipboard, waiting a moment while someone else has it: Windows' clipboard history and other watchers
+/// read every copy the moment it's made, a few milliseconds each. Blocking (up to a fifth of a second): call it
+/// from a background thread.
+#[cfg(windows)]
+fn open_clipboard() -> Option<clipboard_win::Clipboard> {
+    for _ in 0..50 {
+        if let Ok(clipboard) = clipboard_win::Clipboard::new() {
+            return Some(clipboard);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
+    None
 }
 
 /// A PNG's pixels as RGBA8 (None: it isn't one, or it's broken or too big).
@@ -427,6 +442,89 @@ fn write_png(path: &std::path::Path, pic: &Picture) -> Option<()> {
     enc.write_header().ok()?.write_image_data(&pic.px).ok()
 }
 
+/// Put a picture on the clipboard as a browser's "copy image" does: its PNG (`png`, else one made from the pixels),
+/// which keeps transparency for the apps that read it, then a bitmap (CF_DIB) for the rest; Windows makes the other
+/// bitmap kinds from that. Blocking: call it from a background thread.
+#[cfg(windows)]
+pub fn put_picture(pic: &Picture, png: Option<Vec<u8>>) -> Result<(), String> {
+    use clipboard_win::raw;
+    const CF_DIB: u32 = 8;
+    if pic.w == 0 || pic.h == 0 {
+        return Err("the picture is empty".into());
+    }
+    // both made before the clipboard opens: it's held only while they're handed over
+    let png = png.or_else(|| encode_png(pic)).ok_or("couldn't make a PNG of the picture")?;
+    let dib = dib(pic);
+    let _clipboard = open_clipboard().ok_or(BUSY)?;
+    raw::empty().map_err(not_put)?;
+    // the PNG first: apps take the first kind they can read
+    if let Some(format) = raw::register_format("PNG") {
+        raw::set_without_clear(format.get(), &png).map_err(not_put)?;
+    }
+    raw::set_without_clear(CF_DIB, &dib).map_err(not_put)
+}
+
+/// Put files on the clipboard as Explorer copies them (CF_HDROP, marked to be copied rather than moved): a folder,
+/// a chat or a mail pastes the files themselves. Blocking: call it from a background thread.
+#[cfg(windows)]
+pub fn put_files(paths: &[String]) -> Result<(), String> {
+    use clipboard_win::{options, raw};
+    const DROPEFFECT_COPY: u32 = 1;
+    let _clipboard = open_clipboard().ok_or(BUSY)?;
+    raw::empty().map_err(not_put)?;
+    raw::set_file_list_with(paths, options::NoClear).map_err(not_put)?;
+    if let Some(format) = raw::register_format("Preferred DropEffect") {
+        raw::set_without_clear(format.get(), &DROPEFFECT_COPY.to_le_bytes()).map_err(not_put)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+const BUSY: &str = "another app is using the clipboard; try again";
+
+#[cfg(windows)]
+fn not_put(e: clipboard_win::ErrorCode) -> String {
+    format!("couldn't put it on the clipboard ({e})")
+}
+
+/// `pic` as PNG bytes (fast compression: it's pasted in moments).
+#[cfg(any(windows, test))]
+fn encode_png(pic: &Picture) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, pic.w, pic.h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::Fast);
+    let mut writer = enc.write_header().ok()?;
+    writer.write_image_data(&pic.px).ok()?;
+    writer.finish().ok()?;
+    Some(out)
+}
+
+/// `pic` as a device-independent bitmap, as browsers copy pictures: a BITMAPINFOHEADER, then the rows bottom-up as
+/// 32-bit BGRA, the alpha in the fourth byte.
+#[cfg(any(windows, test))]
+fn dib(pic: &Picture) -> Vec<u8> {
+    let row = pic.w as usize * 4;
+    let mut out = Vec::with_capacity(40 + pic.px.len());
+    // size, width, height (positive: bottom-up)
+    for v in [40, pic.w, pic.h] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    // one plane, 32 bits
+    out.extend_from_slice(&[1, 0, 32, 0]);
+    // BI_RGB, the pixels' bytes, no resolution (apps assume their own), no palette
+    for v in [0, pic.px.len() as u32, 0, 0, 0, 0] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for line in pic.px.chunks_exact(row.max(4)).rev() {
+        for [r, g, b, a] in line.as_chunks::<4>().0 {
+            out.extend_from_slice(&[*b, *g, *r, *a]);
+        }
+    }
+    out
+}
+
 /// How paths are pasted: quoted when they contain spaces (like dragging a file into a terminal).
 pub fn paste_form(paths: &[String]) -> String {
     paths.iter().map(|p| if p.contains(' ') { format!("\"{p}\"") } else { p.clone() }).collect::<Vec<_>>().join(" ")
@@ -481,6 +579,18 @@ mod tests {
     }
 
     #[test]
+    fn a_copied_picture_reads_back_as_itself() {
+        // 2x2 with transparency: red, half-see-through green / blue, invisible
+        let pic = super::Picture { w: 2, h: 2, px: vec![255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 9, 9, 9, 0] };
+        let dib = super::dib(&pic);
+        assert_eq!(dib.len(), 40 + 16);
+        assert_eq!(&dib[40..44], &[255, 0, 0, 255], "bottom row first, blue-green-red");
+        assert_eq!(super::dib_picture(&dib), Some(pic.clone()), "the bitmap is the picture, alpha and all");
+        let png = super::encode_png(&pic).expect("a PNG");
+        assert_eq!(super::decode_png(&png), Some(pic));
+    }
+
+    #[test]
     fn a_pasted_picture_has_a_thumbnail_waiting() {
         let big = super::Picture { w: 512, h: 256, px: vec![200; 512 * 256 * 4] };
         let small = super::shrink(&big, 256);
@@ -502,6 +612,51 @@ mod tests {
         let saved = std::fs::read(&paths[0]).unwrap();
         std::fs::remove_file(&paths[0]).unwrap();
         assert_eq!(saved, original, "image paste must preserve the original PNG, including alpha");
+    }
+
+    /// What `read` finds on the clipboard once a new copy has settled: for a few milliseconds after it's made,
+    /// Windows (its clipboard history) is still looking at it, and a read can come back empty.
+    #[cfg(windows)]
+    fn settled<T>(read: impl Fn() -> Option<T>) -> Option<T> {
+        (0..50).find_map(|_| read().or_else(|| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            None
+        }))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "puts a picture, then a file, on the real clipboard; puts back a picture that was there before"]
+    fn live_copy_puts_pictures_and_files_on_the_clipboard() {
+        use clipboard_win::{Getter, formats, raw};
+        let before = super::grab_png();
+        let pic = super::Picture { w: 3, h: 2, px: (0..24).map(|i| i * 10).collect() };
+        let png = super::encode_png(&pic).unwrap();
+        super::put_picture(&pic, Some(png.clone())).expect("copy the picture");
+        let (got, read) = settled(super::grab_png).expect("a PNG on the clipboard");
+        assert_eq!(got, png, "the PNG as it was given");
+        assert_eq!(read, pic);
+        assert_eq!(settled(super::grab_dib), Some(pic), "and a bitmap of the same pixels");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("clip one.mp4");
+        std::fs::write(&file, b"not really a video").unwrap();
+        let name = file.to_string_lossy().to_string();
+        super::put_files(std::slice::from_ref(&name)).expect("copy the file");
+        let (paths, effect, bitmap) = settled(|| {
+            let _clipboard = super::open_clipboard()?;
+            let mut paths: Vec<String> = vec![];
+            formats::FileList.read_clipboard(&mut paths).ok()?;
+            let mut effect = vec![0; 4];
+            raw::get(raw::register_format("Preferred DropEffect")?.get(), &mut effect).ok()?;
+            Some((paths, effect, raw::is_format_avail(8)))
+        })
+        .expect("the file on the clipboard");
+        assert_eq!(paths, vec![name]);
+        assert_eq!(effect, 1u32.to_le_bytes(), "pasted as a copy, not a move");
+        assert!(!bitmap, "the picture before it is gone");
+        if let Some((png, pic)) = before {
+            super::put_picture(&pic, Some(png)).unwrap();
+        }
     }
 
     #[test]

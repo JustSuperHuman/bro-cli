@@ -31,6 +31,8 @@ pub enum Overlay {
     Watchdog(Box<crate::watchdog::view::WatchdogView>),
     /// The watchdog reviewer's instructions (settings).
     WatchdogPrompt(Box<crate::watchdog::prompt_editor::PromptEditor>),
+    /// The local Quips library, managed independently of an agent session.
+    Quips(PaneId),
 }
 
 impl Overlay {
@@ -127,6 +129,7 @@ impl App {
                 crate::watchdog::view::draw(f, area, v, dog.as_ref(), &t);
             }
             Overlay::WatchdogPrompt(e) => e.draw(f, area, &t),
+            Overlay::Quips(_) => {}, // desktop only; drawn natively
         }
     }
 

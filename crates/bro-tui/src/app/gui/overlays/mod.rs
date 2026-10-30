@@ -34,6 +34,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, canvas: &mut TuiCanvas, window: Rect, bo
         Overlay::Help(_) => help::draw(app, ui, window, time),
         Overlay::Resume(_) => resume::draw(app, ui, window, time),
         Overlay::Confirm(_) => confirm::draw(app, ui, window, time),
+        Overlay::Quips(id) => { let id = *id; super::focus::draw_quips_overlay(app, ui, id, window); true }
         _ => {
             let alt = app.alt_down.is_some_and(|t| t.elapsed() >= crate::app::alt_hints::HOLD);
             let cx = Cx { svc: &app.svc, keymap: &app.keymap, time, focused, alt };
@@ -61,6 +62,10 @@ pub fn draw(app: &mut App, ui: &mut Ui, canvas: &mut TuiCanvas, window: Rect, bo
 /// Target `n` of the natively drawn overlay was clicked.
 pub fn click(g: &mut Gui, n: usize, p: Point, button: CButton, m: KeyModifiers, count: u32) {
     if button != CButton::Left {
+        return;
+    }
+    if let Overlay::Quips(id) = g.app.overlay {
+        super::focus::click(g, id, n, p, count);
         return;
     }
     let app = &mut g.app;
@@ -103,6 +108,10 @@ pub fn click(g: &mut Gui, n: usize, p: Point, button: CButton, m: KeyModifiers, 
 
 /// The wheel over the natively drawn overlay (`n`: the target under the pointer, if any).
 pub fn wheel(g: &mut Gui, n: Option<usize>, down: bool) {
+    if let Overlay::Quips(id) = g.app.overlay {
+        super::focus::wheel(g, id, super::scroll::Wheel::Lines(if down { -1.0 } else { 1.0 }));
+        return;
+    }
     let shift = g.mods.shift_key();
     let app = &mut g.app;
     match &mut app.overlay {

@@ -101,6 +101,10 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     let mut subscriptions = Subscriptions::new(&state);
     // Output at or below this seq is already contained in the snapshot sent.
     let mut snapshot_seq: HashMap<String, u64> = HashMap::new();
+    // Offscreen sessions need a freshness signal, not a frame for every PTY write.
+    let mut activity: HashMap<String, Value> = HashMap::new();
+    let mut activity_tick = tokio::time::interval_at(tokio::time::Instant::now() + std::time::Duration::from_millis(500), std::time::Duration::from_millis(500));
+    activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             incoming = receiver.next() => {
@@ -129,6 +133,16 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                         // Missed events: resynchronise the session list.
                         let sessions = json!({ "type": "sessions", "sessions": state.summaries() });
                         if sender.send(text(&sessions)).await.is_err() { break; }
+                        // Terminal bytes were lost too. Restore each visible screen, then discard
+                        // queued output already represented by that snapshot's sequence.
+                        let ids: std::collections::HashSet<_> = subscriptions.slots.values().cloned().collect();
+                        for id in ids {
+                            if let Some((snapshot, seq)) = state.snapshot_with_seq(&id) {
+                                snapshot_seq.insert(id, seq);
+                                if sender.send(text(&snapshot)).await.is_err() { return; }
+                            }
+                        }
+                        activity.clear();
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -138,7 +152,10 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                     .as_ref()
                     .is_none_or(|id| subscriptions.watches(id));
                 let value = if event.output && !watched {
-                    json!({ "type": "activity", "sessionId": event.session_id, "seq": event.value["seq"] })
+                    if let Some(id) = event.session_id {
+                        activity.insert(id, event.value["seq"].clone());
+                    }
+                    continue;
                 } else if event.output {
                     let id = event.session_id.as_deref().unwrap_or_default();
                     let seq = event.value["seq"].as_u64().unwrap_or(u64::MAX);
@@ -150,6 +167,13 @@ async fn client_socket(socket: WebSocket, state: AppState) {
                     event.value
                 };
                 if sender.send(text(&value)).await.is_err() { break; }
+            }
+            _ = activity_tick.tick(), if !activity.is_empty() => {
+                for (id, seq) in std::mem::take(&mut activity) {
+                    if !subscriptions.watches(&id) && sender.send(text(&json!({ "type": "activity", "sessionId": id, "seq": seq }))).await.is_err() {
+                        return;
+                    }
+                }
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {

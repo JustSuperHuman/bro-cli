@@ -5,11 +5,14 @@
 //! hands media here), files an agent sends you (Claude's SendUserFile) or writes, creates or looks at, images pasted
 //! with alt+v (and the last half day of them on start), files dropped on the window. Newest first, once each. The
 //! panel shows the selected one large (zoom and pan for images, a player for video and audio) and the rest as a
-//! gallery, for the session in focus or its whole project. Nothing here ever runs a file.
+//! gallery, for the session in focus or its whole project. A right-click on a thumbnail or the viewer (shift+F10 from
+//! the keys) opens the item's menu: what the buttons do, the player's and the zoom's, each with its key. Nothing here
+//! ever runs a file.
 
 mod loader;
 
 use super::actions::Action;
+use super::kit::widgets::MenuLine;
 use super::kit::{Cursor, Style, Ui, size, weight, widgets};
 use crate::layout::PaneId;
 use bro_gfx::text::Align;
@@ -139,6 +142,8 @@ impl View {
 pub enum Ask {
     None,
     Toast(String),
+    /// put it on the clipboard, as a picture or as the file ([`copy_out`], on a worker)
+    Copy(PathBuf),
     /// type `@path ` into this pane (else the focused one)
     Mention(PathBuf, Option<PaneId>),
     /// open with the system's app
@@ -161,6 +166,7 @@ enum Target {
     Mute,
     Loop,
     Copy,
+    CopyPath,
     Mention,
     Open,
     Reveal,
@@ -168,7 +174,51 @@ enum Target {
     Prev,
     Next,
     Gallery,
+    /// a line of the open menu (None: anywhere else, which closes it)
+    Menu(Option<Cmd>),
 }
+
+/// What a line of the right-click menu does to the selected item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cmd {
+    Copy,
+    CopyPath,
+    Mention,
+    Play,
+    Mute,
+    Loop,
+    Fit,
+    Actual,
+    Expand,
+    Open,
+    Reveal,
+    Remove,
+}
+
+/// A line of the menu: its icon, label, key and what it does.
+#[derive(Clone, Copy, Debug)]
+struct Line {
+    icon: &'static str,
+    label: &'static str,
+    key: Option<&'static str>,
+    cmd: Cmd,
+}
+
+/// The right-click menu (shift+F10's): the selected item's, where it was opened.
+struct Menu {
+    at: Point,
+    /// the line the keys are on (none until an arrow is pressed, when it was opened with the mouse)
+    sel: Option<usize>,
+    /// the card as last drawn: a click on it between the lines leaves it open
+    card: Rect,
+}
+
+#[cfg(windows)]
+const REVEAL: &str = "Show in Explorer";
+#[cfg(target_os = "macos")]
+const REVEAL: &str = "Show in Finder";
+#[cfg(not(any(windows, target_os = "macos")))]
+const REVEAL: &str = "Show in folder";
 
 #[derive(Clone, Copy)]
 enum DragKind {
@@ -228,6 +278,7 @@ pub struct Media {
     opened: Option<(PaneId, PathBuf)>,
     /// when the shown files were last checked for changes on disk
     checked: Instant,
+    menu: Option<Menu>,
 }
 
 /// Pictures are first decoded to fit this many pixels; zooming in on a bigger one decodes it again, up to
@@ -258,6 +309,38 @@ fn mime(path: &Path) -> Option<&'static str> {
         return Some("application/pdf");
     }
     bro_bridge::file_preview::image_mime(&ext).or_else(|| bro_bridge::file_preview::media_mime(&ext))
+}
+
+/// Put `path` on the clipboard for "Copy": a still picture as the picture (apps, chats and editors paste it in), an
+/// animation, a video, a song or a PDF as the file, as the file manager copies it (a chat, a mail or a folder takes
+/// it whole), and so too a picture bro can't decode. Returns what to say. Blocking (a picture is decoded first):
+/// call it from a background thread.
+pub fn copy_out(path: &Path) -> Result<String, String> {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    if !path.is_file() {
+        return Err(format!("{name} isn't there any more"));
+    }
+    if matches!(bro_media::kind_of(path), MediaKind::Image)
+        && !bro_media::is_animated(path)
+        && let Ok(image) = bro_media::load_image(path, copy_side(path))
+        && let Some((frame, _)) = image.frames.into_iter().next()
+    {
+        // a PNG goes as it is, the file's own bytes; anything else as the PNG of its pixels
+        let png = (cfg!(windows) && image.format == "PNG").then(|| std::fs::read(path).ok()).flatten();
+        super::window::set_clipboard_picture(crate::clip::Picture { w: frame.w, h: frame.h, px: frame.px }, png)?;
+        return Ok(format!("copied {name} as a picture"));
+    }
+    super::window::set_clipboard_files(&[path.to_path_buf()])?;
+    Ok(format!("copied {name} as a file"))
+}
+
+/// The size "Copy" makes a picture: its own (up to the largest texture); an SVG at twice its own, within reason.
+fn copy_side(path: &Path) -> u32 {
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if ext != "svg" && ext != "svgz" {
+        return SHARP_SIDE;
+    }
+    bro_media::load_image(path, 1).map(|i| (i.original.0.max(i.original.1) * 2).clamp(256, 4096)).unwrap_or(1024)
 }
 
 /// A transcript fact's time.
@@ -301,6 +384,7 @@ impl Media {
             hidden: HashMap::new(),
             opened: None,
             checked: Instant::now(),
+            menu: None,
         }
     }
 
@@ -488,6 +572,10 @@ impl Media {
             return;
         }
         self.active = active;
+        // a menu goes with the window's focus, as any menu does
+        if !active {
+            self.menu = None;
+        }
         if let View::Media { player, .. } = &mut self.view {
             if !active {
                 self.resume = player.is_playing() && !player.ended();
@@ -699,6 +787,7 @@ impl Media {
         let mut y = head.bottom() + 10.0;
         let shown: Vec<Item> = self.shown(focus).into_iter().cloned().collect();
         if shown.is_empty() {
+            self.menu = None;
             self.empty(ui, Rect::new(inner.x, y, inner.w, inner.bottom() - y), focus);
             return;
         }
@@ -719,16 +808,17 @@ impl Media {
         if let Some(it) = &item {
             y = self.draw_info(ui, Rect::new(inner.x, y, inner.w, 140.0), it);
         }
-        // what you can do with it
+        // what you can do with it (the path line above copies the path)
+        let copy_tip = if item.as_ref().is_some_and(|it| self.copies_as_picture(it)) { "Copy the picture · c" } else { "Copy the file · c" };
         let actions: [(&str, &str, &str, Target); 5] = [
-            ("\u{F018F}", "Copy path", "c", Target::Copy),
-            ("\u{F0065}", "Mention", "@", Target::Mention),
-            ("\u{F03CC}", "Open", "o", Target::Open),
+            ("\u{F018F}", "Copy", copy_tip, Target::Copy),
+            ("\u{F0065}", "Mention", "Mention · @", Target::Mention),
+            ("\u{F03CC}", "Open", "Open · o", Target::Open),
             ("\u{F0256}", "Folder", "", Target::Reveal),
-            ("\u{F0A7A}", "Remove", "del", Target::Remove),
+            ("\u{F0A7A}", "Remove", "Remove · del", Target::Remove),
         ];
         let aw = (inner.w - 4.0 * 6.0) / 5.0;
-        for (i, (icon, label, key, target)) in actions.into_iter().enumerate() {
+        for (i, (icon, label, tip, target)) in actions.into_iter().enumerate() {
             let b = Rect::new(inner.x + i as f32 * (aw + 6.0), y, aw, 44.0);
             let n = self.target(target);
             let h = ui.hover_amount(("media-act", i), b);
@@ -736,8 +826,8 @@ impl Media {
             ui.icon(Rect::new(b.x, b.y + 4.0, b.w, 20.0), icon, size::BODY, t.text.mix(t.muted, 0.3 - 0.3 * h));
             ui.label_in(Rect::new(b.x + 2.0, b.y + 24.0, b.w - 4.0, 16.0), label, Style::new(size::CAPTION, weight::MEDIUM, t.muted), Align::Center);
             ui.hit(b, Action::Media(n));
-            if h > 0.5 && !key.is_empty() {
-                widgets::tooltip(ui, b, &format!("{label} · {key}"));
+            if h > 0.5 && !tip.is_empty() {
+                widgets::tooltip(ui, b, tip);
             }
         }
         y += 56.0;
@@ -746,6 +836,7 @@ impl Media {
         y += 26.0;
         let gallery = Rect::new(inner.x, y, inner.w, (inner.bottom() - y).max(0.0));
         self.draw_gallery(ui, gallery, &shown);
+        self.draw_menu(ui, item.as_ref());
     }
 
     /// Draw the selected media over the workspace, keeping the same image or player loaded.
@@ -762,6 +853,79 @@ impl Media {
         let close = Rect::new(r.right() - 40.0, r.y + 12.0, 28.0, 28.0);
         let n = self.target(Target::Collapse);
         widgets::icon_button(ui, close, "\u{F0156}", ui.t.text, Action::Media(n));
+        let item = self.selected_item();
+        self.draw_menu(ui, item.as_ref());
+        ui.set_layer(prev);
+    }
+
+    /// The selected item, when it's still listed.
+    fn selected_item(&self) -> Option<Item> {
+        let sel = self.sel.as_ref()?;
+        self.items.iter().find(|it| &it.path == sel).cloned()
+    }
+
+    /// The menu's lines for `it` (None: a separator), as things stand: Play or Pause, the zoom there is to undo.
+    fn menu_lines(&self, it: &Item) -> Vec<Option<Line>> {
+        let l = |icon, label, key, cmd| Some(Line { icon, label, key, cmd });
+        let copy = if self.copies_as_picture(it) { "Copy picture" } else { "Copy file" };
+        let mut out = vec![l("\u{F018F}", copy, Some("c"), Cmd::Copy), l("\u{F0337}", "Copy path", Some("shift+c"), Cmd::CopyPath), l("\u{F0065}", "Mention in session", Some("@"), Cmd::Mention)];
+        let shown = self.view.path() == Some(it.path.as_path());
+        if shown && let View::Media { player, .. } = &self.view {
+            let playing = player.is_playing() && !player.ended();
+            out.push(None);
+            out.push(if playing { l("\u{F03E4}", "Pause", Some("space"), Cmd::Play) } else { l("\u{F040A}", "Play", Some("space"), Cmd::Play) });
+            out.push(if self.muted { l("\u{F057E}", "Unmute", Some("m"), Cmd::Mute) } else { l("\u{F0581}", "Mute", Some("m"), Cmd::Mute) });
+            out.push(if self.looping { l("\u{F0457}", "Stop looping", Some("l"), Cmd::Loop) } else { l("\u{F0456}", "Loop", Some("l"), Cmd::Loop) });
+        }
+        let mut look = vec![];
+        if shown && matches!(self.view, View::Image { .. }) {
+            if self.zoom > 1.01 {
+                look.push(l("\u{F18F4}", "Fit", Some("0"), Cmd::Fit));
+            }
+            // only when the picture has more pixels than the fit shows
+            let actual = self.actual_zoom();
+            if actual > 1.01 && (self.zoom - actual).abs() > 0.01 {
+                look.push(l("\u{F0C8D}", "Actual size", Some("1"), Cmd::Actual));
+            }
+        }
+        if it.kind != MediaKind::Pdf {
+            look.push(if self.expanded { l("\u{F0294}", "Back to the panel", Some("esc"), Cmd::Expand) } else { l("\u{F0293}", "Fill the window", None, Cmd::Expand) });
+        }
+        if !look.is_empty() {
+            out.push(None);
+            out.extend(look);
+        }
+        out.extend([None, l("\u{F03CC}", "Open with default app", Some("o"), Cmd::Open), l("\u{F0256}", REVEAL, None, Cmd::Reveal), None, l("\u{F0A7A}", "Remove from Media", Some("del"), Cmd::Remove)]);
+        out
+    }
+
+    /// The open menu over everything, where it was opened; a click anywhere else closes it.
+    fn draw_menu(&mut self, ui: &mut Ui, item: Option<&Item>) {
+        let (Some(m), Some(it)) = (&self.menu, item) else {
+            self.menu = None;
+            return;
+        };
+        let (at, sel) = (m.at, m.sel);
+        let lines = self.menu_lines(it);
+        let prev = ui.layer();
+        let screen = ui.screen;
+        let out = self.target(Target::Menu(None));
+        ui.hit_with(screen, Action::Media(out), Cursor::Default);
+        let base = self.targets.len();
+        self.targets.extend(lines.iter().map(|l| Target::Menu(l.map(|l| l.cmd))));
+        let drawn: Vec<MenuLine> = lines
+            .iter()
+            .map(|l| match l {
+                Some(l) => MenuLine { icon: Some(l.icon), label: l.label, key: l.key, ..Default::default() },
+                None => MenuLine { heading: true, ..Default::default() },
+            })
+            .collect();
+        let name = it.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let bounds = Rect::new(screen.x + 6.0, screen.y + 6.0, (screen.w - 12.0).max(1.0), (screen.h - 12.0).max(1.0));
+        let card = widgets::menu(ui, at, bounds, Some(&name), &drawn, sel, |i| Action::Media(base + i));
+        if let Some(m) = &mut self.menu {
+            m.card = card;
+        }
         ui.set_layer(prev);
     }
 
@@ -1069,8 +1233,23 @@ impl Media {
             },
             None => crate::util::short_path(&it.path, 60),
         };
-        let pb = ui.line(&place, Style::mono(size::CAPTION, t.faint), Some(r.w));
+        // a click copies the whole path
+        let width = ui.measure(&place, Style::mono(size::CAPTION, t.faint)).min(r.w - 20.0);
+        let hit = Rect::new(r.x - 4.0, r.y + 35.0, width + 26.0, 20.0);
+        let h = ui.hover_amount("media-path", hit);
+        if h > 0.01 {
+            ui.round(hit, super::kit::radius::CONTROL, t.text.with_alpha(0.05 * h));
+        }
+        let pb = ui.line(&place, Style::mono(size::CAPTION, t.faint.mix(t.muted, h)), Some(r.w - 20.0));
         ui.draw(&pb, Point::new(r.x, r.y + 38.0));
+        if h > 0.01 {
+            ui.icon(Rect::new(r.x + pb.w + 4.0, r.y + 38.0 + (pb.h - 14.0) / 2.0, 14.0, 14.0), "\u{F018F}", size::CAPTION, t.muted.with_alpha(h));
+        }
+        let n = self.target(Target::CopyPath);
+        ui.hit(hit, Action::Media(n));
+        if h > 0.5 {
+            widgets::tooltip(ui, hit, "Copy path · shift+c");
+        }
         let when = ago(it.at);
         let from = match &it.owner {
             Some(o) => format!("{} {} · {when}", it.source.verb(), o.who),
@@ -1180,6 +1359,13 @@ impl Media {
     pub fn click(&mut self, n: usize, p: Point, count: u32, focus: Option<&Owner>) -> Ask {
         self.focus = true;
         let Some(target) = self.targets.get(n).cloned() else { return Ask::None };
+        // an open menu first: a line runs, anywhere else closes it
+        if self.menu.take().is_some() || matches!(target, Target::Menu(_)) {
+            return match target {
+                Target::Menu(Some(cmd)) => self.run(cmd, focus),
+                _ => Ask::None,
+            };
+        }
         let sel = self.sel.clone();
         match target {
             Target::Close => return Ask::Close,
@@ -1229,6 +1415,7 @@ impl Media {
             Target::Mute => self.toggle_mute(),
             Target::Loop => self.toggle_loop(),
             Target::Copy => return self.copy(),
+            Target::CopyPath => return self.copy_path(),
             Target::Mention => return self.mention(),
             Target::Open => {
                 if let Some(path) = sel {
@@ -1243,12 +1430,124 @@ impl Media {
             Target::Remove => self.remove_selected(focus),
             Target::Prev => self.step(-1, focus),
             Target::Next => self.step(1, focus),
-            Target::Gallery => {}
+            Target::Gallery | Target::Menu(_) => {}
         }
         Ask::None
     }
 
+    /// Target `n` was right-clicked at `p`: the menu of the item it's about (a thumbnail is selected first), there.
+    /// Anywhere else (the header, the gallery's blank space, beside an open menu) only closes one.
+    pub fn context(&mut self, n: usize, p: Point) {
+        self.focus = true;
+        self.drag = None;
+        let had = self.menu.take().is_some();
+        let Some(target) = self.targets.get(n).cloned() else { return };
+        match target {
+            _ if had => return,
+            Target::Thumb(path) => self.select(&path),
+            Target::Viewer(_) | Target::Play | Target::Seek(_) | Target::Volume(_) | Target::Mute | Target::Loop => {}
+            Target::Copy | Target::CopyPath | Target::Mention | Target::Open | Target::Reveal | Target::Remove | Target::Prev | Target::Next => {}
+            Target::Close | Target::Collapse | Target::Scope(_) | Target::Gallery | Target::Menu(_) => return,
+        }
+        if self.sel.is_some() {
+            self.menu = Some(Menu { at: p, sel: None, card: Rect::ZERO });
+        }
+    }
+
+    /// The menu's open.
+    pub fn menu_open(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    /// `p` is on the open menu's card (between its lines, a click there does nothing).
+    pub fn on_menu(&self, p: Point) -> bool {
+        self.menu.as_ref().is_some_and(|m| m.card.contains(p))
+    }
+
+    pub fn close_menu(&mut self) {
+        self.menu = None;
+    }
+
+    /// Do what menu line `cmd` says to the selected item.
+    fn run(&mut self, cmd: Cmd, focus: Option<&Owner>) -> Ask {
+        let sel = self.sel.clone();
+        match cmd {
+            Cmd::Copy => return self.copy(),
+            Cmd::CopyPath => return self.copy_path(),
+            Cmd::Mention => return self.mention(),
+            Cmd::Open => return sel.map(Ask::Open).unwrap_or(Ask::None),
+            Cmd::Reveal => return sel.map(Ask::Reveal).unwrap_or(Ask::None),
+            Cmd::Play => {
+                if let View::Media { player, .. } = &mut self.view {
+                    toggle(player);
+                }
+            }
+            Cmd::Mute => self.toggle_mute(),
+            Cmd::Loop => self.toggle_loop(),
+            Cmd::Fit => {
+                self.zoom = 1.0;
+                self.pan = Point::default();
+            }
+            Cmd::Actual => {
+                let r = self.viewer;
+                let actual = self.actual_zoom();
+                self.zoom_at(r, r.center(), actual);
+            }
+            Cmd::Expand => self.toggle_expanded(),
+            Cmd::Remove => self.remove_selected(focus),
+        }
+        Ask::None
+    }
+
+    /// A key while the menu is open: the arrows move in it, Enter runs the line, Escape closes it. Any other key
+    /// closes it and goes on to do what it does (c still copies); None then.
+    fn menu_key(&mut self, k: &crossterm::event::KeyEvent, focus: Option<&Owner>) -> Option<Ask> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let cmds: Vec<Option<Cmd>> = self.selected_item().map(|it| self.menu_lines(&it)).unwrap_or_default().iter().map(|l| l.map(|l| l.cmd)).collect();
+        let m = self.menu.as_mut()?;
+        let live: Vec<usize> = cmds.iter().enumerate().filter_map(|(i, c)| c.map(|_| i)).collect();
+        let at = m.sel.and_then(|s| live.iter().position(|&i| i == s));
+        let by = |d: i32| match at {
+            Some(a) => live.get((a as i32 + d).rem_euclid(live.len().max(1) as i32) as usize).copied(),
+            None if d > 0 => live.first().copied(),
+            None => live.last().copied(),
+        };
+        if !k.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            self.menu = None;
+            return None;
+        }
+        match k.code {
+            KeyCode::Down | KeyCode::Tab => m.sel = by(1),
+            KeyCode::Up | KeyCode::BackTab => m.sel = by(-1),
+            KeyCode::Home | KeyCode::PageUp => m.sel = live.first().copied(),
+            KeyCode::End | KeyCode::PageDown => m.sel = live.last().copied(),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let cmd = m.sel.and_then(|i| cmds.get(i).copied().flatten());
+                self.menu = None;
+                return Some(cmd.map_or(Ask::None, |c| self.run(c, focus)));
+            }
+            KeyCode::Esc => self.menu = None,
+            _ => {
+                self.menu = None;
+                return None;
+            }
+        }
+        Some(Ask::None)
+    }
+
+    /// shift+F10: the selected item's menu, at the top of the picture, on its first line.
+    fn open_menu_by_key(&mut self) {
+        if self.sel.is_some() {
+            let at = Point::new(self.viewer.x + 16.0, self.viewer.y + 16.0);
+            self.menu = Some(Menu { at, sel: Some(0), card: Rect::ZERO });
+        }
+    }
+
     fn copy(&self) -> Ask {
+        self.sel.clone().map(Ask::Copy).unwrap_or(Ask::None)
+    }
+
+    fn copy_path(&self) -> Ask {
         match &self.sel {
             Some(p) => {
                 let text = p.to_string_lossy().to_string();
@@ -1257,6 +1556,16 @@ impl Media {
             }
             None => Ask::None,
         }
+    }
+
+    /// "Copy" puts `it` on the clipboard as the picture it is, not as the file: a still picture. An animation is told
+    /// by its frames once it's shown, by being a GIF until then (the copy itself looks at the file).
+    fn copies_as_picture(&self, it: &Item) -> bool {
+        matches!(it.kind, MediaKind::Image)
+            && match &self.view {
+                View::Image { path, frames, .. } if *path == it.path => frames.len() < 2,
+                _ => !it.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif")),
+            }
     }
 
     fn mention(&self) -> Ask {
@@ -1383,6 +1692,9 @@ impl Media {
 
     /// The wheel over target `n`: zooms a picture (around the pointer), scrolls the gallery, sets the volume.
     pub fn wheel(&mut self, n: usize, p: Point, dy: f32) {
+        if self.menu.is_some() {
+            return;
+        }
         match self.targets.get(n).cloned() {
             Some(Target::Viewer(r)) if matches!(self.view, View::Image { .. }) => {
                 let to = self.zoom * if dy > 0.0 { 1.18 } else { 1.0 / 1.18 };
@@ -1405,8 +1717,17 @@ impl Media {
 
     /// Keys while the panel has focus; None when the key isn't the panel's.
     pub fn key(&mut self, k: &crossterm::event::KeyEvent, focus: Option<&Owner>) -> Option<Ask> {
-        use crossterm::event::KeyCode;
-        if !k.modifiers.difference(crossterm::event::KeyModifiers::SHIFT).is_empty() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if self.menu.is_some()
+            && let Some(ask) = self.menu_key(k, focus)
+        {
+            return Some(ask);
+        }
+        // ctrl+c (cmd+c on a Mac) copies what's shown, as in any viewer: it doesn't reach the session behind
+        if matches!(k.code, KeyCode::Char('c' | 'C')) && (k.modifiers == KeyModifiers::CONTROL || k.modifiers == KeyModifiers::SUPER) {
+            return Some(self.copy());
+        }
+        if !k.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
             return None;
         }
         let zoomed = self.zoom > 1.01;
@@ -1472,7 +1793,12 @@ impl Media {
                 self.zoom_at(r, r.center(), actual);
                 Ask::None
             }
+            KeyCode::F(10) if k.modifiers == KeyModifiers::SHIFT => {
+                self.open_menu_by_key();
+                Ask::None
+            }
             KeyCode::Char('c') => self.copy(),
+            KeyCode::Char('C') => self.copy_path(),
             KeyCode::Char('o') => self.sel.clone().map(Ask::Open).unwrap_or(Ask::None),
             KeyCode::Char('@') | KeyCode::Char('i') => self.mention(),
             KeyCode::Delete | KeyCode::Backspace => {
@@ -1838,6 +2164,36 @@ mod tests {
     }
 
     #[test]
+    fn copy_takes_the_picture_or_the_file() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut m = Media::new(Arc::new(|| {}));
+        let c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(matches!(m.key(&c, None), Some(Ask::None)), "nothing selected, nothing to copy");
+        let path = PathBuf::from("still.png");
+        m.select(&path);
+        for k in [c, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER)] {
+            assert!(matches!(m.key(&k, None), Some(Ask::Copy(p)) if p == path), "{k:?} copies it");
+        }
+        assert!(m.key(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL), None).is_none(), "other ctrl keys still reach the session");
+        let still = Item { path: path.clone(), kind: MediaKind::Image, owner: None, source: Source::Opened, at: SystemTime::now(), caption: None, mtime: None };
+        assert!(m.copies_as_picture(&still));
+        assert!(!m.copies_as_picture(&Item { path: PathBuf::from("dance.GIF"), ..still.clone() }), "an animation goes as the file");
+        assert!(!m.copies_as_picture(&Item { path: PathBuf::from("clip.mp4"), kind: MediaKind::Video, ..still.clone() }));
+        assert!(!m.copies_as_picture(&Item { path: PathBuf::from("doc.pdf"), kind: MediaKind::Pdf, ..still }));
+    }
+
+    #[test]
+    fn copy_out_says_when_the_file_has_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone.png");
+        assert_eq!(copy_out(&gone), Err("gone.png isn't there any more".to_string()), "and leaves the clipboard be");
+        assert_eq!(copy_side(Path::new("photo.jpg")), SHARP_SIDE);
+        let svg = dir.path().join("icon.svg");
+        std::fs::write(&svg, r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="16"><rect width="24" height="16"/></svg>"#).unwrap();
+        assert_eq!(copy_side(&svg), 256, "a small SVG comes out big enough to use");
+    }
+
+    #[test]
     fn the_scope_follows_the_session_or_its_project() {
         let dir = tempfile::tempdir().unwrap();
         let mut m = Media::new(Arc::new(|| {}));
@@ -1852,6 +2208,141 @@ mod tests {
         m.whole_project = true;
         assert_eq!(names(&m, Some(&s1)), ["d.png", "b.png", "a.png"], "the project's");
         assert_eq!(names(&m, None).len(), 4, "no session in focus: everything");
+    }
+
+    fn cmds(m: &Media) -> Vec<Cmd> {
+        m.menu_lines(&m.selected_item().unwrap()).into_iter().flatten().map(|l| l.cmd).collect()
+    }
+
+    #[test]
+    fn right_clicking_media_opens_its_menu_there() {
+        use Cmd::*;
+        let dir = tempfile::tempdir().unwrap();
+        let (pic, clip, doc) = (dir.path().join("chart.png"), dir.path().join("demo.mp4"), dir.path().join("spec.pdf"));
+        for p in [&pic, &clip, &doc] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        let mut m = Media::new(Arc::new(|| {}));
+        for p in [&doc, &clip, &pic] {
+            m.add(p.clone(), Source::Sent, None, None);
+        }
+        m.select(&pic);
+        // a thumbnail: it's selected first, and the menu opens where the pointer is, with the keyboard
+        let thumb = m.target(Target::Thumb(clip.clone()));
+        let at = Point::new(120.0, 340.0);
+        m.context(thumb, at);
+        assert_eq!(m.sel.as_ref(), Some(&clip));
+        assert!(m.menu_open() && m.focus);
+        let open = m.menu.as_ref().unwrap();
+        assert_eq!((open.at.x, open.at.y, open.sel), (120.0, 340.0, None), "nothing highlighted until an arrow");
+        assert_eq!(cmds(&m), [Copy, CopyPath, Mention, Expand, Open, Reveal, Remove], "a video still loading has no Play yet");
+        // a right-click beside an open menu only closes it; the header and the gallery's blank space have none
+        let gallery = m.target(Target::Gallery);
+        m.context(gallery, at);
+        assert!(!m.menu_open());
+        for t in [Target::Gallery, Target::Close, Target::Scope(true)] {
+            let n = m.target(t);
+            m.context(n, at);
+            assert!(!m.menu_open());
+        }
+        // the viewer, the info and the buttons under it: the selected item's
+        for t in [Target::Viewer(Rect::new(0.0, 0.0, 300.0, 200.0)), Target::CopyPath, Target::Remove] {
+            let n = m.target(t);
+            m.context(n, at);
+            assert!(m.menu_open());
+            m.close_menu();
+        }
+        // a PDF opens in its own app: nothing to fill the window with
+        m.select(&doc);
+        assert_eq!(cmds(&m), [Copy, CopyPath, Mention, Open, Reveal, Remove]);
+        assert_eq!(m.menu_lines(&m.selected_item().unwrap())[0].unwrap().label, "Copy file");
+        m.select(&pic);
+        assert_eq!(m.menu_lines(&m.selected_item().unwrap())[0].unwrap().label, "Copy picture");
+    }
+
+    #[test]
+    fn a_menu_line_runs_once_and_a_click_beside_it_only_closes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.png"), dir.path().join("b.png"));
+        for p in [&a, &b] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        let mut m = Media::new(Arc::new(|| {}));
+        m.add(b.clone(), Source::Made, None, None);
+        m.add(a.clone(), Source::Made, None, None);
+        m.select(&a);
+        let viewer = m.target(Target::Viewer(Rect::new(0.0, 0.0, 300.0, 200.0)));
+        let line = |m: &mut Media, cmd: Option<Cmd>| {
+            m.context(viewer, Point::new(40.0, 40.0));
+            assert!(m.menu_open());
+            // as drawn: the scrim, then the menu's lines
+            let n = m.target(Target::Menu(cmd));
+            let ask = m.click(n, Point::new(50.0, 60.0), 1, None);
+            assert!(!m.menu_open(), "{cmd:?} closes the menu");
+            ask
+        };
+        assert!(matches!(line(&mut m, None), Ask::None));
+        assert_eq!((m.sel.as_ref(), m.expanded), (Some(&a), false), "beside it: nothing else happens");
+        assert!(matches!(line(&mut m, Some(Cmd::Open)), Ask::Open(p) if p == a));
+        assert!(matches!(line(&mut m, Some(Cmd::Reveal)), Ask::Reveal(p) if p == a));
+        assert!(matches!(line(&mut m, Some(Cmd::Copy)), Ask::Copy(p) if p == a));
+        assert!(matches!(line(&mut m, Some(Cmd::Mention)), Ask::Mention(p, None) if p == a));
+        line(&mut m, Some(Cmd::Expand));
+        assert!(m.expanded);
+        line(&mut m, Some(Cmd::Expand));
+        assert!(!m.expanded);
+        line(&mut m, Some(Cmd::Remove));
+        assert_eq!(m.items.len(), 1);
+        assert!(a.is_file(), "removed from the panel, not from the disk");
+        assert_eq!(m.sel.as_ref(), Some(&b));
+        // the wheel doesn't scroll what's under an open menu
+        m.context(viewer, Point::default());
+        m.gallery_scroll = 0.0;
+        let gallery = m.target(Target::Gallery);
+        m.wheel(gallery, Point::default(), -3.0);
+        assert_eq!(m.gallery_scroll, 0.0);
+    }
+
+    #[test]
+    fn shift_f10_opens_the_menu_and_the_keys_walk_it() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.png");
+        std::fs::write(&a, b"x").unwrap();
+        let mut m = Media::new(Arc::new(|| {}));
+        m.add(a.clone(), Source::Made, None, None);
+        m.select(&a);
+        m.key(&KeyEvent::new(KeyCode::F(10), KeyModifiers::SHIFT), None);
+        let lines = m.menu_lines(&m.selected_item().unwrap());
+        let on = |m: &Media| m.menu.as_ref().and_then(|o| o.sel).and_then(|i| lines[i]).map(|l| l.cmd);
+        assert_eq!(on(&m), Some(Cmd::Copy), "opened with keys: on its first line");
+        m.key(&key(KeyCode::Up), None);
+        assert_eq!(on(&m), Some(Cmd::Remove), "up from the top wraps to the bottom");
+        m.key(&key(KeyCode::Down), None);
+        m.key(&key(KeyCode::Down), None);
+        m.key(&key(KeyCode::Down), None);
+        assert_eq!(on(&m), Some(Cmd::Mention));
+        m.key(&key(KeyCode::Down), None);
+        assert_eq!(on(&m), Some(Cmd::Expand), "separators are stepped over");
+        assert!(matches!(m.key(&key(KeyCode::Enter), None), Some(Ask::None)));
+        assert!(m.expanded && !m.menu_open());
+        // Escape closes the menu, only
+        m.key(&KeyEvent::new(KeyCode::F(10), KeyModifiers::SHIFT), None);
+        m.key(&key(KeyCode::Esc), None);
+        assert!(!m.menu_open() && m.expanded);
+        // any other key closes it and does what it does
+        m.key(&KeyEvent::new(KeyCode::F(10), KeyModifiers::SHIFT), None);
+        assert!(matches!(m.key(&key(KeyCode::Char('c')), None), Some(Ask::Copy(p)) if p == a));
+        assert!(!m.menu_open());
+        // opened with the mouse, the first arrow lands on the first line
+        let viewer = m.target(Target::Viewer(Rect::new(0.0, 0.0, 300.0, 200.0)));
+        m.context(viewer, Point::default());
+        m.key(&key(KeyCode::Down), None);
+        assert_eq!(on(&m), Some(Cmd::Copy));
+        // the window losing focus takes it away
+        m.set_active(false);
+        assert!(!m.menu_open());
     }
 
     #[test]

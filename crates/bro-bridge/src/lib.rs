@@ -28,6 +28,7 @@
 //! | `hosts` | the other bridges on this machine (`/api/hosts`), so clients switch between bro windows without pairing again |
 //! | `orchestrator` | Hugh, the built-in agent over every session: a headless Claude Code process using the tools at `/mcp` |
 //! | `watchdog` | per-session watchdogs: milestones, a log, and a fresh reviewer agent per wake-up on the same tools |
+//! | `mod_jobs` | MCP work for a session's Claude Code mod (`/api/mod/*`): bro asks, the mod polls, does it, answers |
 //!
 //! # Data root
 //!
@@ -41,15 +42,19 @@
 //! phones paired with Just Terminal keep working; see [`StartOptions`].
 
 mod agents;
+mod apps;
 mod alerts;
 mod auth;
 mod commands;
+mod conversation;
 pub mod file_links;
 pub mod file_preview;
 pub mod insights;
 mod file_search;
 mod folders;
 mod hosts;
+mod media;
+mod mod_jobs;
 mod model;
 mod net;
 mod notifications;
@@ -61,11 +66,14 @@ mod project_store;
 mod projects;
 mod prompt;
 mod raw_file;
+mod thumbnail;
+mod waveform;
 mod rest;
 mod rest_sessions;
 mod server;
 mod session;
 pub mod slash_commands;
+mod focus_controls;
 mod state;
 mod vt_stream;
 pub mod watchdog;
@@ -180,11 +188,32 @@ pub struct CreateRequest {
     pub model: Option<String>,
 }
 
+/// A model or thinking choice from the phone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum FocusControlChange {
+    Model { value: String },
+    Thinking { value: String },
+}
+
 /// Commands the bridge asks bro to execute on its PTYs.
 pub enum BridgeCommand {
+    /// The desktop and phone share the model and thinking controls, including changes waiting for a turn to end.
+    FocusControls {
+        id: String,
+        change: Option<FocusControlChange>,
+        reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+    },
+    Seen { id: String, event_id: String },
     Input {
         id: String,
         data: Vec<u8>,
+    },
+    /// Composed input waits until bro has handed the bytes to the session before pacing the next write.
+    Write {
+        id: String,
+        data: Vec<u8>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     Resize {
         id: String,
@@ -249,8 +278,15 @@ pub enum OrchestratorCommand {
 impl std::fmt::Debug for BridgeCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::FocusControls { id, change, .. } => f.debug_struct("FocusControls").field("id", id).field("change", change).finish(),
+            Self::Seen { id, event_id } => f.debug_struct("Seen").field("id", id).field("event_id", event_id).finish(),
             Self::Input { id, data } => f
                 .debug_struct("Input")
+                .field("id", id)
+                .field("bytes", &data.len())
+                .finish(),
+            Self::Write { id, data, .. } => f
+                .debug_struct("Write")
                 .field("id", id)
                 .field("bytes", &data.len())
                 .finish(),
@@ -491,6 +527,11 @@ impl Bridge {
         self.state().set_agent_files(id, files);
     }
 
+    /// What session `id` was last given by [`Bridge::set_agent_files`] (None for an unknown id).
+    pub fn agent_files(&self, id: &str) -> Option<AgentFiles> {
+        self.state().agent_files(id)
+    }
+
     /// Replaces the launch profiles advertised to clients (default: shell,
     /// claude, codex, pi, omp) and broadcasts them.
     pub fn set_profiles(&self, profiles: Vec<TerminalProfile>) {
@@ -507,6 +548,14 @@ impl Bridge {
     /// to resolve spoken project names ("open a session in justgains").
     pub fn set_known_folders(&self, folders: Vec<PathBuf>) {
         *self.state().known_folders.write() = folders.iter().map(|dir| path_text(dir)).collect();
+    }
+
+    /// Whether clients may open pictures, videos, sounds and PDFs from anywhere on this computer (true), or
+    /// only media tied to the work: in a session's folders or a known one ([`Bridge::set_known_folders`]),
+    /// what the agents sent, made or looked at, what was attached or opened, what a conversation names
+    /// (false, the default). Code and text never leave the session's folders either way.
+    pub fn set_media_anywhere(&self, anywhere: bool) {
+        self.state().media_anywhere.store(anywhere, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Sends a message to the orchestrator as if typed in its panel (voice
@@ -629,6 +678,26 @@ impl Bridge {
         self.state().watchdogs.on_update(Arc::from(f));
     }
 
+    /// Ask the Claude Code mod running in session `session` (bro's id for the pane, the mod's
+    /// `BRO_SESSION_ID`) to do `job` with Claude Code's own MCP connections (`{"kind":"read",...}`,
+    /// `{"kind":"call",...}`; the mod reads the fields). `reply` runs once, on a bridge thread, with the mod's
+    /// result or why there is none: nobody took the job within 10 s (the session has no bro mod listening), the
+    /// mod didn't answer within 90 s, the mod's own error, or the bridge stopped. Don't block in it.
+    pub fn mod_ask(
+        &self,
+        session: &str,
+        job: serde_json::Value,
+        reply: Box<dyn FnOnce(Result<serde_json::Value, String>) + Send>,
+    ) {
+        mod_jobs::ask(self.state(), session, job, reply);
+    }
+
+    /// The session's mod is taking jobs: it asked for work within the last ~40 s (its long poll is open or
+    /// just was). Cheap: one lock and a map lookup.
+    pub fn mod_listening(&self, session: &str) -> bool {
+        self.state().mod_jobs.listening(session)
+    }
+
     /// Push a notification to connected clients (and history).
     pub fn notify(&self, n: Notification) {
         let state = self.state();
@@ -746,6 +815,7 @@ impl Bridge {
             state.watchdogs.stop(&dog.session_id);
         }
         state.shutdown.send_replace(true);
+        state.mod_jobs.fail_all();
         let Some(thread) = self.inner.thread.lock().take() else {
             return;
         };
@@ -795,6 +865,7 @@ async fn run_host(
         *state.last_error.lock() = Some(error.to_string());
     }
     state.running.store(false, Ordering::Relaxed);
+    state.mod_jobs.fail_all();
     hosts::unregister(&state);
     server::remove_server_info(&state);
 }

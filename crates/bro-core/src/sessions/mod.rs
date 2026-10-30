@@ -10,6 +10,7 @@ mod cache;
 pub mod conversation;
 pub mod describe;
 pub mod live;
+pub mod limits;
 mod messages;
 mod stage;
 
@@ -311,6 +312,11 @@ pub fn list(opts: &ListOpts) -> Vec<SessionInfo> {
 /// `profile_id` (None = the machine's own login) for `cwd`, touched at or after `since`.
 /// Used to move a live session to another login.
 pub fn latest_for(harness: Harness, profile_id: Option<&str>, cwd: &Path, since: SystemTime) -> Option<SessionInfo> {
+    latest_for_where(harness, profile_id, cwd, since, |_| true)
+}
+
+/// [`latest_for`], passing over the sessions `keep` turns down (another running agent's, one older than the pane).
+pub fn latest_for_where(harness: Harness, profile_id: Option<&str>, cwd: &Path, since: SystemTime, keep: impl Fn(&SessionInfo) -> bool) -> Option<SessionInfo> {
     let own = match harness {
         Harness::Claude => Some("claude:local"),
         Harness::Codex => Some("codex:local"),
@@ -320,7 +326,10 @@ pub fn latest_for(harness: Harness, profile_id: Option<&str>, cwd: &Path, since:
     // a second of slack: filesystems round mtimes
     let since = since.checked_sub(std::time::Duration::from_secs(1)).unwrap_or(since);
     list(&ListOpts { limit: 80, harnesses: vec![harness] }).into_iter().find(|s| {
-        s.modified >= since && s.profile_id.as_deref() == want && s.cwd.as_deref().is_some_and(|c| crate::util::same_path(c, cwd))
+        s.modified >= since
+            && s.profile_id.as_deref() == want
+            && s.cwd.as_deref().is_some_and(|c| crate::util::same_path(c, cwd))
+            && keep(s)
     })
 }
 

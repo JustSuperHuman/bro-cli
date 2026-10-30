@@ -9,6 +9,7 @@
 //! in pixels, the drawing and the mouse.
 
 pub(crate) mod actions;
+mod apps;
 mod backdrop;
 mod caption;
 mod chrome;
@@ -25,6 +26,7 @@ mod overlays;
 mod page;
 mod prefs;
 mod script;
+mod scroll;
 mod sidebar;
 pub(crate) mod surface;
 mod term;
@@ -44,7 +46,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
@@ -61,8 +63,11 @@ pub enum UserEvent {
     App(Event),
     /// something finished in the background (a decoded picture, a video frame): draw
     Wake,
-    /// the HTML preview's page said something
+    /// the HTML preview's page said something (never on Linux, which makes no web view)
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     Page(page::Msg),
+    /// an MCP app's page, the mod or the disk said something (see [`apps`])
+    Apps(apps::Msg),
 }
 
 /// How `bro gui` was asked for.
@@ -221,7 +226,8 @@ struct PaneState {
     /// file paths on screen were still being checked: look again once they are
     links_pending: bool,
     /// fractional scroll from a touchpad, in lines
-    scroll_acc: f32,
+    scroll_acc: scroll::Accumulator,
+    program_scroll_acc: scroll::Accumulator,
     /// its conversation's layout and motion in focus mode
     focus: focus::View,
     /// which face it showed last frame (true: its conversation), and when that last changed (it fades in)
@@ -318,6 +324,8 @@ pub struct Gui {
     old_window: Option<Arc<Window>>,
     /// the web view an HTML preview shows its page in
     pages: page::Pages,
+    /// MCP apps' pages in focus mode's conversations
+    apps: apps::Apps,
 }
 
 impl Gui {
@@ -389,6 +397,7 @@ impl Gui {
             window_see_through: false,
             swap_window: false,
             old_window: None,
+            apps: apps::Apps::new(proxy.clone()),
             pages: page::Pages::new(proxy),
         }
     }
@@ -532,6 +541,17 @@ impl Gui {
         match ask {
             media::Ask::None => {}
             media::Ask::Toast(t) => self.app.toast(crate::alerts::Kind::Info, t),
+            // a picture is decoded first: off the window's thread, then a word on how it went
+            media::Ask::Copy(path) => {
+                let tx = self.app.tx.clone();
+                std::thread::spawn(move || {
+                    let said = match media::copy_out(&path) {
+                        Ok(said) => Event::Toast(crate::alerts::Kind::Info, said),
+                        Err(why) => Event::Toast(crate::alerts::Kind::Error, why),
+                    };
+                    let _ = tx.send(said);
+                });
+            }
             media::Ask::Close => {
                 self.prefs.media_open = false;
                 self.media.focus = false;
@@ -613,6 +633,10 @@ impl Gui {
                 self.media_ask(ask);
                 return;
             }
+        }
+        if !(self.prefs.media_open && self.media.focus) && scroll::key(&mut self.app, &mut self.panes, k) {
+            self.dirty = true;
+            return;
         }
         self.app_event(Event::Input(crossterm::event::Event::Key(k)));
     }
@@ -776,7 +800,7 @@ impl Gui {
             // end of the tab row
             let window_rect = Rect::new(0.0, 0.0, w, h);
             let buttons = band.then(|| window.is_maximized());
-            let (grid, painted) = draw_all(&mut self.app, &mut ui, window_rect, buttons, &mut self.layout, &mut self.panes, &mut self.tui, &mut self.sidebar, &self.prefs, self.focused_window, self.drag.as_ref(), self.alt_alone, &mut self.media);
+            let (grid, painted) = draw_all(&mut self.app, &mut ui, window_rect, buttons, &mut self.layout, &mut self.panes, &mut self.tui, &mut self.sidebar, &self.prefs, self.focused_window, self.drag.as_ref(), self.alt_alone, &mut self.media, &mut self.apps);
             if self.app.overlay.is_open() || self.app.prefix_armed {
                 self.clipboard_menu = None;
             }
@@ -845,6 +869,7 @@ impl Gui {
         self.gfx = Some(gfx);
         self.update_hover();
         self.sync_page(&window);
+        self.sync_apps(&window);
         if !self.first_frame_done {
             self.first_frame_done = true;
             window.set_visible(true);
@@ -934,6 +959,9 @@ impl Gui {
         if let Some(at) = self.pages.next_wake() {
             d = d.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
         }
+        if let Some(at) = self.apps.next_wake() {
+            d = d.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
+        }
         // the sidebar's clock turns over on the minute
         let into = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|t| t.as_secs() % 60).unwrap_or(0);
         d = d.min(Duration::from_secs(60 - into) + Duration::from_millis(30));
@@ -990,6 +1018,31 @@ impl Gui {
                 }
                 self.app.toast(crate::alerts::Kind::Error, format!("HTML shows as source: the web view didn't start · {e}"));
                 self.dirty = true;
+            }
+        }
+    }
+
+    /// Lay MCP apps' pages over the cards this frame drew them in. They hide while something covers the
+    /// sessions: an overlay, a picture filling the window, a menu.
+    fn sync_apps(&mut self, window: &Window) {
+        let hidden = self.app.overlay.is_open() || self.media.expanded || self.clipboard_menu.is_some() || self.app.renaming.is_some();
+        self.apps.sync(window, self.scale, self.tokens.light, hidden, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// What an MCP app's page, the mod or the disk said.
+    fn apps_msg(&mut self, m: apps::Msg) {
+        let svc = self.app.svc.clone();
+        for e in self.apps.msg(m, &svc) {
+            match e {
+                apps::Effect::Redraw => self.dirty = true,
+                apps::Effect::Open(url) => self.app_event(Event::OpenLink(url)),
+                apps::Effect::Send(id, text) => {
+                    self.app.focus_send_text(id, &text);
+                    self.dirty = true;
+                }
+                // the page's wheel is in pixels, down positive; the conversation's in lines, up positive
+                apps::Effect::Wheel(id, dy) => focus::wheel(self, id, scroll::Wheel::Pixels(-dy)),
+                apps::Effect::Keys => self.apps.focus_window(),
             }
         }
     }
@@ -1088,6 +1141,7 @@ fn draw_all(
     drag: Option<&Drag>,
     alt_alone: bool,
     media: &mut media::Media,
+    apps: &mut apps::Apps,
 ) -> (Option<overlays::Drawn>, chrome::Painted) {
     let overlay_open = app.overlay.is_open();
     let launcher = matches!(app.overlay, super::Overlay::Launcher(_));
@@ -1164,11 +1218,15 @@ fn draw_all(
     if app.tabs.is_empty() {
         welcome::draw(app, ui, Rect::new(body.x - layout::MARGIN, body.y - layout::MARGIN, body.w + 2.0 * layout::MARGIN, body.h + 2.0 * layout::MARGIN));
     } else {
-        painted = chrome::draw_panes(app, ui, layout, panes, tui, focused_window, media);
+        painted = chrome::draw_panes(app, ui, layout, panes, tui, focused_window, media, apps);
         chrome::draw_edges(app, ui, layout);
     }
     // pictures and videos beside the sessions (video and animations only run while you can see them)
     media.set_active((media_r.w > 0.0 || media.expanded) && focused_window);
+    // a dialog over the panel takes its menu away
+    if app.overlay.is_open() {
+        media.close_menu();
+    }
     if media_r.w > 0.0 && !media.expanded {
         let focus = app.focused().and_then(|id| media::owner(app, id));
         let key = app.keymap.primary(crate::keymap::Act::Media);
@@ -1253,6 +1311,7 @@ impl ApplicationHandler<UserEvent> for Gui {
             UserEvent::App(ev) => self.app_event(ev),
             UserEvent::Wake => self.dirty = true,
             UserEvent::Page(m) => self.page_msg(m),
+            UserEvent::Apps(m) => self.apps_msg(m),
         }
     }
 
@@ -1392,6 +1451,7 @@ impl ApplicationHandler<UserEvent> for Gui {
                 // a click on the window, not in an HTML preview's page: the keys are bro's again
                 if state == ElementState::Pressed {
                     self.pages.focus_window();
+                    self.apps.focus_window();
                 }
                 let Some(p) = self.pointer else { return };
                 match state {
@@ -1410,15 +1470,12 @@ impl ApplicationHandler<UserEvent> for Gui {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let Some(p) = self.pointer else { return };
-                let (dx, dy) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (x, y),
-                    MouseScrollDelta::PixelDelta(d) => (d.x as f32 / (18.0 * self.scale), d.y as f32 / (18.0 * self.scale)),
-                };
+                let delta = scroll::Wheel::from_event(delta, self.scale);
                 if self.app.touched() {
                     self.redraw();
                     return;
                 }
-                mouse::wheel(self, p, dx, dy);
+                mouse::wheel(self, p, delta);
                 self.redraw();
             }
             WindowEvent::DroppedFile(path) => {
@@ -1438,6 +1495,7 @@ impl ApplicationHandler<UserEvent> for Gui {
 
     fn exiting(&mut self, _el: &ActiveEventLoop) {
         self.pages.reset();
+        self.apps.reset();
         self.prefs.note_size(self.window.as_deref());
         // sessions and services stop after the loop (the bridge may take a few seconds): out of sight, not frozen
         if let Some(w) = &self.window {
