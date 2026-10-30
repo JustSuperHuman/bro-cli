@@ -63,6 +63,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, focused: bool) -
 
 /// Target `n` of view pane `id` was clicked.
 pub fn click(app: &mut App, id: PaneId, n: usize, p: Point, m: KeyModifiers, count: u32) {
+    app.settle_task_context(id);
     with_view(app, id, true, |any, cx| {
         if let Some(v) = any.downcast_mut::<CoordinationView>() {
             crate::views::coordination::gui::click(v, n, p, m, count, cx)

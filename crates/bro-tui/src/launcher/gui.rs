@@ -308,7 +308,7 @@ pub(crate) fn draw(l: &mut Launcher, ui: &mut Ui, area: Rect, cx: &Cx) -> bool {
             widgets::tooltip(ui, button, "Coordinate across projects · alt+g");
         }
     }
-    address_bar(ui, &l.dir, l.orchestrator && l.no_project && l.tab == SessionTab::New, bar, false);
+    address_bar(ui, &l.dir, l.orchestrator && l.no_project && l.tab == SessionTab::New, bar, false, Action::Overlay(PROJECT), Some("alt+p"));
     if widgets::icon_button(ui, close, I_CLOSE, t.muted, Action::Overlay(CLOSE)) {
         widgets::tooltip(ui, close, "Close · esc");
     }
@@ -327,8 +327,8 @@ pub(crate) fn draw(l: &mut Launcher, ui: &mut Ui, area: Rect, cx: &Cx) -> bool {
             let k = picker::opening(ui);
             let screen = ui.screen;
             widgets::scrim(ui, screen, k, Action::None);
-            address_bar(ui, &l.dir, l.orchestrator && l.no_project, bar, true);
-            picker::draw(p, ui, bar, area, &l.dir, PICKER, cx, k);
+            address_bar(ui, &l.dir, l.orchestrator && l.no_project, bar, true, Action::None, Some("alt+p"));
+            picker::draw(p, ui, bar, area, &l.dir, &|n| Action::Overlay(PICKER + n), cx.focused, k);
             ui.set_layer(prev);
         }
         None => picker::closed(ui),
@@ -359,7 +359,7 @@ fn head(inner: Rect) -> (Rect, Rect, Rect) {
 /// The project as an address bar, as File Explorer's: a folder, the path as breadcrumbs, and on the right the key
 /// that changes it and a chevron. Clicking anywhere on it opens the project picker; `open` draws it lit (an
 /// outline, the chevron up) while the picker hangs from it. A coordinator can choose any project folder.
-fn address_bar(ui: &mut Ui, dir: &Path, no_project: bool, r: Rect, open: bool) {
+pub(crate) fn address_bar(ui: &mut Ui, dir: &Path, no_project: bool, r: Rect, open: bool, action: Action, key: Option<&str>) {
     let t = ui.t;
     if r.w < 80.0 {
         return;
@@ -377,13 +377,16 @@ fn address_bar(ui: &mut Ui, dir: &Path, no_project: bool, r: Rect, open: bool) {
     }
     ui.icon(icon, if open { I_FOLDER_OPEN } else { I_FOLDER }, size::TITLE + 1.0, t.muted.mix(t.text, if open { 0.75 } else { 0.35 + 0.4 * hot }));
     // the right end: the key that changes it, then the chevron
+    let live = open || !matches!(action, Action::None);
     let chev = Rect::new(r.right() - 34.0, r.y, 24.0, r.h);
-    ui.icon(chev, if open { I_CHEVRON_UP } else { I_CHEVRON_DOWN }, size::TITLE, t.muted.mix(t.text, 0.6 * hot));
-    let kw = kbd_w(ui, "alt+p");
-    let mut end = chev.x - 8.0;
-    if r.w >= 280.0 {
+    if live {
+        ui.icon(chev, if open { I_CHEVRON_UP } else { I_CHEVRON_DOWN }, size::TITLE, t.muted.mix(t.text, 0.6 * hot));
+    }
+    let kw = key.map_or(0.0, |k| kbd_w(ui, k));
+    let mut end = if live { chev.x - 8.0 } else { r.right() - 12.0 };
+    if let Some(key) = key.filter(|_| live && r.w >= 280.0) {
         let kx = chev.x - 6.0 - kw;
-        widgets::kbd(ui, Point::new(kx, r.y + (r.h - 18.0) / 2.0), "alt+p");
+        widgets::kbd(ui, Point::new(kx, r.y + (r.h - 18.0) / 2.0), key);
         end = kx - 14.0;
     }
     let x = r.x + TEXT_X;
@@ -393,8 +396,8 @@ fn address_bar(ui: &mut Ui, dir: &Path, no_project: bool, r: Rect, open: bool) {
     } else {
         crumbs(ui, text, &path_parts(dir), t.text);
     }
-    if !open {
-        ui.hit(r, Action::Overlay(PROJECT));
+    if !open && live {
+        ui.hit(r, action);
     }
 }
 

@@ -4,6 +4,7 @@
 #[cfg(feature = "gui")]
 pub(crate) mod gui;
 
+use crate::folder::{self, FolderPicker};
 use crate::pane::{Cx, Pane, Waker};
 use crate::ui::{self, fg, muted};
 use bro_core::coordination::{
@@ -92,7 +93,7 @@ impl Worker {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, PartialEq)]
 pub(crate) struct Counts {
     pub queued: usize,
     pub running: usize,
@@ -131,9 +132,12 @@ pub(super) struct Form {
     task: Option<TaskView>,
     pub goal: String,
     pub acceptance: String,
+    /// The task's project folder. A new task starts from where New Session would open; an existing task keeps its own.
     pub project: String,
     pub focus: usize,
     pub quality: QualityMode,
+    /// The shared project chooser, open over the form.
+    pub(super) picker: Option<FolderPicker>,
 }
 
 pub struct CoordinationView {
@@ -151,9 +155,17 @@ pub struct CoordinationView {
     pub(super) detail_scroll: usize,
     pub(super) list_top: usize,
     owners: std::collections::HashMap<String, String>,
+    owners_version: u64,
     row_indices: Vec<usize>,
     hits: Vec<(Rect, usize)>,
     demo: bool,
+    /// The count line, rebuilt when the snapshot changes rather than every frame.
+    pub(super) summary: String,
+    pub(super) tally: Counts,
+    /// The detail lines for the current selection; cleared by anything that changes them.
+    detail_lines: Option<Vec<(String, bool)>>,
+    /// Wrapped height of each detail line at one width and scale (the GUI fills it).
+    pub(super) detail_heights: Option<((u32, u32), Vec<f32>)>,
 }
 
 impl CoordinationView {
@@ -162,7 +174,8 @@ impl CoordinationView {
             return false;
         }
         match action {
-            1 | 2 | 3 | 7 | 8 | 10 | 11 => true,
+            1 | 2 | 3 | 7 | 8 | 10 | 11 | 21..=23 => true,
+            15 => self.form.as_ref().is_some_and(|f| f.task.is_none()),
             4 => self.current().is_some(),
             5 => self.current().is_some_and(|t| {
                 !matches!(
@@ -221,10 +234,44 @@ impl CoordinationView {
             detail_scroll: 0,
             list_top: 0,
             owners: Default::default(),
+            owners_version: 0,
             row_indices: vec![],
             hits: vec![],
             demo: false,
+            summary: String::new(),
+            tally: Counts::default(),
+            detail_lines: None,
+            detail_heights: None,
         }
+    }
+
+    /// Drop the cached detail lines (and their measured heights) after anything that changes them.
+    pub(super) fn invalidate(&mut self) {
+        self.detail_lines = None;
+        self.detail_heights = None;
+    }
+
+    /// The detail lines for the current selection, built once per change instead of once per frame.
+    pub(super) fn detail_cached(&mut self) -> &[(String, bool)] {
+        if self.detail_lines.is_none() {
+            self.detail_lines = Some(self.detail());
+        }
+        self.detail_lines.as_deref().unwrap_or_default()
+    }
+
+    /// Where a new task starts: the project New Session opens in, as the app last reported it.
+    fn default_project(cx: &Cx) -> String {
+        cx.svc
+            .task_projects()
+            .default
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The open form's project folder (tests and callers that only read it).
+    #[cfg(test)]
+    pub(crate) fn form_project(&self) -> Option<String> {
+        self.form.as_ref().map(|f| f.project.clone())
     }
 
     pub(crate) fn counts(&self) -> Counts {
@@ -240,12 +287,18 @@ impl CoordinationView {
             if self.demo {
                 self.snapshot = Some(demo_snapshot());
                 self.rebuild_rows();
+                self.tally = self.counts();
+                self.summary = self.tally.full();
             } else {
                 self.worker = Some(Worker::start(cx.svc.clone(), cx.waker()));
             }
         }
         self.take_updates();
-        self.owners = cx.svc.coordination_workers();
+        if let Some((version, owners)) = cx.svc.coordination_workers(self.owners_version) {
+            self.owners = owners;
+            self.owners_version = version;
+            self.invalidate();
+        }
     }
 
     fn take_updates(&mut self) {
@@ -260,6 +313,9 @@ impl CoordinationView {
                     let selected = self.current().map(|t| t.id.clone());
                     self.snapshot = Some(snapshot);
                     self.rebuild_rows();
+                    self.tally = self.counts();
+                self.summary = self.tally.full();
+                    self.invalidate();
                     self.error = None;
                     if let Some(id) = selected {
                         let position = self.tasks().position(|t| t.id == id).unwrap_or(0);
@@ -276,6 +332,7 @@ impl CoordinationView {
                 }
                 Update::Snapshot(Err(e)) => self.error = Some(e),
                 Update::Context(Ok(packet)) => {
+                    self.invalidate();
                     if self.current().is_some_and(|t| {
                         t.id == packet.task.id && t.revision == packet.task.revision
                     }) {
@@ -284,6 +341,7 @@ impl CoordinationView {
                     self.busy = false;
                 }
                 Update::Context(Err(e)) => {
+                    self.invalidate();
                     self.error = Some(e);
                     self.busy = false;
                 }
@@ -296,7 +354,10 @@ impl CoordinationView {
                     self.error = Some(e);
                     self.busy = false;
                 }
-                Update::Refreshed => self.busy = false,
+                Update::Refreshed => {
+                    self.busy = false;
+                    self.invalidate();
+                }
             }
         }
     }
@@ -333,6 +394,7 @@ impl CoordinationView {
             .get(*self.row_indices.get(self.selected)?)
     }
     pub(super) fn select(&mut self, index: usize) {
+        self.invalidate();
         self.selected = index.min(self.row_indices.len().saturating_sub(1));
         self.detail_scroll = 0;
         self.context = None;
@@ -362,9 +424,10 @@ impl CoordinationView {
                     task: None,
                     goal: String::new(),
                     acceptance: String::new(),
-                    project: String::new(),
+                    project: Self::default_project(cx),
                     focus: 0,
                     quality: QualityMode::Standard,
+                    picker: None,
                 });
                 self.error = None;
             }
@@ -382,6 +445,7 @@ impl CoordinationView {
                         project: task.project.clone(),
                         quality: task.contract.quality,
                         focus: 0,
+                        picker: None,
                         task: Some(task),
                     });
                 }
@@ -452,8 +516,17 @@ impl CoordinationView {
                     cx.act(crate::pane::Action::Preview(std::path::PathBuf::from(path)));
                 }
             }
+            15 => self.open_picker(cx),
+            n @ 21..=23 => {
+                if let Some(f) = &mut self.form {
+                    f.quality = [QualityMode::Quick, QualityMode::Standard, QualityMode::Critical][n - 21];
+                }
+            }
             n if n >= 100 => self.select(n - 100),
             _ => {}
+        }
+        if matches!(action, 7 | 8) {
+            self.invalidate();
         }
     }
 
@@ -482,21 +555,69 @@ impl CoordinationView {
         }
     }
 
+    /// Open the shared project chooser, listing the same folders New Session does. A new task only.
+    fn open_picker(&mut self, cx: &Cx) {
+        let Some(f) = self.form.as_mut().filter(|f| f.task.is_none()) else {
+            return;
+        };
+        let known = cx.svc.task_projects();
+        let current = std::path::PathBuf::from(f.project.trim());
+        let dirs = folder::dedup(
+            Some(current)
+                .filter(|p| !p.as_os_str().is_empty())
+                .into_iter()
+                .chain(known.choices),
+        );
+        f.picker = Some(FolderPicker::new(dirs));
+        self.error = None;
+    }
+
+    /// What the chooser decided: use an existing folder, or say why the folder can't be used.
+    pub(super) fn picker_outcome(&mut self, outcome: folder::Outcome) {
+        let Some(f) = self.form.as_mut() else {
+            return;
+        };
+        match outcome {
+            folder::Outcome::None => {}
+            folder::Outcome::Close => f.picker = None,
+            folder::Outcome::Open(dir) => match project_folder_error(&dir) {
+                None => {
+                    f.project = dir.display().to_string();
+                    f.picker = None;
+                    self.error = None;
+                }
+                Some(error) => {
+                    if let Some(p) = &mut f.picker {
+                        p.error = Some(error);
+                    }
+                }
+            },
+            folder::Outcome::Create(..) => {
+                if let Some(p) = &mut f.picker {
+                    p.error = Some(
+                        "That folder doesn't exist yet. Choose an existing project folder, or create it from New Session first."
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+
     fn form_commands(&self) -> Result<Vec<Command>, String> {
         let f = self
             .form
             .as_ref()
             .ok_or_else(|| "No task form is open".to_owned())?;
-        if f.goal.trim().is_empty()
-            || f.acceptance.trim().is_empty()
-            || (f.task.is_none() && f.project.trim().is_empty())
-        {
-            return Err(
-                "Enter an outcome, an observable review check, and a project folder.".into(),
-            );
+        if f.goal.trim().is_empty() || f.acceptance.trim().is_empty() {
+            return Err("Enter an outcome and an observable review check.".into());
         }
-        if f.task.is_none() && !std::path::Path::new(f.project.trim()).is_absolute() {
-            return Err("Use an absolute project folder path.".into());
+        if f.task.is_none() {
+            if f.project.trim().is_empty() {
+                return Err("Choose the project this task belongs to.".into());
+            }
+            if let Some(error) = project_folder_error(std::path::Path::new(f.project.trim())) {
+                return Err(error);
+            }
         }
         let mut contract = f
             .task
@@ -785,6 +906,18 @@ impl CoordinationView {
     }
 }
 
+/// Why `dir` can't be a task's project, or None. One metadata call, run when a folder is chosen or saved.
+fn project_folder_error(dir: &std::path::Path) -> Option<String> {
+    if !dir.is_absolute() {
+        return Some("Use an absolute project folder path.".into());
+    }
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => None,
+        Ok(_) => Some("That path is a file. Choose a project folder.".into()),
+        Err(_) => Some("That folder doesn't exist. Choose an existing project folder.".into()),
+    }
+}
+
 pub(crate) fn state_label(state: TaskState) -> &'static str {
     match state {
         TaskState::Pending => "Queued",
@@ -876,8 +1009,9 @@ impl Pane for CoordinationView {
                 height: 1,
                 ..area
             },
-            vec![Span::styled(self.counts().full(), muted(t))],
+            vec![Span::styled(self.summary.as_str(), muted(t))],
         );
+        let form_project = self.form.as_ref().map(|f| f.project.clone()).unwrap_or_default();
         if let Some(form) = &self.form {
             let title = if form.task.is_some() {
                 "Steer this outcome"
@@ -898,9 +1032,16 @@ impl Pane for CoordinationView {
                     form.acceptance
                 )),
                 Line::from(format!(
-                    "{}Project: {}",
+                    "{}Project: {}{}",
                     if form.focus == 2 { "> " } else { "  " },
-                    form.project
+                    if form.project.is_empty() { "none chosen" } else { &form.project },
+                    if form.task.is_some() {
+                        " (stays with the task)"
+                    } else if form.focus == 2 {
+                        " · Enter chooses"
+                    } else {
+                        ""
+                    }
                 )),
                 Line::from(format!(
                     "Quality: {} · Ctrl+q cycles quality",
@@ -928,6 +1069,10 @@ impl Pane for CoordinationView {
                     },
                     vec![Span::styled(e.clone(), fg(t.danger))],
                 );
+            }
+            if let Some(p) = self.form.as_mut().and_then(|f| f.picker.as_mut()) {
+                let current = std::path::PathBuf::from(form_project.as_str());
+                folder::draw_for_session(f, area, p, &current, t);
             }
             return;
         }
@@ -1061,12 +1206,22 @@ impl Pane for CoordinationView {
             if self.busy {
                 return true;
             }
+            if let Some(p) = self.form.as_mut().and_then(|f| f.picker.as_mut()) {
+                let outcome = p.key(k);
+                self.picker_outcome(outcome);
+                return true;
+            }
             match k.code {
                 KeyCode::Esc => self.form = None,
                 KeyCode::PageDown => self.detail_scroll = (self.detail_scroll + 6).min(24),
                 KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(6),
                 KeyCode::Enter if k.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.submit_form(cx)
+                }
+                KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Down
+                    if self.form.as_ref().is_some_and(|f| f.focus == 2 && f.task.is_none()) =>
+                {
+                    self.activate(15, cx)
                 }
                 KeyCode::Tab | KeyCode::Enter => {
                     if let Some(f) = &mut self.form {
@@ -1084,11 +1239,11 @@ impl Pane for CoordinationView {
                 KeyCode::Backspace => {
                     if let Some(f) = &mut self.form {
                         match f.focus {
-                            0 => &mut f.goal,
-                            1 => &mut f.acceptance,
-                            _ => &mut f.project,
+                            0 => Some(&mut f.goal),
+                            1 => Some(&mut f.acceptance),
+                            _ => None,
                         }
-                        .pop();
+                        .map(String::pop);
                     }
                 }
                 KeyCode::Char(c)
@@ -1098,11 +1253,11 @@ impl Pane for CoordinationView {
                 {
                     if let Some(f) = &mut self.form {
                         let field = match f.focus {
-                            0 => &mut f.goal,
-                            1 => &mut f.acceptance,
-                            _ => &mut f.project,
+                            0 => Some(&mut f.goal),
+                            1 => Some(&mut f.acceptance),
+                            _ => None,
                         };
-                        if field.len() < 8192 {
+                        if let Some(field) = field.filter(|field| field.len() < 8192) {
                             field.push(c);
                         }
                     }
@@ -1148,15 +1303,20 @@ impl Pane for CoordinationView {
         }
     }
     fn paste(&mut self, text: &str, _cx: &mut Cx) {
-        if let Some(f) = &mut self.form {
-            let field = match f.focus {
-                0 => &mut f.goal,
-                1 => &mut f.acceptance,
-                _ => &mut f.project,
-            };
-            let remaining = 8192usize.saturating_sub(field.len());
-            field.extend(text.chars().take(remaining));
+        let Some(f) = &mut self.form else {
+            return;
+        };
+        if let Some(p) = &mut f.picker {
+            p.paste(text);
+            return;
         }
+        let field = match f.focus {
+            0 => &mut f.goal,
+            1 => &mut f.acceptance,
+            _ => return,
+        };
+        let remaining = 8192usize.saturating_sub(field.len());
+        field.extend(text.chars().take(remaining));
     }
 }
 
@@ -1330,6 +1490,7 @@ mod tests {
             project: dir.path().display().to_string(),
             focus: 0,
             quality: QualityMode::Standard,
+            picker: None,
         });
         services
             .coordination_execute("saved-from-ui", view.form_commands().unwrap().remove(0))
@@ -1402,6 +1563,7 @@ mod tests {
                 project: dir.path().display().to_string(),
                 focus: 0,
                 quality,
+                picker: None,
             });
             let commands = view.form_commands().unwrap();
             assert_eq!(commands.len(), 1, "task and intent must commit atomically");
@@ -1431,6 +1593,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn project_choice_is_saved_and_bad_folders_are_explained() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, "x").unwrap();
+        let mut view = CoordinationView::new();
+        view.form = Some(Form {
+            task: None,
+            goal: "Goal".into(),
+            acceptance: "Check".into(),
+            project: String::new(),
+            focus: 2,
+            quality: QualityMode::Standard,
+            picker: Some(FolderPicker::new(vec![])),
+        });
+        assert!(view.form_commands().unwrap_err().contains("Choose the project"));
+        view.picker_outcome(folder::Outcome::Open(dir.path().join("missing")));
+        let f = view.form.as_ref().unwrap();
+        assert!(f.project.is_empty() && f.picker.as_ref().unwrap().error.is_some(), "a missing folder stays unchosen with a reason");
+        view.picker_outcome(folder::Outcome::Open(file));
+        assert!(view.form.as_ref().unwrap().project.is_empty());
+        view.picker_outcome(folder::Outcome::Open(dir.path().to_path_buf()));
+        let f = view.form.as_ref().unwrap();
+        assert!(f.picker.is_none());
+        let Command::CreateWork { tasks, .. } = view.form_commands().unwrap().remove(0) else { panic!("create") };
+        assert_eq!(tasks[0].project, dir.path().display().to_string());
     }
 
     #[test]

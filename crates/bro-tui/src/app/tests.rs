@@ -5992,3 +5992,30 @@ fn terminal_quips_use_bracketed_paste_for_codex_and_keep_multiline_input_intact(
     assert!(wire.ends_with("\x1b[201~"), "the existing delayed Enter follows the entire paste");
     assert!(!wire.contains("Keep this"), "the native draft is never sent a second time");
 }
+
+#[test]
+fn new_task_starts_in_the_project_new_session_would_open_in() {
+    let mut a = app(true);
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    a.open_projects.roots.clear();
+    a.open_projects.add(first.clone());
+    a.open_projects.add(second.clone());
+    a.pick_project(first.clone());
+    a.open(Box::new(crate::views::coordination::CoordinationView::new()), Place::Tab);
+    let form_project = |a: &App| a.panes.values().find_map(|p| p.as_any().downcast_ref::<crate::views::coordination::CoordinationView>()).and_then(|v| v.form_project());
+    // no tick between the project switch and the key: New still reads the latest interaction
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
+    assert_eq!(form_project(&a), Some(first.display().to_string()));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    a.pick_project(second.clone());
+    key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
+    assert_eq!(form_project(&a), Some(second.display().to_string()), "reopening New follows the project just picked");
+    assert_eq!(a.preferred_dir(), Some(second.clone()), "the same value New Session opens with");
+    // an open form keeps its project while it is edited, even if the current project moves
+    a.pick_project(first);
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert_eq!(form_project(&a), Some(second.display().to_string()));
+}

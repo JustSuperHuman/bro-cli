@@ -7,7 +7,6 @@
 use super::{FolderPicker, Kind, Outcome, looks_like_path, same_path};
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::{Style, Ui, radius, size, weight, widgets};
-use crate::app::gui::surface::Cx;
 use crate::launcher::gui as page;
 use bro_gfx::text::Align;
 use bro_gfx::{Point, Rect};
@@ -107,10 +106,10 @@ pub(crate) fn opening(ui: &mut Ui) -> f32 {
 }
 
 /// Draw the picker hanging from `anchor` (the launcher's address bar), as wide as it and inside `page`, sliding
-/// down into place as it opens (`k`, 0..1); the launcher has dimmed the window behind it. Targets are `base + n`;
+/// down into place as it opens (`k`, 0..1); the launcher has dimmed the window behind it. Targets come from `act` (CLOSE, FIELD, ROW + n);
 /// `current` is the launcher's folder (checked in the list).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn draw(p: &mut FolderPicker, ui: &mut Ui, anchor: Rect, page: Rect, current: &Path, base: usize, cx: &Cx, k: f32) {
+pub(crate) fn draw(p: &mut FolderPicker, ui: &mut Ui, anchor: Rect, page: Rect, current: &Path, act: &dyn Fn(usize) -> Action, focused: bool, k: f32) {
     let t = ui.t;
     // as tall as its rows need (room for six at least), growing downwards from just under the bar
     let w = anchor.w.max(320f32.min(page.w - 24.0));
@@ -128,7 +127,7 @@ pub(crate) fn draw(p: &mut FolderPicker, ui: &mut Ui, anchor: Rect, page: Rect, 
     let title = Rect::new(inner.x, inner.y, inner.w, 28.0);
     ui.label_in(Rect { w: inner.w - 40.0, ..title }, "Choose project", Style::new(size::HEADING, weight::SEMIBOLD, t.text), Align::Left);
     let close = Rect::new(title.right() - 32.0 + 6.0, title.y - 2.0, 32.0, 32.0);
-    if widgets::icon_button(ui, close, page::I_CLOSE, t.muted, Action::Overlay(base + CLOSE)) {
+    if widgets::icon_button(ui, close, page::I_CLOSE, t.muted, act(CLOSE)) {
         widgets::tooltip(ui, close, "Close · esc");
     }
 
@@ -136,7 +135,7 @@ pub(crate) fn draw(p: &mut FolderPicker, ui: &mut Ui, anchor: Rect, page: Rect, 
     let field = Rect::new(inner.x, title.bottom() + 12.0, inner.w, page::FIELD_H);
     let path_like = looks_like_path(p.filter.trim());
     let icon = if path_like { page::I_FOLDER } else { page::I_SEARCH };
-    page::input(ui, field, icon, &p.filter, "find a project, or type a path (ctrl+v to paste)", true, cx.focused, path_like, Action::Overlay(base + FIELD));
+    page::input(ui, field, icon, &p.filter, "find a project, or type a path (ctrl+v to paste)", true, focused, path_like, act(FIELD));
     let mut y = field.bottom() + 10.0;
     // what went wrong, or that the folder is being made
     if let Some(error) = &p.error {
@@ -158,7 +157,7 @@ pub(crate) fn draw(p: &mut FolderPicker, ui: &mut Ui, anchor: Rect, page: Rect, 
     if view.is_empty() {
         ui.label(Point::new(inner.x + 12.0, list.y + 10.0), "nothing here — type a path (~/, C:\\, /…)", Style::new(size::BODY, weight::REGULAR, t.muted));
     } else {
-        draw_rows(p, ui, list, view, current, base);
+        draw_rows(p, ui, list, view, current, act);
     }
 
     // the keys
@@ -173,7 +172,7 @@ pub(crate) fn draw(p: &mut FolderPicker, ui: &mut Ui, anchor: Rect, page: Rect, 
 
 /// The rows: what the folder is (typed, to create, a file, a completion, one of yours), its name, a check on the
 /// launcher's folder, and where it is.
-fn draw_rows(p: &FolderPicker, ui: &mut Ui, list: Rect, view: &[(PathBuf, Kind)], current: &Path, base: usize) {
+fn draw_rows(p: &FolderPicker, ui: &mut Ui, list: Rect, view: &[(PathBuf, Kind)], current: &Path, act: &dyn Fn(usize) -> Action) {
     let t = ui.t;
     let content = view.len() as f32 * ROW_H;
     let off = page::scroll(ui, "picker", Some((p.sel as f32 * ROW_H, ROW_H)), content, list.h);
@@ -189,7 +188,7 @@ fn draw_rows(p: &FolderPicker, ui: &mut Ui, list: Rect, view: &[(PathBuf, Kind)]
         let rr = Rect::new(list.x, list.y + k as f32 * ROW_H - off, list.w, ROW_H);
         let on = k == p.sel;
         page::row_fill(ui, rr, ("picker", k), on, true);
-        ui.hit(rr, Action::Overlay(base + ROW + k));
+        ui.hit(rr, act(ROW + k));
         let mid = rr.y + rr.h / 2.0;
         // what kind of row it is, as the terminal UI tags it
         let (file, exists) = if *kind == Kind::Typed { typed_state(ui, path) } else { (false, true) };

@@ -224,6 +224,8 @@ pub struct App {
     pub(crate) cur_project: Option<std::path::PathBuf>,
     /// the pane focus was on when `cur_project` last followed it
     last_focus: Option<PaneId>,
+    /// when the Tasks view's project choices were last rebuilt
+    task_choices_at: Option<Instant>,
     /// sessions shown together (shift+click in the sidebar); 2+ = stacked view
     pub(crate) stack: Vec<PaneId>,
     pub(crate) stack_focus: Option<PaneId>,
@@ -374,6 +376,7 @@ impl App {
             open_projects: if opts.load_recents { crate::projects::OpenProjects::load() } else { Default::default() },
             cur_project: None,
             last_focus: None,
+            task_choices_at: None,
             stack: vec![],
             stack_focus: None,
             tile_all: false,
@@ -808,7 +811,17 @@ impl App {
     }
 
     /// Run `f` on pane `id` with a Cx, then apply the actions it asked for.
+    /// Input for the Tasks view reads where New Session would open: settle focus and publish it now, not at the
+    /// next tick, so a project switch is seen by the very next New.
+    pub(crate) fn settle_task_context(&mut self, id: PaneId) {
+        if self.panes.get(&id).is_some_and(|p| p.view() == Some("tasks")) {
+            self.follow_focus();
+            self.publish_task_context();
+        }
+    }
+
     pub(crate) fn with_pane<R>(&mut self, id: PaneId, f: impl FnOnce(&mut dyn Pane, &mut Cx) -> R) -> Option<R> {
+        self.settle_task_context(id);
         let mut actions = vec![];
         let focused = self.focused() == Some(id);
         let r = {
@@ -948,7 +961,7 @@ impl App {
         self.update_insights();
         self.publish_teams();
         self.publish_projects();
-        self.svc.set_coordination_workers(self.panes.values().filter_map(|p| p.as_term_ref().map(|t| (t.meta.sid.clone(), t.display_name()))).collect());
+        self.publish_task_context();
         self.pump_voice();
         self.toasts.expire();
     }

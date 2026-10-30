@@ -178,9 +178,17 @@ struct Inner {
     teams: Mutex<Vec<LiveTeam>>,
     /// The sidebar's projects (kept current by the UI loop while the Skills view is open), whose own skills it lists.
     sidebar_projects: Mutex<Vec<KnownProject>>,
-    task_workers: RwLock<HashMap<String, String>>,
+    task_workers: RwLock<(u64, HashMap<String, String>)>,
+    task_projects: RwLock<TaskProjects>,
     /// The session server this window drives (see [`host`]).
     host: RwLock<Option<bro_host::Client>>,
+}
+
+/// Where a new task starts and the folders its project chooser lists, as the app last reported them.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub(crate) struct TaskProjects {
+    pub default: Option<PathBuf>,
+    pub choices: Vec<PathBuf>,
 }
 
 /// A project as the sidebar lists it.
@@ -362,7 +370,8 @@ impl Services {
                 login_watch: Mutex::new(Default::default()),
                 teams: Mutex::new(vec![]),
                 sidebar_projects: Mutex::new(vec![]),
-                task_workers: RwLock::new(HashMap::new()),
+                task_workers: RwLock::new((0, HashMap::new())),
+                task_projects: RwLock::new(TaskProjects::default()),
                 host: RwLock::new(None),
             }),
         }
@@ -839,11 +848,30 @@ impl Services {
 
     pub(crate) fn set_coordination_workers(&self, names: HashMap<String, String>) {
         let mut cached = self.inner.task_workers.write();
-        if *cached != names { *cached = names; }
+        if cached.1 != names {
+            *cached = (cached.0 + 1, names);
+        }
     }
 
-    pub(crate) fn coordination_workers(&self) -> HashMap<String, String> {
-        self.inner.task_workers.read().clone()
+    /// Worker names with a version that moves only when they change, so a view re-reads them only then.
+    pub(crate) fn coordination_workers(&self, seen: u64) -> Option<(u64, HashMap<String, String>)> {
+        let cached = self.inner.task_workers.read();
+        (cached.0 != seen).then(|| (cached.0, cached.1.clone()))
+    }
+
+    /// The UI loop reports where a new task starts (the project New Session opens in) and the folders the
+    /// project chooser lists. True when either changed.
+    pub(crate) fn set_task_projects(&self, projects: TaskProjects) -> bool {
+        let mut cached = self.inner.task_projects.write();
+        let changed = *cached != projects;
+        if changed {
+            *cached = projects;
+        }
+        changed
+    }
+
+    pub(crate) fn task_projects(&self) -> TaskProjects {
+        self.inner.task_projects.read().clone()
     }
 
     pub(crate) fn focused_session(&self) -> Option<String> {

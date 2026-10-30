@@ -509,6 +509,29 @@ impl App {
         }
     }
 
+    /// What the Tasks view reads from the app while it's open: the sessions' names and where a new task starts
+    /// (the project New Session opens in, so reopening New follows the latest interaction). The folders the
+    /// chooser lists come from past sessions, so they're rebuilt at most every few seconds.
+    pub(crate) fn publish_task_context(&mut self) {
+        if !self.panes.values().any(|p| p.view() == Some("tasks")) {
+            return;
+        }
+        self.svc.set_coordination_workers(self.panes.values().filter_map(|p| p.as_term_ref().map(|t| (t.meta.sid.clone(), t.display_name()))).collect());
+        let default = self.preferred_dir();
+        let stale = self.task_choices_at.is_none_or(|at| at.elapsed() > Duration::from_secs(5));
+        let known = self.svc.task_projects();
+        if !stale && known.default == default {
+            return;
+        }
+        let choices = if stale {
+            self.task_choices_at = Some(Instant::now());
+            self.launcher_projects()
+        } else {
+            known.choices
+        };
+        self.svc.set_task_projects(crate::services::TaskProjects { default, choices });
+    }
+
     /// Demo: open the demo projects (a real run opens its start folder via [`App::start_in`]).
     pub(crate) fn seed_projects(&mut self) {
         if self.svc.is_demo() {
