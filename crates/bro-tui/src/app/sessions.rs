@@ -1044,13 +1044,10 @@ impl App {
             let mut term = if self.opts.fixed_demo {
                 Term::fixed(meta, &crate::services::demo::transcript(d.harness), self.svc.clone())
             } else {
-                // the session that waits on you shows its prompt at the bottom, as Claude Code draws it
-                let c = if d.activity == Some(crate::pane::Activity::Blocked) {
-                    crate::services::demo::shell_showing(d.harness, &label, cwd, &crate::services::demo::blocked_screen(), Some("blocked"))
-                } else {
-                    crate::services::demo::shell_command(d.harness, &label, cwd)
-                };
-                Term::new(meta, Spawn { program: c.program, args: c.args, ..Spawn::default() }, self.svc.clone())
+                // drawn at its tile's width, never typed into a shell: nothing wraps wrongly or prints a prompt of its
+                // own. The session that waits on you shows its prompt at the bottom, as Claude Code draws it
+                let (harness, blocked) = (d.harness, d.activity == Some(crate::pane::Activity::Blocked));
+                Term::scene(meta, move |cols, rows| crate::services::demo::scene(harness, blocked, cols, rows), self.svc.clone())
             };
             term.demo_activity = d.activity;
             // the first Claude session leads an agent team (not in the fixed demo the tests draw)

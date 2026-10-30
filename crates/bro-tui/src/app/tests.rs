@@ -6019,3 +6019,26 @@ fn new_task_starts_in_the_project_new_session_would_open_in() {
     key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
     assert_eq!(form_project(&a), Some(second.display().to_string()));
 }
+
+/// A demo pane is drawn again at every size its tile takes, so it never reads as a screen cut by a resize.
+#[test]
+fn scene_pane_redraws_at_each_width() {
+    use crate::panes::term::Term;
+    let a = app(true);
+    let mut meta = a.panes[&a.focused().unwrap()].as_term_ref().unwrap().meta.clone();
+    meta.sid = "scene".into();
+    let mut t = Term::scene(meta, |cols, rows| crate::services::demo::scene(Some(bro_core::Harness::Claude), false, cols, rows), a.svc.clone());
+    assert!(!t.started());
+    for cols in [90u16, 34, 120] {
+        t.resize(30, cols);
+        assert!(t.started());
+        let rows = t.screen_rows();
+        let box_rows: Vec<&String> = rows.iter().filter(|r| r.starts_with(['╭', '│', '╰'])).collect();
+        assert_eq!(box_rows.len(), 4, "{cols} cols: the welcome box stays whole\n{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("Pondering")), "{cols} cols");
+        assert!(!rows.iter().any(|r| r.contains("PS ")), "{cols} cols: no prompt of a shell's own");
+        let cols_of = |r: &&String| unicode_width::UnicodeWidthStr::width(r.trim_end());
+        assert!(rows.iter().all(|r| unicode_width::UnicodeWidthStr::width(r.trim_end()) <= cols as usize));
+        assert!(box_rows.iter().all(|r| cols_of(r) == cols_of(&box_rows[0])));
+    }
+}

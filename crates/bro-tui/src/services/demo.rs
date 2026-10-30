@@ -440,53 +440,272 @@ pub fn team() -> bro_core::agent_teams::Team {
     }
 }
 
-/// An agent-looking transcript (ANSI) for a demo pane.
+/// An agent-looking transcript (ANSI) for a demo pane, at the width the old fixed screens used.
 pub fn transcript(h: Option<Harness>) -> String {
-    let (o, d, g, r, b, x) = ("\x1b[38;2;217;119;87m", "\x1b[2m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[0m");
-    match h {
-        Some(Harness::Claude) => format!(
-            "{o}╭───────────────────────────────────────────────╮{x}\r\n{o}│{x} {o}✻{x} Welcome to {b}Claude Code{x}!                     {o}│{x}\r\n{o}│{x}   {d}cwd: ~/code/bro-cli-v2{x}                      {o}│{x}\r\n{o}╰───────────────────────────────────────────────╯{x}\r\n\r\n\
-             {d}>{x} wire the launcher to the proxy routes\r\n\r\n\
-             {o}●{x} I'll look at how launches register routes first.\r\n\r\n\
-             {o}●{x} {b}Read{x}(crates/bro-tui/src/services/launch.rs)\r\n  {d}⎿  Read 148 lines{x}\r\n\r\n\
-             {o}●{x} {b}Update{x}(crates/bro-tui/src/services/launch.rs)\r\n  {d}⎿  Updated with {g}12 additions{x}{d} and {r}3 removals{x}\r\n\r\n\
-             {o}✻ Pondering…{x} {d}(38s · ↓ 2.1k tokens · esc to interrupt){x}\r\n"
-        ),
-        Some(Harness::Codex) => format!(
-            "{b}>_ OpenAI Codex{x} {d}(v0.60){x}\r\n{d}model: gpt-5.2-codex   directory: ~/code/bro-cli-v2{x}\r\n\r\n\
-             {b}user{x}\r\nadd golden fixtures for responses streaming\r\n\r\n\
-             {g}•{x} Explored\r\n  {d}└ Read fixtures/responses_stream.jsonl{x}\r\n\r\n\
-             {g}•{x} Edited crates/bro-proxy/tests/golden.rs {g}(+86 -0){x}\r\n\r\n\
-             {b}codex{x}\r\nAdded 6 fixtures covering text, tool calls and reasoning deltas.\r\nAll 41 proxy tests pass.\r\n\r\n{d}› {x}\r\n"
-        ),
-        Some(Harness::Pi) | Some(Harness::Omp) => format!(
-            "{b}pi{x} {d}· openrouter · kimi-k2{x}\r\n\r\n{d}>{x} summarise the bridge protocol\r\n\r\n\
-             The bridge speaks {b}/ws{x} with hello → snapshot → output events,\r\nplus /api/sessions for create / kill / rename.\r\n\r\n{d}ready ·{x} \r\n"
-        ),
-        None => format!("{g}PS{x} ~/code/bro-cli-v2> git status --short\r\n M crates/bro-tui/src/app/mod.rs\r\n?? crates/bro-tui/snapshots/\r\n{g}PS{x} ~/code/bro-cli-v2> "),
-    }
+    transcript_for(h, 200)
 }
 
-/// The screen of the demo session that waits on you (the fourth): Claude asking to push, the box at the bottom
-/// as Claude Code draws it, so focus mode has a real choice to show.
-pub fn blocked_screen() -> String {
+/// The width of `s` on screen, its escape sequences not counted.
+fn visible_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    let mut w = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            for e in chars.by_ref() {
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            w += c.width().unwrap_or(0);
+        }
+    }
+    w
+}
+
+/// Where a line's continuation starts: under its text, past a bullet, a `⎿` or a `1.`.
+fn hang_of(line: &str) -> usize {
+    let mut plain = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            for e in chars.by_ref() {
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    let lead = plain.chars().take_while(|c| *c == ' ').count();
+    let rest: String = plain.chars().skip(lead).collect();
+    let token = rest.split(' ').next().unwrap_or("");
+    let numbered = token.len() > 1 && token.ends_with('.') && token[..token.len() - 1].chars().all(|c| c.is_ascii_digit());
+    if !(matches!(token, "●" | "•" | ">" | "✻" | "⎿" | "└" | "›" | "❯") || numbered) {
+        return lead;
+    }
+    let after = rest.chars().skip(token.chars().count()).take_while(|c| *c == ' ').count();
+    lead + token.chars().count() + after
+}
+
+/// `line` (ANSI) broken at spaces to fit `width`, a continuation hanging under the text and carrying the colours
+/// the break interrupted. Unlike the terminal's own wrap it never splits a word that fits on a line.
+fn wrap_ansi(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    if visible_width(line) <= width {
+        return vec![line.to_string()];
+    }
+    let hang = hang_of(line).min(width / 2);
+    // (is an escape, text): escapes, words and runs of spaces
+    let mut tokens: Vec<(bool, String)> = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            let mut e = String::from("\x1b");
+            for n in chars.by_ref() {
+                e.push(n);
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            tokens.push((true, e));
+        } else {
+            let space = c == ' ';
+            match tokens.last_mut() {
+                Some((false, t)) if t.starts_with(' ') == space => t.push(c),
+                _ => tokens.push((false, c.to_string())),
+            }
+        }
+    }
+    let (mut out, mut cur, mut cur_w, mut active) = (Vec::new(), String::new(), 0usize, Vec::<String>::new());
+    let flush = |cur: &mut String, cur_w: &mut usize, active: &[String], out: &mut Vec<String>| {
+        if !active.is_empty() {
+            cur.push_str("\x1b[0m");
+        }
+        out.push(std::mem::take(cur));
+        *cur = format!("{}{}", " ".repeat(hang), active.concat());
+        *cur_w = hang;
+    };
+    for (esc, t) in tokens {
+        if esc {
+            if t == "\x1b[0m" || t == "\x1b[m" {
+                active.clear();
+            } else {
+                active.push(t.clone());
+            }
+            cur.push_str(&t);
+            continue;
+        }
+        let w = visible_width(&t);
+        if t.starts_with(' ') {
+            if cur_w > hang && cur_w + w <= width {
+                cur.push_str(&t);
+                cur_w += w;
+            } else if cur_w > hang {
+                flush(&mut cur, &mut cur_w, &active, &mut out);
+            } else if out.is_empty() {
+                cur.push_str(&t);
+                cur_w += w;
+            }
+            continue;
+        }
+        if cur_w + w > width && cur_w > hang {
+            flush(&mut cur, &mut cur_w, &active, &mut out);
+        }
+        // a word longer than a whole line breaks after a slash where it can, and is cut where it can't
+        let pieces: Vec<&str> = if w + hang > width { t.split_inclusive('/').collect() } else { vec![t.as_str()] };
+        for piece in pieces {
+            let pw = visible_width(piece);
+            if cur_w + pw > width && cur_w > hang && pw + hang <= width {
+                flush(&mut cur, &mut cur_w, &active, &mut out);
+            }
+            for c in piece.chars() {
+                let cw = visible_width(&c.to_string());
+                if cur_w + cw > width {
+                    flush(&mut cur, &mut cur_w, &active, &mut out);
+                }
+                cur.push(c);
+                cur_w += cw;
+            }
+        }
+    }
+    if cur_w > hang || out.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// `lines` inside a rounded box of at most `width` columns, edges in `edge`, each line wrapped to fit.
+fn boxed(edge: &str, lines: &[&str], width: usize) -> Vec<String> {
+    let x = "\x1b[0m";
+    let width = width.max(12);
+    let inner = width - 4;
+    let mut out = vec![format!("{edge}╭{}╮{x}", "─".repeat(width - 2))];
+    for l in lines {
+        for row in wrap_ansi(l, inner) {
+            let pad = inner.saturating_sub(visible_width(&row));
+            out.push(format!("{edge}│{x} {row}{x}{} {edge}│{x}", " ".repeat(pad)));
+        }
+    }
+    out.push(format!("{edge}╰{}╯{x}", "─".repeat(width - 2)));
+    out
+}
+
+/// A demo pane's screen in parts that stay whole: a box or a tool step is shown entire or not at all.
+type Blocks = Vec<Vec<String>>;
+
+/// `blocks` as one screen `cols` wide and at most `rows` tall: lines break at words, and when it's taller than the
+/// tile the oldest blocks go (the way a conversation scrolls), never half of one.
+fn stack(blocks: Blocks, cols: usize, rows: usize) -> String {
+    let mut blocks: Vec<Vec<String>> = blocks.into_iter().map(|b| b.iter().flat_map(|l| wrap_ansi(l, cols)).collect()).collect();
+    let height = |b: &[Vec<String>]| b.iter().map(Vec::len).sum::<usize>();
+    while blocks.len() > 1 && height(&blocks) > rows {
+        blocks.remove(0);
+    }
+    blocks.concat().join("\r\n")
+}
+
+/// A block of lines, the last of them followed by a blank one.
+fn block(lines: &[&str]) -> Vec<String> {
+    lines.iter().map(|l| l.to_string()).chain([String::new()]).collect()
+}
+
+/// The transcript for a demo pane `cols` wide: its lines break at words and its box is drawn to fit, so it reads
+/// the same at any tile size.
+pub fn transcript_for(h: Option<Harness>, cols: u16) -> String {
+    let screen = transcript_fit(h, cols, u16::MAX);
+    // Claude's ended on a fresh line, below its status
+    if matches!(h, Some(Harness::Claude)) { screen + "\r\n" } else { screen }
+}
+
+/// [`transcript_for`] in a tile `rows` tall.
+pub fn transcript_fit(h: Option<Harness>, cols: u16, rows: u16) -> String {
+    let (cols, rows) = (cols as usize, rows as usize);
+    let (o, d, g, r, b, x) = ("\x1b[38;2;217;119;87m", "\x1b[2m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[0m");
+    let blocks: Blocks = match h {
+        Some(Harness::Claude) => {
+            let mut welcome = boxed(o, &[&format!("{o}✻{x} Welcome to {b}Claude Code{x}!"), &format!("  {d}cwd: ~/code/bro-cli-v2{x}")], cols.min(49));
+            welcome.push(String::new());
+            vec![
+                welcome,
+                block(&[&format!("{d}>{x} wire the launcher to the proxy routes")]),
+                block(&[&format!("{o}●{x} I'll look at how launches register routes first.")]),
+                block(&[&format!("{o}●{x} {b}Read{x}(crates/bro-tui/src/services/launch.rs)"), &format!("  {d}⎿  Read 148 lines{x}")]),
+                block(&[&format!("{o}●{x} {b}Update{x}(crates/bro-tui/src/services/launch.rs)"), &format!("  {d}⎿  Updated with {g}12 additions{x}{d} and {r}3 removals{x}")]),
+                vec![format!("{o}✻ Pondering…{x} {d}(38s · ↓ 2.1k tokens · esc to interrupt){x}")],
+            ]
+        }
+        Some(Harness::Codex) => vec![
+            block(&[&format!("{b}>_ OpenAI Codex{x} {d}(v0.60){x}"), &format!("{d}model: gpt-5.2-codex   directory: ~/code/bro-cli-v2{x}")]),
+            block(&[&format!("{b}user{x}"), "add golden fixtures for responses streaming"]),
+            block(&[&format!("{g}•{x} Explored"), &format!("  {d}└ Read fixtures/responses_stream.jsonl{x}")]),
+            block(&[&format!("{g}•{x} Edited crates/bro-proxy/tests/golden.rs {g}(+86 -0){x}")]),
+            block(&[&format!("{b}codex{x}"), "Added 6 fixtures covering text, tool calls and reasoning deltas.", "All 41 proxy tests pass."]),
+            vec![format!("{d}› {x}")],
+        ],
+        Some(Harness::Pi) | Some(Harness::Omp) => vec![
+            block(&[&format!("{b}pi{x} {d}· openrouter · kimi-k2{x}")]),
+            block(&[&format!("{d}>{x} summarise the bridge protocol")]),
+            block(&[&format!("The bridge speaks {b}/ws{x} with hello → snapshot → output events,"), "plus /api/sessions for create / kill / rename."]),
+            vec![format!("{d}ready ·{x} ")],
+        ],
+        None => {
+            // a tile too narrow for the whole path shows the folder alone
+            let dir = if cols >= 44 { "~/code/bro-cli-v2" } else { "bro-cli-v2" };
+            vec![vec![
+                format!("{g}PS{x} {dir}> git status --short"),
+                " M crates/bro-tui/src/app/mod.rs".to_string(),
+                "?? crates/bro-tui/snapshots/".to_string(),
+                format!("{g}PS{x} {dir}> "),
+            ]]
+        }
+    };
+    stack(blocks, cols, rows)
+}
+
+/// The screen of the demo session that waits on you (the fourth) for a pane `cols` wide: Claude asking to push,
+/// the box at the bottom as Claude Code draws it, so focus mode has a real choice to show.
+pub fn blocked_screen_for(cols: u16) -> String {
+    blocked_screen_fit(cols, u16::MAX)
+}
+
+/// [`blocked_screen_for`] in a tile `rows` tall.
+pub fn blocked_screen_fit(cols: u16, rows: u16) -> String {
+    let (cols, rows) = (cols as usize, rows as usize);
     let (o, d, b, x) = ("\x1b[38;2;217;119;87m", "\x1b[2m", "\x1b[1m", "\x1b[0m");
-    format!(
-        "{d}>{x} fix the flaky workout timer test\r\n\r\n\
-         {o}●{x} {b}Update{x}(src/features/timer/useTimer.ts)\r\n  {d}⎿  Updated with 9 additions and 4 removals{x}\r\n\r\n\
-         {o}●{x} All 14 timer tests pass now, ten runs in a row. Pushing the branch so CI can confirm.\r\n\r\n\
-         ╭──────────────────────────────────────────────────────────────╮\r\n\
-         │ Bash command                                                 │\r\n\
-         │                                                              │\r\n\
-         │   git push -u origin fix/timer-clock                         │\r\n\
-         │   Push the fix for CI                                        │\r\n\
-         │                                                              │\r\n\
-         │ Do you want to proceed?                                      │\r\n\
-         │ {o}❯{x} 1. Yes                                                     │\r\n\
-         │   2. Yes, and don't ask again for git push commands          │\r\n\
-         │   3. No, and tell Claude what to do differently {d}(esc){x}         │\r\n\
-         ╰──────────────────────────────────────────────────────────────╯\r\n"
-    )
+    let ask = [
+        "Bash command".to_string(),
+        String::new(),
+        "  git push -u origin fix/timer-clock".to_string(),
+        "  Push the fix for CI".to_string(),
+        String::new(),
+        "Do you want to proceed?".to_string(),
+        format!("{o}❯{x} 1. Yes"),
+        "  2. Yes, and don't ask again for git push commands".to_string(),
+        format!("  3. No, and tell Claude what to do differently {d}(esc){x}"),
+    ];
+    let ask: Vec<&str> = ask.iter().map(String::as_str).collect();
+    // in a tile too short for the box, the choices stand on their own: a box cut by the tile would leave its edges
+    let mut prompt_box = boxed("", &ask, cols.min(64));
+    if prompt_box.len() > rows {
+        prompt_box = ask.iter().flat_map(|l| wrap_ansi(l, cols)).collect();
+    }
+    let blocks: Blocks = vec![
+        block(&[&format!("{d}>{x} fix the flaky workout timer test")]),
+        block(&[&format!("{o}●{x} {b}Update{x}(src/features/timer/useTimer.ts)"), &format!("  {d}⎿  Updated with 9 additions and 4 removals{x}")]),
+        block(&[&format!("{o}●{x} All 14 timer tests pass now, ten runs in a row. Pushing the branch so CI can confirm.")]),
+        prompt_box,
+    ];
+    stack(blocks, cols, rows)
+}
+
+/// What a demo session draws in a tile `cols` by `rows`: its transcript, or the prompt it waits on. The ones
+/// with nothing to type into hide the cursor, so none floats under the text.
+pub fn scene(harness: Option<Harness>, blocked: bool, cols: u16, rows: u16) -> String {
+    let screen = if blocked { blocked_screen_fit(cols, rows) } else { transcript_fit(harness, cols, rows) };
+    if blocked || harness == Some(Harness::Claude) { format!("{screen}\x1b[?25l") } else { screen }
 }
 
 /// A screenshot for the demo's conversations, drawn here rather than read from anywhere: a test run with one red
@@ -762,4 +981,68 @@ pub fn demo_models(providers: &[Provider]) -> std::collections::BTreeMap<String,
     let claude = m.get("anthropic").cloned().unwrap_or_default();
     m.insert("claude".into(), claude);
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    fn rows(screen: &str, cols: u16) -> Vec<String> {
+        let mut p = vt100::Parser::new(60, cols, 0);
+        p.process(screen.as_bytes());
+        p.screen().rows(0, cols).map(|r| r.trim_end().to_string()).filter(|r| !r.is_empty()).collect()
+    }
+
+    /// The demo screens at every width a tile takes: each line fits whole, and a box is a whole box.
+    #[test]
+    fn screens_fit_every_width_with_whole_boxes() {
+        let harnesses = [Some(Harness::Claude), Some(Harness::Codex), Some(Harness::Pi), None];
+        for cols in [20u16, 24, 30, 40, 52, 66, 80, 140] {
+            let mut screens: Vec<String> = harnesses.iter().map(|h| transcript_for(*h, cols)).collect();
+            screens.push(blocked_screen_for(cols));
+            for screen in screens {
+                let r = rows(&screen, cols);
+                // nothing is left for the terminal to wrap
+                assert!(screen.split("\r\n").all(|l| visible_width(l) <= cols as usize), "{cols} cols: a line the terminal would wrap\n{}", r.join("\n"));
+                let boxed: Vec<&String> = r.iter().filter(|l| l.starts_with(['╭', '│', '╰'])).collect();
+                let tops = r.iter().filter(|l| l.starts_with('╭')).count();
+                assert_eq!(tops, r.iter().filter(|l| l.starts_with('╰')).count(), "{cols} cols: half a box");
+                if let Some(first) = boxed.first() {
+                    assert!(boxed.iter().all(|l| l.width() == first.width()), "{cols} cols: ragged box\n{}", r.join("\n"));
+                    assert!(boxed.iter().all(|l| l.ends_with(['╮', '│', '╯'])), "{cols} cols: box without its right edge");
+                }
+            }
+        }
+    }
+
+    fn rows_of(screen: &str, cols: u16, rows: u16) -> Vec<String> {
+        let mut p = vt100::Parser::new(rows, cols, 0);
+        p.process(screen.as_bytes());
+        p.screen().rows(0, cols).map(|r| r.trim_end().to_string()).filter(|r| !r.is_empty()).collect()
+    }
+
+    /// In a tile shorter than the screen the oldest parts go whole: never half a box, nothing scrolled off.
+    #[test]
+    fn short_tiles_drop_whole_blocks() {
+        for cols in [24u16, 40, 80] {
+            for rows in [18u16, 24, 30] {
+                for (h, blocked) in [(Some(Harness::Claude), false), (Some(Harness::Codex), false), (Some(Harness::Pi), false), (Some(Harness::Claude), true)] {
+                    let screen = scene(h, blocked, cols, rows);
+                    let r = rows_of(&screen, cols, rows);
+                    let tops = r.iter().filter(|l| l.starts_with('╭')).count();
+                    assert_eq!(tops, r.iter().filter(|l| l.starts_with('╰')).count(), "{cols}x{rows}: half a box\n{}", r.join("\n"));
+                    let lines = screen.split("\r\n").count();
+                    assert!(lines <= rows as usize, "{cols}x{rows}: {lines} lines\n{}", r.join("\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wide_claude_screen_keeps_the_original_box() {
+        let wide = transcript_for(Some(Harness::Claude), 120);
+        assert!(wide.starts_with("\x1b[38;2;217;119;87m╭───────────────────────────────────────────────╮"));
+        assert!(wide.contains("Welcome to \x1b[1mClaude Code\x1b[0m!"));
+    }
 }

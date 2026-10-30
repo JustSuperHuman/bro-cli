@@ -16,6 +16,8 @@ const ICON_PNG: &[u8] = include_bytes!("../../../assets/bro.png");
 /// swap chain, with the system's backdrop wherever that is see-through (elsewhere the window asks for alpha).
 pub fn create(el: &ActiveEventLoop, prefs: &Prefs, see_through: bool) -> Result<Window, String> {
     let (w, h) = prefs.window.unwrap_or((1440.0, 900.0));
+    // `BRO_GUI_SIZE=900x700`: a window of this logical size (for scripted captures at a layout)
+    let (w, h) = std::env::var("BRO_GUI_SIZE").ok().and_then(|v| v.split_once('x').and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?)))).unwrap_or((w, h));
     let mut attrs = Window::default_attributes()
         .with_title("bro")
         .with_inner_size(winit::dpi::LogicalSize::new(w.max(640.0), h.max(420.0)))

@@ -332,6 +332,14 @@ pub struct Term {
     remote_size: Arc<Mutex<Option<(u16, u16)>>>,
     /// The size this pane last asked the server for.
     wanted: (u16, u16),
+    /// A drawn pane (the demo): the screen as a function of its size, redrawn whenever its tile changes.
+    scene: Option<Scene>,
+}
+
+/// What a [`Term::scene`] draws, and the size it last drew at.
+struct Scene {
+    draw: Arc<dyn Fn(u16, u16) -> String + Send + Sync>,
+    drawn: Option<(u16, u16)>,
 }
 
 /// Where a queued resume stands (the app keeps it current).
@@ -415,6 +423,38 @@ impl Term {
             saved_agent: None,
             remote_size: Arc::new(Mutex::new(None)),
             wanted: (0, 0),
+            scene: None,
+        }
+    }
+
+    /// A pane that runs nothing and draws `draw(cols, rows)` (ANSI) as its screen, again at every size its tile takes,
+    /// so it reads cleanly at any layout (no shell, no prompts, nothing to reflow).
+    pub fn scene(meta: Meta, draw: impl Fn(u16, u16) -> String + Send + Sync + 'static, svc: Services) -> Term {
+        let mut t = Term::new(meta, Spawn::default(), svc);
+        t.spawn = None;
+        t.scene = Some(Scene { draw: Arc::new(draw), drawn: None });
+        t
+    }
+
+    /// Draw the scene at this size, replacing what the screen showed.
+    fn draw_scene(&mut self, rows: u16, cols: u16) {
+        let Some(scene) = self.scene.as_mut() else { return };
+        if scene.drawn == Some((rows, cols)) {
+            return;
+        }
+        scene.drawn = Some((rows, cols));
+        let bytes = format!("\x1b[2J\x1b[3J\x1b[H{}", (scene.draw)(cols, rows));
+        self.size = (rows, cols);
+        self.base = (rows, cols);
+        {
+            let mut parser = self.parser.lock();
+            parser.screen_mut().set_size(rows, cols);
+            parser.process(bytes.as_bytes());
+            *self.program_state.lock() = ProgramState::of(&parser);
+        }
+        if let Some(m) = &self.mirror {
+            m.resize(rows, cols);
+            m.feed(bytes.as_bytes());
         }
     }
 
@@ -475,6 +515,10 @@ impl Term {
             return;
         }
         let (rows, cols) = (rows.max(2), cols.max(10));
+        if self.scene.is_some() {
+            self.draw_scene(rows, cols);
+            return;
+        }
         if let Some(info) = self.attach.take() {
             if let Err(e) = self.start_attached(info, rows, cols, waker) {
                 self.error = Some(e);
@@ -1180,7 +1224,7 @@ impl Term {
         if self.test_sized {
             return true;
         }
-        self.live.is_some()
+        self.live.is_some() || self.scene.is_some()
     }
 
     /// Tests: more output for a fixed pane.
@@ -1217,6 +1261,10 @@ impl Term {
     /// Resize the pty and the parser (no-op if unchanged).
     fn set_pty_size(&mut self, rows: u16, cols: u16) {
         if rows == 0 || cols == 0 {
+            return;
+        }
+        if self.scene.is_some() {
+            self.draw_scene(rows, cols);
             return;
         }
         // the server sizes a session it holds, to whoever controls it: ask for this size, and let the screens
@@ -1288,7 +1336,7 @@ impl Term {
 
     /// The program is running (spawned and not yet reaped).
     pub fn started(&self) -> bool {
-        self.live.is_some()
+        self.live.is_some() || self.scene.as_ref().is_some_and(|s| s.drawn.is_some())
     }
 
     /// Which path-like words are files, resolved off the UI thread (for link detection).
