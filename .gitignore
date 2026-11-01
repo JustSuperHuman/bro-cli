@@ -3,3 +3,4 @@
 *.log
 /.claude/
 /crates/bro-tui/snapshots/
+/reports/orbit-release-review/fixtures/*/
