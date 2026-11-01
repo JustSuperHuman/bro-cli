@@ -282,6 +282,7 @@ impl App {
 
     /// Focus a live session (switching tabs) and leave the sidebar.
     pub(crate) fn go_session(&mut self, id: PaneId) {
+        self.dismiss_session_screen();
         // In all-sessions mode, navigation moves focus without dismantling the grid.
         if !self.tile_all {
             self.clear_stack();
@@ -301,6 +302,21 @@ impl App {
         }
         self.focus_pane(id);
         self.leave_sidebar();
+    }
+
+    /// Session navigation leaves the launcher and closes Settings immediately.
+    /// Settings are saved as they change; neither screen owns a running session.
+    pub(crate) fn dismiss_session_screen(&mut self) -> bool {
+        let mut dismissed = false;
+        if matches!(self.overlay, Overlay::Launcher(_)) {
+            self.overlay = Overlay::None;
+            dismissed = true;
+        }
+        if let Some(id) = self.focused().filter(|id| self.panes.get(id).is_some_and(|p| p.view() == Some("settings"))) {
+            self.close(id);
+            dismissed = true;
+        }
+        dismissed
     }
 
     fn cycle_session(&mut self, d: i32) {

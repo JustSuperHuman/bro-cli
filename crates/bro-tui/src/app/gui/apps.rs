@@ -147,6 +147,16 @@ impl Apps {
         self.page(svc, sid, app);
     }
 
+    /// Start a draw attempt. Atlas retries must not leave child views from an unpresented attempt.
+    pub fn begin_frame(&mut self) {
+        self.wants.clear();
+    }
+
+    /// Stage exclusions cannot safely promise native placement succeeded: suspend while any child is shown.
+    pub fn stage_obscured(&self) -> bool {
+        self.views.values().any(|v| v.shown())
+    }
+
     /// A card on screen this frame (its page goes there once the frame is drawn, see [`Apps::sync`]).
     pub fn want(&mut self, w: Want) {
         self.wants.push(w);

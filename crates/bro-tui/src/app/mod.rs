@@ -22,6 +22,7 @@ pub(crate) mod inbox_store;
 mod menu;
 mod mouse;
 mod overlays;
+mod orbit_voice;
 mod project_tabs;
 mod screensaver;
 mod sessions;
@@ -930,7 +931,7 @@ impl App {
             if busy {
                 idle_since = None;
             } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= BACKGROUND_IDLE {
-                if !self.svc.host_resident() {
+                if !self.svc.host_resident() && !self.svc.orbit_background_wanted() {
                     break;
                 }
                 idle_since = None;
@@ -963,6 +964,7 @@ impl App {
         self.publish_projects();
         self.publish_task_context();
         self.pump_voice();
+        self.publish_orbit_context();
         self.toasts.expire();
     }
 
@@ -1207,6 +1209,11 @@ impl App {
             Event::FolderCreated(request, result) => self.project_folder_created(request, result),
             Event::Watchdog(u) => self.watchdog_event(u),
             Event::Voice(m) => self.voice_message(*m),
+            Event::OrbitVoice(generation, command) => {
+                if generation == self.svc.orbit_generation() {
+                    self.orbit_command(command);
+                }
+            }
             Event::CoordinationTaskAction {task_id, revision, action} => self.coordination_task_action(&task_id, revision, &action),
             Event::OrchestratorInbox(update) => self.inbox_update(*update),
             Event::Host(e) => self.host_event(e),

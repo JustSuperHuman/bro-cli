@@ -234,11 +234,15 @@ struct Saved {
     /// The agent's conversation (Claude / Codex), so it resumes exactly that one if it has to come back.
     #[serde(default)]
     agent_session: Option<String>,
+    /// Stable through window/background handover; never a credential.
+    #[serde(default)]
+    orbit_lifetime: Option<String>,
 }
 
 /// The terminal pane.
 pub struct Term {
     pub meta: Meta,
+    orbit_lifetime: String,
     /// Original launch choices, reused when reloading with current profile settings.
     pub launch_spec: Option<bro_core::launch::LaunchSpec>,
     pub reloading: bool,
@@ -300,6 +304,9 @@ pub struct Term {
     launch: Option<Spawn>,
     /// While a prompt is on screen: its question line ("Do you want to proceed?").
     prompt_title: Option<String>,
+    /// Last complete prompt, kept only when a concurrent output read holds the screen.
+    prompt_choice: Option<bro_core::terminal_prompt::Choice>,
+    answered_choice: Option<bro_core::terminal_prompt::Choice>,
     /// A currently rendered provider limit; this outranks a busy footer or transcript.
     limit: Option<bro_core::sessions::limits::UsageLimit>,
     cleared_limit_error: Option<String>,
@@ -352,6 +359,10 @@ pub struct Queued {
     pub starting: bool,
 }
 
+#[cfg(test)]
+#[path = "term/orbit_tests.rs"]
+mod orbit_tests;
+
 impl Term {
     #[cfg(test)]
     pub(crate) fn set_test_writer(&mut self, writer: Box<dyn Write + Send>) {
@@ -368,6 +379,7 @@ impl Term {
         let program_state = ProgramState::of(&parser);
         Term {
             meta,
+            orbit_lifetime: uuid::Uuid::new_v4().to_string(),
             launch_spec: None,
             reloading: false,
             spawn: Some(spawn),
@@ -407,6 +419,8 @@ impl Term {
             insights: None,
             launch: None,
             prompt_title: None,
+            prompt_choice: None,
+            answered_choice: None,
             limit: None,
             cleared_limit_error: None,
             resume: Default::default(),
@@ -664,6 +678,7 @@ impl Term {
             orchestrator: saved.orchestrator,
         };
         let mut t = Term::new(meta, saved.spawn.clone(), svc);
+        if let Some(lifetime) = saved.orbit_lifetime.filter(|id| uuid::Uuid::parse_str(id).is_ok()) { t.orbit_lifetime = lifetime; }
         t.spawn = None;
         t.launch = Some(saved.spawn);
         t.launch_spec = saved.launch_spec;
@@ -750,6 +765,7 @@ impl Term {
             spawn: s.clone(),
             launch_spec: self.launch_spec.clone(),
             agent_session: self.agent_session(),
+            orbit_lifetime: Some(self.orbit_lifetime.clone()),
         };
         serde_json::to_value(saved).ok()
     }
@@ -972,6 +988,16 @@ impl Term {
         }
     }
 
+    /// Stable PTY/project identity, not a reconstructed UI Instant. A real process,
+    /// host, or project change invalidates captures; a window handover does not.
+    pub(crate) fn orbit_generation(&self) -> String {
+        let pid = self.live.as_ref().and_then(Live::pid).or_else(|| self.attach.as_ref().and_then(|info| info.pid));
+        let host = self.svc.host().map(|host| host.info().started_ms).unwrap_or(0);
+        let project = bro_core::orbit_voice::project_scope_id(&self.meta.project.root).unwrap_or_default();
+        let cwd = bro_core::orbit_voice::project_scope_id(&self.meta.cwd).unwrap_or_default();
+        bro_core::coordination::digest_bytes(format!("bro-voice-target-v1\0{}\0{}\0{host}\0{pid:?}\0{project}\0{cwd}", self.meta.sid, self.orbit_lifetime).as_bytes())
+    }
+
     /// Re-announce to a bridge that started after this session.
     pub fn reregister(&self) {
         if let Some(l) = &self.live {
@@ -1182,11 +1208,27 @@ impl Term {
         if self.scroll != 0 || crate::pane::Pane::activity(self) != Some(Activity::Blocked) {
             return None;
         }
+        let choice = self.focus_choice()?;
         let p = self.parser.lock();
         let s = p.screen();
         let (_, cols) = s.size();
         let line = s.rows(0, cols).nth(row.saturating_add(self.view_top) as usize)?;
-        prompt_option(&line)
+        let key = prompt_option(&line)?;
+        choice.options.iter().any(|o| o.key == key).then_some(key)
+    }
+
+    /// Answer the current single-select menu once. Focus cards also supply the
+    /// request they displayed, so an old click cannot answer a newer question.
+    pub fn answer_prompt_option(&mut self, key: &str, shown: Option<&bro_core::terminal_prompt::Choice>) -> bool {
+        if crate::pane::Pane::activity(self) != Some(Activity::Blocked) || self.limit_warning().is_some() { return false; }
+        let Some(rows) = self.try_live_screen_rows() else { return false };
+        let Some(current) = bro_core::terminal_prompt::choice(&rows) else { return false };
+        if shown.is_some_and(|shown| !shown.same_request(&current)) { return false; }
+        if self.answered_choice.as_ref().is_some_and(|answered| answered.same_request(&current)) { return false; }
+        let Some(bytes) = current.response(key, self.program_state.lock().app_cursor) else { return false };
+        self.answered_choice = Some(current);
+        self.send(bytes.as_bytes());
+        true
     }
 
     /// The local size for the pty (the tile, or a hidden pane's remote request). The pty gets
@@ -1370,6 +1412,25 @@ impl Term {
         Some(p.screen().rows(0, cols).collect())
     }
 
+    /// Prompt detection always reads the live screen, even after the user has
+    /// scrolled back in the terminal. Restore that viewport after the read.
+    pub fn try_live_screen_rows(&self) -> Option<Vec<String>> {
+        let mut p = self.parser.try_lock()?;
+        let back = p.screen().scrollback();
+        p.screen_mut().set_scrollback(0);
+        let (_, cols) = p.screen().size();
+        let rows = p.screen().rows(0, cols).collect();
+        p.screen_mut().set_scrollback(back);
+        Some(rows)
+    }
+
+    pub fn focus_choice(&self) -> Option<bro_core::terminal_prompt::Choice> {
+        match self.try_live_screen_rows() {
+            Some(rows) => bro_core::terminal_prompt::choice(&rows),
+            None => self.prompt_choice.clone(),
+        }
+    }
+
     /// (rows, cols) of the pty.
     #[cfg(test)]
     pub fn size(&self) -> (u16, u16) {
@@ -1504,20 +1565,28 @@ impl Term {
     /// Read the bottom of the screen for an agent's tell-tale lines: "esc to interrupt" while it works, a
     /// permission prompt or question when it's waiting on you.
     fn scan(&mut self) {
-        let (text, question, limit) = {
-            let Some(p) = self.parser.try_lock() else { return };
+        let (text, question, limit, choice, blocked) = {
+            let Some(mut p) = self.parser.try_lock() else { return };
+            let back = p.screen().scrollback();
+            p.screen_mut().set_scrollback(0);
             let s = p.screen();
             let (_, cols) = s.size();
             let rows: Vec<String> = s.rows(0, cols).collect();
             let tail: Vec<&String> = rows.iter().rev().filter(|r| !r.trim().is_empty()).take(14).collect();
+            // Claude's plan menu has different wording, and its cursor can be on any option.
+            let choice = bro_core::terminal_prompt::choice(&rows);
+            let question = choice.as_ref().map(|c| c.question.clone()).or_else(|| prompt_question(&tail));
             // contents() joins soft-wrapped rows, preserving words and reset dates at narrow widths.
-            (tail.iter().rev().map(|r| r.as_str()).collect::<Vec<_>>().join("\n"), prompt_question(&tail), bro_core::sessions::limits::UsageLimit::from_screen(&s.contents()))
+            let result = (tail.iter().rev().map(|r| r.as_str()).collect::<Vec<_>>().join("\n"), question, bro_core::sessions::limits::UsageLimit::from_screen(&s.contents()), choice, bro_core::terminal_prompt::waiting(&rows));
+            p.screen_mut().set_scrollback(back);
+            result
         };
+        if self.answered_choice.as_ref().is_some_and(|answered| choice.as_ref().is_none_or(|current| !answered.same_request(current))) {
+            self.answered_choice = None;
+        }
+        self.prompt_choice = choice;
         let text = text.to_lowercase();
         let working = ["esc to interrupt", "esc to cancel", "ctrl+c to interrupt", "ctrl-c to interrupt"].iter().any(|m| text.contains(m));
-        let blocked = ["do you want to", "do you want me to", "allow this", "allow once", "approve this", "(y/n)", "[y/n]", "❯ 1. yes", "› 1. yes", "enter to confirm", "enter to select", "waiting for your approval"]
-            .iter()
-            .any(|m| text.contains(m));
         if working || blocked {
             self.agent = true;
         }
@@ -1531,6 +1600,7 @@ impl Term {
             return;
         }
         let quiet_ms = (self.born.elapsed().as_millis() as u64).saturating_sub(self.last_output.load(Ordering::Relaxed));
+        if blocked && self.status != Some(Activity::Blocked) { self.scroll = 0; }
         self.prompt_title = if blocked { question } else { None };
         self.status = Some(if blocked || self.limit.is_some() {
             Activity::Blocked
@@ -2114,14 +2184,85 @@ pub fn permission_prompt(rows: &[String]) -> Option<String> {
 /// The option number on a prompt row: "❯ 1. Yes", "  2. Yes, and don't ask again", "› 3. No" -> "1"/"2"/"3".
 /// The same rows the bridge offers the phone as prompt options.
 pub fn prompt_option(line: &str) -> Option<String> {
-    let rest = line.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '❯' | '>' | '›' | '●' | '○' | '│'));
-    let (number, label) = rest.split_once('.')?;
-    (!number.is_empty() && number.len() <= 2 && number.chars().all(|c| c.is_ascii_digit()) && !label.trim().is_empty()).then(|| number.to_string())
+    bro_core::terminal_prompt::option_key(line)
 }
 
 #[cfg(test)]
 mod prompt_option_tests {
     use super::{permission_prompt, prompt_option};
+
+    #[test]
+    fn prompt_scans_ignore_scrollback_and_native_forms_are_blocked() {
+        use super::*;
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = Services::offline(Default::default(), tx);
+        let meta = Meta { sid: "live-prompt-fixture".into(), harness: Some(Harness::Claude), profile: None, store: None, model: None,
+            label: "Claude".into(), name: None, renamed: false, cwd: std::env::temp_dir(), project: svc.project_for(&std::env::temp_dir()),
+            started: Instant::now(), route_id: None, cleanup: vec![], orchestrator: false };
+        let history = "Historical output\r\n".repeat(80);
+        let mut term = Term::fixed(meta, &format!("{history}\r\nCurrent question?\r\n❯ 1. Yes\r\n  2. No"), svc);
+        term.parser.lock().screen_mut().set_scrollback(20);
+        term.scan();
+        assert_eq!(term.focus_choice().unwrap().question, "Current question?");
+        assert_eq!(term.parser.lock().screen().scrollback(), 20, "a prompt read preserves the history viewport");
+        {
+            let parser = term.parser.clone();
+            let _guard = parser.lock();
+            assert_eq!(term.focus_choice().unwrap().question, "Current question?", "a busy screen keeps the last completed read");
+            assert!(!term.answer_prompt_option("1", None), "a click waits for a fresh screen read");
+        }
+        for screen in [
+            "MCP server \"demo\" requests your input\r\n❯ Accept\r\n  Decline\r\nEsc to cancel",
+            "Question 1/2\r\nWhere?\r\n› Type your answer\r\nenter to submit answer | esc to interrupt",
+        ] {
+            term.feed(format!("\x1b[2J\x1b[H{screen}").as_bytes());
+            term.scan();
+            assert_eq!(crate::pane::Pane::activity(&term), Some(Activity::Blocked));
+            assert!(term.focus_choice().is_none());
+        }
+        term.feed("\x1b[2J\x1b[HAn old question?\r\n❯ 1. Yes\r\n  2. No\r\nEnter to confirm\r\n❯\r\n? for shortcuts".as_bytes());
+        term.scan();
+        assert_ne!(crate::pane::Pane::activity(&term), Some(Activity::Blocked));
+        assert!(term.focus_choice().is_none());
+    }
+
+    #[test]
+    fn claude_plan_approval_is_blocked_with_any_option_selected() {
+        use super::*;
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = Services::offline(Default::default(), tx);
+        let meta = Meta { sid: "plan-approval-fixture".into(), harness: Some(Harness::Claude), profile: None, store: None, model: None,
+            label: "Claude".into(), name: None, renamed: false, cwd: std::env::temp_dir(), project: svc.project_for(&std::env::temp_dir()),
+            started: Instant::now(), route_id: None, cleanup: vec![], orchestrator: false };
+        let mut term = Term::fixed(meta, "", svc);
+        let fixture = include_str!("../../tests/fixtures/claude-plan-approval.txt");
+        for selected in 1..=3 {
+            let screen = fixture.replace("❯ 1.", "  1.").replace(&format!("  {selected}."), &format!("❯ {selected}.")).replace('\n', "\r\n");
+            for cols in [44, 80, 140] {
+                {
+                    let mut parser = term.parser.lock();
+                    parser.screen_mut().set_size(30, cols);
+                    parser.process(b"\x1b[2J\x1b[H");
+                    parser.process(screen.as_bytes());
+                }
+                term.scan();
+                assert_eq!(crate::pane::Pane::activity(&term), Some(Activity::Blocked), "option {selected}, columns {cols}");
+                assert!(!crate::pane::Pane::busy(&term));
+                assert_eq!(term.prompt_title(), Some("Claude has written up a plan and is ready to execute. Would you like to proceed?"));
+                let rows = term.try_screen_rows().unwrap();
+                let c = crate::focus::choice(&rows).expect("focus view can read the plan approval");
+                assert!(c.options[selected - 1].focused);
+                assert_eq!(permission_prompt(&rows), None, "plan approval stays a manual choice");
+            }
+        }
+        term.feed(b"\x1b[2J\x1b[HImplementing the plan\r\nesc to interrupt");
+        term.scan();
+        assert_eq!(crate::pane::Pane::activity(&term), Some(Activity::Working));
+        assert_eq!(term.prompt_title(), None);
+        assert!(crate::focus::choice(&term.try_screen_rows().unwrap()).is_none());
+    }
 
     #[test]
     fn permission_prompts_are_told_from_questions() {

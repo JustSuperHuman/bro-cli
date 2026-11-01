@@ -63,7 +63,7 @@ pub struct Painted {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, focused_window: bool, media: &mut super::media::Media, apps: &mut super::apps::Apps) -> Painted {
+pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, focused_window: bool, media: &mut super::media::Media, apps: &mut super::apps::Apps, stage: &mut super::orbit_stage::Drawn) -> Painted {
     let mut out = Painted::default();
     if layout.all_minimized {
         ui.label_in(layout.body, "All sessions minimized · show minimized in the sidebar", Style::new(size::BODY, weight::MEDIUM, ui.t.muted), Align::Center);
@@ -76,7 +76,7 @@ pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashM
     app.flips.retain(|id, flip| app.panes.contains_key(id) && (flip.back || flip.turning(now)));
     // the card with the keyboard last, so its edge stays whole where tiles share a line
     for b in layout.panes.iter().filter(|b| !b.focused).chain(layout.panes.iter().filter(|b| b.focused)) {
-        draw_card(app, ui, layout, b, panes, canvas, &pal, focused_window, &mut out, media, apps);
+        draw_card(app, ui, layout, b, panes, canvas, &pal, focused_window, &mut out, media, apps, stage);
     }
     // where tiles share a line there's no gutter: the line itself is grabbed to move the edge (the mouse finds the
     // tile edge under it, as in a gutter)
@@ -130,7 +130,7 @@ fn draw_group(app: &App, ui: &mut Ui, g: &GroupBox) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, pal: &Palette, focused_window: bool, out: &mut Painted, media: &mut super::media::Media, apps: &mut super::apps::Apps) {
+fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, pal: &Palette, focused_window: bool, out: &mut Painted, media: &mut super::media::Media, apps: &mut super::apps::Apps, stage: &mut super::orbit_stage::Drawn) {
     let id = b.id;
     let Some(p) = app.panes.get(&id) else { return };
     let t = ui.t;
@@ -188,6 +188,7 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
     ui.hit_with(shown, Action::Pane(id, PaneAct::Header), Cursor::Default);
     // header
     let header = Rect { h: b.header.h, ..shown };
+    stage.pane(b, shown, header, app.focused() == Some(id), flip.is_some_and(|f| f.turning(ui.now)));
     let header_corners = bro_gfx::Corners { tl: corners.tl, tr: corners.tr, br: 0.0, bl: 0.0 };
     // unread status colours only the title bar; the session's content keeps its own colours
     if let Some(ink) = notice_ink {
@@ -241,7 +242,7 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
             }
             let st = panes.entry(id).or_default();
             st.drawn = Default::default();
-            super::focus::draw(app, ui, id, content, b.focused && focused_window, &mut st.focus, media, apps);
+            super::focus::draw(app, ui, id, content, b.focused && focused_window, &mut st.focus, media, apps, stage);
             app.perf.pane_rendered(id, started.elapsed());
         } else {
             let tags = super::focus::terminal_quips_height(app, id);
@@ -253,6 +254,9 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
             let state = panes.entry(id).or_default();
             let input = state.drawn.cursor.map(|(row, col)| Rect::new(state.drawn.origin.x + col as f32 * state.drawn.cell_w, state.drawn.origin.y + row as f32 * state.drawn.cell_h, state.drawn.cell_w, state.drawn.cell_h));
             super::focus::draw_terminal_quips(app, ui, id, content, b.focused && focused_window, input, &mut state.focus);
+            if app.focus.drafts.get(&id).is_some_and(|d| d.terminal_quips.query.is_some()) {
+                stage.suspend();
+            }
         }
     } else if super::views::draw(app, ui, id, super::layout::inset(content, 6.0), b.focused) {
         // drawn natively by the view's own module

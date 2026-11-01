@@ -168,8 +168,9 @@ impl App {
     pub(super) fn leave_to_background(&mut self) {
         let s = self.svc.settings();
         let wanted = role() == Role::Window && !self.taken_over && !self.guest && !self.svc.is_demo() && s.server.keep_sessions && s.server.keep_working;
-        if wanted && (self.left_running > 0 || self.svc.host_resident()) && self.svc.start_background() {
+        if wanted && (self.left_running > 0 || self.svc.host_resident() || self.svc.orbit_background_wanted()) && self.svc.start_background() {
             self.left_to_background = true;
+            self.svc.prepare_orbit_handover();
         }
     }
 
@@ -180,6 +181,7 @@ impl App {
             HostEvent::TakenOver => {
                 // a window drives the sessions now: this bro steps aside, leaving them running
                 self.taken_over = true;
+                self.svc.prepare_orbit_handover();
                 self.quit = true;
             }
             HostEvent::Restarted(result) => self.restarted(result),
@@ -236,6 +238,7 @@ impl App {
     /// A viewer asks this bro (the primary) to launch something: it runs here, with this bro's proxy and phone bridge,
     /// and the viewer sees it arrive.
     fn relayed(&mut self, body: serde_json::Value) {
+        if self.svc.accept_orbit_relay(&body) { return; }
         if let Ok(Relayed { launch: Some(l) }) = serde_json::from_value::<Relayed>(body) {
             self.svc.launch(Self::relayed_request(l));
         }

@@ -1,0 +1,3735 @@
+{
+  "mode": "supplied-host-native",
+  "compositorOnly": true,
+  "profile": "C:\\Users\\james\\AppData\\Local\\Temp\\orbit-stage-profile-YIVLDi",
+  "selectedSurface": {
+    "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+    "x": 740,
+    "y": 446.68572998046875,
+    "w": 448,
+    "h": 34,
+    "oneWay": true,
+    "perchX": 1062.56
+  },
+  "captures": [
+    {
+      "label": "perched",
+      "png": "00-perched.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 428.50545077475897,
+          "foot": 446.68572998046875,
+          "ex": 17.846762675146696,
+          "ey": 18.18027920570977,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": "enter"
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "held-above-header",
+      "png": "01-held-above-header.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 421.4755966403534,
+          "foot": 439.4756066056391,
+          "ex": 17.99999152950717,
+          "ey": 18.00000996528568,
+          "airborne": true,
+          "pivot": false
+        },
+        "supportId": null,
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": "held"
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "flight-0",
+      "png": "02-flight-0.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 428.5408374830134,
+          "foot": 446.68572998046875,
+          "ex": 17.876841377162947,
+          "ey": 18.144892497455356,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": "landed"
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "flight-1",
+      "png": "03-flight-1.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 428.6865205155437,
+          "foot": 446.68572998046875,
+          "ex": 18.000671954813708,
+          "ey": 17.999209464925052,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": "landed"
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "flight-2",
+      "png": "04-flight-2.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 431.1950142814794,
+          "foot": 446.68572998046875,
+          "ex": 20.132891655859048,
+          "ey": 15.490715698989359,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": "landed"
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "flight-3",
+      "png": "05-flight-3.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 430.8155605524393,
+          "foot": 446.68572998046875,
+          "ex": 19.810355986174983,
+          "ey": 15.870169428029433,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": "landed"
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "flight-4",
+      "png": "06-flight-4.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 428.18665250215247,
+          "foot": 446.68572998046875,
+          "ex": 17.57578414343114,
+          "ey": 18.499077478316305,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": "landed"
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "flight-5",
+      "png": "07-flight-5.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 428.9329088600554,
+          "foot": 446.68572998046875,
+          "ex": 18.210102047648668,
+          "ey": 17.75282112041333,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": null
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "flight-6",
+      "png": "08-flight-6.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 428.9326447539494,
+          "foot": 446.68572998046875,
+          "ex": 18.209877557458526,
+          "ey": 17.753085226519378,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": null
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "flight-7",
+      "png": "09-flight-7.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 428.93250230253904,
+          "foot": 446.68572998046875,
+          "ex": 18.209756473759764,
+          "ey": 17.753227677929694,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": null
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    },
+    {
+      "label": "settled",
+      "png": "10-settled.png",
+      "state": {
+        "frame": "client",
+        "returning": false,
+        "running": true,
+        "body": {
+          "x": 1062.56,
+          "y": 428.9325024756473,
+          "foot": 446.68572998046875,
+          "ex": 18.20975662090178,
+          "ey": 17.753227504821435,
+          "airborne": false,
+          "pivot": false
+        },
+        "supportId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "home": {
+          "x": 1062.56,
+          "y": 446.68572998046875,
+          "surface": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+        "solids": [
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+            "x": 284,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+            "x": 284,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+            "x": 284,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+            "x": 731,
+            "y": 78,
+            "w": 1,
+            "h": 741,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+            "x": 740,
+            "y": 437.68572998046875,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+            "x": 740,
+            "y": 44,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+            "x": 740,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+            "x": 1187,
+            "y": 78,
+            "w": 1,
+            "h": 360.68572998046875,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+            "x": 740,
+            "y": 818,
+            "w": 448,
+            "h": 1,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+            "x": 740,
+            "y": 446.68572998046875,
+            "w": 448,
+            "h": 34,
+            "oneWay": true
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+            "x": 740,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+            "x": 1187,
+            "y": 480.68572998046875,
+            "w": 1,
+            "h": 338.31427001953125,
+            "oneWay": false
+          },
+          {
+            "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+            "x": 10,
+            "y": 234,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-filter",
+            "x": 10,
+            "y": 48,
+            "w": 251,
+            "h": 32,
+            "oneWay": true
+          },
+          {
+            "id": "sidebar-rail",
+            "x": 271,
+            "y": 0,
+            "w": 1,
+            "h": 831,
+            "oneWay": false
+          },
+          {
+            "id": "workspace-floor",
+            "x": 280,
+            "y": 830,
+            "w": 912,
+            "h": 1,
+            "oneWay": true
+          }
+        ],
+        "reaction": null
+      },
+      "native": {
+        "kind": "qubit",
+        "free": false,
+        "boxless": true,
+        "enabled": true,
+        "leaving": false,
+        "visible": true,
+        "bounds": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "strip": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "lifted": false,
+        "stageEnabled": true,
+        "stage": {
+          "persistent": true,
+          "W": 1200,
+          "H": 831,
+          "solids": [
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-bottom",
+              "x": 284,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-header",
+              "x": 284,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-left",
+              "x": 284,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-12693272-2c23-4a16-8096-4de8e6016ebb-right",
+              "x": 731,
+              "y": 78,
+              "w": 1,
+              "h": 741,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-bottom",
+              "x": 740,
+              "y": 437.68572998046875,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-header",
+              "x": 740,
+              "y": 44,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-left",
+              "x": 740,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-14f3f546-e2b5-4caf-b021-2f9be0998ab9-right",
+              "x": 1187,
+              "y": 78,
+              "w": 1,
+              "h": 360.68572998046875,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-bottom",
+              "x": 740,
+              "y": 818,
+              "w": 448,
+              "h": 1,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header",
+              "x": 740,
+              "y": 446.68572998046875,
+              "w": 448,
+              "h": 34,
+              "oneWay": true
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-left",
+              "x": 740,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-right",
+              "x": 1187,
+              "y": 480.68572998046875,
+              "w": 1,
+              "h": 338.31427001953125,
+              "oneWay": false
+            },
+            {
+              "id": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-sidebar",
+              "x": 10,
+              "y": 234,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-filter",
+              "x": 10,
+              "y": 48,
+              "w": 251,
+              "h": 32,
+              "oneWay": true
+            },
+            {
+              "id": "sidebar-rail",
+              "x": 271,
+              "y": 0,
+              "w": 1,
+              "h": 831,
+              "oneWay": false
+            },
+            {
+              "id": "workspace-floor",
+              "x": 280,
+              "y": 830,
+              "w": 912,
+              "h": 1,
+              "oneWay": true
+            }
+          ],
+          "preferredSurfaceId": "pane-e76c4638-4665-4eaf-b3e5-02dd8da679ea-header"
+        },
+        "liftArea": null,
+        "host": {
+          "x": 604,
+          "y": 293,
+          "width": 1200,
+          "height": 831
+        },
+        "hostHwnd": 14356256,
+        "box": null,
+        "send": null,
+        "boxKnown": true,
+        "voice": {
+          "phase": "off",
+          "asleep": true,
+          "hearing": false,
+          "input": 0,
+          "output": 0,
+          "claudeWorking": false,
+          "muted": false,
+          "draft": false,
+          "sending": false
+        },
+        "takesMouse": false,
+        "hit": null
+      }
+    }
+  ],
+  "errors": []
+}

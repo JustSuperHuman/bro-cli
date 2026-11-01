@@ -156,6 +156,15 @@ fn root_servers(cwd: &Path, skip: &dyn Fn(&str) -> bool) -> Map<String, Value> {
     out
 }
 
+/// Whether a login or project already declares this server. Automatic integrations must not
+/// replace a personal transport or bypass its disabled-server setting.
+pub(crate) fn has_mcp_server(account: &Path, cwd: &Path, name: &str) -> bool {
+    let own = read_json(&account.join(".claude.json")).unwrap_or(Value::Null);
+    let project = read_json(&cwd.join(".mcp.json")).unwrap_or(Value::Null);
+    servers(&own).chain(project_servers(&own, cwd)).chain(servers(&project)).any(|(n, _)| n == name)
+        || root_servers(cwd, &|_| false).contains_key(name)
+}
+
 /// `<account>/bro-shared/mcp-servers.json`
 pub fn shared_mcp_path(account: &Path) -> PathBuf {
     account.join("bro-shared").join("mcp-servers.json")

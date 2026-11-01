@@ -23,6 +23,7 @@ mod media;
 mod menu;
 mod mouse;
 mod overlays;
+mod orbit_stage;
 mod page;
 mod prefs;
 mod script;
@@ -326,6 +327,9 @@ pub struct Gui {
     pages: page::Pages,
     /// MCP apps' pages in focus mode's conversations
     apps: apps::Apps,
+    /// Last semantic stage and this native window's stable identity epoch.
+    orbit_stage: orbit_stage::Publisher,
+    occluded: bool,
 }
 
 impl Gui {
@@ -399,10 +403,13 @@ impl Gui {
             old_window: None,
             apps: apps::Apps::new(proxy.clone()),
             pages: page::Pages::new(proxy),
+            orbit_stage: orbit_stage::Publisher::default(),
+            occluded: false,
         }
     }
 
     fn shutdown(&mut self) {
+        self.orbit_stage.invalidate(&self.app.svc);
         self.prefs.save(self.app.persist);
         self.app.shutdown();
     }
@@ -742,13 +749,18 @@ impl Gui {
 
     /// Draw the window; returns how long the GPU's part took (getting an image, handing the frame over).
     fn frame_inner(&mut self) -> Duration {
-        let Some(window) = self.window.clone() else { return Duration::ZERO };
+        let Some(window) = self.window.clone() else {
+            self.orbit_stage.invalidate(&self.app.svc);
+            return Duration::ZERO;
+        };
         if self.gfx.is_none() {
+            self.orbit_stage.invalidate(&self.app.svc);
             return Duration::ZERO;
         }
         // minimised: no swapchain image comes, and each try would block the loop for wgpu's 1 s acquire timeout.
         // Coming back resizes the window, which rebuilds the swapchain and draws; until then nothing moves.
-        if window.is_minimized() == Some(true) {
+        if window.is_minimized() == Some(true) || self.occluded {
+            self.orbit_stage.invalidate(&self.app.svc);
             self.ticking = false;
             self.moving = false;
             return Duration::ZERO;
@@ -760,6 +772,10 @@ impl Gui {
         }
         self.sync_font();
         let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            self.orbit_stage.invalidate(&self.app.svc);
+            return Duration::ZERO;
+        }
         let (w, h) = (size.width as f32 / self.scale, size.height as f32 / self.scale);
         let now = Instant::now();
         let time = self.started.elapsed().as_secs_f64();
@@ -772,8 +788,9 @@ impl Gui {
         }
         let mut attempts = 0;
         let band = caption::on() && window.fullscreen().is_none();
-        let (hits, overlay_grid, painted) = loop {
+        let (hits, overlay_grid, painted, mut stage) = loop {
             attempts += 1;
+            self.apps.begin_frame();
             gfx.scene.clear();
             // a skin's gradient is the window's fill: nothing under it, so a see-through window stays as see-through
             gfx.scene.background = if theme.skin.fx.gradient.is_some() { self.tokens.window.with_alpha(0.0) } else { self.tokens.window };
@@ -800,17 +817,18 @@ impl Gui {
             // end of the tab row
             let window_rect = Rect::new(0.0, 0.0, w, h);
             let buttons = band.then(|| window.is_maximized());
-            let (grid, painted) = draw_all(&mut self.app, &mut ui, window_rect, buttons, &mut self.layout, &mut self.panes, &mut self.tui, &mut self.sidebar, &self.prefs, self.focused_window, self.drag.as_ref(), self.alt_alone, &mut self.media, &mut self.apps);
+            let (grid, painted, mut stage) = draw_all(&mut self.app, &mut ui, window_rect, buttons, &mut self.layout, &mut self.panes, &mut self.tui, &mut self.sidebar, &self.prefs, self.focused_window, self.drag.as_ref(), self.alt_alone, &mut self.media, &mut self.apps);
             if self.app.overlay.is_open() || self.app.prefix_armed {
                 self.clipboard_menu = None;
             }
             if let Some(menu) = &self.clipboard_menu {
                 menu::draw_clipboard(menu, &mut ui, window_rect);
+                stage.suspend();
             }
             self.ticking = ui.ticking;
             self.moving = ui.anim.moving;
             if !ui.text.overflow || attempts > 2 {
-                break (hits, grid, painted);
+                break (hits, grid, painted, stage);
             }
             ui.text.grow_atlases();
         };
@@ -860,13 +878,18 @@ impl Gui {
         // workspace, the screen off or locked) draws nothing, instead of waiting out a 1 s acquire every frame and
         // rebuilding the swapchain each time
         let gpu_started = Instant::now();
-        match gfx.renderer.render_with(&gfx.scene, &mut gfx.text, || window.pre_present_notify()) {
-            Ok(()) => {}
-            Err(bro_gfx::FrameError::Reconfigured) => self.dirty = true,
-            Err(bro_gfx::FrameError::Skipped) => {}
-        }
+        let presented = match gfx.renderer.render_with(&gfx.scene, &mut gfx.text, || window.pre_present_notify()) {
+            Ok(()) => true,
+            Err(bro_gfx::FrameError::Reconfigured) => { self.dirty = true; false }
+            Err(bro_gfx::FrameError::Skipped) => false,
+        };
         let gpu = gpu_started.elapsed();
         self.gfx = Some(gfx);
+        if !presented {
+            self.apps.begin_frame();
+            self.orbit_stage.invalidate(&self.app.svc);
+            return gpu;
+        }
         self.update_hover();
         self.sync_page(&window);
         self.sync_apps(&window);
@@ -877,6 +900,13 @@ impl Gui {
             if self.old_window.take().is_some() {
                 window.focus_window();
             }
+        }
+        if self.pages.stage_obscured() || self.apps.stage_obscured() {
+            stage.suspend();
+        }
+        if self.orbit_stage.presented(&self.app, &window, stage, self.occluded) {
+            // Queue the window epoch before the independent session publisher binds host.window to it.
+            self.app.publish_orbit_context();
         }
         // input methods open their window at the focused terminal's cursor (in focus mode, the reply box's caret)
         if let Some(id) = self.app.focused()
@@ -1142,7 +1172,8 @@ fn draw_all(
     alt_alone: bool,
     media: &mut media::Media,
     apps: &mut apps::Apps,
-) -> (Option<overlays::Drawn>, chrome::Painted) {
+) -> (Option<overlays::Drawn>, chrome::Painted, orbit_stage::Drawn) {
+    let mut stage = orbit_stage::Drawn::new(window, f64::from(ui.scale));
     let overlay_open = app.overlay.is_open();
     let launcher = matches!(app.overlay, super::Overlay::Launcher(_));
     let sidebar_on = app.sidebar && window.w >= layout::SIDEBAR_MIN_WINDOW;
@@ -1204,11 +1235,11 @@ fn draw_all(
     }
     // sidebar
     if side_r.w > 0.0 {
-        sidebar::draw(app, ui, side_r, side, focused_window, prefs.media_open, media.unseen);
+        sidebar::draw(app, ui, side_r, side, focused_window, prefs.media_open, media.unseen, &mut stage);
     }
     // project tabs, their line carried on under the window's buttons
     if strip_r.h > 0.0 {
-        sidebar::draw_strip(app, ui, strip_r);
+        sidebar::draw_strip(app, ui, strip_r, &mut stage);
         if caption_r.h > 0.0 {
             ui.hline(caption_r.x, caption_r.bottom() - ui.hair(), caption_r.w, ui.t.stroke);
         }
@@ -1218,7 +1249,7 @@ fn draw_all(
     if app.tabs.is_empty() {
         welcome::draw(app, ui, Rect::new(body.x - layout::MARGIN, body.y - layout::MARGIN, body.w + 2.0 * layout::MARGIN, body.h + 2.0 * layout::MARGIN));
     } else {
-        painted = chrome::draw_panes(app, ui, layout, panes, tui, focused_window, media, apps);
+        painted = chrome::draw_panes(app, ui, layout, panes, tui, focused_window, media, apps, &mut stage);
         chrome::draw_edges(app, ui, layout);
     }
     // pictures and videos beside the sessions (video and animations only run while you can see them)
@@ -1259,7 +1290,11 @@ fn draw_all(
     } else {
         caption::clear();
     }
-    (grid, painted)
+    stage.workspace(body);
+    if app.overlay.is_open() || app.prefix_armed || app.renaming.is_some() || app.alt_hints() || media.expanded || media.menu_open() {
+        stage.suspend();
+    }
+    (grid, painted, stage)
 }
 
 impl ApplicationHandler<UserEvent> for Gui {
@@ -1281,6 +1316,8 @@ impl ApplicationHandler<UserEvent> for Gui {
         self.scale = w.scale_factor() as f32;
         window::style(&w, self.tokens.bg, self.tokens.light, bro_core::config::Material::Solid);
         window::remember_handle(&w);
+        self.orbit_stage.new_window(&self.app.svc);
+        self.occluded = false;
         let size = w.inner_size();
         self.see_through_tried = see_through;
         self.window_see_through = see_through;
@@ -1322,6 +1359,9 @@ impl ApplicationHandler<UserEvent> for Gui {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if self.occluded || self.window.as_ref().is_some_and(|w| w.is_minimized() == Some(true) || (self.first_frame_done && w.is_visible() == Some(false))) {
+            self.orbit_stage.invalidate(&self.app.svc);
+        }
         if self.swap_window {
             self.swap_window(el);
         }
@@ -1372,6 +1412,7 @@ impl ApplicationHandler<UserEvent> for Gui {
                 self.redraw();
             }
             WindowEvent::Resized(s) => {
+                self.orbit_stage.invalidate(&self.app.svc);
                 if let Some(g) = &mut self.gfx {
                     g.renderer.resize(s.width, s.height);
                 }
@@ -1379,8 +1420,24 @@ impl ApplicationHandler<UserEvent> for Gui {
                 // draw right away so live resizing doesn't smear
                 self.frame();
             }
-            WindowEvent::Moved(_) => self.prefs.note_size(self.window.as_deref()),
+            WindowEvent::Moved(_) => {
+                self.prefs.note_size(self.window.as_deref());
+                // Rebase only validated, already-presented geometry; native tracking does the same between updates.
+                if let Some(w) = &self.window
+                    && self.orbit_stage.moved(&self.app, w, self.occluded)
+                {
+                    self.app.publish_orbit_context();
+                }
+                if self.orbit_stage.needs_frame() { self.redraw(); }
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                self.orbit_stage.invalidate(&self.app.svc);
+                if !occluded { self.redraw(); }
+            }
+            WindowEvent::Destroyed => self.orbit_stage.invalidate(&self.app.svc),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.orbit_stage.invalidate(&self.app.svc);
                 self.scale = scale_factor as f32;
                 self.font_px = 0.0;
                 self.redraw();
@@ -1493,7 +1550,12 @@ impl ApplicationHandler<UserEvent> for Gui {
         }
     }
 
+    fn suspended(&mut self, _el: &ActiveEventLoop) {
+        self.orbit_stage.invalidate(&self.app.svc);
+    }
+
     fn exiting(&mut self, _el: &ActiveEventLoop) {
+        self.orbit_stage.invalidate(&self.app.svc);
         self.pages.reset();
         self.apps.reset();
         self.prefs.note_size(self.window.as_deref());

@@ -657,6 +657,9 @@ async fn accepted_result_delivery_survives_restart_without_a_second_panel_item()
 #[tokio::test]
 async fn original_panel_request_gets_a_distinct_durable_final_result() {
     let h = Harness::new();
+    let updates = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let sink = updates.clone();
+    h.app.orchestrator.on_update(Arc::new(move |update| sink.lock().push(update)));
     h.app.orchestrator.set_routed(true);
     h.app.orchestrator.route(
         &h.app,
@@ -707,6 +710,9 @@ async fn original_panel_request_gets_a_distinct_durable_final_result() {
     assert_eq!(initial["text"], "Started the requested report.");
     assert_eq!(final_item["originRequestId"], panel);
     assert_eq!(initial["turnId"], final_item["turnId"]);
+    let updates = updates.lock();
+    assert!(updates.iter().any(|u| matches!(u, crate::OrchestratorUpdate::Reply { text, .. } if text == "Started the requested report.")));
+    assert!(updates.iter().any(|u| matches!(u, crate::OrchestratorUpdate::TaskOutcome { origin_request_id, task_id, revision: 1, .. } if origin_request_id == &panel && task_id == "task")), "real accepted-task delivery must emit its typed companion notification, not just append panel history");
 }
 
 #[tokio::test]

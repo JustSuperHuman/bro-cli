@@ -1,0 +1,31 @@
+{
+  "demoOnly": true,
+  "binary": "F:\\bro-cli-v2\\target\\release\\bro.exe",
+  "deviceFree": true,
+  "captures": [
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-graphite-off.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-graphite-connecting.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-graphite-error.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-graphite-setup.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-graphite-ready.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-graphite-talking.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-paper-off.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-paper-connecting.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-paper-error.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-paper-setup.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-paper-ready.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\1120x820-paper-talking.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-graphite-off.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-graphite-connecting.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-graphite-error.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-graphite-setup.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-graphite-ready.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-graphite-talking.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-paper-off.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-paper-connecting.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-paper-error.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-paper-setup.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-paper-ready.png",
+    "F:\\bro-cli-v2\\reports\\orbit-release-review\\fixtures\\760x700-paper-talking.png"
+  ]
+}

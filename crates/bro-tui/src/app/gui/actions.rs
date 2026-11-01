@@ -38,6 +38,8 @@ pub enum Action {
     MediaResize,
     /// Show or hide the media panel.
     MediaToggle,
+    /// Native Orbit controls: 0 conversation, 1 mute, 2 advanced settings.
+    OrbitVoice(u8),
     /// Dismiss toast `n`.
     Toast(usize),
     /// The welcome screen's target `n`.

@@ -23,6 +23,8 @@ pub fn create(el: &ActiveEventLoop, prefs: &Prefs, see_through: bool) -> Result<
         .with_inner_size(winit::dpi::LogicalSize::new(w.max(640.0), h.max(420.0)))
         .with_min_inner_size(winit::dpi::LogicalSize::new(560.0, 360.0))
         .with_visible(false)
+        // Scripted validation must not take the user's foreground when the first frame shows.
+        .with_active(std::env::var_os("BRO_GUI_SCRIPT").is_none())
         .with_transparent(see_through)
         .with_window_icon(icon());
     #[cfg(windows)]

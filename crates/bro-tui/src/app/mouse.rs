@@ -440,7 +440,7 @@ impl App {
             self.sel = None;
             self.last_pane_click = None;
             if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
-                t.send(format!("{key}\r").as_bytes());
+                t.answer_prompt_option(&key, None);
             }
             return;
         }
@@ -487,10 +487,9 @@ impl App {
         }
     }
 
-    /// A sidebar click while the launcher is open. A project becomes the one it starts in and + New / Continue
-    /// switch its tab, all without closing it; toggles leave it open; anything else closes it first. True when
-    /// the click is handled here.
-    fn launcher_side_click(&mut self, hit: &SideHit) -> bool {
+    /// A sidebar project row changes the launch folder; project tabs navigate
+    /// out of the launcher. New / Continue switch its tab, and toggles keep it open.
+    pub(crate) fn launcher_side_click(&mut self, hit: &SideHit) -> bool {
         if !matches!(self.overlay, Overlay::Launcher(_)) {
             return false;
         }
@@ -515,13 +514,7 @@ impl App {
                 }
                 true
             }
-            SideHit::Strip(super::project_tabs::StripHit::Tab(super::project_tabs::StripTab::Project(key))) => {
-                // a project tab picks the launcher's project, like its sidebar row
-                if let Some(root) = self.project_tabs().into_iter().find(|t| t.key == *key).map(|t| t.root) {
-                    self.select_launcher_project(root);
-                }
-                true
-            }
+            SideHit::Strip(super::project_tabs::StripHit::Tab(_)) => false,
             SideHit::Fable | SideHit::UsageToggle | SideHit::Minimized | SideHit::Strip(super::project_tabs::StripHit::Minimized) => false,
             _ => {
                 self.overlay = Overlay::None;

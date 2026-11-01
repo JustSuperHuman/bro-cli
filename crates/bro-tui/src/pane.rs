@@ -56,6 +56,7 @@ pub enum Event {
     Watchdog(bro_bridge::WatchdogUpdate),
     /// Push-to-talk: words for the orchestrator session.
     Voice(Box<crate::services::VoiceMsg>),
+    OrbitVoice(u64, bro_bridge::orbit_voice::Command),
     CoordinationTaskAction { task_id: String, revision: u64, action: String },
     OrchestratorInbox(Box<crate::app::inbox_store::Update>),
     /// The session server went away, another window took it over, or a restart finished.

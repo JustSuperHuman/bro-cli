@@ -62,6 +62,7 @@ mod model;
 mod net;
 mod notifications;
 mod orchestrator;
+pub mod orbit_voice;
 pub mod schedule;
 mod output_filter;
 mod profiles;
@@ -430,6 +431,24 @@ impl Bridge {
         options: StartOptions,
         on_command: Box<dyn Fn(BridgeCommand) + Send + Sync>,
     ) -> anyhow::Result<Bridge> {
+        Self::start_service(cfg, options, on_command, true)
+    }
+
+    /// Canonical workspace/tool service without any HTTP listener or LAN access.
+    /// The same handle feeds the session registry used by the optional bridge.
+    pub fn start_local(
+        cfg: BridgeConfig,
+        on_command: Box<dyn Fn(BridgeCommand) + Send + Sync>,
+    ) -> anyhow::Result<Bridge> {
+        Self::start_service(cfg, StartOptions { import_legacy_token: false }, on_command, false)
+    }
+
+    fn start_service(
+        cfg: BridgeConfig,
+        options: StartOptions,
+        on_command: Box<dyn Fn(BridgeCommand) + Send + Sync>,
+        listen: bool,
+    ) -> anyhow::Result<Bridge> {
         std::fs::create_dir_all(&cfg.data_root)?;
         let legacy = if options.import_legacy_token {
             auth::legacy_token_candidates()
@@ -456,8 +475,17 @@ impl Bridge {
                     }
                 };
                 let _ = host_state.runtime.set(runtime.handle().clone());
-                runtime.spawn(schedule::run(host_state.clone()));
-                runtime.block_on(run_host(host_state, cfg, ready_tx));
+                if listen {
+                    runtime.spawn(schedule::run(host_state.clone()));
+                    runtime.block_on(run_host(host_state, cfg, ready_tx));
+                } else {
+                    // No network/token discovery/schedule workers in local-only mode.
+                    runtime.block_on(async {
+                        let mut stopped = host_state.shutdown.subscribe();
+                        let _ = ready_tx.send(Ok(()));
+                        let _ = stopped.wait_for(|value| *value).await;
+                    });
+                }
                 runtime.shutdown_timeout(Duration::from_secs(1));
             })?;
         match ready_rx.recv() {
@@ -482,6 +510,9 @@ impl Bridge {
         &self.inner.state
     }
 
+    /// Identity of the shared local service, independent of transport status.
+    pub fn same_service(&self, other: &Bridge) -> bool { Arc::ptr_eq(&self.inner, &other.inner) }
+
     pub fn register(&self, meta: SessionMeta) {
         let cwd = meta.cwd.as_deref().map(path_text).unwrap_or_default();
         let mut summary = model::TerminalSessionSummary::native(
@@ -497,6 +528,18 @@ impl Bridge {
             .map(path_text)
             .filter(|dir| !dir.trim().is_empty());
         self.state().register(summary, project, hint);
+    }
+
+    /// Native publication only: bind the voice snapshot to these exact registry lifetimes.
+    /// This does no I/O and is not exposed through MCP/HTTP arguments.
+    pub fn bind_voice_generations(&self, generations: &[(&str, &str)]) {
+        let mut inner = self.state().inner.lock();
+        for (id, generation) in generations {
+            if let Some(session) = inner.sessions.get_mut(*id)
+                && session.summary.voice_generation.as_deref() != Some(*generation) {
+                session.summary.voice_generation = Some((*generation).to_owned());
+            }
+        }
     }
 
     /// Raw PTY output bytes, in order.
@@ -774,7 +817,7 @@ impl Bridge {
             let inner = state.inner.lock();
             (inner.host, inner.port)
         };
-        let urls = net::server_access_urls(
+        let urls = if port == 0 { Vec::new() } else { net::server_access_urls(
             host,
             port,
             &state.token,
@@ -782,7 +825,7 @@ impl Bridge {
         )
         .into_iter()
         .filter_map(|url| url["url"].as_str().map(str::to_owned))
-        .collect();
+        .collect() };
         BridgeStatus {
             running: state.running.load(Ordering::Relaxed),
             port,

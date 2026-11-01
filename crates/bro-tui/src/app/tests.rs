@@ -573,9 +573,9 @@ fn clicking_an_agents_prompt_option_answers_it() {
     assert!(sent(&mut a).is_empty());
     a.panes.get_mut(&id).unwrap().as_term().unwrap().demo_activity = Some(Activity::Blocked);
     click(&mut a, row_of("2. Yes"));
-    assert_eq!(sent(&mut a), b"2\r", "the option's key, then enter");
+    assert_eq!(sent(&mut a), b"\x1b[B\r", "move the option cursor, then commit once");
     click(&mut a, row_of("3. No"));
-    assert_eq!(sent(&mut a), b"3\r");
+    assert!(sent(&mut a).is_empty(), "another click on the same prompt cannot submit a second answer");
     click(&mut a, row_of("Do you want"));
     assert!(sent(&mut a).is_empty(), "the question itself isn't an option");
     // Hovering an option highlights its row.
@@ -3303,7 +3303,7 @@ fn a_remotely_watched_session_gets_a_minimum_size_and_the_tile_shows_its_bottom_
     );
     term_of(&mut a, id).demo_activity = Some(Activity::Blocked);
     a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: inner.x + 6, row: inner.y + last - 1, modifiers: KeyModifiers::NONE });
-    assert_eq!(std::mem::take(&mut term_of(&mut a, id).sent), b"2\r", "the option on the clicked tile row");
+    assert_eq!(std::mem::take(&mut term_of(&mut a, id).sent), b"\x1b[B\r", "the option on the clicked tile row");
     term_of(&mut a, id).demo_activity = None;
     // A program that tracks the mouse gets screen rows, not tile rows.
     term_of(&mut a, id).feed(b"\x1b[?1000h\x1b[?1006h");
@@ -3498,18 +3498,15 @@ fn settings_view_switches_presets_and_overrides_switches() {
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // start at sign-in
     { let s = draw(&mut a); assert!(s.contains("Start at sign-in") && s.contains("no admin"), "{s}"); }
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // protect phone media
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // push-to-talk
-    { let s = draw(&mut a); assert!(s.contains("Push-to-talk") && s.contains("Voice key") && s.contains("OpenAI key") && !s.contains("Auto-resume"), "{s}"); }
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // its key
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // how Hugh answers
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Orbit connection
+    { let s = draw(&mut a); assert!(s.contains("Orbit Voice") && s.contains("Orbit connection") && !s.contains("Push-to-talk") && !s.contains("Auto-resume"), "{s}"); }
+    assert!(!a.svc.settings().orbit_voice.enabled);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(a.svc.settings().voice.mode, "transcribe");
-    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
-    assert_eq!(a.svc.settings().voice.mode, "live");
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // his voice
-    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
-    assert_eq!(a.svc.settings().voice.live_voice.as_deref(), Some("marin"));
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // the OpenAI key
+    assert!(a.svc.settings().orbit_voice.enabled);
+    assert_eq!(a.svc.settings().voice.mode, "live", "Orbit does not rewrite legacy voice preferences");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!a.svc.settings().orbit_voice.enabled);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // original Orbit project; unavailable voice controls stay hidden
     key(&mut a, KeyCode::Down, KeyModifiers::NONE); // caveman mode
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // off → caveman
     assert_eq!(a.svc.settings().caveman.active(), Some(bro_core::caveman::Level::Caveman));
@@ -4454,6 +4451,65 @@ fn reset_times_read_short() {
 }
 
 #[test]
+#[ignore = "opens an isolated loopback listener; no microphone, provider or agent calls"]
+fn orbit_transport_pins_focus_and_never_replays_work() {
+    use std::io::{Read, Write};
+    fn http(handle: &bro_bridge::orbit_voice::Handle, method: &str, path: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+        let descriptor: serde_json::Value = serde_json::from_slice(&std::fs::read(handle.descriptor_path()).unwrap()).unwrap();
+        let token = descriptor["token"].as_str().unwrap();
+        let endpoint = url::Url::parse(handle.local_url()).unwrap();
+        let host = format!("{}:{}", endpoint.host_str().unwrap(), endpoint.port().unwrap());
+        let mut socket = std::net::TcpStream::connect(&host).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let body = serde_json::to_string(&body).unwrap();
+        write!(socket, "{method} /orbit/v1{path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, serde_json::from_str(body).unwrap())
+    }
+    let mut a = app(true);
+    let looking = a.focused().unwrap();
+    let target = a.panes[&looking].as_term_ref().unwrap().meta.sid.clone();
+    let boss = ready_orchestrator(&mut a, bro_core::Harness::Claude);
+    a.focus_pane(looking);
+    let root = tempfile::tempdir().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = bro_bridge::orbit_voice::start(root.path(), move |command| { let _ = tx.send(command); }).unwrap();
+    a.svc.attach_orbit_test(handle.clone());
+    a.publish_orbit_context();
+    assert!(handle.ready(), "the real app snapshot must satisfy the host contract");
+    let utterance = uuid::Uuid::new_v4().to_string();
+    let request = uuid::Uuid::new_v4().to_string();
+    let (status, _) = http(&handle, "POST", "/utterances", serde_json::json!({"id":utterance}));
+    assert!(status < 300);
+    a.focus_pane(boss);
+    a.publish_orbit_context();
+    let body = serde_json::json!({"id":request,"utteranceId":utterance,"text":"summarize the selected session"});
+    let (status, response) = http(&handle, "POST", "/requests", body.clone());
+    assert!(status < 300, "{status}: {response}");
+    a.orbit_command(rx.recv_timeout(Duration::from_secs(3)).unwrap());
+    a.voice.idle_since = Some(Instant::now() - Duration::from_secs(5));
+    a.pump_voice();
+    let sent = typed(&a, boss);
+    assert!(sent.contains(&format!("(sessionId {target})] summarize the selected session")), "{sent}");
+    let count = sent.matches("[bro-request ").count();
+    let (status, _) = http(&handle, "POST", "/requests", body);
+    assert!(status < 300);
+    assert!(rx.try_recv().is_err(), "same request must not dispatch twice");
+    assert_eq!(typed(&a, boss).matches("[bro-request ").count(), count);
+    let changed = serde_json::json!({"id":request,"utteranceId":utterance,"text":"different work"});
+    assert_eq!(http(&handle, "POST", "/requests", changed).0, 409);
+    a.close(looking);
+    a.publish_orbit_context();
+    let stale = serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"utteranceId":utterance,"text":"do not retarget"});
+    assert_eq!(http(&handle, "POST", "/requests", stale).0, 409);
+    assert!(rx.try_recv().is_err());
+    handle.shutdown();
+}
+
+#[test]
 fn voice_starts_an_orchestrator_on_the_roomiest_login_and_goes_to_it() {
     use crate::services::VoiceMsg;
     let mut a = app(true);
@@ -5029,7 +5085,7 @@ fn attention_moves_on_to_the_next_session_and_follows_it_to_its_tab() {
 }
 
 #[test]
-fn the_mouse_wheels_through_tabs_middle_click_closes_and_the_launcher_takes_a_project() {
+fn the_mouse_wheels_through_tabs_middle_click_closes_and_tabs_leave_the_launcher() {
     use super::project_tabs::{StripHit, StripTab};
     let mut a = app(true);
     tabs_on(&mut a);
@@ -5054,9 +5110,55 @@ fn the_mouse_wheels_through_tabs_middle_click_closes_and_the_launcher_takes_a_pr
     draw(&mut a);
     let r = strip_hit(&a, &StripHit::Tab(StripTab::Project(gains.clone()))).unwrap();
     click_at(&mut a, r, MouseButton::Left);
-    let Overlay::Launcher(l) = &a.overlay else { panic!("the launcher stays open") };
     let root = a.project_tabs().into_iter().find(|t| t.key == gains).unwrap().root;
-    assert_eq!(l.dir, root, "and starts in the tab's project");
+    assert!(matches!(a.overlay, Overlay::None), "the launcher closes when a tab is clicked");
+    assert_eq!(a.showing_tab(), Some(StripTab::Project(gains)));
+    assert_eq!(a.preferred_dir(), Some(root));
+}
+
+#[test]
+fn project_tabs_and_session_rows_close_new_session_and_settings() {
+    use super::project_tabs::{StripHit, StripTab};
+    for settings in [false, true] {
+        for target in ["all", "same-project", "other-project", "session"] {
+            let mut a = app(true);
+            tabs_on(&mut a);
+            let bro = tab_key(&a, "bro-cli-v2");
+            let gains = tab_key(&a, "justgains");
+            if target == "all" { a.show_tab(StripTab::All); }
+            else { a.show_tab(StripTab::Project(bro.clone())); }
+            let sessions: std::collections::HashSet<_> = a.panes.iter().filter(|(_, p)| p.is_terminal()).map(|(id, _)| *id).collect();
+            let settings_id = if settings {
+                a.open_view("settings");
+                Some(a.focused().unwrap())
+            } else {
+                a.open_launcher(None, Place::Tab);
+                None
+            };
+            draw(&mut a);
+            if target == "session" {
+                let (r, session) = a.side_hits.iter().find_map(|(r, h)| {
+                    let SideHit::Row(i) = h else { return None };
+                    let crate::sidebar::Row::Live { info, .. } = a.rows().get(*i)?.clone() else { return None };
+                    Some((*r, info.pane))
+                }).expect("a live session row");
+                click_at(&mut a, r, MouseButton::Left);
+                assert_eq!(a.focused(), Some(session));
+            } else {
+                let tab = match target {
+                    "all" => StripTab::All,
+                    "same-project" => StripTab::Project(bro),
+                    _ => StripTab::Project(gains),
+                };
+                let r = strip_hit(&a, &StripHit::Tab(tab.clone())).unwrap();
+                click_at(&mut a, r, MouseButton::Left);
+                assert_eq!(a.showing_tab(), Some(tab), "settings: {settings}, target: {target}");
+            }
+            assert!(!a.overlay.is_open());
+            if let Some(id) = settings_id { assert!(!a.panes.contains_key(&id), "Settings closes on navigation"); }
+            assert_eq!(sessions, a.panes.iter().filter(|(_, p)| p.is_terminal()).map(|(id, _)| *id).collect(), "navigation keeps every session");
+        }
+    }
 }
 
 #[test]
@@ -5781,6 +5883,88 @@ fn focus_mode_writes_replies_and_answers_choices_through_the_session() {
     // shells keep their terminal
     let shell = a.panes.iter().find(|(_, p)| p.as_term_ref().is_some_and(|t| t.meta.harness.is_none())).map(|(id, _)| *id).unwrap();
     assert!(!a.focus_view(shell));
+}
+
+#[test]
+fn focus_mode_shows_claude_plan_approval_and_forwards_its_answers() {
+    use crate::panes::term::Term;
+    let mut a = app(true);
+    a.focus.on = true;
+    let meta = a.panes[&a.focused().unwrap()].as_term_ref().unwrap().meta.clone();
+    let screen = include_str!("../../tests/fixtures/claude-plan-approval.txt").replace('\n', "\r\n");
+    let mut term = Term::fixed(meta, &screen, a.svc.clone());
+    term.set_screen_status(Some(Activity::Blocked));
+    let id = a.new_tab(Box::new(term));
+    assert!(a.focus_view(id));
+    let c = a.focus_choice(id).expect("the plan approval appears in focus view");
+    assert_eq!(c.options.len(), 3);
+    assert_eq!(c.options[1].label, "Yes, manually approve edits");
+    assert!(term_of(&mut a, id).sent.is_empty(), "showing the plan must not answer it");
+
+    for (code, expected) in [(KeyCode::Down, "\x1b[B"), (KeyCode::Enter, "\r"), (KeyCode::Char('2'), "2"), (KeyCode::BackTab, "\x1b[Z"), (KeyCode::Esc, "\x1b")] {
+        key(&mut a, code, KeyModifiers::NONE);
+        assert_eq!(String::from_utf8(std::mem::take(&mut term_of(&mut a, id).sent)).unwrap(), expected);
+    }
+
+    term_of(&mut a, id).feed(b"\x1b[2J\x1b[HImplementing the plan\r\nesc to interrupt");
+    term_of(&mut a, id).set_screen_status(Some(Activity::Working));
+    assert!(a.focus_choice(id).is_none(), "the approval disappears when work resumes");
+}
+
+#[test]
+fn focus_mode_keeps_native_forms_visible_and_preserves_the_draft() {
+    use crate::panes::term::Term;
+    for screen in [
+        "Which features?\r\n❯ [ ] Logging\r\n  [x] Metrics\r\nSpace to toggle · Enter to confirm · Esc to cancel",
+        "MCP server \"demo\" requests your input\r\nName:\r\n❯ Accept\r\n  Decline\r\nEsc to cancel",
+        "Question 1/2\r\nWhere should files go?\r\n› Type your answer\r\nenter to submit answer | esc to interrupt",
+        "Question 1/2\r\nChoose one\r\n› 1. One\r\n  2. Two\r\ntab to add notes | enter to submit answer | esc to interrupt",
+        "1 of 2\r\nChoose one\r\n› 1. One\r\n  2. Other\r\nenter submit · esc skip · tab main prompt",
+        "? 2 questions\r\nalt+up to answer",
+        "An agent's new form that Bro has not seen before",
+    ] {
+        let mut a = app(true);
+        a.focus.on = true;
+        let meta = a.panes[&a.focused().unwrap()].as_term_ref().unwrap().meta.clone();
+        let mut term = Term::fixed(meta, screen, a.svc.clone());
+        term.set_screen_status(Some(Activity::Blocked));
+        let id = a.new_tab(Box::new(term));
+        a.focus.draft(id).area.set_text("Keep this draft");
+        assert!(!a.focus_view(id), "the native form must be visible: {screen}");
+        key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(term_of(&mut a, id).sent, b"x", "typing reaches the native form");
+        assert_eq!(a.focus.drafts[&id].area.text(), "Keep this draft");
+        term_of(&mut a, id).feed(b"\x1b[2J\x1b[HWorking again\r\nesc to interrupt");
+        term_of(&mut a, id).set_screen_status(Some(Activity::Working));
+        assert!(a.focus_view(id), "the conversation returns after the form closes");
+        assert_eq!(a.focus.drafts[&id].area.text(), "Keep this draft");
+    }
+}
+
+#[test]
+fn focus_prompt_buttons_commit_once_and_reject_stale_cards() {
+    use crate::panes::term::Term;
+    let mut a = app(true);
+    a.focus.on = true;
+    let meta = a.panes[&a.focused().unwrap()].as_term_ref().unwrap().meta.clone();
+    let mut term = Term::fixed(meta, "First question?\r\n❯ 1. Yes\r\n  2. No", a.svc.clone());
+    term.set_screen_status(Some(Activity::Blocked));
+    let id = a.new_tab(Box::new(term));
+    let first = a.focus_choice(id).unwrap();
+    assert!(a.focus_answer(id, &first, "2"));
+    assert_eq!(std::mem::take(&mut term_of(&mut a, id).sent), b"\x1b[B\r");
+    assert!(!a.focus_answer(id, &first, "2"), "a double click must not submit twice");
+    assert!(term_of(&mut a, id).sent.is_empty());
+
+    term_of(&mut a, id).feed("\x1b[2J\x1b[HSecond question?\r\n  1. Yes\r\n❯ 2. No".as_bytes());
+    assert!(!a.focus_answer(id, &first, "1"), "the old card cannot answer the next question");
+    assert!(term_of(&mut a, id).sent.is_empty());
+    let second = a.focus_choice(id).unwrap();
+    assert!(a.focus_answer(id, &second, "1"));
+    assert_eq!(std::mem::take(&mut term_of(&mut a, id).sent), b"\x1b[A\r");
+    term_of(&mut a, id).feed(b"\x1b[2J\x1b[HWorking again\r\nesc to interrupt");
+    assert!(!a.focus_answer(id, &second, "1"));
+    assert!(a.focus_choice(id).is_none(), "a successfully read empty screen clears the old card");
 }
 
 #[test]

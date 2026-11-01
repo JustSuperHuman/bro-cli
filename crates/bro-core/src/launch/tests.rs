@@ -102,6 +102,44 @@ fn setup() -> Sandbox {
 }
 
 #[test]
+fn installed_justbrowse_reaches_local_and_pooled_sessions_without_a_browser_toggle() {
+    let sb = setup();
+    use crate::util::atomic_write;
+    atomic_write(&crate::justbrowse::extension_dir().join("manifest.json"), b"{}").unwrap();
+    atomic_write(&crate::justbrowse::install_dir().join("bridge/dist/cli.js"), b"// bridge").unwrap();
+    let skill = crate::tool_skills::cache_dir(crate::tool_skills::BROWSER);
+    atomic_write(&skill.join("SKILL.md"), b"---\nname: justbrowse-browser\n---\n").unwrap();
+    atomic_write(&skill.join("references/tools.md"), b"complete reference").unwrap();
+    for profile in [None, Some("claude:work")] {
+        let mut s = spec(Harness::Claude, profile, None, None);
+        s.extra_args = vec!["--".into(), "a literal prompt".into()];
+        let command = build(&s, &ctx()).unwrap();
+        let home = profile.map_or_else(crate::paths::claude_local_dir, |_| crate::paths::claude_accounts_dir().join("work"));
+        let config = home.join("bro-browser/justbrowse-mcp.json");
+        assert!(has_seq(&command.args, &["--mcp-config", &config.to_string_lossy()]));
+        assert!(command.args.iter().position(|a| a == "--mcp-config").unwrap() < command.args.iter().position(|a| a == "--").unwrap());
+        assert!(home.join("skills/justbrowse-browser/references/tools.md").is_file());
+        s.extra_args = vec!["--strict-mcp-config".into()];
+        let strict = build(&s, &ctx()).unwrap();
+        assert!(!strict.args.iter().any(|a| a.ends_with("justbrowse-mcp.json")));
+    }
+    for profile in [None, Some("codex:smol")] {
+        let command = build(&spec(Harness::Codex, profile, None, None), &ctx()).unwrap();
+        assert!(command.args.iter().any(|a| a == "mcp_servers.justbrowse.url=\"http://127.0.0.1:12306/mcp\""));
+        let home = profile.map_or_else(crate::paths::codex_local_dir, |_| crate::paths::codex_profiles_dir().join("smol"));
+        assert!(home.join("skills/justbrowse-browser/.bro-managed").is_file());
+    }
+    let custom = crate::paths::codex_profiles_dir().join("smol/config.toml");
+    atomic_write(&custom, b"[mcp_servers.justbrowse]\ncommand = 'custom-bridge'\nenabled = false\n").unwrap();
+    let command = build(&spec(Harness::Codex, Some("codex:smol"), None, None), &ctx()).unwrap();
+    assert!(!command.args.iter().any(|a| a.starts_with("mcp_servers.justbrowse.")), "preserve custom transports and disabled entries");
+    assert!(!sb.home().join(".claude.json").exists(), "Bro does not edit global agent configuration");
+    atomic_write(&sb.home().join(".claude.json"), br#"{"mcpServers":{"justbrowse":{"command":"custom-bridge"}},"disabledMcpServers":["justbrowse"]}"#).unwrap();
+    let command = build(&spec(Harness::Claude, None, None, None), &ctx()).unwrap();
+    assert!(!command.args.iter().any(|a| a.ends_with("justbrowse-mcp.json")), "preserve the user's own browser MCP and disabled setting");
+}
+
+#[test]
 fn agent_summary_preload_is_opt_in_and_only_wires_claude_launches() {
     let sb = setup();
     let mut context = ctx();

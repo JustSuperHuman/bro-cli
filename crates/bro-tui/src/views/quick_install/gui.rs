@@ -21,6 +21,8 @@ const BG: usize = 0;
 const TICK_ALL: usize = 1;
 const TICK_NONE: usize = 2;
 const LOOK: usize = 3;
+const EXTENSION_FOLDER: usize = 4;
+const CHECK_BROWSER: usize = 5;
 /// `ROW + i`: selectable row `i` (the tools, then the install button)
 const ROW: usize = 100;
 
@@ -123,11 +125,22 @@ pub(crate) fn draw(v: &mut QuickInstallView, ui: &mut Ui, area: Rect, cx: &mut C
         let lead = format!("{} · how: ", tool.name());
         ui.rich(&[(lead, Style::new(size::SMALL, weight::MEDIUM, t.muted)), (h.clone(), Style::mono(size::SMALL, t.text.mix(t.muted, 0.2)))], size::SMALL, Some(inner_w), true, Some(2))
     });
+    let setup = match v.row() {
+        Row::Tool(tool @ (Tool::JustBrowse | Tool::AgentDesktop)) => bro_core::quick_install::after_install(tool)
+            .map(|s| ui.para(&s, Style::new(size::SMALL, weight::REGULAR, t.text), inner_w, None)),
+        _ => None,
+    };
+    let browser_actions = matches!(v.row(), Row::Tool(Tool::JustBrowse)) && v.installed(Tool::JustBrowse, cx);
+    let folder_w = key_button_width(ui, None, "Open extension folder", None);
+    let check_w = key_button_width(ui, None, "Check connection", None);
+    let stack_browser_actions = folder_w + check_w + 8.0 > inner_w;
+    let actions_h = if stack_browser_actions { BUTTON_H * 2.0 + 8.0 } else { BUTTON_H };
+    let setup_h = setup.as_ref().map_or(0.0, |b| 12.0 + b.h) + if browser_actions { 12.0 + actions_h } else { 0.0 };
     let notes: Vec<&str> = std::iter::once("each installer runs in a new tab so you can follow it and answer its prompts")
         .chain(v.watching.is_some().then_some("open a new terminal or restart bro afterwards so new sessions find the new tools on PATH"))
         .collect();
     let hints_y = col.bottom() - 18.0;
-    let bar_full = bar_pad + BUTTON_H + 12.0 + notes.len() as f32 * 20.0 + how_box.as_ref().map_or(0.0, |b| 10.0 + 1.0 + 10.0 + b.h) + bar_pad;
+    let bar_full = bar_pad + BUTTON_H + 12.0 + notes.len() as f32 * 20.0 + how_box.as_ref().map_or(0.0, |b| 10.0 + 1.0 + 10.0 + b.h) + setup_h + bar_pad;
     // it grows and shrinks (the how line comes and goes with the selection) instead of jumping
     let bar_h = ui.ease(("quick-install-bar-h", id), bar_full, 140.0);
     let bar = Rect::new(col.x, hints_y - 16.0 - bar_h, col.w, bar_h);
@@ -251,6 +264,18 @@ pub(crate) fn draw(v: &mut QuickInstallView, ui: &mut Ui, area: Rect, cx: &mut C
         ui.hline(bx, by, inner_w, t.hairline);
         by += 11.0;
         ui.draw(b, Point::new(bx, by));
+        by += b.h;
+    }
+    if let Some(b) = &setup {
+        by += 12.0;
+        ui.draw(b, Point::new(bx, by));
+        by += b.h;
+    }
+    if browser_actions {
+        by += 12.0;
+        key_button(ui, Rect::new(bx, by, folder_w, BUTTON_H), None, "Open extension folder", None, Kind::Secondary, Some(Action::View(id, EXTENSION_FOLDER)));
+        let check = if stack_browser_actions { Rect::new(bx, by + BUTTON_H + 8.0, check_w, BUTTON_H) } else { Rect::new(bx + folder_w + 8.0, by, check_w, BUTTON_H) };
+        key_button(ui, check, None, "Check connection", None, Kind::Ghost, Some(Action::View(id, CHECK_BROWSER)));
     }
     ui.unclip();
 
@@ -356,6 +381,7 @@ fn tool_mark(tool: Tool) -> Mark {
         Tool::JustWatch => "\u{F13B4}",
         Tool::JustImagine => "\u{F0E0C}",
         Tool::JustBrowse => "\u{F059F}",
+        Tool::AgentDesktop => "\u{F0379}",
         Tool::Git => "\u{F02A2}",
         Tool::GitHubCli => "\u{F02A4}",
         Tool::Node => "\u{F0399}",
@@ -398,6 +424,24 @@ pub(crate) fn click(v: &mut QuickInstallView, n: usize, _p: Point, _mods: KeyMod
         TICK_ALL => KeyCode::Char('a'),
         TICK_NONE => KeyCode::Char('n'),
         LOOK => KeyCode::Char('r'),
+        EXTENSION_FOLDER => {
+            if let Err(e) = crate::panes::links::open(&bro_core::justbrowse::extension_dir().to_string_lossy()) {
+                cx.toast(crate::alerts::Kind::Error, format!("Couldn't open the extension folder: {e}"));
+            }
+            return;
+        }
+        CHECK_BROWSER => {
+            let svc = cx.svc.clone();
+            std::thread::spawn(move || {
+                let (kind, text) = match bro_core::justbrowse::connected() {
+                    Ok(true) => (crate::alerts::Kind::Info, "JustBrowseMCP is connected to your browser. New sessions can use it.".to_string()),
+                    Ok(false) => (crate::alerts::Kind::Error, "The bridge is running, but the browser is not connected. Load the extension and click Connect.".to_string()),
+                    Err(e) => (crate::alerts::Kind::Error, e),
+                };
+                svc.send(crate::pane::Event::Toast(kind, text));
+            });
+            return;
+        }
         n if n >= ROW => {
             v.sel = (n - ROW).min(rows().len() - 1);
             v.activate(cx);

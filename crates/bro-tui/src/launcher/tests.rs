@@ -195,7 +195,9 @@ fn toggles_and_esc() {
     ctrl(&mut l, 'e');
     assert_eq!(l.permission, Permission::Default);
     ctrl(&mut l, 's');
-    assert_eq!(l.place, Place::Split);
+    ctrl(&mut l, 'b');
+    assert_eq!(l.place, Place::Tab, "placement comes from the entry point, not a hidden shortcut");
+    assert_eq!(l.browser, BrowserMode::Off);
     narrow(&mut l, "zz");
     assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::None), "esc clears the filter first");
     assert!(matches!(key(&mut l, KeyCode::Esc), Outcome::Close));

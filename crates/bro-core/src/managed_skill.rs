@@ -38,6 +38,23 @@ pub fn write(home: &Path, name: &str, files: &[&str]) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Copy a complete skill tree, including references, scripts and binary assets. Only this feature's
+/// own marked copy may be refreshed; personal skills, repository-owned copies and links stay untouched.
+pub fn write_tree(home: &Path, name: &str, source: &Path) -> std::io::Result<bool> {
+    let dir = skill_dir(home, name);
+    if !source.join("SKILL.md").is_file() {
+        return Ok(false);
+    }
+    if std::fs::symlink_metadata(&dir).is_ok()
+        && (std::fs::symlink_metadata(&dir)?.file_type().is_symlink() || crate::skill_repos::owner(&dir).as_deref() != Some(""))
+    {
+        return Ok(false);
+    }
+    crate::skill_repos::mirror(source, &dir, true)?;
+    crate::browser::write_if_changed(&dir.join(MARKER), "written by bro; kept with its installed tool\n")?;
+    Ok(true)
+}
+
 /// Removes the copy bro wrote under `home`. A link is skipped (what it points at is removed
 /// where it really lives); your own skill is never removed.
 pub fn remove(home: &Path, name: &str) {

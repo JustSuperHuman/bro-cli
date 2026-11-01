@@ -647,6 +647,9 @@ fn handle(host: &Arc<Host>, me: &Arc<Conn>, kind: u8, body: &[u8]) -> bool {
         }
         wire::SET => {
             if let Ok(s) = serde_json::from_slice::<Set>(body) {
+                // Native companion status is authoritative only from the current driver.
+                if s.key == "bro.native.orbit-status.v1"
+                    && (host.primary.load(Ordering::SeqCst) != me.id || s.value.len() > 16 * 1024) { return true; }
                 host.values.lock().insert(s.key, s.value);
             }
         }

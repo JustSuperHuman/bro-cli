@@ -89,7 +89,8 @@ from a browser's bitmap copy. Clipboard contents stay unchanged.
 ## Fonts
 
 Settings → Appearance → **Font** switches the terminal font live: bro bundles
-JetBrains Mono, Fira Code, IBM Plex Mono, Maple Mono, Victor Mono, Monaspace Krypton and Radon, Space Mono,
+JetBrains Mono, Fira Code, IBM Plex Mono, Maple Mono, JustGains Mono (ours: Poppins on a grid, where `:mal:`,
+`:xp:` and friends draw as icons), Victor Mono, Monaspace Krypton and Radon, Space Mono,
 Share Tech Mono, Comic Mono, Departure Mono and VT323, video-game-era Kode Mono, Doto, Monocraft (Minecraft),
 IBM VGA 8x16 (DOS), Workbench (Amiga), Sixtyfour (C64) and Press Start 2P, plus the Nerd Font symbols for its icons —
 all open source, licences in [crates/bro-tui/assets/fonts/licenses](../crates/bro-tui/assets/fonts/licenses).

@@ -111,6 +111,7 @@ impl App {
 
     /// Show `tab` (nothing changes when it's showing already).
     pub(crate) fn show_tab(&mut self, tab: StripTab) {
+        self.dismiss_session_screen();
         if tab != StripTab::Orchestrator && self.showing_tab().as_ref() == Some(&tab) {
             self.leave_sidebar();
             return;
@@ -155,7 +156,8 @@ impl App {
 
     /// A click (or ⏎) on a tab. All again goes back to the session you're on, like the tile-all shortcut.
     pub(crate) fn click_tab(&mut self, tab: StripTab) {
-        if tab == StripTab::All && self.showing_tab() == Some(StripTab::All) {
+        let dismissed = self.dismiss_session_screen();
+        if !dismissed && tab == StripTab::All && self.showing_tab() == Some(StripTab::All) {
             self.toggle_tiles();
         } else {
             self.show_tab(tab);

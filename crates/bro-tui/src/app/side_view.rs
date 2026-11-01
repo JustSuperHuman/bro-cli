@@ -607,6 +607,7 @@ impl App {
         let status_rows = if self.usage_expanded { STATUS_ROWS } else { 0 };
         // (a footer of only the status rows has no header)
         if area.height > status_rows.max(2) && !usage.is_empty() {
+            let show_h5 = usage.iter().any(|u| u.h5.is_some());
             // header: "▸ usage left ⓘ ───  5h  wk" — click to switch totals ⇄ every profile; ⓘ opens the stats
             let head = row(y);
             let arrow = if self.usage_expanded { "▾" } else { "▸" };
@@ -616,7 +617,7 @@ impl App {
             let info_style = if info_at.contains(self.hover) { ui::bold_accent(t) } else { muted(t) };
             // column heads sit over the figures: " 46%" + " " + " 39%" + " "; holding alt, the rows say when they reset
             let resets = self.alt_hints();
-            let heads = if resets { "resets " } else { " 5h   wk  " };
+            let heads = if resets { "resets " } else if show_h5 { " 5h   wk  " } else { " wk  " };
             let fill = (area.width as usize).saturating_sub(ui::width(&label) + ui::width(&info) + ui::width(heads) + 1);
             ui::line_lr(f, head, vec![Span::styled(label, ui::accent(t)), Span::styled(info, info_style), Span::styled("─".repeat(fill), fg(t.frame))], vec![Span::styled(heads, muted(t))]);
             // the ⓘ wins over the header (hits are searched in order)
@@ -624,7 +625,7 @@ impl App {
             self.side_hits.push((head, SideHit::UsageToggle));
             y += 1;
             let name_w = usage.iter().map(|u| ui::width(&u.label)).max().unwrap_or(6).clamp(5, 10);
-            let meter_n = (area.width as usize).saturating_sub(name_w + 3 + 12).clamp(0, 8);
+            let meter_n = (area.width as usize).saturating_sub(name_w + 3 + if show_h5 { 12 } else { 7 }).clamp(0, 8);
             for u in usage {
                 if y + status_rows >= area.bottom() {
                     break;
@@ -665,8 +666,10 @@ impl App {
                         {
                             left.push(Span::styled(crate::util::countdown(at - now), muted(t)));
                         }
-                        right.extend(figure(u.h5, u.approx, t));
-                        right.push(Span::raw(" "));
+                        if show_h5 {
+                            right.extend(figure(u.h5, u.approx, t));
+                            right.push(Span::raw(" "));
+                        }
                         right.extend(figure(u.wk, false, t));
                         right.push(Span::raw(" "));
                     }

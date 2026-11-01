@@ -182,7 +182,9 @@ impl Session {
             agents::observe_with_hint(&self.summary, osc_agent, &text, self.agent_hint);
         self.screen_limit = observation.agent.and_then(|_| bro_core::sessions::limits::UsageLimit::from_screen(&text));
         let attention_changed = self.refresh_attention();
-        let waiting = observation.agent.is_some() && (self.screen_limit.is_some() || prompt::detect_prompt(&text).is_some());
+        let waiting = observation.agent.is_some() && (self.screen_limit.is_some()
+            || bro_core::terminal_prompt::waiting(&text.lines().map(str::to_string).collect::<Vec<_>>())
+            || prompt::detect_prompt(&text).is_some());
         let activity = agents::activity(&observation, waiting).map(str::to_owned);
         let agent = observation.agent.map(|agent| agent.id().to_owned());
         let source = observation.source.map(str::to_owned);
@@ -522,5 +524,17 @@ mod tests {
             })
         );
         assert_eq!(session.observe().transition, None);
+    }
+
+    #[test]
+    fn native_forms_request_attention_without_inventing_single_select_buttons() {
+        let mut session = session(100, 30);
+        session.summary.agent = Some("claude".into());
+        session.summary.agent_source = Some("screen".into());
+        session.feed("MCP server \"demo\" requests your input\r\nName:\r\n❯ Accept\r\n  Decline\r\nEsc to cancel", &mut vec![]);
+        assert!(matches!(session.observe().transition, Some(Transition::Awaiting { .. })));
+        assert_eq!(session.summary.agent_activity.as_deref(), Some("awaiting"));
+        assert!(session.input_context()["prompt"].is_null());
+        assert_eq!(session.input_context()["busy"], false);
     }
 }

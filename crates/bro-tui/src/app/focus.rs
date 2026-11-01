@@ -5,7 +5,7 @@
 
 use super::App;
 use crate::alerts::Kind;
-use crate::focus::{Change, Choice, Command, Draft, Menu, MenuKind, Scroll, Sent, choice, command_query, matching, visible};
+use crate::focus::{Change, Choice, Command, Draft, Menu, MenuKind, Scroll, Sent, command_query, matching, visible};
 use crate::keymap::Act;
 use crate::layout::PaneId;
 use crate::pane::{Activity, Event};
@@ -159,7 +159,10 @@ fn edit_box(d: &mut Draft, k: KeyEvent) -> bool {
 impl App {
     /// `id` shows its conversation instead of its terminal.
     pub(crate) fn focus_view(&self, id: PaneId) -> bool {
-        self.focus.on && !self.focus.peek.contains(&id) && self.panes.get(&id).and_then(|p| p.as_term_ref()).is_some_and(focusable)
+        self.focus.on && !self.focus.peek.contains(&id) && self.panes.get(&id).is_some_and(|p| {
+            p.as_term_ref().is_some_and(|t| focusable(t)
+                && (p.activity() != Some(Activity::Blocked) || t.limit_warning().is_some() || t.focus_choice().is_some()))
+        })
     }
 
     /// Focus mode on / off (the desktop app's; the terminal UI says where it is). A session showing its terminal
@@ -189,7 +192,11 @@ impl App {
         if p.activity() != Some(Activity::Blocked) {
             return None;
         }
-        choice(&p.as_term_ref()?.try_screen_rows()?)
+        p.as_term_ref()?.focus_choice()
+    }
+
+    pub(crate) fn focus_answer(&mut self, id: PaneId, shown: &Choice, key: &str) -> bool {
+        self.panes.get_mut(&id).and_then(|p| p.as_term()).is_some_and(|t| t.answer_prompt_option(key, Some(shown)))
     }
 
     /// What you've said in `id`, oldest first: the conversation's messages, then those on their way.

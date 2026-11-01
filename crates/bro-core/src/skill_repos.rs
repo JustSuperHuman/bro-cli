@@ -472,7 +472,10 @@ pub(crate) fn owner(dir: &Path) -> Option<String> {
 
 /// Copies every file of `src` into `dst` (only what changed) and removes what `src` no longer has.
 /// Links and `.git` are skipped.
-fn mirror(src: &Path, dst: &Path, top: bool) -> io::Result<()> {
+pub(crate) fn mirror(src: &Path, dst: &Path, top: bool) -> io::Result<()> {
+    if std::fs::symlink_metadata(dst).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing to mirror into a link: {}", dst.display())));
+    }
     std::fs::create_dir_all(dst)?;
     let mut keep = vec![];
     for e in std::fs::read_dir(src)?.flatten() {
@@ -680,7 +683,15 @@ fn refresh(repo: &str, dir: &Path, projects: &[PathBuf]) -> Result<(), String> {
 /// `projects`' own folders). Installs nothing new. Blocking (network): call off the UI thread.
 pub fn sync(repo: &str, projects: &[PathBuf]) -> Result<RepoSkills, String> {
     let dir = cache_dir(repo);
-    let pulled = if dir.join(".git").exists() { pull(&dir, repo) } else { Err(String::new()) };
+    let listed = sync_at(repo, &dir)?;
+    refresh(repo, &dir, projects)?;
+    Ok(listed)
+}
+
+/// A separate checkout for tool-owned skills avoids races with the user's watched repositories.
+/// Lists the checkout only; its caller owns publication into agent homes.
+pub(crate) fn sync_at(repo: &str, dir: &Path) -> Result<RepoSkills, String> {
+    let pulled = if dir.join(".git").exists() { pull(dir, repo) } else { Err(String::new()) };
     if pulled.is_err() {
         // no clone yet, or one git can't bring up to date: start over
         clone(repo, &dir)?;
@@ -689,7 +700,6 @@ pub fn sync(repo: &str, projects: &[PathBuf]) -> Result<RepoSkills, String> {
     if let Some(p) = pick(repo).filter(|_| out.skills.is_empty()) {
         return Err(missing(repo, p));
     }
-    refresh(repo, &dir, projects)?;
     Ok(out)
 }
 

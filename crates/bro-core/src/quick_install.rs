@@ -25,6 +25,8 @@ pub enum Tool {
     JustImagine,
     /// your browser as an MCP server; needs Node.js, and the extension is loaded by hand once
     JustBrowse,
+    /// Native desktop automation, with Bro-managed main and platform skills (npm + Git).
+    AgentDesktop,
     Git,
     GitHubCli,
     Node,
@@ -71,7 +73,7 @@ impl Group {
 
 impl Tool {
     /// Every tool, in list order, which is install order except for [Tool::install_rank].
-    pub const ALL: [Tool; 24] = [
+    pub const ALL: [Tool; 25] = [
         Tool::JustTools,
         Tool::JustPaste,
         Tool::JustWatch,
@@ -90,6 +92,7 @@ impl Tool {
         Tool::Agent(Harness::Codex),
         Tool::Agent(Harness::Pi),
         Tool::Agent(Harness::Omp),
+        Tool::AgentDesktop,
         Tool::Ripgrep,
         Tool::Ffmpeg,
         Tool::YtDlp,
@@ -106,6 +109,7 @@ impl Tool {
             Tool::JustWatch => "justwatch",
             Tool::JustImagine => "justimagine",
             Tool::JustBrowse => "justbrowse",
+            Tool::AgentDesktop => "agent-desktop",
             Tool::Git => "git",
             Tool::GitHubCli => "gh",
             Tool::Node => "node",
@@ -134,6 +138,7 @@ impl Tool {
             "just-watch" | "watch" => Some(Tool::JustWatch),
             "just-imagine" | "imagine" => Some(Tool::JustImagine),
             "just-browse" | "justbrowsemcp" | "browse" | "browser" | "browser-mcp" | "chrome-mcp" | "mcp-chrome" => Some(Tool::JustBrowse),
+            "desktop" | "agentdesktop" => Some(Tool::AgentDesktop),
             "github-cli" | "github" => Some(Tool::GitHubCli),
             "nodejs" | "node.js" | "npm" => Some(Tool::Node),
             "python3" | "py" => Some(Tool::Python),
@@ -169,6 +174,7 @@ impl Tool {
             Tool::JustWatch => "JustWatch",
             Tool::JustImagine => "JustImagine",
             Tool::JustBrowse => "JustBrowseMCP",
+            Tool::AgentDesktop => "agent-desktop",
             Tool::Git => "Git",
             Tool::GitHubCli => "GitHub CLI",
             Tool::Node => "Node.js LTS",
@@ -197,7 +203,8 @@ impl Tool {
             Tool::JustPaste => "Ctrl+V in Explorer saves copied images, downloads copied links, clones repos; file copies stay Windows'",
             Tool::JustWatch => "tray app that keeps your dev servers running; agents restart them and read their logs",
             Tool::JustImagine => "your own image, video, song and voice studio, always on in the background; agents generate through its API",
-            Tool::JustBrowse => "agents drive your own signed-in Chrome or Edge over MCP, each session in tabs of its own, without stealing focus",
+            Tool::JustBrowse => "control your signed-in browser in separate tabs; includes the unpacked extension and a managed skill",
+            Tool::AgentDesktop => "inspect and control desktop apps; Bro keeps its main skill and your platform guide together",
             Tool::Git => "version control; agents expect it",
             Tool::GitHubCli => "issues, pull requests and releases from the terminal",
             Tool::Node => "JavaScript runtime and npm; Codex and Pi install with it",
@@ -226,7 +233,7 @@ impl Tool {
             Tool::Git | Tool::GitHubCli => Group::Essentials,
             Tool::Node | Tool::Bun | Tool::Python | Tool::Uv | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => Group::Runtimes,
             Tool::Agent(_) => Group::Agents,
-            Tool::Ripgrep | Tool::Ffmpeg | Tool::YtDlp | Tool::Tailscale | Tool::PowerToys | Tool::ShareX => Group::Utilities,
+            Tool::AgentDesktop | Tool::Ripgrep | Tool::Ffmpeg | Tool::YtDlp | Tool::Tailscale | Tool::PowerToys | Tool::ShareX => Group::Utilities,
         }
     }
 
@@ -251,6 +258,7 @@ impl Tool {
         match self {
             Tool::JustImagine => Tool::ALL.len(),
             Tool::JustBrowse => Tool::ALL.len() + 1,
+            Tool::AgentDesktop => Tool::ALL.len() + 2,
             _ => Tool::ALL.iter().position(|t| *t == self).unwrap_or(Tool::ALL.len()),
         }
     }
@@ -273,6 +281,7 @@ impl Tool {
     /// Executables that show it's installed.
     fn exes(self) -> &'static [&'static str] {
         match self {
+            Tool::AgentDesktop => &["agent-desktop"],
             Tool::Git => &["git"],
             Tool::GitHubCli => &["gh"],
             Tool::Node => &["node"],
@@ -634,7 +643,7 @@ fn dotnet_script(major: u32) -> Step {
 /// The commands that install `tool` on `os`. JustTools, JustImagine and the agents have their own
 /// installers and get an empty plan.
 pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
-    if matches!(tool, Tool::JustTools | Tool::JustImagine | Tool::Agent(_)) {
+    if matches!(tool, Tool::JustTools | Tool::JustImagine | Tool::JustBrowse | Tool::AgentDesktop | Tool::Agent(_)) {
         return Ok(vec![]);
     }
     if tool == Tool::JustPaste {
@@ -649,13 +658,6 @@ pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
             Os::Windows { .. } => Ok(vec![powershell(crate::justwatch::installer_command())]),
             _ => Err("JustWatch is a Windows app".into()),
         };
-    }
-    if tool == Tool::JustBrowse {
-        // its own installer: the newest release, checked against its SHA-256
-        return Ok(vec![match os {
-            Os::Windows { .. } => powershell(crate::justbrowse::installer_command()),
-            _ => sh(crate::justbrowse::installer_command()),
-        }]);
     }
     if matches!(tool, Tool::ShareX | Tool::PowerToys) && !matches!(os, Os::Windows { .. }) {
         return Err(format!("{} is a Windows app", tool.name()));
@@ -780,7 +782,8 @@ pub fn how(tool: Tool, os: &Os) -> String {
         Tool::JustWatch => format!("{} · then its skill for new sessions", crate::justwatch::installer_command()),
         Tool::ShareX if matches!(os, Os::Windows { .. }) => "the newest setup-x64.exe from github.com/JustSuperHuman/ShareX releases, run elevated (/SILENT)".into(),
         Tool::JustImagine => crate::justimagine::how(),
-        Tool::JustBrowse => format!("{} · the extension, its native bridge (npm), the justbrowse-browser skill and the MCP server for Claude Code and Codex; then Load unpacked once", crate::justbrowse::installer_command()),
+        Tool::JustBrowse => "Bro downloads the release, verifies SHA256SUMS, extracts the extension and registers its bridge (Node.js 20+). Its skill and session MCP configuration stay managed by Bro.".into(),
+        Tool::AgentDesktop => "npm install -g agent-desktop; Bro downloads and maintains the main skill and this platform's guide (needs Node.js and Git).".into(),
         Tool::Agent(h) => match crate::agent_install::plan(h) {
             Ok(steps) => steps.iter().map(|s| s.display.as_str()).collect::<Vec<_>>().join(" && "),
             Err(e) => e,
@@ -803,6 +806,12 @@ pub(crate) fn run(step: &Step) -> Result<(), String> {
 
 /// Install `tool` (not JustTools or an agent) in the current terminal. `say` gets progress lines.
 pub fn install(tool: Tool, mut say: impl FnMut(&str)) -> Result<(), String> {
+    if tool == Tool::JustBrowse {
+        return crate::justbrowse::install(say).map_err(|e| format!("{e:#}"));
+    }
+    if tool == Tool::AgentDesktop {
+        return crate::agent_desktop::install(say);
+    }
     for step in plan(tool, &Os::detect())? {
         say(&format!("$ {}", step.display));
         if let Err(e) = run(&step) {
@@ -818,6 +827,9 @@ pub fn install(tool: Tool, mut say: impl FnMut(&str)) -> Result<(), String> {
 pub fn after_install(tool: Tool) -> Option<String> {
     if tool == Tool::JustBrowse {
         return Some(crate::justbrowse::after_install());
+    }
+    if tool == Tool::AgentDesktop {
+        return Some(crate::agent_desktop::after_install());
     }
     if tool == Tool::Tailscale {
         return Some(if cfg!(target_os = "linux") { "sign in: sudo tailscale up".into() } else { "sign in from the Tailscale app (tray / menu bar)".into() });
@@ -868,6 +880,13 @@ mod tests {
         assert_eq!(Tool::from_id("imagine"), Some(Tool::JustImagine));
         assert!(Tool::JustImagine.install_rank() > Tool::Node.install_rank() && Tool::JustImagine.install_rank() > Tool::Git.install_rank());
         assert_eq!(Tool::Node.install_rank(), pos(Tool::Node));
+        assert_eq!(Tool::from_id("desktop"), Some(Tool::AgentDesktop));
+        assert!(Tool::AgentDesktop.install_rank() > Tool::Node.install_rank() && Tool::AgentDesktop.install_rank() > Tool::Git.install_rank());
+        assert!(how(Tool::AgentDesktop, &Os::Windows { winget: false }).contains("npm install -g agent-desktop"));
+        assert!(how(Tool::JustBrowse, &Os::Windows { winget: false }).contains("SHA256SUMS"));
+        assert!(after_install(Tool::JustBrowse).unwrap().contains("Load unpacked"));
+        assert!(plan(Tool::JustBrowse, &Os::Windows { winget: false }).unwrap().is_empty());
+        assert!(plan(Tool::AgentDesktop, &Os::Windows { winget: false }).unwrap().is_empty());
     }
 
     #[test]

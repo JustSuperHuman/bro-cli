@@ -10,7 +10,7 @@ bro install codex --force          # reinstall / update one
 ```
 
 Tools: `justtools`, `justpaste` (Windows), `justwatch` (Windows), `justimagine`, `justbrowse`, `git`, `gh`, `node`, `bun`, `python`, `uv`, `dotnet9`, `dotnet10`, `dotnet11`,
-`claude`, `codex`, `pi`, `omp`, `rg`, `ffmpeg`, `yt-dlp`, `tailscale`, `powertoys` (Windows), `sharex` (Windows, JustSuperHuman's fork). Windows installs with WinGet, macOS with Homebrew
+`claude`, `codex`, `pi`, `omp`, `agent-desktop`, `rg`, `ffmpeg`, `yt-dlp`, `tailscale`, `powertoys` (Windows), `sharex` (Windows, JustSuperHuman's fork). Windows installs with WinGet, macOS with Homebrew
 (installed first if missing), Linux with apt, dnf, pacman, zypper or apk. Bun, uv and .NET on
 macOS / Linux (into `~/.dotnet`) use their official install scripts; JustTools, Claude Code, Codex,
 Pi, omp and JustWatch use their own installers.
@@ -35,15 +35,41 @@ compares the checkout with GitHub when it opens and every 12 hours, and says whe
 commits. Enter on settings → integrations → JustImagine, or `bro install justimagine --force`, pulls
 them, reinstalls dependencies and restarts the service.
 
-JustBrowseMCP lets agents drive your own signed-in Chrome, Edge or Brave over MCP, each session in
-background tabs of its own. `bro install justbrowse` runs
-[its installer](https://github.com/JustSuperHuman/mcp-chrome-but-good#install): the newest release,
-checked against its SHA-256, goes in `%LOCALAPPDATA%\JustBrowseMCP` (`~/Library/Application
-Support/JustBrowseMCP` on macOS, `~/.local/share/justbrowse-mcp` on Linux) with the extension, its
-native bridge, the native host for Chrome, Chromium, Edge and Brave, the `justbrowse-browser` skill and
-the `justbrowse` MCP server (`http://127.0.0.1:12306/mcp`) for Claude Code and Codex. It needs Node.js.
-Browsers only take an unpacked extension by hand, so load the printed `extension` folder once (Developer
-mode, **Load unpacked**) and click **Connect** in its popup. Run it again to update.
+## Browser and desktop tools
+
+`bro install justbrowse` downloads the newest [JustBrowseMCP release](https://github.com/JustSuperHuman/mcp-chrome-but-good/releases),
+requires a matching SHA-256 in `SHA256SUMS`, extracts the extension and registers its native bridge.
+It needs Node.js 20 or newer. Files go in `%LOCALAPPDATA%\JustBrowseMCP` on Windows,
+`~/Library/Application Support/JustBrowseMCP` on macOS, or `~/.local/share/justbrowse-mcp` on Linux
+(override with `JUSTBROWSE_DIR`; choose a release with `JUSTBROWSE_VERSION`).
+
+Browsers require one manual step:
+
+1. Open `chrome://extensions` or `edge://extensions` and turn on **Developer mode**.
+2. Choose **Load unpacked**, then select the installed `extension` folder.
+3. Open JustBrowseMCP's popup and click **Connect**. After updating, click **Reload** on the extensions page first.
+
+Select JustBrowseMCP in Quick install to see those instructions and the exact folder again.
+**Open extension folder** opens it; **Check connection** checks whether a browser is connected,
+not merely whether the bridge is running. New Claude and Codex sessions, including pooled logins,
+get the local `justbrowse` MCP server automatically. Bro does not rewrite global agent configuration.
+Claude's explicit `--strict-mcp-config` still excludes Bro's automatic browser configuration.
+
+`bro install agent-desktop` installs [Vercel's native desktop CLI](https://github.com/vercel-labs/agent-desktop)
+through npm. It needs Node.js and Git. Bro installs the main `agent-desktop` skill and the guide for
+this machine's OS, including their reference files—not the other platforms, FFI integration or optional
+model-provider helper. Run `agent-desktop status` to check readiness. On macOS, use
+`agent-desktop permissions --guide` to grant Accessibility access. On Linux, run from the graphical
+session with `at-spi2-core` available; individual features may need X11, GNOME or `wl-clipboard`.
+Bro does not grant OS permissions or enable physical input automatically.
+
+Both tools appear under **Skills → Bro**. Bro keeps a complete cache in `~/.bro/tool-skills`,
+refreshes its managed copies on startup and every six hours, and supplies cached skills to new profiles
+without network access during launch. Desktop skill downloads follow the Skills auto-sync setting;
+the browser skill comes from its installed release (older installations can fetch it from the repository).
+Personal skills and links of the same name stay untouched. Update either tool with
+`bro install <tool> --force`. The launcher no longer has Browser or Opens as switches; permissions remain
+per session, and explicit split entry points still work.
 
 In bro, Quick Install is a checklist: settings → integrations → Quick install (or Enter on JustTools
 when it isn't installed), the palette, or `prefix I`. Tick tools with space and press `i`: JustTools

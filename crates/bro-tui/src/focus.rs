@@ -432,127 +432,9 @@ impl Draft {
 // The choice on screen
 // ---------------------------------------------------------------------------------------------------------
 
-/// A choice the harness shows and waits on: a permission prompt, a question with options.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Choice {
-    /// "Do you want to proceed?"
-    pub question: String,
-    /// the lines just above the question (what it's about: "Bash command", "npm publish"), top first
-    pub context: Vec<String>,
-    pub options: Vec<Opt>,
-    /// the keys it says it takes ("Enter to select · Tab/Arrow keys to navigate · Esc to cancel")
-    pub hint: Option<String>,
-}
-
-/// One option of a [`Choice`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Opt {
-    /// the number that picks it
-    pub key: String,
-    pub label: String,
-    /// the line(s) under it
-    pub detail: Option<String>,
-    /// the harness's cursor is on it
-    pub focused: bool,
-}
-
-/// What a row says once the frame around it is gone: box-drawing edges off both ends, trailing space off.
-fn unframed(row: &str) -> String {
-    const FRAME: &[char] = &['│', '┃', '║', '╭', '╰', '╮', '╯', '▌', '▐'];
-    let t = row.trim_end();
-    let t = t.trim_end_matches(|c: char| FRAME.contains(&c) || c.is_whitespace());
-    let t = t.strip_prefix(|c: char| FRAME.contains(&c)).unwrap_or(t);
-    t.to_string()
-}
-
-fn indent(row: &str) -> usize {
-    row.chars().take_while(|c| c.is_whitespace()).count()
-}
-
-/// The option on a row: (its number, where the number starts, its label, whether the cursor is on it).
-fn option(row: &str) -> Option<(String, usize, String, bool)> {
-    let key = crate::panes::term::prompt_option(row)?;
-    let col = row.find(&*key)?;
-    let before = &row[..col];
-    let focused = before.chars().any(|c| matches!(c, '❯' | '›' | '>' | '●'));
-    let label = row[col + key.len() + 1..].trim().to_string();
-    Some((key, row[..col].chars().count(), label, focused))
-}
-
-/// A line of key hints under a choice.
-fn is_hint(row: &str) -> bool {
-    let l = row.to_lowercase();
-    ["enter to", "esc to", "tab to", "arrow keys", "to navigate", "to cancel", "to select", "to confirm"].iter().any(|m| l.contains(m))
-}
-
-/// A rule or a box's edge: where the context above a question stops.
-fn is_rule(row: &str) -> bool {
-    let t = row.trim();
-    !t.is_empty() && t.chars().all(|c| matches!(c, '─' | '━' | '═' | '-' | '╌' | '┄' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘'))
-}
-
-/// The choice at the bottom of a screen (its rows, top first): numbered options from 1 under a question,
-/// anything indented under an option its detail. None when there isn't one (two options at least).
-pub fn choice(rows: &[String]) -> Option<Choice> {
-    let lines: Vec<String> = rows.iter().map(|r| unframed(r)).collect();
-    let end = lines.iter().rposition(|l| !l.trim().is_empty())? + 1;
-    let start = end.saturating_sub(48);
-    let opts: Vec<usize> = (start..end).filter(|&i| option(&lines[i]).is_some()).collect();
-    let &last = opts.last()?;
-    // the options must be the last thing on screen: below them only their details, blanks and key hints
-    let tail_ok = (last + 1..end).all(|i| {
-        let l = &lines[i];
-        l.trim().is_empty() || is_hint(l) || is_rule(l) || indent(l) > option(&lines[last]).map_or(0, |o| o.1) + 1
-    });
-    if !tail_ok {
-        return None;
-    }
-    // walk up while the rows between options are details (indented under the option above) or blank
-    let mut group = vec![last];
-    let mut at = last;
-    while let Some(&prev) = opts.iter().rev().find(|&&j| j < at) {
-        let col = option(&lines[prev]).map_or(0, |o| o.1);
-        if (prev + 1..at).all(|k| lines[k].trim().is_empty() || indent(&lines[k]) > col + 1) {
-            group.push(prev);
-            at = prev;
-        } else {
-            break;
-        }
-    }
-    group.reverse();
-    let mut options: Vec<Opt> = vec![];
-    for (n, &i) in group.iter().enumerate() {
-        let (key, col, label, focused) = option(&lines[i])?;
-        let until = group.get(n + 1).copied().unwrap_or(end);
-        let detail: Vec<&str> = (i + 1..until).map(|k| lines[k].as_str()).take_while(|l| !l.trim().is_empty()).filter(|l| indent(l) > col + 1 && !is_hint(l)).map(str::trim).collect();
-        options.push(Opt { key, label, detail: (!detail.is_empty()).then(|| detail.join(" ")), focused });
-    }
-    // numbered from 1, in order: a numbered list in the agent's reply isn't a choice
-    let numbered = options.iter().enumerate().all(|(i, o)| o.key == (i + 1).to_string());
-    if options.len() < 2 || !numbered {
-        return None;
-    }
-    let mut q = group[0];
-    while q > 0 && lines[q - 1].trim().is_empty() {
-        q -= 1;
-    }
-    let question = if q > 0 { lines[q - 1].trim().to_string() } else { String::new() };
-    let mut context = vec![];
-    let mut k = q.saturating_sub(1);
-    while k > 0 && context.len() < 6 {
-        k -= 1;
-        let l = &lines[k];
-        if is_rule(l) {
-            break;
-        }
-        if !l.trim().is_empty() {
-            context.push(l.trim().to_string());
-        }
-    }
-    context.reverse();
-    let hint = (last + 1..end).map(|i| lines[i].trim()).find(|l| is_hint(l)).map(str::to_string);
-    Some(Choice { question, context, options, hint })
-}
+pub use bro_core::terminal_prompt::Choice;
+#[cfg(test)]
+pub use bro_core::terminal_prompt::choice;
 
 #[cfg(test)]
 mod tests {
@@ -583,6 +465,26 @@ mod tests {
         assert_eq!(c.options[2].detail, None);
         assert!(c.hint.as_deref().is_some_and(|h| h.contains("Esc to cancel")));
         assert_eq!(c.context, ["☐ When  ✔ Submit"]);
+    }
+
+    #[test]
+    fn claude_plan_approval_keeps_wrapped_text_and_the_editor_hint() {
+        let screen = rows(include_str!("../tests/fixtures/claude-plan-approval.txt"));
+        let c = choice(&screen).expect("the plan approval is a choice");
+        assert_eq!(c.question, "Claude has written up a plan and is ready to execute. Would you like to proceed?");
+        assert!(c.context.is_empty());
+        assert_eq!(c.options.len(), 3);
+        assert_eq!(c.options[0].label, "Yes, and switch to BYPASS PERMISSIONS");
+        assert_eq!(c.options[0].detail.as_deref(), Some("(no further prompts) for this session"));
+        assert!(c.options[0].focused);
+        assert_eq!(c.options[1].label, "Yes, manually approve edits");
+        assert_eq!(c.options[2].detail.as_deref(), Some("shift+tab to approve with this feedback"));
+        assert_eq!(c.hint.as_deref(), Some("ctrl+g to edit in Notepad ·"));
+
+        for tail in ["\n❯ ", "\nWork has resumed."] {
+            let screen = rows(&format!("{}{tail}", screen.join("\n")));
+            assert!(choice(&screen).is_none(), "text after the prompt must still dismiss it: {tail:?}");
+        }
     }
 
     #[test]

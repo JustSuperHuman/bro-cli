@@ -14,11 +14,18 @@ pub fn isolate() {
     DIR.get_or_init(|| {
         let d = std::env::temp_dir().join(format!("bro-tui-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&d);
+        for folder in ["home", "appdata", "local-appdata"] {
+            std::fs::create_dir_all(d.join(folder)).expect("isolated test roots");
+        }
         // SAFETY: set once, before any test reads these (OnceLock), and only in tests
         unsafe {
             std::env::set_var("BRO_DIR", d.join(".bro"));
             std::env::set_var("CLAUDE_POOL_DIR", d.join(".claude-max-pool"));
             std::env::set_var("BRO_CODEX_PROFILES_DIR", d.join("codex-profiles"));
+            std::env::set_var("HOME", d.join("home"));
+            std::env::set_var("USERPROFILE", d.join("home"));
+            std::env::set_var("APPDATA", d.join("appdata"));
+            std::env::set_var("LOCALAPPDATA", d.join("local-appdata"));
             // the skills view never reaches skill-issue.in
             std::env::set_var("BRO_SKILL_MARKET_URL", "http://127.0.0.1:9/never");
         }

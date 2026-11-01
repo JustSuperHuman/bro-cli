@@ -167,7 +167,7 @@ pub(crate) async fn answer_prompt(state: &AppState, id: &str, body: &Value) -> R
     if context["status"] != "running" { return Err("The session has exited.".into()); }
     let data = crate::prompt::prompt_response_bytes(&context, body)?;
     let codex = context.pointer("/prompt/protocol").and_then(Value::as_str).is_some_and(|p| p.starts_with("codex-question"));
-    let final_action = codex && body["action"] != "open-notes";
+    let final_action = body["action"] != "open-notes";
     if final_action {
         let mut inner = state.inner.lock();
         let session = inner.sessions.get_mut(id).ok_or("Unknown terminal session.")?;

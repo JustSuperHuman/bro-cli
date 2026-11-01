@@ -7,7 +7,6 @@ use super::actions::{Action, PaneAct};
 use super::kit::Cursor;
 use super::{Drag, Gui};
 use crate::app::{Overlay, SideHit};
-use crate::app::project_tabs::{StripHit, StripTab};
 use crate::layout::Dir;
 use crate::pane::{Event, Pane, PaneId};
 use alacritty_terminal::index::Side;
@@ -133,7 +132,7 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
     }
     // anywhere on the sidebar (its blank spots too) is the sidebar; the project tabs aren't
     let on_side = on_sidebar(g, p);
-    let side_hit = matches!(hit, Some(Action::Side(_) | Action::SideFilter | Action::SideList | Action::SideResize | Action::SideScroll | Action::MediaToggle));
+    let side_hit = matches!(hit, Some(Action::Side(_) | Action::SideFilter | Action::SideList | Action::SideResize | Action::SideScroll | Action::MediaToggle | Action::OrbitVoice(_)));
     let on_strip = matches!(hit, Some(Action::Side(SideHit::Strip(_))));
     let in_sidebar = (on_side || side_hit) && !on_strip;
     if !matches!(hit, Some(Action::Media(_) | Action::MediaResize)) {
@@ -174,6 +173,12 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
     }
     match hit {
         Some(Action::Toast(i)) => dismiss_toast(g, i),
+        Some(Action::OrbitVoice(which)) if cb == CButton::Left => match which {
+            0 => g.app.svc.toggle_orbit_voice(),
+            1 => g.app.svc.mute_orbit_voice(),
+            2 => g.app.svc.open_orbit_voice(),
+            _ => {},
+        },
         Some(Action::MediaToggle) if cb == CButton::Left => {
             g.prefs.media_open = !g.prefs.media_open;
             g.prefs.save(g.app.persist);
@@ -284,7 +289,7 @@ fn side_click(g: &mut Gui, hit: SideHit, cb: CButton, m: KeyModifiers) {
     if cb != CButton::Left {
         return;
     }
-    if launcher_side_click(app, &hit) {
+    if app.launcher_side_click(&hit) {
         return;
     }
     if matches!(hit, SideHit::Row(_)) {
@@ -320,47 +325,6 @@ fn side_click(g: &mut Gui, hit: SideHit, cb: CButton, m: KeyModifiers) {
     }
     if app.overlay.is_open() {
         app.leave_sidebar();
-    }
-}
-
-/// A sidebar click while the launcher is open (the terminal UI's `launcher_side_click`): a project becomes the
-/// one it starts in, + New / Continue switch its tab, toggles keep it open, anything else closes it first.
-fn launcher_side_click(app: &mut crate::app::App, hit: &SideHit) -> bool {
-    if !matches!(app.overlay, Overlay::Launcher(_)) {
-        return false;
-    }
-    match hit {
-        SideHit::Row(i) => {
-            if let Some(crate::sidebar::Row::Project { root, .. }) = app.rows().get(*i) {
-                let root = root.clone();
-                app.select_launcher_project(root);
-                return true;
-            }
-            app.overlay = Overlay::None;
-            false
-        }
-        SideHit::Launcher | SideHit::Continue => {
-            if let Overlay::Launcher(l) = &mut app.overlay {
-                if matches!(hit, SideHit::Continue) {
-                    l.show_continue();
-                } else {
-                    l.tab = crate::launcher::SessionTab::New;
-                    l.hits.clear();
-                }
-            }
-            true
-        }
-        SideHit::Strip(StripHit::Tab(StripTab::Project(key))) => {
-            if let Some(root) = app.project_tabs().into_iter().find(|t| t.key == *key).map(|t| t.root) {
-                app.select_launcher_project(root);
-            }
-            true
-        }
-        SideHit::Fable | SideHit::UsageToggle | SideHit::Minimized | SideHit::Strip(StripHit::Minimized) => false,
-        _ => {
-            app.overlay = Overlay::None;
-            false
-        }
     }
 }
 
@@ -473,7 +437,7 @@ fn body_press(g: &mut Gui, id: PaneId, p: Point, cb: CButton, m: KeyModifiers, c
     {
         focus(&mut g.app, id);
         if let Some(t) = g.app.panes.get_mut(&id).and_then(|p| p.as_term()) {
-            t.send(format!("{key}\r").as_bytes());
+            t.answer_prompt_option(&key, None);
         }
         return;
     }

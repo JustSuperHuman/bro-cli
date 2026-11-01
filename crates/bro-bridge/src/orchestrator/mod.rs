@@ -7,7 +7,7 @@
 //! push-to-talk voice input.
 
 mod cast;
-mod chats;
+pub(crate) mod chats;
 pub(crate) mod claude;
 mod context;
 pub(crate) mod folders;
@@ -185,6 +185,8 @@ pub enum OrchestratorUpdate {
     /// The turn ended; `text` is the final answer.
     Reply { text: String, tag: Option<String> },
     Failed { message: String, tag: Option<String> },
+    /// Host-produced accepted task outcome, distinct from a coordinator's initial reply.
+    TaskOutcome { origin_request_id: String, task_id: String, revision: u64, text: String },
 }
 
 pub type UpdateSink = std::sync::Arc<dyn Fn(OrchestratorUpdate) + Send + Sync>;
@@ -350,7 +352,11 @@ impl Orchestrator {
         let identity=format!("task-result:{task_id}:{revision}");
         let item={
             let mut state=self.state.lock();
-            if state.items.iter().any(|item|item.id==identity) {return true;}
+            if state.items.iter().any(|item|item.id==identity) {
+                drop(state);
+                self.emit(OrchestratorUpdate::TaskOutcome { origin_request_id: origin_request_id.into(), task_id: task_id.into(), revision, text: text.trim().into() });
+                return true;
+            }
             let turn=state.items.iter().find(|item|item.id==origin_request_id).map(|item|item.turn_id.clone()).unwrap_or_else(||format!("task-outcome:{task_id}"));
             let mut item=Self::new_item(&turn,"assistant","done");
             item.id=identity;item.origin_request_id=Some(origin_request_id.into());item.text=format!("Accepted outcome\n{}",text.trim());item.finished_at=Some(iso_now());item.seq=state.seq+1;
@@ -368,7 +374,9 @@ impl Orchestrator {
             if saved.is_err() {return false;}
             state.seq=item.seq;state.items=items;item
         };
-        self.publish_item(&item);self.publish_status();true
+        self.publish_item(&item);self.publish_status();
+        self.emit(OrchestratorUpdate::TaskOutcome { origin_request_id: origin_request_id.into(), task_id: task_id.into(), revision, text: text.trim().into() });
+        true
     }
 
     /// Cancelled while routed: the pending answers stop waiting.

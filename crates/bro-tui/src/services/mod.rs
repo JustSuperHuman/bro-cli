@@ -14,6 +14,7 @@ pub mod justwatch;
 pub mod skills;
 pub mod updates;
 pub mod launch;
+pub mod orbit_voice;
 mod workers;
 
 pub use guard::{guard, guard_res};
@@ -137,6 +138,7 @@ pub struct State {
     /// Every session's watchdog as the bridge last reported it, by session id.
     pub watchdogs: HashMap<String, bro_bridge::WatchdogSnapshot>,
     pub voice: VoiceState,
+    pub orbit_voice: orbit_voice::OrbitState,
     /// The session server.
     pub host: host::HostState,
     /// Things that didn't work at startup, shown once as toasts and in the views.
@@ -170,6 +172,20 @@ struct Inner {
     voice: Mutex<Option<bro_voice::Voice>>,
     /// Bumped on every (re)start, so a slow start that lost the race stops itself.
     voice_gen: std::sync::atomic::AtomicU64,
+    orbit_voice: Mutex<Option<bro_bridge::orbit_voice::Handle>>,
+    orbit_generation: std::sync::atomic::AtomicU64,
+    stopping: std::sync::atomic::AtomicBool,
+    orbit_reconcile: Mutex<()>,
+    orbit_observer_generation: std::sync::atomic::AtomicU64,
+    orbit_control_generation: std::sync::atomic::AtomicU64,
+    orbit_handover: std::sync::atomic::AtomicBool,
+    orbit_relay: orbit_voice::relay::RelayState,
+    workspace_reconcile: Mutex<()>,
+    orbit_stage: Arc<orbit_voice::StageMailbox>,
+    /// Serialize disk writes; workers save the latest cache, never a queued stale snapshot.
+    settings_io: Mutex<()>,
+    /// Installed-preview paths are owned by registration, not unrelated settings forms.
+    orbit_preview: RwLock<Option<bro_core::orbit_voice::PreviewInstallation>>,
     /// Bridge id of the session in the focused pane (kept current by the UI loop).
     focused: Mutex<Option<String>>,
     /// Profiles with a login tab open that a watcher is polling until they read signed in.
@@ -305,6 +321,7 @@ pub fn fallback_settings() -> Settings {
         bridge: BridgeSettings::default(),
         proxy: ProxySettings::default(),
         voice: bro_core::config::VoiceSettings::default(),
+        orbit_voice: bro_core::config::OrbitSettings::default(),
         insights: bro_core::config::InsightsSettings::default(),
         auto_resume: bro_core::config::AutoResumeSettings::default(),
         auto_approve: false,
@@ -366,6 +383,18 @@ impl Services {
                 projects: Mutex::new(HashMap::new()),
                 voice: Mutex::new(None),
                 voice_gen: Default::default(),
+                orbit_voice: Mutex::new(None),
+                orbit_generation: Default::default(),
+                stopping: Default::default(),
+                orbit_reconcile: Mutex::new(()),
+                orbit_observer_generation: Default::default(),
+                orbit_control_generation: Default::default(),
+                orbit_handover: Default::default(),
+                orbit_relay: Default::default(),
+                workspace_reconcile: Mutex::new(()),
+                orbit_stage: Arc::new(orbit_voice::StageMailbox::default()),
+                settings_io: Mutex::new(()),
+                orbit_preview: RwLock::new(None),
                 focused: Mutex::new(None),
                 login_watch: Mutex::new(Default::default()),
                 teams: Mutex::new(vec![]),
@@ -396,6 +425,7 @@ impl Services {
             picks: (None, None),
             watchdogs: HashMap::new(),
             voice: VoiceState::default(),
+            orbit_voice: orbit_voice::OrbitState::default(),
             host: Default::default(),
             issues: vec![],
         }
@@ -478,8 +508,15 @@ impl Services {
     }
 
     /// Persist settings on a background thread (no-op in demo mode).
-    pub fn save_settings(&self, s: Settings) {
-        self.update(|st| st.settings = s.clone());
+    pub fn save_settings(&self, mut s: Settings) {
+        self.update(|st| {
+            // A form may have captured its settings before a preview registration completed.
+            // It owns its other options, but may not undo the newly validated launch paths.
+            if let Some(preview) = self.inner.orbit_preview.read().as_ref() {
+                preview.apply(&mut s.orbit_voice);
+            }
+            st.settings = s.clone();
+        });
         // the phone's media rule changes at once, without restarting the bridge
         self.with_bridge("bridge::set_media_anywhere", |b| b.set_media_anywhere(!s.bridge.protect_media));
         if self.is_demo() {
@@ -487,12 +524,20 @@ impl Services {
         }
         let svc = self.clone();
         std::thread::spawn(move || {
-            if let Err(e) = guard_res("config::Settings::save", || s.save()) {
+            if let Err(e) = guard_res("config::Settings::save", || svc.persist_current_settings()) {
                 svc.send(Event::Toast(crate::alerts::Kind::Error, format!("couldn't save settings: {e}")));
             }
-            // the co-author switch reaches the logins' own settings.json at once, not at their next launch
-            let _ = guard("coauthor::sync_all", || bro_core::coauthor::sync_all(s.claude_env.coauthor_hidden()));
         });
+    }
+
+    fn persist_current_settings(&self) -> anyhow::Result<()> {
+        let _write = self.inner.settings_io.lock();
+        // A newer settings save or preview registration may have superseded the
+        // snapshot that was current when this worker was queued.
+        let latest = self.settings();
+        latest.save()?;
+        let _ = guard("coauthor::sync_all", || bro_core::coauthor::sync_all(latest.claude_env.coauthor_hidden()));
+        Ok(())
     }
 
     /// Project identity for a directory: cached; bro-core's `project_for` when available, else a local git-root
@@ -703,7 +748,9 @@ impl Services {
 
     pub(crate) fn set_bridge(&self, b: Option<Bridge>) {
         self.inner.bridge_fuse.reset();
+        let workspace = b.clone();
         *self.inner.bridge.write() = b;
+        if let Some(handle) = self.orbit_handle() { handle.attach_workspace(workspace); }
         self.inner.bridge_announced.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -944,13 +991,31 @@ impl Services {
 
     /// GPT-Live: Hugh's answer to a delegation, for the voice to speak.
     pub(crate) fn voice_delegation_result(&self, id: &str, text: &str) {
+        if let Some(id) = id.strip_prefix("orbit:") {
+            if let Some(handle) = self.orbit_handle() {
+                handle.outcome(id, text, true);
+            }
+            return;
+        }
         if let Some(voice) = self.inner.voice.lock().as_ref() {
             voice.delegation_result(id, &brief(text));
         }
     }
 
+    /// A durable host-accepted result is not the coordinator's initial reply.
+    pub(crate) fn orbit_task_outcome(&self, origin: &str, task_id: &str, revision: u64, text: &str) {
+        if let Some(id) = origin.strip_prefix("orbit:")
+            && let Some(handle) = self.orbit_handle() { handle.task_outcome(id, task_id, revision, text); }
+    }
+
     /// GPT-Live: what Hugh is doing for a delegation (the voice knows, doesn't read it out).
     pub(crate) fn voice_delegation_progress(&self, id: &str, text: &str) {
+        if let Some(id) = id.strip_prefix("orbit:") {
+            if let Some(handle) = self.orbit_handle() {
+                handle.progress(id, text);
+            }
+            return;
+        }
         if let Some(voice) = self.inner.voice.lock().as_ref() {
             voice.delegation_progress(id, text);
         }
@@ -1223,22 +1288,30 @@ impl Services {
         if self.is_demo() {
             return;
         }
-        if on {
-            workers::spawn_bridge(self);
+        if on || self.settings().orbit_voice.enabled {
+            workers::spawn_bridge(self); // replace transport off-thread, keeping one canonical service
         } else {
-            let b = self.inner.bridge.write().take();
-            if let Some(b) = b {
-                let _ = guard("bridge::shutdown", || b.shutdown());
-            }
-            self.update(|st| {
-                st.bridge.status = Avail::Unavailable("turned off".into());
-                st.bridge.qr = None;
+            let svc = self.clone();
+            std::thread::spawn(move || {
+                let _lane = svc.inner.workspace_reconcile.lock();
+                let b = { svc.inner.bridge.write().take() };
+                if let Some(b) = b { let _ = guard("bridge::shutdown", || b.shutdown()); }
+                svc.update(|st| { st.bridge.status = Avail::Unavailable("turned off".into()); st.bridge.qr = None; });
             });
         }
     }
 
     /// Stop the proxy and bridge (on quit).
     pub fn shutdown(&self) {
+        self.inner.stopping.store(true, Ordering::Release);
+        self.inner.orbit_control_generation.fetch_add(1, Ordering::AcqRel);
+        let _orbit_lane = self.inner.orbit_reconcile.lock();
+        self.inner.orbit_stage.stop();
+        self.inner.orbit_generation.fetch_add(1, Ordering::AcqRel);
+        let orbit = { self.inner.orbit_voice.lock().take() };
+        if let Some(handle) = orbit {
+            self.stop_owned_orbit(&handle);
+        }
         if let Some(p) = self.inner.proxy.lock().take() {
             let _ = guard("proxy::shutdown", || p.shutdown());
         }

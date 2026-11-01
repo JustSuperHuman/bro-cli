@@ -233,6 +233,25 @@ fn main() -> ExitCode {
             print!("{}", install_cmd::HELP);
             ExitCode::SUCCESS
         }
+        Ok(cli::Command::OrbitHelp) => {
+            println!("bro orbit register <electron-executable> <application-directory>\n\nValidates the installed Orbit build and records its launch paths independently of settings saves.\nIn your primary window, enable Settings → Orbit Voice or choose Try connection.\nNo sessions are restarted, no credentials are imported, and no microphone is opened.");
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Command::OrbitRegister { executable, application_dir }) => {
+            let selection = bro_core::config::OrbitSettings {
+                executable: Some(executable), application_dir: Some(application_dir), ..Default::default()
+            };
+            match bro_core::orbit_voice::register_installed_preview(&selection) {
+                Ok(preview) => {
+                    println!("Registered Orbit build {}.\nEnable Settings → Orbit Voice or choose Try connection in your primary window.", preview.version);
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bro orbit: {error:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Ok(cli::Command::Update { check_only }) => match install_cmd::update(check_only) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

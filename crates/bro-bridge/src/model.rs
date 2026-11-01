@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSessionSummary {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_generation: Option<String>,
     pub title: String,
     pub shell: String,
     #[serde(default)]
@@ -70,6 +72,7 @@ impl TerminalSessionSummary {
             shell,
             args: Vec::new(),
             cwd,
+            voice_generation: None,
             project_id: None,
             agent: None,
             agent_source: None,

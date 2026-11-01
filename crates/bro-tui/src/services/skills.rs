@@ -73,15 +73,17 @@ pub enum Bundled {
     JustImagine,
     /// the orchestrator's: only its own session gets it
     Orchestrator,
-    /// the browser's: sessions that drive your browser get it
+    /// JustBrowse's: managed with the installed browser extension
     Browser,
+    /// agent-desktop's main and current platform skills
+    AgentDesktop,
 }
 
 impl Bundled {
     /// The ones this machine has, in the order they're listed.
     pub fn here() -> Vec<Bundled> {
         use Bundled::*;
-        [Open, JustTools, JustWatch, JustImagine, Orchestrator, Browser].into_iter().filter(|b| *b != JustWatch || bro_core::justwatch::supported()).collect()
+        [Open, JustTools, JustWatch, JustImagine, Orchestrator, Browser, AgentDesktop].into_iter().filter(|b| *b != JustWatch || bro_core::justwatch::supported()).collect()
     }
 
     pub fn title(self) -> &'static str {
@@ -91,7 +93,8 @@ impl Bundled {
             Bundled::JustWatch => "JustWatch",
             Bundled::JustImagine => "JustImagine",
             Bundled::Orchestrator => "Orchestrator",
-            Bundled::Browser => "Browser",
+            Bundled::Browser => "JustBrowseMCP",
+            Bundled::AgentDesktop => "agent-desktop",
         }
     }
 
@@ -103,7 +106,15 @@ impl Bundled {
             Bundled::JustWatch => &[bro_core::justwatch::SKILL_NAME],
             Bundled::JustImagine => &["generate-images", "generate-video", "generate-voice"],
             Bundled::Orchestrator => &[bro_core::orchestrator::SKILL_NAME],
-            Bundled::Browser => &["bro-browser"],
+            Bundled::Browser => &[bro_core::tool_skills::BROWSER],
+            Bundled::AgentDesktop => {
+                #[cfg(windows)]
+                { &["agent-desktop", "agent-desktop-windows"] }
+                #[cfg(target_os = "macos")]
+                { &["agent-desktop", "agent-desktop-macos"] }
+                #[cfg(not(any(windows, target_os = "macos")))]
+                { &["agent-desktop", "agent-desktop-linux"] }
+            }
         }
     }
 
@@ -115,7 +126,8 @@ impl Bundled {
             Bundled::JustWatch => "lets new Claude and Codex sessions check, restart and tail your dev servers through JustWatch",
             Bundled::JustImagine => "generate-images, -video and -voice: agents make pictures, clips and voice-overs through JustImagine",
             Bundled::Orchestrator => "how bro's orchestrator drives your other sessions: its own session gets it, no other",
-            Bundled::Browser => "how a session drives your signed-in browser through JustBrowse: sessions with the browser on get it",
+            Bundled::Browser => "control your signed-in browser in separate tabs; Bro keeps the full skill with JustBrowseMCP and configures new sessions. Install and load the extension from Quick install",
+            Bundled::AgentDesktop => "inspect and control native apps; Bro maintains the full main skill and your platform guide, including references. Install agent-desktop from Quick install",
         }
     }
 }
@@ -192,7 +204,7 @@ impl Services {
             Bundled::Open => Some(st.settings.skills.bro_open),
             Bundled::JustTools => Some(st.settings.justtools.skill),
             Bundled::JustWatch => Some(st.settings.justwatch.skill),
-            Bundled::JustImagine | Bundled::Orchestrator | Bundled::Browser => None,
+            Bundled::JustImagine | Bundled::Orchestrator | Bundled::Browser | Bundled::AgentDesktop => None,
         }
     }
 
@@ -220,7 +232,7 @@ impl Services {
                 }
             }
             Bundled::JustImagine if on => self.install_imagine_skills(),
-            Bundled::JustImagine | Bundled::Orchestrator | Bundled::Browser => {}
+            Bundled::JustImagine | Bundled::Orchestrator | Bundled::Browser | Bundled::AgentDesktop => {}
         }
     }
 
@@ -524,9 +536,29 @@ impl Services {
         let _ = std::thread::Builder::new().name("bro-skill-sync".into()).spawn({
             let svc = self.clone();
             move || loop {
-                if svc.settings().skills.auto_sync {
+                let auto_sync = svc.settings().skills.auto_sync;
+                if auto_sync {
                     svc.sync_skill_repos();
                 }
+                // Tool-owned skills are not loose copies left behind by third-party installers.
+                // Local release skills always repair their managed copies; remote updates follow
+                // the same auto-sync setting as watched repositories. Never block the UI thread.
+                let browser = bro_core::justbrowse::installed().is_some().then(|| {
+                    guard("tool_skills::browser", bro_core::tool_skills::refresh_browser).unwrap_or_else(Err)
+                });
+                let desktop = bro_core::agent_desktop::installed().is_some().then(|| {
+                    guard("tool_skills::desktop", || {
+                        if auto_sync || bro_core::agent_desktop::skill_names().iter().any(|n| !bro_core::tool_skills::cache_dir(n).join("SKILL.md").is_file()) {
+                            bro_core::tool_skills::refresh_desktop()
+                        } else {
+                            bro_core::agent_desktop::skill_names().into_iter().try_for_each(bro_core::tool_skills::publish)
+                        }
+                    }).unwrap_or_else(Err)
+                });
+                for error in [browser, desktop].into_iter().flatten().filter_map(Result::err) {
+                    svc.send(Event::Toast(Kind::Error, format!("Couldn't refresh a tool's skills: {error}")));
+                }
+                svc.rescan_skills();
                 std::thread::sleep(skill_repos::SYNC_EVERY);
             }
         });

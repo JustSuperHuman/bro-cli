@@ -91,7 +91,7 @@ fn exe(name: &str) -> String {
 }
 
 /// The SHA-256 `SHA256SUMS.txt` lists for `file` (`<hex>  <file>` or `<hex> *<file>`).
-fn sum_for(sums: &str, file: &str) -> Option<String> {
+pub(crate) fn sum_for(sums: &str, file: &str) -> Option<String> {
     sums.lines().find_map(|l| {
         let mut parts = l.split_whitespace();
         let (hash, name) = (parts.next()?, parts.next()?);
@@ -99,7 +99,7 @@ fn sum_for(sums: &str, file: &str) -> Option<String> {
     })
 }
 
-fn sha256_file(path: &Path) -> anyhow::Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let mut f = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut f, &mut hasher)?;
@@ -146,7 +146,7 @@ pub fn clean_up_old() {
 }
 
 /// Windows' own bsdtar, which reads .zip (a GNU tar from Git or MSYS earlier on PATH can't).
-fn tar() -> PathBuf {
+pub(crate) fn tar() -> PathBuf {
     match std::env::var_os("SystemRoot").map(|r| PathBuf::from(r).join("System32").join("tar.exe")) {
         Some(t) if cfg!(windows) && t.is_file() => t,
         _ => PathBuf::from("tar"),

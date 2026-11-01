@@ -776,8 +776,13 @@ async fn agent_awaiting_input_raises_needs_input() {
     assert_eq!(response.status(), 200);
     assert_eq!(
         harness.wait_seen(1).await,
-        vec![Seen::Input("agent".into(), "1\r".into())]
+        vec![Seen::Input("agent".into(), "\r".into())]
     );
+    let repeated = reqwest::Client::new()
+        .post(harness.url("/api/sessions/agent/prompt-response"))
+        .json(&json!({ "promptId": context["prompt"]["id"], "action": "select", "optionId": "option-1" }))
+        .send().await.unwrap();
+    assert_eq!(repeated.status(), 409, "a repeated click on a generic prompt cannot submit twice");
     let stale = reqwest::Client::new()
         .post(harness.url("/api/sessions/agent/prompt-response"))
         .json(&json!({ "promptId": "prompt-old", "action": "cancel" }))

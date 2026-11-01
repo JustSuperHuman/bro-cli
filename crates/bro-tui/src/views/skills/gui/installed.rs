@@ -568,9 +568,10 @@ fn bro_row(ui: &mut Ui, r: Rect, b: Bundled, on: bool, k: usize, cx: &Cx) {
         }
         None => {
             let st = Style::new(size::SMALL, weight::REGULAR, t.faint);
-            let w = ui.measure("when it's needed", st);
+            let label = if matches!(b, Bundled::Browser | Bundled::AgentDesktop) { "managed with its tool" } else { "when it's needed" };
+            let w = ui.measure(label, st);
             right -= w;
-            ui.label_in(Rect::new(right, r.y, w, r.h), "when it's needed", st, Align::Left);
+            ui.label_in(Rect::new(right, r.y, w, r.h), label, st, Align::Left);
         }
     }
     let x = r.x + 14.0;
@@ -869,7 +870,8 @@ fn bro_details(ui: &mut Ui, r: Rect, b: Bundled, side: bool, cx: &Cx) {
     ui.draw(&ab, Point::new(x, y));
     y += ab.h + 14.0;
     let homes = cx.svc.state().skills.inventory.as_ref().map_or(0, |inv| inv.everywhere().filter(|s| s.origin == Origin::Bro && b.names().contains(&s.name.as_str())).map(|s| s.places.len()).max().unwrap_or(0));
-    let (glyph, line, ink) = if homes > 0 { (CHECK, format!("In {} now", plural(homes, "agent home")), t.good) } else { (INFO, "In no agent home yet: new sessions get it when it's on".to_string(), t.muted) };
+    let empty = if matches!(b, Bundled::Browser | Bundled::AgentDesktop) { "Not in an agent home yet. Install the tool from Quick install to add its skills." } else { "In no agent home yet: new sessions get it when it's on" };
+    let (glyph, line, ink) = if homes > 0 { (CHECK, format!("In {} now", plural(homes, "agent home")), t.good) } else { (INFO, empty.to_string(), t.muted) };
     ui.icon(Rect::new(x, y, 16.0, 18.0), glyph, size::BODY, ink);
     ui.label_in(Rect::new(x + 22.0, y, w - 22.0, 18.0), &line, Style::new(size::SMALL, weight::MEDIUM, ink), Align::Left);
     // the switch, as a button that says what it does
@@ -877,6 +879,7 @@ fn bro_details(ui: &mut Ui, r: Rect, b: Bundled, side: bool, cx: &Cx) {
         Some(true) => ("Turn off", Kind::Secondary, true),
         Some(false) => ("Turn on", Kind::Primary, true),
         None if b == Bundled::JustImagine => (if cx.svc.state().skills.imagine == Some(true) { "Write them again" } else { "Install them" }, Kind::Primary, true),
+        None if matches!(b, Bundled::Browser | Bundled::AgentDesktop) => ("Managed with its tool", Kind::Ghost, false),
         None => ("Written when it's needed", Kind::Ghost, false),
     };
     let bw = if side { r.w - 2.0 * pad } else { 200.0f32.min(r.w * 0.36) };

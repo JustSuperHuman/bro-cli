@@ -600,6 +600,15 @@ async fn wait_for_output(
     )
 }
 
+/// Exact-identity reader shared with scoped companion observations. No fuzzy resolver or caller authority.
+pub(crate) fn read_session_exact(app: &AppState, id: &str, lines: usize) -> Result<String, String> {
+    let text = app.session_text(id, lines.clamp(1, MAX_READ_LINES)).ok_or("The session is no longer available.")?;
+    let header = app.session_view(id).map(|view| format!("[{} — {} — {}{}]", view.summary.title,
+        view.summary.cwd, view.summary.agent.as_deref().unwrap_or("shell"),
+        view.summary.agent_activity.as_deref().map(|activity| format!(" {activity}")).unwrap_or_default())).unwrap_or_default();
+    Ok(if text.trim().is_empty() { format!("{header}\n(the session has not printed anything yet)") } else { format!("{header}\n{text}") })
+}
+
 pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String, String> {
     if name.starts_with("coordination_") { return crate::coordination::execute_tool(app,name,args).await; }
     if worker_scoped() { return Err("This worker capability only permits its assigned task protocol.".into()); }
@@ -613,30 +622,7 @@ pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String,
             let lines = integer_arg(args, "lines")
                 .unwrap_or(120)
                 .clamp(1, MAX_READ_LINES as u64) as usize;
-            let text = app
-                .session_text(&id, lines)
-                .ok_or("The session is no longer available.")?;
-            let view = app.session_view(&id);
-            let header = view
-                .map(|view| {
-                    format!(
-                        "[{} — {} — {}{}]",
-                        view.summary.title,
-                        view.summary.cwd,
-                        view.summary.agent.as_deref().unwrap_or("shell"),
-                        view.summary
-                            .agent_activity
-                            .as_deref()
-                            .map(|activity| format!(" {activity}"))
-                            .unwrap_or_default()
-                    )
-                })
-                .unwrap_or_default();
-            Ok(if text.trim().is_empty() {
-                format!("{header}\n(the session has not printed anything yet)")
-            } else {
-                format!("{header}\n{text}")
-            })
+            read_session_exact(app, &id, lines)
         }
         "send_input" => {
             let id = resolve_worker(app, args)?;

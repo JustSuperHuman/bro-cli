@@ -37,6 +37,7 @@ pub const FONTS: &[Font] = &[
     font!("fira-code", "Fira Code", "Fira Code", "FiraCode-Variable.ttf", "ligatures: -> and != join up"),
     font!("ibm-plex-mono", "IBM Plex Mono", "IBM Plex Mono", "IBMPlexMono-Regular.ttf", "corporate typewriter"),
     font!("maple-mono", "Maple Mono", "Maple Mono", "MapleMono-Regular.ttf", "soft, rounded, friendly"),
+    font!("justgains-mono", "JustGains Mono", "JustGains Mono", "JustGainsMono-Regular.ttf", "our own: geometric, and :mal: becomes Mal"),
     font!("victor-mono", "Victor Mono", "Victor Mono", "VictorMono-Variable.ttf", "slender, with cursive italics"),
     font!("monaspace-krypton", "Monaspace Krypton", "Monaspace Krypton", "MonaspaceKrypton-Regular.otf", "mechanical, machined edges"),
     font!("monaspace-radon", "Monaspace Radon", "Monaspace Radon", "MonaspaceRadon-Regular.otf", "handwritten code"),
@@ -164,6 +165,18 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), FONTS.len(), "unique ids");
         assert!(FONTS.iter().all(|f| f.data.len() > 10_000), "every file is bundled");
+    }
+
+    /// JustGains Mono's `:mal:`, `:xp:` and friends are ligatures, and the GUI only shapes runs (so only draws
+    /// them) for fonts it finds joining `->`. Its arrows are what let the icons through.
+    #[cfg(feature = "gui")]
+    #[test]
+    fn justgains_mono_joins_so_its_shortcodes_draw() {
+        let f = get("justgains-mono").unwrap();
+        let mut t = bro_gfx::text::Text::new(f.data, &[], false);
+        let m = t.set_mono(14.0, 1.2);
+        assert_eq!(m.cell_w, (14.0f32 * 0.6).round(), "every glyph is one 600-unit cell");
+        assert!(t.mono_ligatures(), "-> joins, so runs are shaped and :shortcodes: draw");
     }
 
     #[test]

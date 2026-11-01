@@ -54,6 +54,27 @@ impl Server {
     }
 }
 
+#[test]
+#[ignore = "isolated authenticated loopback host; no PTYs or external programs"]
+fn native_companion_status_is_primary_only_and_view_controls_relay_without_takeover() {
+    let server = Server::start();
+    let (primary, commands) = server.connect();
+    let (viewer, _) = server.connect_as(Role::Viewer);
+    let key = "bro.native.orbit-status.v1";
+    primary.set_value(key, "primary-status");
+    wait("primary status", || client::status(server.path()).ok().is_some_and(|s| s.values.get(key).is_some_and(|v| v == "primary-status")));
+    viewer.set_value(key, "forged-viewer-status");
+    // A relayed control follows the attempted write in the same ordered socket stream.
+    let body = serde_json::json!({"orbitControl":{"kind":"stop"}});
+    viewer.relay(body.clone());
+    assert_eq!(next(&commands, |e| matches!(e, ClientEvent::Relayed(_))), ClientEvent::Relayed(body));
+    let status = client::status(server.path()).unwrap();
+    assert_eq!(status.values.get(key).map(String::as_str), Some("primary-status"));
+    assert_eq!(status.peers.primary.unwrap().role, Role::Window);
+    primary.shutdown(Duration::from_secs(2));
+    server.done.recv_timeout(Duration::from_secs(5)).unwrap();
+}
+
 /// A shell that stays at its prompt.
 fn shell() -> (String, Vec<String>) {
     if cfg!(windows) { ("cmd.exe".into(), vec![]) } else { ("/bin/sh".into(), vec![]) }

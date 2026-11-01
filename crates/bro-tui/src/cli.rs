@@ -21,6 +21,9 @@ pub enum Command {
     /// `bro install [tools…]` — Quick Install: JustTools, Git, Node.js, .NET, the agents….
     Install(crate::install_cmd::InstallArgs),
     InstallHelp,
+    /// Validate a fork and leave a narrow installer handoff for the live settings owner.
+    OrbitRegister { executable: std::path::PathBuf, application_dir: std::path::PathBuf },
+    OrbitHelp,
     /// `bro update [--check]` — install the newest bro release over this one (or only look).
     Update { check_only: bool },
     /// `bro env encrypt | decrypt | list` — env files (`--env` itself is taken off in `main`).
@@ -70,10 +73,12 @@ usage
   bro ctl [<tool> [key=value …]]
                    drive bro's sessions from a shell: list, open, prompt and watch them
                    (the orchestrator's tools; no tool: list them)
+  bro orbit register <electron-executable> <application-directory>
+                   validate the installed Orbit build for Settings → Orbit Voice
   bro update [--check]
                    install the newest bro release over this one (--check: only look)
   bro install [tools… | recommended | agents | all] [--force]
-                   Quick Install: JustTools, JustPaste, JustWatch, JustBrowseMCP, Git, Node.js, Bun, Python, .NET 9/10/11,
+                   Quick Install: JustTools, JustPaste, JustWatch, JustBrowseMCP, agent-desktop, Git, Node.js, Bun, Python, .NET 9/10/11,
                    Claude Code, Codex, Pi, omp… (no names: pick from a list)
   bro --env <file|url> [--save] [command]
                    load API keys and settings from an env file (encrypted ones ask for a
@@ -116,6 +121,15 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
     if args.first().map(String::as_str) == Some("open") {
         return crate::open_cmd::parse(&args[1..]).map(|a| a.map_or(Command::OpenHelp, Command::Open));
+    }
+    if args.first().map(String::as_str) == Some("orbit") {
+        return match args.get(1).map(String::as_str) {
+            None | Some("--help" | "-h") if args.len() <= 2 => Ok(Command::OrbitHelp),
+            Some("register") if args.len() == 4 => Ok(Command::OrbitRegister {
+                executable: args[2].clone().into(), application_dir: args[3].clone().into(),
+            }),
+            _ => Err("bro orbit register <electron-executable> <application-directory>".into()),
+        };
     }
     if args.first().map(String::as_str) == Some("update") {
         return match args.get(1).map(String::as_str) {
@@ -189,6 +203,9 @@ mod tests {
         assert!(p(&["open"]).is_err());
         assert!(matches!(p(&["install", "claude"]), Ok(Command::Install(ref a)) if a.tools == [bro_core::quick_install::Tool::Agent(bro_core::Harness::Claude)]));
         assert_eq!(p(&["install", "-h"]), Ok(Command::InstallHelp));
+        assert_eq!(p(&["orbit", "--help"]), Ok(Command::OrbitHelp));
+        assert!(matches!(p(&["orbit", "register", "C:/preview/electron.exe", "C:/preview/app"]), Ok(Command::OrbitRegister { .. })));
+        assert!(p(&["orbit", "register", "C:/preview/electron.exe"]).is_err());
         assert_eq!(p(&["update"]), Ok(Command::Update { check_only: false }));
         assert_eq!(p(&["update", "--check"]), Ok(Command::Update { check_only: true }));
         assert!(p(&["update", "now"]).is_err());

@@ -1,14 +1,13 @@
 //! Drawing the launcher. One row holds the New / Continue switch and the project the session starts in; then
 //! the agents as chips (and ★ orchestrator, gold; on its tab a second row of chips picks its harness); then the
 //! "run on" list on the left and, beside it, the launch panel: what will run,
-//! the model list when one is needed, the permissions / browser / placement switches and the Launch button.
+//! the model list when one is needed, permission choices and the Launch button.
 //! Narrow screens stack the switches under the list instead.
 
 use super::{AccountKind, Focus, Hit, Item, Launcher, SessionTab};
 use crate::theme::{self, Theme};
 use crate::ui::{self, fg, muted};
 use bro_core::Harness;
-use bro_core::browser::BrowserMode;
 use bro_core::launch::Permission;
 use ratatui::{
     Frame,
@@ -31,7 +30,7 @@ pub fn draw(f: &mut Frame, area: Rect, l: &mut Launcher, t: &Theme, time: f64) {
 /// The panel beside the list needs this much room; below it the switches go under the list.
 const SIDE_MIN_WIDTH: u16 = 84;
 /// Rows the switches (heading, three rows) and the Launch button take, with a blank row between.
-const SETTINGS_H: u16 = 6;
+const SETTINGS_H: u16 = 4;
 
 fn draw_inner(f: &mut Frame, r: Rect, l: &mut Launcher, t: &Theme, _time: f64, hits: &mut Vec<(Rect, Hit)>) {
     ui::clear(f, r, t);
@@ -415,7 +414,7 @@ fn draw_panel(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Vec
         draw_summary(f, Rect { height: 5, ..area }, l, t);
         (area.y + 6).min(button_y.saturating_sub(SETTINGS_H - 1))
     };
-    draw_options(f, Rect { y: options_y, height: 4, ..area }, l, t, hits);
+    draw_options(f, Rect { y: options_y, height: 2, ..area }, l, t, hits);
     draw_button(f, Rect { y: button_y, height: 1, ..area }, l, t, hits);
 }
 
@@ -495,7 +494,7 @@ fn draw_orchestrator_summary(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme)
     }
 }
 
-/// Permissions, browser and placement as labelled rows with their keys, under an "options" heading.
+/// Permission choices with their key, under an "options" heading.
 fn draw_options(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
     heading(f, Rect { height: 1, ..area }, "options", t);
     let row = |i: u16| Rect { y: area.y + 1 + i, height: 1, ..area };
@@ -519,26 +518,6 @@ fn draw_options(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut V
     }
     ui::line_lr(f, r, spans, key("^e"));
 
-    // browser
-    let r = row(1);
-    let (b, on) = match l.browser {
-        BrowserMode::Off => ("off", false),
-        BrowserMode::Auto => ("on", true),
-        BrowserMode::Edge => ("edge", true),
-        BrowserMode::Chrome => ("chrome", true),
-    };
-    ui::line_lr(f, r, vec![label("browser"), Span::styled(format!(" {b} "), if on { ui::bold_accent(t) } else { muted(t) })], key("^b"));
-    hits.push((r, Hit::Browser));
-
-    // placement
-    let r = row(2);
-    if l.orchestrator {
-        ui::line(f, r, vec![label("opens as"), Span::styled(" its own session ", fg(theme::gold(t)).add_modifier(Modifier::BOLD))]);
-    } else {
-        let place = if l.place == crate::pane::Place::Tab { "new session" } else { "split beside this one" };
-        ui::line_lr(f, r, vec![label("opens as"), Span::styled(format!(" {place} "), ui::bold_accent(t))], key("^s"));
-        hits.push((r, Hit::Place));
-    }
 }
 
 /// The Launch button, filled in the agent's color once there's something to launch.
@@ -604,19 +583,6 @@ fn draw_stacked(f: &mut Frame, body: Rect, l: &Launcher, t: &Theme, hits: &mut V
         hits.push((Rect { x, width: w, ..r }, Hit::Perm(p)));
         x += w;
         toggles.push(Span::styled(text, if on { Style::default().fg(t.bg).bg(c).add_modifier(Modifier::BOLD) } else { muted(t) }));
-    }
-    let b = match l.browser {
-        BrowserMode::Off => "browser off",
-        BrowserMode::Auto => "browser on",
-        BrowserMode::Edge => "edge",
-        BrowserMode::Chrome => "chrome",
-    };
-    let place = if l.place == crate::pane::Place::Tab { "new session" } else { "split" };
-    for (text, hit) in [(format!("  {b}"), Hit::Browser), (format!("  {place}"), Hit::Place)] {
-        let w = ui::width(&text) as u16;
-        hits.push((Rect { x, width: w, ..r }, hit));
-        x += w;
-        toggles.push(Span::styled(text, ui::bold_accent(t)));
     }
     ui::line(f, r, toggles);
 }

@@ -812,7 +812,7 @@ mod tests {
                 OrchestratorUpdate::Step { summary, .. } => steps.push(summary),
                 OrchestratorUpdate::Reply { text, .. } => break text,
                 OrchestratorUpdate::Failed { message, .. } => panic!("failed: {message}"),
-                OrchestratorUpdate::Started { .. } => {}
+                OrchestratorUpdate::Started { .. } | OrchestratorUpdate::TaskOutcome { .. } => {}
             }
         };
         eprintln!("reply after {:.1}s: {reply} (steps: {steps:?})", started.elapsed().as_secs_f32());

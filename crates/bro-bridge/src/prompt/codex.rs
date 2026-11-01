@@ -21,6 +21,8 @@ fn option(line: &str) -> Option<(usize, &str, bool)> {
 }
 
 pub(super) fn detect(text: &str) -> Option<Value> {
+    let rows: Vec<String> = text.lines().map(str::to_string).collect();
+    if !bro_core::terminal_prompt::waiting(&rows) { return None; }
     blocking(text)
         .or_else(|| asynchronous(text))
         .or_else(|| collapsed(text))

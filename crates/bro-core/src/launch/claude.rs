@@ -52,6 +52,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         let _ = crate::skills::write_bro_open_skill(&config_dir);
     }
     crate::skill_repos::write_cached(&config_dir, &ctx.skill_repos);
+    crate::tool_skills::write_cached(&config_dir);
     if ctx.justtools_skill {
         let _ = crate::justtools::write_skill(&config_dir);
     }
@@ -224,6 +225,16 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         } else {
             args.extend(shared);
         }
+    }
+    // Installed browser tools are available to every login without a launcher toggle. Respect
+    // strict-MCP isolation, and place the variadic flag after prompts (or before a literal `--`).
+    if !strict_mcp && !spec.extra_args.iter().any(|a| a == "--mcp-config" || a.starts_with("--mcp-config="))
+        && crate::justbrowse::installed().is_some()
+        && !crate::claude_shared::has_mcp_server(&config_dir, &spec.cwd, crate::justbrowse::SERVER_NAME)
+        && let Ok(file) = crate::justbrowse::mcp_config(&config_dir)
+    {
+        let config = ["--mcp-config".to_string(), file.to_string_lossy().into_owned()];
+        if args.iter().any(|a| a == "--") { args.splice(0..0, config); } else { args.extend(config); }
     }
     (cmd.program, cmd.args) = super::program_and_args("claude", args);
     cmd.label = label(Harness::Claude, &who, spec.model.as_deref());

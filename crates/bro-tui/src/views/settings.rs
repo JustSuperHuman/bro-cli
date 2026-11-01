@@ -1,5 +1,4 @@
-//! Settings view: bro's own everyday options (theme, icons, auto-resume, auto-approve, recaps, compression), push-to-talk
-//! voice (its key, set by pressing it), watchdog
+//! Settings view: bro's everyday options, Orbit Voice connection and moving companion, watchdog
 //! defaults and the reviewer's prompt, caveman
 //! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, Quick Install, Smart Paste and JustImagine), skills (bro's
 //! own, JustTools', JustWatch's and JustImagine's, and the git repos bro watches for more), bro's own updates and the Claude Code environment bro sets on every Claude launch — agent teams (on, the
@@ -248,56 +247,30 @@ impl BroOpt {
     }
 }
 
-/// Caveman mode's rows.
-/// Push-to-talk's rows.
+fn voice_visible_options(enabled: bool, state: &crate::services::orbit_voice::OrbitState) -> Vec<VoiceOpt> {
+    let ready = enabled && state.connected && state.runtime.as_ref().is_some_and(|r| r.renderer_ready);
+    let credential = ready && state.runtime.as_ref().is_some_and(|r| r.credential_available);
+    let talking = ready && state.runtime.as_ref().is_some_and(|r| r.phase != bro_bridge::orbit_voice::Phase::Off);
+    VOICE_OPTS.into_iter().filter(|option| match option {
+        VoiceOpt::On | VoiceOpt::Upstream => true,
+        VoiceOpt::ReloadPreview => enabled && !ready && !state.checking,
+        VoiceOpt::Provider | VoiceOpt::Source | VoiceOpt::Open | VoiceOpt::Escape | VoiceOpt::Background | VoiceOpt::Quit | VoiceOpt::Updates => ready,
+        VoiceOpt::Talk => ready && (credential || talking || state.starting),
+        VoiceOpt::Model | VoiceOpt::Voice | VoiceOpt::Volume | VoiceOpt::Listen => credential,
+        VoiceOpt::Mute => talking,
+    }).collect()
+}
+
+/// Orbit owns microphone, hotkey and realtime provider settings.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum VoiceOpt {
-    On,
-    /// enter, then press the key (where the platform lets bro listen for it)
-    Key,
-    /// GPT-Live answering out loud, or speech to text
-    Mode,
-    /// GPT-Live's voice
-    Speaker,
-    /// whether the OpenAI key is there
-    ApiKey,
+    On, Talk, Mute, Provider, Model, Voice, Volume, Listen, Source, Open,
+    Escape, Background, Quit, Updates, ReloadPreview, Upstream,
 }
 
-const VOICE_OPTS: [VoiceOpt; 5] = [VoiceOpt::On, VoiceOpt::Key, VoiceOpt::Mode, VoiceOpt::Speaker, VoiceOpt::ApiKey];
-
-/// GPT-Live's voices.
-const LIVE_VOICES: [&str; 10] = ["cedar", "marin", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"];
-
-/// Keys ←/→ step through where pressing one to set it doesn't work.
-fn key_choices() -> Vec<&'static str> {
-    let mut all = vec![bro_voice::default_hotkey()];
-    all.extend(
-        ["ralt", "rctrl", "rshift", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24", "scrolllock", "pause"]
-            .into_iter()
-            .filter(|k| *k != bro_voice::default_hotkey()),
-    );
-    all
-}
-
-/// The voice key a key that reached bro's window names: function keys (F13–F24 by name) and Insert; keys you
-/// type or move with can't be one.
-fn window_hotkey(code: KeyCode) -> Option<String> {
-    match code {
-        KeyCode::F(n @ 13..=24) => Some(format!("f{n}")),
-        KeyCode::F(n @ 1..=12) => Some(format!("vk:0x{:02X}", 0x6F + u32::from(n))),
-        KeyCode::Insert => Some("insert".into()),
-        _ => None,
-    }
-}
-
-/// The push-to-talk key's name, the platform's default when none is set.
-fn voice_key(v: &bro_core::config::VoiceSettings) -> String {
-    v.hotkey.clone().unwrap_or_else(|| bro_voice::default_hotkey().to_string())
-}
-
-fn live_mode(v: &bro_core::config::VoiceSettings) -> bool {
-    v.mode != "transcribe"
-}
+const VOICE_OPTS: [VoiceOpt; 16] = [VoiceOpt::On, VoiceOpt::Talk, VoiceOpt::Mute, VoiceOpt::Provider,
+    VoiceOpt::Model, VoiceOpt::Voice, VoiceOpt::Volume, VoiceOpt::Listen, VoiceOpt::Source, VoiceOpt::Open,
+    VoiceOpt::Escape, VoiceOpt::Background, VoiceOpt::Quit, VoiceOpt::Updates, VoiceOpt::ReloadPreview, VoiceOpt::Upstream];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum CaveOpt {
@@ -649,7 +622,7 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Sessions => "Sessions",
             Section::Server => "Session server",
-            Section::Voice => "Voice",
+            Section::Voice => "Orbit Voice",
             Section::Caveman => "Caveman",
             Section::Watchdog => "Watchdog",
             Section::Claude => "Claude Code",
@@ -685,7 +658,7 @@ impl Section {
             Section::Appearance => "How bro looks. Every change shows up as you make it.",
             Section::Sessions => "What bro does on its own while your agents work.",
             Section::Server => "Your sessions run in a background process of bro's, so they keep running when bro closes, crashes or updates, and come back when it opens. The terminal UI and the desktop app both pick them up.",
-            Section::Voice => "Hold the key in any app, speak, let go: Hugh hears you and gets it done. bro keeps that key to itself while it runs.",
+            Section::Voice => "Talk with your workspace. You decide when the microphone is on.",
             Section::Caveman => "Terse replies with every fact kept, in new Claude, Codex and Pi sessions.",
             Section::Watchdog => "A fresh reviewer reads a session that went quiet and hands it its next task. Prefix w on a session starts one.",
             Section::Claude => "Agent teams, and the environment bro sets on every Claude launch. New sessions pick it up.",
@@ -872,6 +845,29 @@ impl SettingsView {
         rows()[self.sel.min(rows().len() - 1)]
     }
 
+    fn visible(&self, row: Row, cx: &Cx) -> bool {
+        if let Row::Voice(option) = row {
+            let state = cx.svc.state().orbit_voice.clone();
+            return voice_visible_options(cx.svc.settings().orbit_voice.enabled || state.owned_elsewhere && state.connected, &state).contains(&option);
+        }
+        true
+    }
+
+    fn normalize_selection(&mut self, cx: &Cx) {
+        if !self.visible(self.row(), cx) {
+            self.sel = rows().iter().position(|r| *r == Row::Voice(VoiceOpt::On)).unwrap_or(0);
+        }
+    }
+
+    fn move_visible(&mut self, direction: isize, cx: &Cx) {
+        let all = rows();
+        let mut next = self.sel as isize + direction;
+        while next >= 0 && (next as usize) < all.len() {
+            if self.visible(all[next as usize], cx) { self.sel = next as usize; break; }
+            next += direction;
+        }
+    }
+
     /// Select the first row of the section `dir` away (wrapping round).
     fn jump(&mut self, dir: isize) {
         let at = SECTIONS.iter().position(|s| *s == Section::of(self.row())).unwrap_or(0) as isize;
@@ -982,42 +978,65 @@ impl SettingsView {
         }
     }
 
-    /// Enter (or ←/→) on a voice row. Every change restarts the listener with it.
     fn voice(&mut self, o: VoiceOpt, dir: isize, cx: &mut Cx) {
-        let mut s = cx.svc.settings();
-        let v = &mut s.voice;
+        use bro_bridge::orbit_voice::{VoiceControl, Provider};
+        if !self.visible(Row::Voice(o), cx) { self.normalize_selection(cx); return; }
+        if cx.svc.orbit_owned_elsewhere() && matches!(o, VoiceOpt::On | VoiceOpt::Escape | VoiceOpt::Background | VoiceOpt::ReloadPreview) {
+            cx.toast(Kind::Info, "Your primary window owns Orbit Voice. Change the connection or character mode there.");
+            return;
+        }
+        let mut settings = cx.svc.settings();
         match o {
-            VoiceOpt::Key => {
-                let all = key_choices();
-                let i = all.iter().position(|k| *k == voice_key(v)).map_or(0, |i| i as isize + dir);
-                v.hotkey = Some(all[i.rem_euclid(all.len() as isize) as usize].to_string());
+            VoiceOpt::On => {
+                settings.orbit_voice.enabled = !settings.orbit_voice.enabled;
+                let enabled = settings.orbit_voice.enabled;
+                cx.svc.save_settings(settings);
+                cx.svc.start_orbit_voice(enabled);
             }
-            VoiceOpt::On => v.enabled = !v.enabled,
-            VoiceOpt::Mode => v.mode = if live_mode(v) { "transcribe" } else { "live" }.into(),
-            VoiceOpt::Speaker => {
-                let current = v.live_voice.clone().unwrap_or_else(|| bro_voice::DEFAULT_LIVE_VOICE.into());
-                let i = LIVE_VOICES.iter().position(|x| *x == current).map_or(0, |i| i as isize + dir);
-                v.live_voice = Some(LIVE_VOICES[i.rem_euclid(LIVE_VOICES.len() as isize) as usize].into());
+            VoiceOpt::Escape => {
+                settings.orbit_voice.allow_escape = !settings.orbit_voice.allow_escape;
+                settings.orbit_voice.mode = "attached".into();
+                cx.svc.save_settings(settings);
             }
-            // look for the key again
-            VoiceOpt::ApiKey => {}
-        }
-        if o != VoiceOpt::ApiKey {
-            cx.svc.save_settings(s);
-        }
-        if cx.svc.runs_voice() {
-            cx.svc.restart_voice();
-        } else if o == VoiceOpt::On || o == VoiceOpt::ApiKey {
-            cx.toast(Kind::Info, voice_elsewhere(cx));
+            VoiceOpt::Background => {
+                settings.orbit_voice.keep_in_background = !settings.orbit_voice.keep_in_background;
+                cx.svc.save_settings(settings);
+            }
+            VoiceOpt::Talk => cx.svc.toggle_orbit_voice(),
+            VoiceOpt::Mute => cx.svc.mute_orbit_voice(),
+            VoiceOpt::Quit => cx.svc.orbit_control(VoiceControl::Quit {}),
+            VoiceOpt::Source => {},
+            VoiceOpt::Provider | VoiceOpt::Model | VoiceOpt::Voice | VoiceOpt::Volume | VoiceOpt::Listen => {
+                let Some(runtime) = cx.svc.state().orbit_voice.runtime.clone() else {
+                    cx.toast(Kind::Info, "Connect Orbit Voice before changing voice preferences."); return;
+                };
+                let mut preferences = runtime.preferences;
+                let next = |current: &str, choices: &[&str]| -> String {
+                    let index = choices.iter().position(|choice| *choice == current).unwrap_or(0);
+                    choices[(index as isize + dir).rem_euclid(choices.len() as isize) as usize].into()
+                };
+                match o {
+                    VoiceOpt::Provider => {
+                        preferences.provider = if preferences.provider == Provider::Openai { Provider::Grok } else { Provider::Openai };
+                        let (model, voice) = if preferences.provider == Provider::Openai { ("gpt-realtime", "cedar") } else { ("grok-voice-latest", "eve") };
+                        preferences.model = model.into(); preferences.voice = voice.into();
+                    }
+                    VoiceOpt::Model => preferences.model = next(&preferences.model, if preferences.provider == Provider::Openai { &["gpt-realtime", "gpt-realtime-mini"] } else { &["grok-voice-latest"] }),
+                    VoiceOpt::Voice => preferences.voice = next(&preferences.voice, if preferences.provider == Provider::Openai { &["cedar", "marin", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"] } else { &["eve", "ara", "rex", "sal", "leo"] }),
+                    VoiceOpt::Volume => preferences.volume = (isize::from(preferences.volume) + dir * 5).clamp(0, 100) as u8,
+                    VoiceOpt::Listen => preferences.listen_mode = if preferences.listen_mode == "always" { "tap" } else { "always" }.into(),
+                    _ => unreachable!(),
+                }
+                cx.svc.orbit_control(VoiceControl::SetPreferences { preferences });
+            }
+            VoiceOpt::Open => cx.svc.open_orbit_voice(),
+            VoiceOpt::Updates => cx.svc.check_orbit_voice_release(),
+            VoiceOpt::ReloadPreview => cx.svc.reload_installed_orbit_preview(),
+            VoiceOpt::Upstream => cx.svc.orbit_repository(true),
         }
     }
 
-    /// Enter on the selected row: the voice key waits for the key you press (where that works); everything
-    /// else steps forward.
     fn press(&mut self, cx: &mut Cx) {
-        if self.row() == Row::Voice(VoiceOpt::Key) && bro_voice::Voice::can_capture_hotkey() {
-            return cx.svc.capture_voice_hotkey();
-        }
         self.step(1, cx);
     }
 
@@ -1111,17 +1130,14 @@ impl SettingsView {
         let mut s = cx.svc.settings();
         match self.row() {
             Row::Mod(ModOpt::TimerSecs) => s.claude_mod.timer_secs = bro_core::claude_mod::ClaudeModSettings::default().timer_secs,
-            Row::Quips | Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Skill(_) | Row::Update(_) | Row::Host(_) | Row::Mod(_) | Row::Voice(VoiceOpt::On | VoiceOpt::ApiKey) => return,
-            Row::Voice(o) => {
-                match o {
-                    VoiceOpt::Key => s.voice.hotkey = None,
-                    VoiceOpt::Speaker => s.voice.live_voice = None,
-                    _ => s.voice.mode = bro_core::config::VoiceSettings::default().mode,
-                }
+            Row::Quips | Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Skill(_) | Row::Update(_) | Row::Host(_) | Row::Mod(_) => return,
+            Row::Voice(VoiceOpt::Escape) => {
+                s.orbit_voice.mode = "attached".into();
+                s.orbit_voice.allow_escape = false;
                 cx.svc.save_settings(s);
-                cx.svc.restart_voice();
                 return;
             }
+            Row::Voice(_) => return,
             Row::Watch(o) => {
                 let d = bro_core::config::WatchdogSettings::default();
                 match o {
@@ -1138,15 +1154,6 @@ impl SettingsView {
             }
         }
         cx.svc.save_settings(s);
-    }
-}
-
-/// Why this bro isn't the one listening.
-fn voice_elsewhere(cx: &Cx) -> &'static str {
-    match () {
-        _ if cx.svc.is_demo() => "the demo doesn't listen for voice",
-        _ if !cx.svc.settings().bridge.enabled => "voice talks to Hugh through the phone bridge, which is off ([bridge] enabled in ~/.bro/v2.toml)",
-        _ => "your other bro runs voice: change it there, or restart it to pick this up",
     }
 }
 
@@ -1459,71 +1466,83 @@ impl SettingsView {
         }
     }
 
-    /// Push-to-talk: on, its key, how Hugh answers, his voice, the OpenAI key.
     fn voice_blocks(&self, cx: &Cx) -> Vec<Block> {
+        use bro_bridge::orbit_voice::{CredentialSource, Phase, Provider};
         let t = cx.theme;
-        let bold = |c| fg(c).add_modifier(Modifier::BOLD);
-        let st = cx.svc.settings();
-        let v = &st.voice;
-        let vs = cx.svc.state().voice.clone();
-        let here = cx.svc.runs_voice();
-        let label = bro_voice::Voice::hotkey_label(&voice_key(v));
-
-        let help = match () {
-            _ if !v.enabled => "nothing listens and the key stays an ordinary key".to_string(),
-            _ if !here => voice_elsewhere(cx).to_string(),
-            _ if vs.running.is_some() => format!("listening on {label} in every app"),
-            _ if vs.key_found == Some(false) => "waiting for an OpenAI key (below)".into(),
-            _ => "starting…".into(),
-        };
-        let mut on = Item::new(Row::Voice(VoiceOpt::On), "Push-to-talk", switch(v.enabled, vs.running.is_some(), t), help);
-        if let Some(e) = vs.error.as_ref().filter(|_| v.enabled) {
-            on = on.note(vec![Span::styled(format!("✗ {e}"), fg(t.danger))]);
+        let settings = cx.svc.settings();
+        let state = cx.svc.state().orbit_voice.clone();
+        let enabled = settings.orbit_voice.enabled || state.owned_elsewhere && state.connected;
+        let runtime = state.runtime.as_ref().filter(|r| enabled && state.connected && r.renderer_ready);
+        let ready = runtime.is_some();
+        let credential = runtime.is_some_and(|r| r.credential_available);
+        let talking = runtime.is_some_and(|r| r.phase != Phase::Off);
+        let visible = voice_visible_options(enabled, &state);
+        let item = |option, label, value, help| Block::Item(Item::new(Row::Voice(option), label, value, help));
+        let heading = |text: &str| Block::Sub(text.into());
+        let mut blocks = vec![heading(if ready { "Connection" } else { "Connect Orbit" })];
+        let connection_help = if state.owned_elsewhere { "Connected through your primary window. Voice controls are shared; no second companion is started." }
+            else if ready { "Your companion is connected. The microphone stays off until you start voice." }
+            else if enabled { "Orbit must be connected before voice and character settings become available." }
+            else { "Enable Orbit to connect your voice companion. Your microphone stays off until you start a conversation." };
+        let mut connection = Item::new(Row::Voice(VoiceOpt::On), "Orbit connection", switch(enabled, ready, t), connection_help);
+        if !ready && enabled {
+            let (message, color) = match &state.error {
+                Some(error) if error.contains("checksum") || error.contains("manifest") => ("The Orbit preview changed after it was verified. Refresh the installed build, then try connecting again.".to_string(), t.danger),
+                Some(error) => (format!("Couldn’t connect. {}", ui::fit(error, 240)), t.danger),
+                None if state.checking => ("Checking the installed preview and preparing the connection…".into(), t.muted),
+                None => (state.status.clone(), t.muted),
+            };
+            if !message.is_empty() { connection = connection.note(vec![Span::styled(message, fg(color))]); }
         }
-
-        // bro comes forward on a press (Windows): a modifier only once it's held, so chords like Win+E still work
-        let raise = match () {
-            _ if !cfg!(windows) => "",
-            _ if bro_voice::Voice::hotkey_is_modifier(&voice_key(v)) => " · bro comes forward once you hold it",
-            _ => " · bro comes forward the moment it goes down",
-        };
-        let (value, help) = match vs.capturing {
-            Some(started) => (shown(format!("{} press a key…", spinner(started)), bold(t.shine)), format!("press it now, in any app · esc keeps {label}")),
-            None if bro_voice::Voice::can_capture_hotkey() => (
-                choice(label.clone(), fg(t.inline), t),
-                format!("enter, then press the key you want{raise} · a G-key set to F13–F24 is ideal, as nothing else uses those"),
-            ),
-            None => (choice(label.clone(), fg(t.inline), t), format!("the key you hold to talk · ←/→ for another{raise}")),
-        };
-        let mut key = Item::new(Row::Voice(VoiceOpt::Key), "Voice key", value, help);
-        if v.hotkey.is_some() {
-            key.tag = Some(Span::styled("  changed", fg(t.shine)));
+        blocks.push(Block::Item(connection));
+        if !ready {
+            if visible.contains(&VoiceOpt::ReloadPreview) {
+                blocks.push(item(VoiceOpt::ReloadPreview, "Connect the installed preview", shown("Microphone stays off", muted(t)),
+                    "Validate the selected Orbit build and retry the background connection."));
+            }
+            blocks.push(Block::Text(vec![Span::styled("Next: choose your voice provider and key source. Conversation controls appear when setup is ready.", muted(t))]));
         }
-
-        let live = live_mode(v);
-        let mode = Item::new(
-            Row::Voice(VoiceOpt::Mode),
-            "Hugh answers",
-            choice(if live { "out loud" } else { "as text" }, fg(t.inline), t),
-            if live { "talk with Hugh through GPT-Live: he answers out loud and hands the work to your orchestrator" } else { "your words go to the orchestrator as text; its answers come back as toasts" },
-        );
-        let speaker_name = v.live_voice.clone().unwrap_or_else(|| bro_voice::DEFAULT_LIVE_VOICE.into());
-        let speaker = Item::new(
-            Row::Voice(VoiceOpt::Speaker),
-            "Hugh's voice",
-            choice(speaker_name, if live { fg(t.inline) } else { muted(t) }, t),
-            if live { "the voice GPT-Live speaks with" } else { "only when Hugh answers out loud" },
-        );
-
-        let env = &v.api_key_env;
-        let (value, help) = match vs.key_found {
-            Some(true) => (shown("found", fg(t.good)), format!("read from {env} · enter looks again")),
-            Some(false) => (shown("not set", fg(t.danger)), format!("set {env} to an OpenAI API key (your environment, or Windows' user variables), then enter looks again")),
-            None if here && v.enabled => (shown("checking…", muted(t)), format!("looking for {env}")),
-            None => (shown("not checked", muted(t)), format!("voice reads its OpenAI key from {env}")),
-        };
-        let api = Item::new(Row::Voice(VoiceOpt::ApiKey), "OpenAI key", value, help);
-        vec![Block::Item(on), Block::Item(key), Block::Item(mode), Block::Item(speaker), Block::Item(api)]
+        if let Some(runtime) = runtime {
+            let preferences = &runtime.preferences;
+            let provider_name = if preferences.provider == Provider::Openai { "OpenAI Realtime" } else { "Grok Voice" };
+            let source = if !credential { "No key selected" } else { match runtime.credential_source {
+                CredentialSource::Saved => "Saved in Orbit", CredentialSource::Process => "System environment",
+                CredentialSource::User => "Windows user environment", CredentialSource::Machine => "Windows machine environment", _ => "Unavailable",
+            } };
+            let preference = |option, label, value: String, help| item(option, label, choice(value, fg(t.inline), t), help);
+            let show_conversation = credential || talking || state.starting;
+            blocks.push(heading(if show_conversation { "Conversation" } else { "Set up your voice" }));
+            if show_conversation {
+                blocks.push(Block::Item(Item::new(Row::Voice(VoiceOpt::Talk), "Talk with Orbit", shown(if state.starting { "Starting voice…".into() } else { state.status.clone() }, fg(if talking || state.starting { t.inline } else { t.good })),
+                    "Start a conversation when you’re ready. Stop releases your microphone.")
+                    .note(vec![Span::styled(format!("{}{} · {source}", if talking { "Next conversation: " } else { "" }, provider_name), muted(t))])));
+                if talking { blocks.push(item(VoiceOpt::Mute, "Mute microphone", switch(runtime.muted, true, t), "Keep hearing replies without sending microphone audio. Stop releases the device.")); }
+                blocks.push(heading(if credential { "Voice preferences" } else { "Set up your next conversation" }));
+            }
+            if !credential {
+                blocks.push(Block::Text(vec![Span::styled("Choose a realtime provider, then select a system key or save a key in Orbit’s secure settings. Nothing is billed during setup.", muted(t))]));
+            }
+            blocks.push(preference(VoiceOpt::Provider, "Provider", provider_name.into(), "Changes apply to your next conversation."));
+            if credential {
+                blocks.push(preference(VoiceOpt::Model, "Model", preferences.model.clone(), ""));
+                blocks.push(preference(VoiceOpt::Voice, "Voice", preferences.voice.clone(), ""));
+                blocks.push(preference(VoiceOpt::Volume, "Reply volume", format!("{}%", preferences.volume), "Adjust playback volume, including during a reply."));
+                blocks.push(preference(VoiceOpt::Listen, "Listening", if preferences.listen_mode == "always" { "Until stopped" } else { "One turn" }.into(), "Keep listening, or stop after one turn."));
+            }
+            blocks.push(item(VoiceOpt::Source, "Key source", shown(source, fg(if credential { t.inline } else { t.muted })), "Manage your key in Orbit’s secure settings."));
+            blocks.push(item(VoiceOpt::Open, if credential { "Advanced settings" } else { "Choose your key" }, shown(if credential { "Open when needed" } else { "Setup required" }, muted(t)),
+                "Manage keys and advanced preferences in Orbit. Closing settings does not end a conversation."));
+            blocks.push(heading("Qubit & background"));
+            blocks.push(item(VoiceOpt::Escape, "Allow Qubit to escape bro", switch(settings.orbit_voice.allow_escape, settings.orbit_voice.allow_escape, t), "Off keeps Qubit inside bro. On allows movement onto the desktop on one display."));
+            blocks.push(item(VoiceOpt::Background, "Keep Orbit in the background", switch(settings.orbit_voice.keep_in_background, settings.server.keep_sessions && settings.server.keep_working, t),
+                "Keep the companion available through bro’s background workspace. This does not start listening."));
+            blocks.push(heading("Companion"));
+            blocks.push(item(VoiceOpt::Quit, "Quit Orbit companion", shown("Sessions stay running", muted(t)), "Stop the managed companion until you explicitly resume it."));
+            blocks.push(item(VoiceOpt::Updates, "Version", shown(state.version.as_deref().unwrap_or("Compatibility preview"), muted(t)), "This compatibility preview is updated separately from bro."));
+        }
+        blocks.push(heading("About Orbit"));
+        blocks.push(item(VoiceOpt::Upstream, "Orbit project", choice("Open GitHub", fg(t.inline), t), "Meet Orbit and follow the original project."));
+        blocks
     }
 
     /// JustTools, Quick Install, Smart Paste and JustImagine.
@@ -1693,13 +1712,12 @@ impl SettingsView {
                 Span::styled(format!("{on} of {} on", opts.len()), muted(t))
             }
             Section::Voice => {
-                let vs = cx.svc.state().voice.clone();
-                match (&vs.capturing, &vs.running) {
-                    (Some(started), _) => Span::styled(spinner(*started), fg(t.shine)),
-                    (None, Some(key)) => Span::styled(bro_voice::Voice::hotkey_label(key), fg(t.inline)),
-                    (None, None) if st.voice.enabled => Span::styled(bro_voice::Voice::hotkey_label(&voice_key(&st.voice)), muted(t)),
-                    (None, None) => Span::styled("off", muted(t)),
-                }
+                let state = cx.svc.state().orbit_voice.clone();
+                let (text, style) = if state.connected { ("connected", fg(t.good)) }
+                    else if state.checking { ("checking…", fg(t.shine)) }
+                    else if st.orbit_voice.enabled { ("waiting", muted(t)) }
+                    else { ("off", muted(t)) };
+                Span::styled(text, style)
             }
             Section::Caveman => match st.caveman.active() {
                 Some(l) => Span::styled(l.id(), fg(t.shine)),
@@ -1788,6 +1806,7 @@ impl Pane for SettingsView {
     fn render(&mut self, f: &mut Frame, area: Rect, cx: &mut Cx) {
         let t = cx.theme;
         note_settings(&cx.svc.settings());
+        self.normalize_selection(cx);
         if !self.tools_checked {
             self.tools_checked = true;
             cx.svc.check_justtools();
@@ -1812,18 +1831,14 @@ impl Pane for SettingsView {
         self.tools_busy = { let jt = &cx.svc.state().justtools; jt.job.is_some() || jt.paste_busy.is_some() };
         let u = cx.svc.state().updates.clone();
         self.update_busy = u.job.is_some() || u.checking;
-        self.voice_busy = cx.svc.state().voice.capturing.is_some();
+        self.voice_busy = cx.svc.state().orbit_voice.checking;
 
         let row = self.row();
         let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
-        if row == Row::Voice(VoiceOpt::Key) && bro_voice::Voice::can_capture_hotkey() {
-            hints.truncate(2);
-            hints.extend([("enter", "press the key"), ("←/→", "pick one")]);
-        }
         match row {
             r if team_knob(r) => hints.push(("r", "bro's default")),
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
-            Row::Watch(_) | Row::Voice(VoiceOpt::Key | VoiceOpt::Mode | VoiceOpt::Speaker) => hints.push(("r", "bro's default")),
+            Row::Watch(_) | Row::Voice(VoiceOpt::Escape) => hints.push(("r", "bro's default")),
             _ => {}
         }
         if source_link(row).is_some() {
@@ -1917,23 +1932,10 @@ impl Pane for SettingsView {
     }
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         note_settings(&cx.svc.settings());
-        // "press the key you want" swallows keys before any window sees them: one that arrives here got past
-        // it, so it's the answer (or esc, no change); the rest wait with it
-        if cx.svc.state().voice.capturing.is_some() {
-            match key.code {
-                KeyCode::Esc => cx.svc.voice_key_pressed_here(None),
-                code => {
-                    if let Some(name) = window_hotkey(code) {
-                        cx.svc.voice_key_pressed_here(Some(name));
-                    }
-                }
-            }
-            return true;
-        }
         let last = rows().len() - 1;
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => self.sel = (self.sel + 1).min(last),
-            KeyCode::Char('k') | KeyCode::Up => self.sel = self.sel.saturating_sub(1),
+            KeyCode::Char('j') | KeyCode::Down => self.move_visible(1, cx),
+            KeyCode::Char('k') | KeyCode::Up => self.move_visible(-1, cx),
             KeyCode::Char('g') | KeyCode::Home => self.sel = 0,
             KeyCode::Char('G') | KeyCode::End => self.sel = last,
             // shift+tab arrives as Tab+SHIFT on some paths (Windows console input)
@@ -1950,10 +1952,9 @@ impl Pane for SettingsView {
         true
     }
     fn mouse(&mut self, ev: MouseEvent, _area: Rect, cx: &mut Cx) {
-        let last = rows().len() - 1;
         match ev.kind {
-            MouseEventKind::ScrollDown => self.sel = (self.sel + 1).min(last),
-            MouseEventKind::ScrollUp => self.sel = self.sel.saturating_sub(1),
+            MouseEventKind::ScrollDown => self.move_visible(1, cx),
+            MouseEventKind::ScrollUp => self.move_visible(-1, cx),
             MouseEventKind::Down(MouseButton::Left) if ev.column < self.nav_end => {
                 if let Some(&(_, s)) = self.nav_hits.iter().find(|(y, _)| *y == ev.row) {
                     self.go(s);
@@ -1977,14 +1978,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keys_reaching_the_window_name_voice_keys() {
-        for (code, label) in [(KeyCode::F(13), "F13"), (KeyCode::F(24), "F24"), (KeyCode::F(5), "F5"), (KeyCode::Insert, "Insert")] {
-            let name = window_hotkey(code).expect("a voice key");
-            assert!(bro_voice::Voice::parse_hotkey(&name).is_some(), "{name}");
-            assert_eq!(bro_voice::Voice::hotkey_label(&name), label);
-        }
-        assert_eq!(window_hotkey(KeyCode::Char('a')), None);
-        assert_eq!(window_hotkey(KeyCode::Enter), None);
+    fn orbit_settings_keep_provider_controls_in_orbit() {
+        assert_eq!(Section::Voice.label(), "Orbit Voice");
+        assert_eq!(VOICE_OPTS.len(), 16);
+        assert_eq!(VOICE_OPTS.iter().filter(|option| **option == VoiceOpt::Upstream).count(), 1);
+        assert!(VOICE_OPTS.contains(&VoiceOpt::ReloadPreview));
+        let settings = bro_core::config::OrbitSettings::default();
+        assert!(!settings.enabled);
+        assert_eq!(settings.mode, "attached");
+        assert!(!settings.allow_escape);
+        assert!(VOICE_OPTS.contains(&VoiceOpt::Escape));
+        assert!(VOICE_OPTS.contains(&VoiceOpt::Background));
+    }
+
+    #[test]
+    fn voice_setup_reveals_only_controls_that_are_available() {
+        use crate::services::orbit_voice::OrbitState;
+        let mut state = OrbitState::default();
+        assert_eq!(voice_visible_options(false, &state), vec![VoiceOpt::On, VoiceOpt::Upstream]);
+        state.error = Some("preview checksum failed".into());
+        assert_eq!(voice_visible_options(true, &state), vec![VoiceOpt::On, VoiceOpt::ReloadPreview, VoiceOpt::Upstream]);
+        state.checking = true;
+        assert!(!voice_visible_options(true, &state).contains(&VoiceOpt::ReloadPreview));
+        state.checking = false; state.connected = true;
+        state.runtime = Some(serde_json::from_value(serde_json::json!({"runtimeId":"fixture","pid":42,"buildId":"a".repeat(64),
+            "rendererReady":true,"preferences":{"provider":"openai","model":"gpt-realtime","voice":"cedar","volume":75,"listenMode":"always"},
+            "credentialAvailable":false,"credentialSource":"none","microphone":"off","phase":"off","muted":false})).unwrap());
+        let setup = voice_visible_options(true, &state);
+        assert!(setup.contains(&VoiceOpt::Provider) && setup.contains(&VoiceOpt::Open));
+        assert!(!setup.contains(&VoiceOpt::Talk) && !setup.contains(&VoiceOpt::Model) && !setup.contains(&VoiceOpt::Mute));
+        state.runtime.as_mut().unwrap().credential_available = true;
+        let available = voice_visible_options(true, &state);
+        assert!(available.contains(&VoiceOpt::Talk) && available.contains(&VoiceOpt::Model));
+        assert!(!available.contains(&VoiceOpt::Mute));
+        state.runtime.as_mut().unwrap().phase = bro_bridge::orbit_voice::Phase::Listening;
+        assert!(voice_visible_options(true, &state).contains(&VoiceOpt::Mute));
+        state.runtime.as_mut().unwrap().credential_available = false;
+        let active_without_next_key = voice_visible_options(true, &state);
+        assert!(active_without_next_key.contains(&VoiceOpt::Talk) && active_without_next_key.contains(&VoiceOpt::Mute), "Stop and Mute remain available when the next provider has no key");
+        assert_eq!(voice_visible_options(false, &state), vec![VoiceOpt::On, VoiceOpt::Upstream], "disabling hides cached controls immediately");
+        state.connected = false;
+        assert!(!voice_visible_options(true, &state).contains(&VoiceOpt::Talk), "a stale cached runtime must not reveal controls");
     }
 
     #[test]

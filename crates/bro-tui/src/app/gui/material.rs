@@ -78,6 +78,7 @@ impl Gui {
     pub(super) fn swap_window(&mut self, el: &ActiveEventLoop) {
         self.swap_window = false;
         let (Some(old), Some(gfx)) = (self.window.clone(), self.gfx.take()) else { return };
+        self.orbit_stage.invalidate(&self.app.svc);
         self.prefs.note_size(Some(&old));
         let maximized = old.is_maximized();
         let fullscreen = old.fullscreen();
@@ -111,6 +112,8 @@ impl Gui {
         w.set_fullscreen(fullscreen);
         w.set_ime_allowed(true);
         window::remember_handle(&w);
+        self.orbit_stage.new_window(&self.app.svc);
+        self.occluded = false;
         self.scale = w.scale_factor() as f32;
         self.font_px = 0.0;
         text.reset_atlases();

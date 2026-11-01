@@ -119,6 +119,38 @@ fn find_chat(chat_id: &str) -> Result<SessionInfo, String> {
         .ok_or_else(|| format!("No chat with id \"{chat_id}\". Call list_chats for ids."))
 }
 
+fn within_project(info: &SessionInfo, root: &Path) -> bool {
+    info.project.as_ref().is_some_and(|p| bro_core::util::same_path(&p.root, root))
+        || info.cwd.as_deref().is_some_and(|cwd| bro_core::util::same_path(cwd, root))
+}
+
+/// Exact project projection for a companion. No fuzzy project names, paths, or profile leakage.
+pub(crate) fn list_scoped(root: &Path, query: Option<&str>, limit: usize) -> Value {
+    let query = query.map(str::to_lowercase);
+    let chats = sessions::list(&ListOpts { limit: LIST_SCAN, harnesses: vec![Harness::Claude, Harness::Codex] })
+        .into_iter().filter(|info| within_project(info, root))
+        .filter(|info| query.as_ref().is_none_or(|q| info.title.to_lowercase().contains(q)))
+        .take(limit.clamp(1, 40)).map(|info| json!({"chatId":info.id,"title":info.title,"agent":info.harness.label(),"modified":modified_iso(info.modified)})).collect::<Vec<_>>();
+    json!({"chats":chats,"nonUser":true})
+}
+
+/// Same canonical transcript reader, with exact ID and project checks before any content read.
+pub(crate) fn read_scoped(app: &AppState, root: &Path, session_id: Option<&str>, chat_id: Option<&str>, messages: Option<u64>) -> Result<String, String> {
+    let info = match (session_id, chat_id) {
+        (Some(id), None) => live_transcript(app, id)?,
+        (None, Some(id)) => {
+            let mut matches = sessions::list(&ListOpts { limit: LIST_SCAN, harnesses: vec![Harness::Claude, Harness::Codex] })
+                .into_iter().filter(|info| info.id == id && within_project(info, root));
+            let info = matches.next().ok_or("Use an exact scoped chat ID from list_chats")?;
+            if matches.next().is_some() { return Err("This chat ID is ambiguous across profiles. Read a bound live session instead.".into()); }
+            info
+        }
+        _ => return Err("Pass exactly one sessionId or chatId".into()),
+    };
+    if !within_project(&info, root) { return Err("Transcript is outside the approved project".into()); }
+    read_info(&info, Some(messages.unwrap_or(20).clamp(1, 40)))
+}
+
 fn clip_middle(text: &str) -> String {
     let count = text.chars().count();
     if count <= MESSAGE_CHARS {
@@ -141,6 +173,10 @@ pub fn read(
         (Some(session_id), None) => live_transcript(app, session_id)?,
         (None, None) => return Err("Pass sessionId (a live tab) or chatId (from list_chats).".into()),
     };
+    read_info(&info, messages)
+}
+
+fn read_info(info: &SessionInfo, messages: Option<u64>) -> Result<String, String> {
     let limit = messages
         .map(|count| count.clamp(1, MAX_MESSAGES as u64) as usize)
         .unwrap_or(DEFAULT_MESSAGES);

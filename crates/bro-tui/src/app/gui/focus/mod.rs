@@ -412,13 +412,11 @@ pub fn header_status(app: &App, ui: &mut Ui, id: PaneId, view: Option<&View>, ri
 
 /// Draw `id`'s conversation in `content` (the card under its header).
 #[allow(clippy::too_many_arguments)]
-pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool, v: &mut View, media: &mut Media, apps: &mut Apps) {
+pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool, v: &mut View, media: &mut Media, apps: &mut Apps, stage: &mut super::orbit_stage::Drawn) {
     let Some(seen) = seen(app, id) else { return };
     // the choice on screen: read when the screen is free, kept while it waits on you
     if seen.limit.is_none() && seen.activity == Some(Activity::Blocked) {
-        if let Some(c) = app.focus_choice(id) {
-            v.choice = Some(c);
-        }
+        v.choice = app.focus_choice(id);
     } else {
         v.choice = None;
     }
@@ -461,6 +459,13 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool
         draw_choice(ui, id, &c, &ch, choice_r);
     }
     reply_box(app, ui, id, box_r, focused, &c, &seen, mood, v, media);
+    stage.composer(id, box_r, content);
+    if choice_h > 0.0 {
+        stage.choice(id, choice_r, content);
+    }
+    if v.popup {
+        stage.suspend();
+    }
     // the apps' pages go over their cards once the frame is drawn, unless a list over the box covers them
     let cards = std::mem::take(&mut v.cards);
     let sid = app.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone());
@@ -2214,11 +2219,11 @@ pub fn click(g: &mut Gui, id: PaneId, n: usize, p: Point, count: u32) {
             }
         }
         n if (OPTION..UNATTACH).contains(&n) => {
-            let key = g.panes.get(&id).and_then(|st| st.focus.choice.as_ref()).and_then(|c| c.options.get(n - OPTION)).map(|o| o.key.clone());
-            if let Some(key) = key
-                && let Some(t) = g.app.panes.get_mut(&id).and_then(|p| p.as_term())
+            let shown = g.panes.get(&id).and_then(|st| st.focus.choice.clone());
+            if let Some(shown) = shown
+                && let Some(option) = shown.options.get(n - OPTION)
             {
-                t.send(format!("{key}\r").as_bytes());
+                g.app.focus_answer(id, &shown, &option.key);
             }
         }
         n if (UNATTACH..SHOW_ATTACHED).contains(&n) => {

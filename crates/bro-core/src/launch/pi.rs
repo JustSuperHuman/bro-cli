@@ -260,6 +260,8 @@ fn proxy_provider(upstream: &str, base: &str, model: Option<&str>) -> Provider {
 }
 
 pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow::Result<CommandSpec> {
+    let home = if spec.harness == Harness::Omp { paths::omp_agent_dir() } else { paths::pi_agent_dir() };
+    crate::tool_skills::write_desktop_cached(&home);
     let mut cmd = CommandSpec::default();
     let model = spec.model.as_deref().filter(|m| !m.is_empty());
     // (provider to configure, its key, who for the label)

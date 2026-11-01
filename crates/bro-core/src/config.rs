@@ -154,7 +154,10 @@ pub struct Settings {
     pub material_tint: u8,
     pub bridge: BridgeSettings,
     pub proxy: ProxySettings,
+    /// Legacy voice preferences remain readable; they are not consent to start Orbit.
     pub voice: VoiceSettings,
+    /// Orbit owns realtime audio, credentials, microphones and hotkeys.
+    pub orbit_voice: OrbitSettings,
     pub insights: InsightsSettings,
     pub auto_resume: AutoResumeSettings,
     /// Answer Yes for you when Claude stops on a "Do you want to proceed?" permission prompt (the safety
@@ -296,7 +299,31 @@ impl Default for WatchdogSettings {
     }
 }
 
-/// Push-to-talk to the orchestrator: hold the hotkey anywhere, speak, release.
+/// Orbit Voice's local integration preferences. Provider settings and secrets live in Orbit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OrbitSettings {
+    /// Explicit consent to connect; legacy `voice.enabled` never enables Orbit.
+    pub enabled: bool,
+    /// Legacy placement, retained for compatibility. Never grants escape permission.
+    pub mode: String,
+    /// Explicit permission for Qubit to roam outside the native bro client.
+    pub allow_escape: bool,
+    /// Remain available through bro's background driver, subject to its global policy.
+    pub keep_in_background: bool,
+    /// An explicitly selected compatible application, or Electron for a local preview.
+    pub executable: Option<std::path::PathBuf>,
+    /// Local preview's application directory, passed as Electron's first argument.
+    pub application_dir: Option<std::path::PathBuf>,
+}
+
+impl Default for OrbitSettings {
+    fn default() -> Self {
+        Self { enabled: false, mode: "attached".into(), allow_escape: false, keep_in_background: true, executable: None, application_dir: None }
+    }
+}
+
+/// Legacy push-to-talk preferences, retained for old settings files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VoiceSettings {
@@ -417,6 +444,7 @@ impl Default for Settings {
             bridge: BridgeSettings::default(),
             proxy: ProxySettings::default(),
             voice: VoiceSettings::default(),
+            orbit_voice: OrbitSettings::default(),
             insights: InsightsSettings::default(),
             auto_resume: AutoResumeSettings::default(),
             auto_approve: false,
@@ -657,6 +685,46 @@ mod tests {
         assert!(bridge.protect_media, "the phone keeps to the work's media unless you say otherwise");
         std::fs::write(paths::settings_path(), "theme = 3").unwrap();
         assert_eq!(Settings::load().theme, "graphite");
+    }
+
+    #[test]
+    fn orbit_preferences_are_opt_in_and_keep_legacy_voice_readable() {
+        let _sb = sandbox();
+        let legacy: Settings = toml::from_str("[voice]\nenabled = true\nhotkey = 'right-win'\nmode = 'live'\n").unwrap();
+        assert!(legacy.voice.enabled);
+        assert_eq!(legacy.voice.hotkey.as_deref(), Some("right-win"));
+        assert_eq!(legacy.orbit_voice, OrbitSettings::default());
+        assert!(!legacy.orbit_voice.enabled);
+        assert_eq!(legacy.orbit_voice.mode, "attached");
+        assert!(!legacy.orbit_voice.allow_escape);
+
+        let mut settings = legacy;
+        settings.orbit_voice = OrbitSettings {
+            enabled: true,
+            mode: "attached".into(),
+            executable: Some(std::path::PathBuf::from("preview/electron")),
+            application_dir: Some(std::path::PathBuf::from("preview/app")),
+            ..Default::default()
+        };
+        settings.save().unwrap();
+        let back = Settings::load();
+        assert_eq!(back.orbit_voice, settings.orbit_voice);
+        assert!(back.voice.enabled);
+        settings.orbit_voice.mode = "auto".into();
+        settings.save().unwrap();
+        assert_eq!(Settings::load().orbit_voice, settings.orbit_voice);
+        let partial: Settings = toml::from_str("[orbit_voice]\nenabled = true\n").unwrap();
+        assert!(partial.orbit_voice.enabled);
+        assert_eq!(partial.orbit_voice.mode, "attached");
+        assert!(!partial.orbit_voice.allow_escape);
+        for mode in ["desktop", "auto", "attached", "unknown"] {
+            let old: Settings = toml::from_str(&format!("[orbit_voice]\nenabled = true\nmode = '{mode}'\n")).unwrap();
+            assert!(!old.orbit_voice.allow_escape, "old placement is not escape consent");
+        }
+        settings.orbit_voice.allow_escape = true;
+        settings.save().unwrap();
+        assert!(Settings::load().orbit_voice.allow_escape);
+        assert!(partial.orbit_voice.executable.is_none() && partial.orbit_voice.application_dir.is_none());
     }
 
     #[test]

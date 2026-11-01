@@ -20,6 +20,7 @@
 //! ([`bro_core::skill_inventory`]), again whenever something changes them; the catalogue is fetched on one (cached for
 //! half a day). Both wake the pane.
 
+#[cfg(feature = "gui")]
 pub mod gui;
 
 use super::settings::{ago, spinner};
@@ -729,6 +730,7 @@ impl SkillsView {
         match cx.svc.bundled_on(b) {
             Some(on) => cx.svc.set_bundled(b, !on),
             None if b == Bundled::JustImagine => cx.svc.set_bundled(b, true),
+            None if matches!(b, Bundled::Browser | Bundled::AgentDesktop) => cx.toast(Kind::Info, "Bro keeps these skills with their installed tool. Quick install shows setup and update options."),
             None => cx.toast(Kind::Info, format!("bro writes the {} skill when it's needed", b.title().to_lowercase())),
         }
     }
@@ -1527,6 +1529,7 @@ impl SkillsView {
                         Some(true) => ("● on", fg(t.good)),
                         Some(false) => ("○ off", muted(t)),
                         None if *b == Bundled::JustImagine => ("write ›", fg(t.inline)),
+                        None if matches!(b, Bundled::Browser | Bundled::AgentDesktop) => ("managed", muted(t)),
                         None => ("when needed", muted(t)),
                     };
                     let spans = vec![marker, Span::styled(ui::pad(b.title(), 16), name_style), Span::styled(ui::pad(state, 13), style), Span::styled(b.about().to_string(), muted(t))];

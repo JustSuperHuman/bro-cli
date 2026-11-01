@@ -18,6 +18,9 @@ Linux.
   answers. Three levels, off by default ([docs/caveman.md](docs/caveman.md)).
 - **Sound packs.** PeonPing voice lines when an agent finishes or needs you, in all four agents. Browse,
   preview and install 370+ packs. MP3 packs and the volume work on every OS ([docs/sounds.md](docs/sounds.md)).
+- **Orbit Voice — Windows compatibility preview.** Realtime conversation through Orbit, with its moving native
+  companion and a private connection to your sessions. Uses a separate Windows companion preview; see
+  [setup and current limits](docs/orbit-voice.md).
 - **A beautiful desktop app, and the same workspace as a TUI.** GPU-rendered GUI on Windows, macOS and
   Linux; over SSH or with no display, `bro` opens the terminal version with the same sessions and keys.
 - **On your phone.** The Just Terminal mobile and web clients connect to a built-in bridge.
@@ -77,6 +80,8 @@ Running the install line again works too.
 - [Using bro](docs/using.md): profiles, pasting images, fonts, themes
 - [The desktop app](docs/gui.md) and its keys
 - [Quick Install](docs/quick-install.md): `bro install` for Git, Node.js, the agents and more
+- [Orbit Voice](docs/orbit-voice.md): realtime voice, the moving companion, and compatibility-preview setup
+- [Orbit collaboration notes](docs/orbit-voice-collaboration.md): protocol, upstream review scope and acceptance gates
 - [Gemini on your Google AI subscription](docs/gemini.md)
 - [Env files](docs/env-files.md): carry your API keys to a new machine
 - [Claude Code presets](docs/claude-env.md), [the bro mod for Claude Code](docs/claude-mod.md), [watchdogs](docs/watchdog.md), [caveman mode](docs/caveman.md), [sounds](docs/sounds.md)

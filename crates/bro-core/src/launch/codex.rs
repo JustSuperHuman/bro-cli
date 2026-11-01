@@ -143,6 +143,7 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         let _ = crate::skills::write_bro_open_skill(&home);
     }
     crate::skill_repos::write_cached(&home, &ctx.skill_repos);
+    crate::tool_skills::write_cached(&home);
     if spec.orchestrator {
         let _ = crate::orchestrator::write_skill(&home);
     }
@@ -274,6 +275,15 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             .filter(|s| !s.trim().is_empty());
         let text = own.into_iter().chain(added).map(|s| s.trim_end().to_string()).collect::<Vec<_>>().join("\n\n");
         args.extend(["-c".into(), format!("developer_instructions={}", toml_str(&text))]);
+    }
+    let owns_browser = std::fs::read_to_string(home.join("config.toml")).ok()
+        .and_then(|s| s.parse::<toml::Table>().ok())
+        .is_some_and(|t| t.get("mcp_servers").and_then(|m| m.get(crate::justbrowse::SERVER_NAME)).is_some());
+    let browser_override = spec.extra_args.iter().any(|a| a.starts_with("mcp_servers.justbrowse."));
+    if !owns_browser && !browser_override && crate::justbrowse::installed().is_some() {
+        // Session-scoped: profiles do not need individual `codex mcp add` calls. Do not mix a
+        // default HTTP URL with a user's existing stdio transport, or re-enable their disabled entry.
+        args.extend(["-c".into(), format!("mcp_servers.{}.url={}", crate::justbrowse::SERVER_NAME, toml_str(crate::justbrowse::MCP_URL))]);
     }
     args.extend(spec.extra_args.iter().cloned());
     (cmd.program, cmd.args) = super::program_and_args("codex", args);

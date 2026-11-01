@@ -36,7 +36,9 @@ tools
   justimagine  JustImagine: image, video, song and voice studio as a background service
              (needs git and node; --force pulls the newest commits and restarts it)
   justbrowse JustBrowseMCP: agents drive your own signed-in Chrome or Edge over MCP; the
-             extension, its bridge, its agent skill and the MCP server (needs node)
+             verified download and extraction; then Developer mode > Load unpacked > Connect
+  agent-desktop  native desktop automation plus Bro-managed main and platform skills
+             (needs node and git; --force updates the CLI and refreshes its skills)
   git        Git                        gh        GitHub CLI
   node       Node.js LTS                bun       Bun
   python     Python 3                   uv        uv (Python packages)

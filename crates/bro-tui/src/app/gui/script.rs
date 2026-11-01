@@ -33,6 +33,8 @@ pub enum Step {
     Theme(String),
     /// the window's material and tint (not saved)
     Material(bro_core::config::Material, Option<u8>),
+    /// Demo-only voice states for device-free settings captures.
+    OrbitFixture(String),
     Exit,
 }
 
@@ -92,6 +94,7 @@ fn parse(raw: &str) -> Option<Step> {
             let (m, tint) = arg.split_once(',').map_or((arg, None), |(m, t)| (m, t.trim().parse().ok()));
             Step::Material(bro_core::config::Material::ALL.into_iter().find(|x| x.id() == m.trim())?, tint)
         }
+        "orbit-fixture" if matches!(arg, "off" | "connecting" | "error" | "setup" | "ready" | "talking") => Step::OrbitFixture(arg.into()),
         "exit" => Step::Exit,
         _ => return None,
     })
@@ -156,6 +159,7 @@ pub fn step(g: &mut Gui) {
                 }
                 g.app.svc.set_settings_unsaved(s);
             }
+            Step::OrbitFixture(state) => g.app.svc.orbit_demo_fixture(&state),
             Step::Exit => {
                 g.app.quit = true;
                 g.script.active = false;

@@ -245,6 +245,12 @@ impl Pane for QuickInstallView {
                 self.started.remove(&Tool::JustImagine);
                 cx.svc.check_justimagine(true);
             }
+            for tool in [Tool::JustBrowse, Tool::AgentDesktop] {
+                if self.started.contains(&tool) && self.installed(tool, cx) {
+                    self.started.remove(&tool);
+                    cx.svc.rescan_skills();
+                }
+            }
         }
         // JustPaste comes with JustTools: switch it on once JustTools is here and not mid-install
         if self.started.contains(&Tool::JustPaste) {
@@ -330,6 +336,13 @@ impl Pane for QuickInstallView {
                 Span::styled(format!(" {}", ui::pad(&detail, 16)), if installed { fg(t.inline) } else { muted(t) }),
                 Span::styled(format!(" {}", tool.blurb()), muted(t)),
             ]));
+            if sel && matches!(tool, Tool::JustBrowse | Tool::AgentDesktop)
+                && let Some(setup) = quick_install::after_install(tool)
+            {
+                for line in setup.lines() {
+                    lines.push((None, vec![Span::styled(format!("        {line}"), muted(t))]));
+                }
+            }
             if tool == Tool::JustTools {
                 if let Some(e) = jt.error.as_ref().filter(|_| jt_job.is_none()) {
                     lines.push((None, vec![Span::styled(format!("        ✗ {e}"), fg(t.danger))]));

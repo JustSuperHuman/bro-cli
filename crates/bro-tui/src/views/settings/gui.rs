@@ -9,7 +9,7 @@
 //! on a row selects it while a click on the selected row steps it (the terminal UI's mouse). The wheel scrolls the
 //! page and the selection follows it, so it always stays in view.
 
-use super::{Block, BroOpt, CaveOpt, HostOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, SkillOpt, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, live_mode, open_source, rows, source_link, team_knob};
+use super::{Block, BroOpt, CaveOpt, HostOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, SkillOpt, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, open_source, rows, source_link, team_knob};
 use bro_core::config::Material;
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::brand::{self, Mark};
@@ -71,6 +71,8 @@ const SUB_H: f32 = 18.0;
 const SUB_BELOW: f32 = 6.0;
 /// controls' height
 const CTRL_H: f32 = 32.0;
+/// A font preview changes its metrics as you cycle; its controls stay put.
+const FONT_CTL_W: f32 = 300.0;
 /// between a setting's words and its control
 const GAP: f32 = 24.0;
 /// room kept above / below the selection when it's scrolled into view
@@ -157,6 +159,7 @@ thread_local! {
 /// Draw the view inside its card (`area`: the card's content).
 pub(crate) fn draw(v: &mut SettingsView, ui: &mut Ui, area: Rect, cx: &mut Cx) -> bool {
     prepare(v, cx);
+    v.normalize_selection(cx);
     let t = ui.t;
     let id = cx.id;
     let all = rows();
@@ -248,14 +251,10 @@ pub(crate) fn draw(v: &mut SettingsView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
     // the keys, quietly
     if hints_h > 0.0 {
         let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
-        if v.row() == Row::Voice(VoiceOpt::Key) && bro_voice::Voice::can_capture_hotkey() {
-            hints.truncate(2);
-            hints.extend([("enter", "press the key"), ("←/→", "pick one")]);
-        }
         match v.row() {
             r if team_knob(r) => hints.push(("r", "bro's default")),
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
-            Row::Watch(_) | Row::Voice(VoiceOpt::Key | VoiceOpt::Mode | VoiceOpt::Speaker) => hints.push(("r", "bro's default")),
+            Row::Watch(_) | Row::Voice(VoiceOpt::Escape) => hints.push(("r", "bro's default")),
             _ => {}
         }
         if source_link(v.row()).is_some() {
@@ -361,7 +360,7 @@ fn prepare(v: &mut SettingsView, cx: &mut Cx) {
     };
     let u = cx.svc.state().updates.clone();
     v.update_busy = u.job.is_some() || u.checking;
-    v.voice_busy = cx.svc.state().voice.capturing.is_some();
+    v.voice_busy = cx.svc.state().orbit_voice.checking;
 }
 
 /// Option `j` of segmented setting `i`: select it and step until it's on that option (one step from a value on
@@ -476,7 +475,6 @@ fn option(row: Row, st: &Settings) -> Option<usize> {
         Row::Bro(BroOpt::Rain) => RAIN.iter().position(|r| *r == st.rain),
         Row::Bro(BroOpt::Material) => Material::ALL.iter().position(|m| *m == st.material),
         Row::Cave(CaveOpt::Mode) => cave_choices().iter().position(|c| *c == st.caveman.active()),
-        Row::Voice(VoiceOpt::Mode) => Some(usize::from(!live_mode(&st.voice))),
         Row::Watch(WatchOpt::Model) => crate::watchdog::MODEL_CHOICES.iter().position(|m| *m == st.watchdog.model),
         Row::Knob(k) => Some(st.claude_env.choice(&KNOBS[k]).0),
         _ => None,
@@ -498,9 +496,7 @@ fn resettable(row: Row, st: &Settings) -> Option<&'static str> {
         Row::Watch(WatchOpt::Reviewer) => w.reviewer != d.reviewer,
         Row::Watch(WatchOpt::Model) => w.model != d.model,
         Row::Watch(WatchOpt::Budget) => w.max_wakes != d.max_wakes,
-        Row::Voice(VoiceOpt::Key) => st.voice.hotkey.is_some(),
-        Row::Voice(VoiceOpt::Speaker) => st.voice.live_voice.is_some(),
-        Row::Voice(VoiceOpt::Mode) => !live_mode(&st.voice),
+        Row::Voice(VoiceOpt::Escape) => st.orbit_voice.allow_escape,
         _ => false,
     };
     changed.then_some("bro's default · r")
@@ -551,13 +547,11 @@ fn button(v: &SettingsView, row: Row, cx: &Cx) -> Option<(&'static str, widgets:
             Some(false) => Some(("Install", Primary)),
             None => None,
         },
-        Row::Voice(VoiceOpt::ApiKey) => {
-            let vs = cx.svc.state().voice.clone();
-            match vs.key_found {
-                Some(false) => Some(("Look again", Primary)),
-                _ => Some(("Check", Secondary)),
-            }
-        }
+        Row::Voice(VoiceOpt::Talk) => Some(if cx.svc.state().orbit_voice.starting || cx.svc.state().orbit_voice.runtime.as_ref().is_some_and(|r| r.phase != bro_bridge::orbit_voice::Phase::Off) { ("Stop voice", Secondary) } else { ("Start voice", Primary) }),
+        Row::Voice(VoiceOpt::Quit) => Some(("Quit companion", Secondary)),
+        Row::Voice(VoiceOpt::Open) => Some(if cx.svc.state().orbit_voice.runtime.as_ref().is_some_and(|r| r.credential_available) { ("Advanced settings", Secondary) } else { ("Set up voice", Primary) }),
+        Row::Voice(VoiceOpt::Updates) => Some(("Details", Secondary)),
+        Row::Voice(VoiceOpt::ReloadPreview) => (!cx.svc.state().orbit_voice.checking).then_some(("Try connection", Primary)),
         Row::Host(HostOpt::Restart) => {
             let hs = cx.svc.state().host.clone();
             match () {
@@ -595,12 +589,10 @@ fn control(v: &SettingsView, it: &Item, ui: &Ui, st: &Settings, cx: &Cx) -> Ctl 
         Row::Bro(BroOpt::Theme) => Ctl::Link { value, ink: vink.value(t) },
         Row::Bro(BroOpt::Font) => Ctl::Step { value, ink: vink.value(t), mono: true, mark: None, press: None },
         Row::Watch(WatchOpt::Reviewer) => step(login_mark(&value, cx)),
-        Row::Bro(BroOpt::Screensaver | BroOpt::Tint) | Row::Watch(WatchOpt::Wake | WatchOpt::Budget) | Row::Preset | Row::Voice(VoiceOpt::Speaker) => step(None),
-        // ‹ key › to pick one, and "Set key" to press it (a spinner meanwhile, below)
-        Row::Voice(VoiceOpt::Key) if spinning(&value).is_none() => {
-            Ctl::Step { value: value.clone(), ink: vink.value(t), mono: false, mark: None, press: bro_voice::Voice::can_capture_hotkey().then_some("Set key") }
-        }
-        Row::Voice(VoiceOpt::Mode) => seg(vec!["out loud".into(), "as text".into()], None),
+        Row::Bro(BroOpt::Screensaver | BroOpt::Tint) | Row::Watch(WatchOpt::Wake | WatchOpt::Budget) | Row::Preset => step(None),
+        Row::Voice(VoiceOpt::Escape | VoiceOpt::Background | VoiceOpt::Mute) => switch(),
+        Row::Voice(VoiceOpt::Provider | VoiceOpt::Model | VoiceOpt::Voice | VoiceOpt::Volume | VoiceOpt::Listen) => step(None),
+        Row::Voice(VoiceOpt::Upstream) => Ctl::Link { value, ink: vink.value(t) },
         Row::Bro(BroOpt::Material) => seg(Material::ALL.iter().map(|m| m.id().to_string()).collect(), None),
         Row::Bro(BroOpt::Rain) => seg(RAIN.iter().map(|r| rain_label(*r).to_string()).collect(), None),
         Row::Cave(CaveOpt::Mode) => seg(cave_choices().iter().map(|c| c.map_or("off", |l| l.id()).to_string()).collect(), None),
@@ -666,6 +658,7 @@ struct Laid {
     reset: Option<&'static str>,
     /// the name and help together (the control sits centred beside them)
     text_h: f32,
+    stacked: bool,
     progress: bool,
 }
 
@@ -794,6 +787,7 @@ fn lay_item(v: &SettingsView, ui: &mut Ui, it: Item, w: f32, y: f32, all: &[Row]
     let mut ctl_w = ctl_width(ui, &ctl);
     let reset = resettable(it.row, st);
     let inner = w - 2.0 * PAD_X;
+    let font = it.row == Row::Bro(BroOpt::Font);
     // too narrow for the choices side by side: ‹ value › instead
     if let Ctl::Seg { value, ink, mark, .. } = &ctl
         && inner - ctl_w - GAP < 200.0
@@ -801,7 +795,15 @@ fn lay_item(v: &SettingsView, ui: &mut Ui, it: Item, w: f32, y: f32, all: &[Row]
         ctl = Ctl::Step { value: value.clone(), ink: *ink, mono: false, mark: *mark, press: None };
         ctl_w = ctl_width(ui, &ctl);
     }
-    let text_w = (inner - ctl_w - GAP - if reset.is_some() { 36.0 } else { 0.0 }).max(140.0);
+    // Keep space for reset even on the default font, so changing the font
+    // cannot rewrap the help or move the arrows vertically.
+    let reset_w = if reset.is_some() || font { 36.0 } else { 0.0 };
+    if font {
+        ctl_w = FONT_CTL_W.min((inner - GAP - reset_w - 140.0).max(80.0));
+    }
+    let stacked = matches!(it.row, Row::Voice(_)) && inner - ctl_w - GAP - reset_w < 180.0;
+    if stacked { ctl_w = ctl_w.min((inner - reset_w).max(40.0)); }
+    let text_w = if stacked { inner } else { (inner - ctl_w - GAP - reset_w).max(140.0) };
     let tag = it.tag.as_ref().map(|s| {
         let k = ink(s.style, ui);
         // the terminal UI's inline (a count of changes) is a quiet note here; shine (changed) stays a highlight
@@ -811,7 +813,17 @@ fn lay_item(v: &SettingsView, ui: &mut Ui, it: Item, w: f32, y: f32, all: &[Row]
     let tag_w = tag.as_ref().map_or(0.0, |b| b.w + 10.0);
     let label = ui.line(&it.label, Style::new(size::TITLE, weight::REGULAR, t.text), Some((text_w - tag_w).max(40.0)));
     let help = (!it.help.is_empty()).then(|| ui.para(&it.help, Style::new(size::SMALL, weight::REGULAR, t.muted), text_w, LINES));
-    let text_h = label.h + help.as_ref().map_or(0.0, |h| 1.0 + h.h);
+    let mut help_h = help.as_ref().map_or(0.0, |h| h.h);
+    if font {
+        // Font descriptions vary in length. Reserve their largest height in
+        // this layout so repeated clicks keep hitting the same arrow.
+        for f in crate::fonts::FONTS {
+            let text = format!("{} · ←/→ to try another", f.blurb);
+            help_h = help_h.max(ui.para(&text, Style::new(size::SMALL, weight::REGULAR, t.muted), text_w, LINES).h);
+        }
+        help_h = help_h.max(ui.para(BroOpt::Font.help(), Style::new(size::SMALL, weight::REGULAR, t.muted), text_w, LINES).h);
+    }
+    let text_h = label.h + if help_h > 0.0 { 1.0 + help_h } else { 0.0 };
     let mut notes = vec![];
     let mut progress = false;
     for n in &it.notes {
@@ -834,8 +846,9 @@ fn lay_item(v: &SettingsView, ui: &mut Ui, it: Item, w: f32, y: f32, all: &[Row]
         notes.push(Note::Source(ui.para(credit, Style::new(size::SMALL, weight::REGULAR, t.muted), (inner - 20.0).max(40.0), LINES)));
     }
     let notes_h: f32 = notes.iter().map(|n| 8.0 + n.h()).sum();
-    let h = PAD_Y + text_h.max(CTRL_H) + notes_h + PAD_Y;
-    Laid { i, y, h, label, tag, help, notes, ctl, ctl_w, reset, text_h, progress }
+    let body = if stacked { text_h + 12.0 + CTRL_H } else { text_h.max(CTRL_H) };
+    let h = PAD_Y + body + notes_h + PAD_Y;
+    Laid { i, y, h, label, tag, help, notes, ctl, ctl_w, reset, text_h, stacked, progress }
 }
 
 // ---------------------------------------------------------------------------------------------- drawing
@@ -911,12 +924,15 @@ fn draw_page(v: &SettingsView, ui: &mut Ui, p: &Page, x: f32, w: f32, top: f32, 
                 if top + y + h < view.y || top + y > view.bottom() {
                     continue;
                 }
-                for it in items {
+                let shared = items.len() > 1 && items.first().is_some_and(|it| matches!(rows()[it.i], Row::Voice(_)));
+                if shared { ui.glass_panel(Rect::new(x, top + y, w, *h), radius::CONTROL, card, t.hairline); }
+                for (index, it) in items.iter().enumerate() {
                     let r = Rect::new(x, top + it.y, w, it.h);
+                    if shared && index > 0 { ui.fill(Rect::new(x + PAD_X, r.y - CARD_GAP / 2.0, w - 2.0 * PAD_X, 1.0), t.hairline); }
                     if r.bottom() < view.y || r.y > view.bottom() {
                         continue;
                     }
-                    item(ui, it, r, it.i == v.sel, focused, id, card);
+                    item(ui, it, r, it.i == v.sel, focused, id, card, shared);
                 }
             }
             Piece::Well { y, h, lines } => {
@@ -937,19 +953,19 @@ fn draw_page(v: &SettingsView, ui: &mut Ui, p: &Page, x: f32, w: f32, top: f32, 
 /// One setting as a card: its name and tag, help and notes on the left, its control on the right. `card`: the
 /// card's fill.
 #[allow(clippy::too_many_arguments)]
-fn item(ui: &mut Ui, it: &Laid, r: Rect, selected: bool, focused: bool, id: PaneId, card: Color) {
+fn item(ui: &mut Ui, it: &Laid, r: Rect, selected: bool, focused: bool, id: PaneId, card: Color, shared: bool) {
     let t = ui.t;
     let hot = ui.hover_amount(("settings-row", id, it.i), r);
     // the keyboard's place: the selection's fill (lighter than a list row's: it covers a whole card), outlined
     // while the view has the keys
     let fill = if selected { t.selected.fade(0.65).over(card) } else { t.hover.fade(0.8 * hot).over(card) };
     let edge = if selected && focused { t.accent.with_alpha(0.8) } else { t.hairline };
-    ui.glass_panel(r, radius::CONTROL, fill, edge);
+    if !shared || selected || hot > 0.01 { ui.glass_panel(r, radius::CONTROL, fill, if shared && !selected { Color::TRANSPARENT } else { edge }); }
     ui.hit_with(r, Action::View(id, ROW + it.i), Cursor::Default);
 
     let x = r.x + PAD_X;
-    let body = it.text_h.max(CTRL_H);
-    let ty = r.y + PAD_Y + (body - it.text_h) / 2.0;
+    let body = if it.stacked { it.text_h + 12.0 + CTRL_H } else { it.text_h.max(CTRL_H) };
+    let ty = r.y + PAD_Y + if it.stacked { 0.0 } else { (body - it.text_h) / 2.0 };
     ui.draw(&it.label, Point::new(x, ty));
     if let Some(tag) = &it.tag {
         ui.draw(tag, Point::new(x + it.label.w + 10.0, ty + (it.label.h - tag.h) / 2.0 + 0.5));
@@ -958,7 +974,7 @@ fn item(ui: &mut Ui, it: &Laid, r: Rect, selected: bool, focused: bool, id: Pane
         ui.draw(h, Point::new(x, ty + it.label.h + 1.0));
     }
 
-    let cy = r.y + PAD_Y + (body - CTRL_H) / 2.0;
+    let cy = r.y + PAD_Y + if it.stacked { it.text_h + 12.0 } else { (body - CTRL_H) / 2.0 };
     let cr = Rect::new(r.right() - PAD_X - it.ctl_w, cy, it.ctl_w, CTRL_H);
     ctl(ui, cr, &it.ctl, it.i, id, it.progress);
     if let Some(tip) = it.reset {
@@ -1147,7 +1163,8 @@ fn ctl(ui: &mut Ui, r: Rect, c: &Ctl, i: usize, id: PaneId, progress: bool) {
                 widgets::button(ui, br, label, *kind, act(INC + i));
                 right = br.x - 12.0;
             }
-            let b = ui.line(value, ink.style(size::BODY), Some(260.0));
+            let room = (right - r.x - if *spin && !progress { 16.0 } else { 0.0 }).clamp(0.0, 260.0);
+            let b = ui.line(value, ink.style(size::BODY), Some(room));
             let x = right - b.w;
             ui.draw(&b, Point::new(x, r.y + (r.h - b.h) / 2.0));
             if *spin && !progress {
@@ -1310,6 +1327,70 @@ mod tests {
             })
             .find(|l| l.i == i)
             .unwrap()
+    }
+
+    #[test]
+    fn narrow_voice_recovery_stacks_controls_without_overlapping_the_description() {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(Settings::default(), tx.clone());
+        svc.update(|state| {
+            state.settings.orbit_voice.enabled = true;
+            state.orbit_voice.error = Some("preview checksum failed".into());
+        });
+        let theme = crate::theme::get("graphite");
+        let mut actions = vec![];
+        let cx = Cx { id: 1, theme: &theme, svc: &svc, tx: &tx, actions: &mut actions, focused: true };
+        let view = SettingsView::default();
+        with_ui(|ui| {
+            for width in [320.0, 420.0, 640.0] {
+                let page = lay_out(&view, ui, Section::Voice, 3, width, false, &rows(), &svc.settings(), &cx);
+                let retry = laid(&page, Row::Voice(VoiceOpt::ReloadPreview));
+                if width <= 420.0 {
+                    assert!(retry.stacked);
+                    assert!(retry.h >= 2.0 * PAD_Y + retry.text_h + 12.0 + CTRL_H);
+                }
+                assert!(retry.label.w <= width - 2.0 * PAD_X + 1.0);
+                assert!(retry.ctl_w <= width - 2.0 * PAD_X);
+            }
+        });
+    }
+
+    #[test]
+    fn font_picker_arrow_targets_stay_fixed_across_fonts_and_descriptions() {
+        crate::testkit::isolate();
+        crate::fonts::TEST_APP_WINDOW.with(|w| w.set(true));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(Settings::default(), tx.clone());
+        let theme = crate::theme::get("graphite");
+        let mut actions = vec![];
+        let cx = Cx { id: 1, theme: &theme, svc: &svc, tx: &tx, actions: &mut actions, focused: true };
+        let v = SettingsView::default();
+        let all = rows();
+        let row = all.iter().position(|r| *r == Row::Bro(BroOpt::Font)).unwrap();
+        with_ui(|ui| {
+            for width in [480.0, 640.0, MAX_W] {
+                let mut expected = None;
+                for font in std::iter::once(None).chain(crate::fonts::FONTS.iter().map(Some)) {
+                    let mut settings = svc.settings();
+                    settings.font = font.map(|f| f.id.to_string());
+                    svc.set_settings_unsaved(settings);
+                    ui.text.set_mono_font(font.unwrap_or(&crate::fonts::FONTS[0]).data);
+                    ui.text.set_mono(14.0, 1.18);
+                    let page = lay_out(&v, ui, Section::Appearance, 0, width, true, &all, &svc.settings(), &cx);
+                    let font_row = laid(&page, Row::Bro(BroOpt::Font));
+                    ui.hits.clear();
+                    let r = Rect::new(20.0, 40.0 + font_row.y, width, font_row.h);
+                    item(ui, font_row, r, true, true, 1, card_fill(ui.t), false);
+                    let target = |n| ui.hits.iter().find(|h| matches!(h.action, Action::View(1, action) if action == n)).unwrap().rect;
+                    let geometry = (target(DEC + row), target(INC + row));
+                    if let Some(expected) = expected {
+                        assert_eq!(geometry, expected, "font: {:?}, width: {width}", font.map(|f| f.id));
+                    } else { expected = Some(geometry); }
+                }
+            }
+        });
+        crate::fonts::TEST_APP_WINDOW.with(|w| w.set(false));
     }
 
     /// What the demo never shows: a JustTools update, Smart Paste switching and bro updating itself turn into a

@@ -83,7 +83,7 @@ const PAD: f32 = 10.0;
 /// The header (wordmark, buttons, clock) ends this far below the sidebar's top.
 pub const HEAD_BOTTOM: f32 = 44.0;
 
-pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_window: bool, media_open: bool, media_unseen: usize) {
+pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_window: bool, media_open: bool, media_unseen: usize, stage: &mut super::orbit_stage::Drawn) {
     let t = ui.t;
     let focused = app.side_focus && !app.overlay.is_open();
     // resize edge: lit under the pointer and while it's dragged
@@ -132,6 +132,26 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_win
         }
     }
 
+    // One native control surface; this does not own a microphone or renderer.
+    let voice = Rect::new(inner.x, filter_r.bottom() + 8.0, inner.w, 44.0);
+    let orbit = app.svc.state().orbit_voice.clone();
+    let talking = orbit.runtime.as_ref().is_some_and(|r| r.phase != bro_bridge::orbit_voice::Phase::Off) || orbit.starting;
+    let muted = orbit.runtime.as_ref().is_some_and(|r| r.muted);
+    ui.round(voice, radius::CONTROL, t.text.with_alpha(0.025));
+    let controls_x = voice.right() - 86.0;
+    ui.label_in(Rect::new(voice.x + 8.0, voice.y + 4.0, (controls_x - voice.x - 12.0).max(0.0), 18.0), "Orbit Voice", Style::new(size::SMALL, weight::SEMIBOLD, t.text), Align::Left);
+    let status = if orbit.starting { "Starting voice…" } else if orbit.status.is_empty() { "OpenAI Realtime · off" } else { orbit.status.as_str() };
+    ui.label_in(Rect::new(voice.x + 8.0, voice.y + 22.0, (controls_x - voice.x - 12.0).max(0.0), 17.0), status, Style::new(size::CAPTION, weight::REGULAR, if talking { t.good } else { t.muted }), Align::Left);
+    let talk = Rect::new(controls_x, voice.y + 9.0, 26.0, 26.0);
+    if widgets::icon_button(ui, talk, if talking { "\u{F04DB}" } else { "\u{F036C}" }, if talking { t.good } else { t.muted }, Action::OrbitVoice(0)) {
+        widgets::tooltip(ui, talk, if talking { "Stop voice and release the microphone" } else { "Start voice · the selected realtime provider is billed while connected" });
+    }
+    let mute = Rect::new(controls_x + 28.0, talk.y, 26.0, 26.0);
+    if widgets::icon_button(ui, mute, "\u{F036D}", if muted { t.danger } else { t.muted }, Action::OrbitVoice(1)) { widgets::tooltip(ui, mute, if muted { "Unmute microphone" } else { "Mute microphone audio · Stop releases the device" }); }
+    let settings = Rect::new(controls_x + 56.0, talk.y, 26.0, 26.0);
+    if widgets::icon_button(ui, settings, "\u{F0493}", t.muted, Action::OrbitVoice(2)) { widgets::tooltip(ui, settings, "Advanced Orbit settings"); }
+    stage.chrome("sidebar-voice", voice, r, bro_bridge::orbit_voice::StageKind::OneWay);
+
     // ---- footer (measured first, pinned to the bottom)
     let usage = app.usage_lines();
     let sessions = app.panes.values().filter(|p| p.is_terminal()).count();
@@ -144,8 +164,10 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_win
     draw_footer(app, ui, foot, &usage, tile_row, sessions);
 
     // ---- list
-    let list = Rect::new(r.x, filter_r.bottom() + 8.0, r.w - 1.0, (foot.y - filter_r.bottom() - 12.0).max(0.0));
-    draw_list(app, ui, list, s, focused);
+    let list = Rect::new(r.x, voice.bottom() + 8.0, r.w - 1.0, (foot.y - voice.bottom() - 12.0).max(0.0));
+    stage.chrome("sidebar-filter", filter_r, r, bro_bridge::orbit_voice::StageKind::OneWay);
+    stage.chrome("sidebar-rail", Rect::new(r.right() - 1.0, r.y, 1.0, r.h), r, bro_bridge::orbit_voice::StageKind::Solid);
+    draw_list(app, ui, list, s, focused, stage);
 }
 
 /// (gap above, height) of a row: a project gets a gap above it (none for the first) and two lines; a session one
@@ -241,7 +263,7 @@ fn draw_team(ui: &mut Ui, r: Rect, top: f32, x: f32, team: &bro_core::agent_team
     }
 }
 
-fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused: bool) {
+fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused: bool, stage: &mut super::orbit_stage::Drawn) {
     let t = ui.t;
     let rows = app.rows();
     app.side_sel = app.side_sel.min(rows.len().saturating_sub(1));
@@ -275,7 +297,7 @@ fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused:
     if pinned {
         let (_, h) = row_height(&rows[0], renaming);
         let r = Rect::new(list.x + PAD, y, list.w - 2.0 * PAD, h);
-        draw_row(app, ui, r, 0, &rows[0], focused, focus_pane, cur_key.as_deref());
+        draw_row(app, ui, r, 0, &rows[0], focused, focus_pane, cur_key.as_deref(), stage, list);
         s.rows.push((0, r));
         y += h + 6.0;
         ui.hline(list.x + PAD + 8.0, y - 3.0, list.w - 2.0 * PAD - 16.0, t.hairline);
@@ -323,7 +345,7 @@ fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused:
             continue;
         }
         let r = Rect::new(list.x + PAD, ry, list.w - 2.0 * PAD, h);
-        draw_row(app, ui, r, i, &rows[i], focused, focus_pane, cur_key.as_deref());
+        draw_row(app, ui, r, i, &rows[i], focused, focus_pane, cur_key.as_deref(), stage, view);
         s.rows.push((i, r));
     }
     ui.unclip();
@@ -339,7 +361,7 @@ fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused:
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: bool, focus_pane: Option<crate::layout::PaneId>, cur_key: Option<&str>) {
+fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: bool, focus_pane: Option<crate::layout::PaneId>, cur_key: Option<&str>, stage: &mut super::orbit_stage::Drawn, stage_clip: Rect) {
     let t = ui.t;
     let selected = focused && i == app.side_sel;
     let hot = ui.hover_amount(("side-row", i, row.project_key()), r);
@@ -409,6 +431,9 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
             let renaming = app.renaming.as_ref().filter(|(id, _)| *id == info.pane).map(|(_, s)| s.clone());
             // its project's colour (the orchestrator's is gold)
             let color = t.project(&info.project_key, &app.theme);
+            if selected || (is_focus && !app.side_focus) || stacked || hot > 0.0 || notice.is_some_and(|n| n.unread) {
+                stage.sidebar_row(info.pane, r, stage_clip);
+            }
             if selected {
                 ui.round(r, radius::CONTROL, t.selected);
                 ui.outline(r, radius::CONTROL, 1.0, t.accent.with_alpha(0.5));
@@ -603,6 +628,7 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
     // in the terminal UI, only those rows)
     let status_h = if app.usage_expanded { STATUS_H } else { 0.0 };
     if !usage.is_empty() && y + 22.0 <= r.bottom() - status_h {
+        let show_h5 = usage.iter().any(|u| u.h5.is_some());
         let head = Rect::new(r.x, y, r.w, 22.0);
         let arrow = if app.usage_expanded { "\u{F0140}" } else { "\u{F0142}" };
         let hh = ui.hover_amount("usage-head", head);
@@ -624,6 +650,9 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
             ui.label(Point::new(wk_r - 14.0 - w, head.y + 4.0), "resets", hs);
         } else {
             for (text, right) in [("5h", h5_r), ("wk", wk_r)] {
+                if text == "5h" && !show_h5 {
+                    continue;
+                }
                 let w = ui.measure(text, hs);
                 ui.label(Point::new(right - w, head.y + 4.0), text, hs);
             }
@@ -678,7 +707,7 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
                 _ => {
                     // the meter shows the tighter window: up to 8 segments, as the terminal UI's ▰▱
                     let meter_x = label_x + 72.0;
-                    let meter_w = (h5_r - 44.0 - meter_x).max(0.0);
+                    let meter_w = ((if show_h5 { h5_r } else { wk_r }) - 44.0 - meter_x).max(0.0);
                     if meter_w >= 24.0 && tight.is_finite() {
                         let n = widgets::segment_count(meter_w, 6.0).min(8);
                         let w = (n as f32 * 6.0).min(meter_w);
@@ -687,13 +716,15 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
                         ui.label(Point::new(meter_x, row.y + 4.0), &crate::util::countdown(at - now), Style::new(size::CAPTION, weight::REGULAR, t.faint));
                     }
                     let fig = |v: Option<f64>, approx: bool| v.map(|v| (format!("{}{v:.0}%", if approx { "≈" } else { "" }), left_color(v, t))).unwrap_or(("—".into(), t.faint));
-                    let (a, ac) = fig(u.h5, u.approx);
                     let (b, bc) = fig(u.wk, false);
                     let st = Style::new(size::SMALL, weight::SEMIBOLD, t.text);
                     let bw = ui.measure(&b, st);
                     ui.label(Point::new(wk_r - bw, row.y + 4.0), &b, st.color(bc));
-                    let aw = ui.measure(&a, st);
-                    ui.label(Point::new(h5_r - aw, row.y + 4.0), &a, st.color(ac));
+                    if show_h5 {
+                        let (a, ac) = fig(u.h5, u.approx);
+                        let aw = ui.measure(&a, st);
+                        ui.label(Point::new(h5_r - aw, row.y + 4.0), &a, st.color(ac));
+                    }
                 }
             }
             if rh > 0.05 {
@@ -968,7 +999,7 @@ fn strip_cap(names: &[f32], chrome: &[f32], room: f32) -> f32 {
 /// (at the far end) the minimized switch. Names shorten before tabs that still don't fit fold into "‹ n" / "n ›"
 /// around the tab the keys picked (else the one showing). The keys' pick (alt+b with no sidebar) has a focus
 /// outline. Draws the line under the tabs too (it stops at the selected tab).
-pub fn draw_strip(app: &mut App, ui: &mut Ui, r: Rect) {
+pub fn draw_strip(app: &mut App, ui: &mut Ui, r: Rect, stage: &mut super::orbit_stage::Drawn) {
     let t = ui.t;
     let tabs = app.project_tabs();
     let items = app.strip_items(&tabs);
@@ -1063,9 +1094,16 @@ pub fn draw_strip(app: &mut App, ui: &mut Ui, r: Rect) {
         None => ui.hline(r.x + radius::OVERLAY, line_y, (r.w - radius::OVERLAY).max(0.0), t.stroke),
     }
     // an anchor too wide for the strip is cut at its end
-    ui.clip(Rect::new(r.x, r.y, (limit + 36.0 - r.x).max(0.0), r.h), 0.0);
+    let strip_clip = Rect::new(r.x, r.y, (limit + 36.0 - r.x).max(0.0), r.h);
+    ui.clip(strip_clip, 0.0);
     for (k, &(i, tr, cap)) in placed.iter().enumerate() {
         let e = &entries[i];
+        let stage_key = match &e.tab {
+            StripTab::All => "all",
+            StripTab::Orchestrator => "orchestrators",
+            StripTab::Project(key) => key.as_str(),
+        };
+        stage.tab(stage_key, tr, strip_clip);
         let on = selected == Some(k);
         let kb = picked.as_ref() == Some(&e.tab);
         if on {

@@ -128,8 +128,6 @@ pub enum Hit {
     /// index into the filtered models
     Model(usize),
     Perm(Permission),
-    Browser,
-    Place,
     Launch,
     /// "install it" under an agent that isn't installed
     Install,
@@ -227,7 +225,8 @@ impl Launcher {
             .or_else(|| recent.as_ref().map(|r| r.cwd.clone()))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
-        let browser = recent.map(|r| r.browser).unwrap_or_default();
+        // Browser tools are managed with their installation, not a per-session switch.
+        let browser = BrowserMode::Off;
         let permission = Permission::Skip;
         Launcher {
             data,
@@ -934,12 +933,6 @@ impl Launcher {
                 self.model_sel = k;
             }
             Hit::Perm(p) => self.permission = p,
-            Hit::Browser => {
-                self.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
-            }
-            Hit::Place => {
-                self.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-            }
             Hit::Install => return Outcome::Install(self.harness),
             Hit::Launch => return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Hit::Close => return Outcome::Close,
@@ -1040,15 +1033,6 @@ impl Launcher {
                     Permission::Skip => Permission::Default,
                 }
             }
-            KeyCode::Char('b') if ctrl => {
-                self.browser = match self.browser {
-                    BrowserMode::Off => BrowserMode::Auto,
-                    BrowserMode::Auto => BrowserMode::Edge,
-                    BrowserMode::Edge => BrowserMode::Chrome,
-                    BrowserMode::Chrome => BrowserMode::Off,
-                }
-            }
-            KeyCode::Char('s') if ctrl && !self.orchestrator => self.place = if self.place == Place::Tab { Place::Split } else { Place::Tab },
             KeyCode::Char('u') if ctrl => {
                 self.filter_mut().clear();
                 self.filter_changed();

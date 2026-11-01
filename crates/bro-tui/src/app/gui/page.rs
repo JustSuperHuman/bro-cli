@@ -102,6 +102,11 @@ impl Pages {
         Ok(show)
     }
 
+    /// Native placement/visibility errors are not yet an enforceable exclusion contract.
+    pub fn stage_obscured(&self) -> bool {
+        self.view.as_ref().is_some_and(|v| v.shown())
+    }
+
     /// A page said its document is ready: true when it's the one asked for (it can show now).
     pub fn ready(&mut self, url: &str) -> bool {
         match &mut self.view {

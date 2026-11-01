@@ -19,9 +19,9 @@ use crate::app::gui::kit::{self, Cursor, Style, Tokens, Ui, radius, size, weight
 use crate::app::gui::surface::Cx;
 use crate::continue_picker::gui as cont;
 use crate::folder::{self, gui as picker};
+#[cfg(test)]
 use crate::pane::Place;
 use bro_core::Harness;
-use bro_core::browser::BrowserMode;
 use bro_core::catalogue::ModelRow;
 use bro_core::launch::{LaunchSpec, Permission};
 use bro_gfx::text::Align;
@@ -51,10 +51,6 @@ const HARNESS: usize = 20;
 const BRAIN: usize = 30;
 /// + the index in [`PERMS`]
 const PERM: usize = 40;
-/// + the index in [`BROWSERS`]
-const BROWSER: usize = 50;
-/// + 0 new session, 1 split
-const PLACE: usize = 60;
 /// Each list gets a block of numbers.
 const SPAN: usize = 1_000_000;
 /// + the index among the run-on list's selectable rows
@@ -67,7 +63,6 @@ const CONTINUE: usize = 3 * SPAN;
 const PICKER: usize = 4 * SPAN;
 
 const PERMS: [(Permission, &str); 3] = [(Permission::Default, "Ask"), (Permission::Auto, "Auto"), (Permission::Skip, "Skip all")];
-const BROWSERS: [(BrowserMode, &str); 4] = [(BrowserMode::Off, "Off"), (BrowserMode::Auto, "On"), (BrowserMode::Edge, "Edge"), (BrowserMode::Chrome, "Chrome")];
 
 // ------------------------------------------------------------------ metrics and icons
 
@@ -88,8 +83,8 @@ pub(crate) const FOOTER_H: f32 = 40.0;
 /// Below this the options go under the list instead of beside it (the terminal UI's 84 × 11 cells).
 const SIDE_MIN_W: f32 = 760.0;
 const SIDE_MIN_H: f32 = 300.0;
-/// The options block: its heading and three rows.
-const OPTIONS_H: f32 = 30.0 + 3.0 * 40.0;
+/// The options block: its heading and permission choices.
+const OPTIONS_H: f32 = 70.0;
 /// A breadcrumb separator: a small chevron with room either side.
 const CRUMB_SEP: f32 = 22.0;
 /// Your home folder's breadcrumb (a house).
@@ -147,10 +142,6 @@ fn sentence(s: &str) -> String {
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
-}
-
-fn ctrl(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
 /// `n` as an index into the block starting at `base`.
@@ -240,20 +231,6 @@ pub(crate) fn click(l: &mut Launcher, n: usize, _p: Point, mods: KeyModifiers, _
             }
         }
         n if (PERM..PERM + PERMS.len()).contains(&n) => l.permission = PERMS[n - PERM].0,
-        // the terminal UI cycles these with ctrl+b / ctrl+s; a choice here cycles to it
-        n if (BROWSER..BROWSER + BROWSERS.len()).contains(&n) => {
-            let want = BROWSERS[n - BROWSER].0;
-            for _ in 0..BROWSERS.len() {
-                if l.browser == want {
-                    break;
-                }
-                l.key(ctrl('b'));
-            }
-        }
-        // the other placement than the current one
-        n if (PLACE..PLACE + 2).contains(&n) && (l.place == Place::Tab) != (n == PLACE) => {
-            l.key(ctrl('s'));
-        }
         _ => {}
     }
     Outcome::None
@@ -1128,116 +1105,39 @@ fn draw_summary(s: &Shown, ui: &mut Ui, r: Rect) -> f32 {
     y - r.y
 }
 
-/// One of the launcher's options.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Opt {
-    Perm,
-    Browser,
-    Place,
+/// Permissions are the only per-session option. Browser and desktop tools follow their installation.
+fn permission_choices(l: &Launcher, t: &Tokens) -> (Vec<Seg<'static>>, Option<usize>) {
+    (
+        PERMS.iter().map(|(p, s)| Seg { label: s, icon: None, ink: (*p == Permission::Skip).then_some(t.danger) }).collect(),
+        PERMS.iter().position(|(p, _)| *p == l.permission),
+    )
 }
 
-impl Opt {
-    const ALL: [Opt; 3] = [Opt::Perm, Opt::Browser, Opt::Place];
-    fn label(self) -> &'static str {
-        match self {
-            Opt::Perm => "Permissions",
-            Opt::Browser => "Browser",
-            Opt::Place => "Opens as",
-        }
-    }
-    fn chord(self) -> &'static str {
-        match self {
-            Opt::Perm => "ctrl+e",
-            Opt::Browser => "ctrl+b",
-            Opt::Place => "ctrl+s",
-        }
-    }
-}
-
-/// An option's choices, the chosen one and its first target; `long` spells out where a split goes.
-fn opt_choices(l: &Launcher, o: Opt, long: bool, t: &Tokens) -> (Vec<Seg<'static>>, Option<usize>, usize) {
-    match o {
-        Opt::Perm => (
-            PERMS.iter().map(|(p, s)| Seg { label: s, icon: None, ink: (*p == Permission::Skip).then_some(t.danger) }).collect(),
-            PERMS.iter().position(|(p, _)| *p == l.permission),
-            PERM,
-        ),
-        Opt::Browser => (BROWSERS.iter().map(|(_, s)| Seg::new(s)).collect(), BROWSERS.iter().position(|(b, _)| *b == l.browser), BROWSER),
-        Opt::Place => (
-            vec![Seg::new("New session"), Seg::new(if long { "Split beside this one" } else { "Split" })],
-            Some(if l.place == Place::Tab { 0 } else { 1 }),
-            PLACE,
-        ),
-    }
-}
-
-/// A coordinator always opens as its own session.
-const PINNED: &str = "its own session";
-
-/// Permissions, browser and placement as labelled rows of choices with their keys, under an "Options" heading.
 fn draw_options(l: &Launcher, ui: &mut Ui, r: Rect) {
     let t = ui.t;
-    widgets::section(ui, Rect::new(r.x, r.y, r.w, 20.0), &sentence("options"));
-    let label_w = 104.0;
-    let ls = Style::new(size::SMALL, weight::MEDIUM, t.muted);
-    for (i, o) in Opt::ALL.into_iter().enumerate() {
-        let row = Rect::new(r.x, r.y + 30.0 + i as f32 * 40.0, r.w, 32.0);
-        ui.label_in(Rect::new(row.x, row.y, label_w - 8.0, row.h), o.label(), ls, Align::Left);
-        let x = row.x + label_w;
-        if o == Opt::Place && l.orchestrator {
-            ui.label_in(Rect::new(x, row.y, row.right() - x, row.h), PINNED, Style::new(size::SMALL, weight::SEMIBOLD, t.gold), Align::Left);
-            continue;
-        }
-        let kw = kbd_w(ui, o.chord());
-        let (segs, on, base) = {
-            let long = opt_choices(l, o, true, t);
-            if x + seg_width(ui, &long.0, size::SMALL) <= row.right() { long } else { opt_choices(l, o, false, t) }
-        };
-        let sw = segmented(ui, Point::new(x, row.y), row.h, &segs, on, size::SMALL, ("launcher-opt", i), |k| Action::Overlay(base + k));
-        if x + sw + 12.0 + kw <= row.right() {
-            widgets::kbd(ui, Point::new(row.right() - kw, row.y + (row.h - 18.0) / 2.0), o.chord());
-        }
+    widgets::section(ui, Rect::new(r.x, r.y, r.w, 20.0), "Options");
+    let row = Rect::new(r.x, r.y + 30.0, r.w, 32.0);
+    let x = row.x + 104.0;
+    ui.label_in(Rect::new(row.x, row.y, 96.0, row.h), "Permissions", Style::new(size::SMALL, weight::MEDIUM, t.muted), Align::Left);
+    let (segs, on) = permission_choices(l, t);
+    let sw = segmented(ui, Point::new(x, row.y), row.h, &segs, on, size::SMALL, "launcher-permission", |k| Action::Overlay(PERM + k));
+    let kw = kbd_w(ui, "ctrl+e");
+    if x + sw + 12.0 + kw <= row.right() {
+        widgets::kbd(ui, Point::new(row.right() - kw, row.y + 7.0), "ctrl+e");
     }
 }
 
-/// Height the options take flowed into one or more lines `w` wide.
-fn options_flow_h(l: &Launcher, ui: &mut Ui, w: f32) -> f32 {
-    let lines = options_flow(l, ui, Rect::new(0.0, 0.0, w, 0.0), false);
-    lines as f32 * 40.0 - 8.0
+fn options_flow_h(_l: &Launcher, _ui: &mut Ui, _w: f32) -> f32 {
+    32.0
 }
 
 fn draw_options_flow(l: &Launcher, ui: &mut Ui, r: Rect) {
-    options_flow(l, ui, r, true);
-}
-
-/// The options side by side ("Permissions [Ask Auto Skip all]   Browser [Off On …]   …"), wrapping when they
-/// don't fit. Returns the number of lines.
-fn options_flow(l: &Launcher, ui: &mut Ui, r: Rect, paint: bool) -> usize {
     let t = ui.t;
     let ls = Style::new(size::SMALL, weight::MEDIUM, t.muted);
-    let mut x = r.x;
-    let mut line = 0;
-    for (i, o) in Opt::ALL.into_iter().enumerate() {
-        let lw = ui.measure(o.label(), ls);
-        let (segs, on, base) = opt_choices(l, o, false, t);
-        let cw = if o == Opt::Place && l.orchestrator { ui.measure(PINNED, Style::new(size::SMALL, weight::SEMIBOLD, t.gold)) } else { seg_width(ui, &segs, size::SMALL) };
-        let w = lw + 10.0 + cw;
-        if x > r.x && x + w > r.right() {
-            x = r.x;
-            line += 1;
-        }
-        if paint {
-            let y = r.y + line as f32 * 40.0;
-            ui.label_in(Rect::new(x, y, lw + 2.0, 32.0), o.label(), ls, Align::Left);
-            if o == Opt::Place && l.orchestrator {
-                ui.label_in(Rect::new(x + lw + 10.0, y, cw + 2.0, 32.0), PINNED, Style::new(size::SMALL, weight::SEMIBOLD, t.gold), Align::Left);
-            } else {
-                segmented(ui, Point::new(x + lw + 10.0, y), 32.0, &segs, on, size::SMALL, ("launcher-opt", i), |k| Action::Overlay(base + k));
-            }
-        }
-        x += w + 24.0;
-    }
-    line + 1
+    let lw = ui.measure("Permissions", ls);
+    ui.label_in(Rect::new(r.x, r.y, lw + 2.0, 32.0), "Permissions", ls, Align::Left);
+    let (segs, on) = permission_choices(l, t);
+    segmented(ui, Point::new(r.x + lw + 10.0, r.y), 32.0, &segs, on, size::SMALL, "launcher-permission", |k| Action::Overlay(PERM + k));
 }
 
 /// The main button's look and what it does.
@@ -1527,16 +1427,8 @@ mod tests {
     #[test]
     fn choices_go_to_what_was_clicked() {
         let mut l = launcher();
-        tap(&mut l, BROWSER + 2);
-        assert_eq!(l.browser, BrowserMode::Edge);
-        tap(&mut l, BROWSER);
-        assert_eq!(l.browser, BrowserMode::Off);
-        tap(&mut l, PLACE + 1);
-        assert_eq!(l.place, Place::Split);
-        tap(&mut l, PLACE + 1);
-        assert_eq!(l.place, Place::Split, "the chosen one again changes nothing");
-        tap(&mut l, PLACE);
-        assert_eq!(l.place, Place::Tab);
+        tap(&mut l, PERM + 1);
+        assert_eq!(l.permission, Permission::Auto);
         tap(&mut l, PERM);
         assert_eq!(l.permission, Permission::Default);
     }

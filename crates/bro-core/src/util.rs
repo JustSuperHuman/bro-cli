@@ -306,6 +306,7 @@ pub(crate) mod test_env {
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
             std::env::set_var("BRO_DIR", home.join(".bro"));
+            std::env::set_var("JUSTBROWSE_DIR", home.join("JustBrowseMCP"));
             std::env::set_var("CLAUDE_POOL_DIR", home.join(".claude-max-pool"));
             std::env::set_var("BRO_CODEX_PROFILES_DIR", home.join(".bro").join("codex-profiles"));
             std::env::set_var("BRO_MODELS_URL", "http://127.0.0.1:9/never");

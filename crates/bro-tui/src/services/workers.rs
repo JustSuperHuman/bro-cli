@@ -25,15 +25,14 @@ pub(super) fn spawn_all(svc: &Services) {
     } else {
         svc.update(|st| st.proxy.status = Avail::Unavailable("turned off in settings".into()));
     }
-    if s.bridge.enabled {
+    if s.bridge.enabled || s.orbit_voice.enabled {
         spawn_bridge(svc);
-        // push-to-talk needs a window to talk to
-        if super::host::role() != bro_host::Role::Background {
-            spawn_voice(svc);
-        }
+        // Orbit's authenticated local integration is independent of LAN access.
     } else {
         svc.update(|st| st.bridge.status = Avail::Unavailable("turned off in settings".into()));
     }
+    svc.start_orbit_relay();
+    svc.start_orbit_voice(false);
 }
 
 /// What a second bro runs (see `Services::start_guest`): data and usage, with its proxy started on demand.
@@ -46,7 +45,9 @@ pub(super) fn spawn_guest(svc: &Services) {
     svc.update(|st| {
         st.proxy.status = Avail::Unavailable(note.into());
         st.bridge.status = Avail::Unavailable(note.into());
+        st.orbit_voice.status = "Your primary window owns the Orbit Voice connection.".into();
     });
+    svc.start_orbit_relay();
 }
 
 /// Every Claude login's settings.json follows the co-author knob ([`bro_core::coauthor`]), so sessions started
@@ -566,10 +567,22 @@ impl Summon {
 pub(super) fn spawn_bridge(svc: &Services) {
     let svc = svc.clone();
     std::thread::spawn(move || {
+        let starting = svc.inner.workspace_reconcile.lock();
+        if svc.inner.stopping.load(Ordering::Acquire) { return; }
         let s = svc.settings().bridge;
+        let existing = { svc.inner.bridge.read().clone() };
+        if let Some(existing) = existing {
+            if existing.local_url().is_some() == s.enabled { return; }
+            existing.shutdown();
+            svc.set_bridge(None);
+        }
         let cfg = bro_bridge::BridgeConfig { port: s.port, automatic_port: s.automatic_port, bind: s.bind.clone(), data_root: crate::util::bro_dir().join("bridge"), web_interface: s.web_interface };
         let cmd_svc = svc.clone();
-        let started = guard_res("bridge::start", || bro_bridge::Bridge::start(cfg, Box::new(move |c| cmd_svc.send(Event::Bridge(c)))));
+        let started = guard_res("bridge::start", || {
+            let sink: Box<dyn Fn(bro_bridge::BridgeCommand) + Send + Sync> = Box::new(move |c| cmd_svc.send(Event::Bridge(c)));
+            if s.enabled { bro_bridge::Bridge::start(cfg, sink) }
+            else { bro_bridge::Bridge::start_local(cfg, sink) }
+        });
         let b = match started {
             Ok(b) => b,
             Err(e) => {
@@ -591,6 +604,7 @@ pub(super) fn spawn_bridge(svc: &Services) {
                 bro_bridge::OrchestratorUpdate::Reply { text, tag: Some(id) } => o_svc.voice_delegation_result(&id, if text.trim().is_empty() { "Done." } else { text.trim() }),
                 bro_bridge::OrchestratorUpdate::Failed { message, tag: Some(id) } => o_svc.voice_delegation_result(&id, &format!("That didn't work: {message}")),
                 bro_bridge::OrchestratorUpdate::Step { summary, tag: Some(id) } => o_svc.voice_delegation_progress(&id, &summary),
+                bro_bridge::OrchestratorUpdate::TaskOutcome { origin_request_id, task_id, revision, text } => o_svc.orbit_task_outcome(&origin_request_id, &task_id, revision, &text),
                 bro_bridge::OrchestratorUpdate::Reply { text, tag: None } if !text.trim().is_empty() => o_svc.send(Event::Toast(Kind::Info, format!("Hugh: {}", super::brief(&text)))),
                 bro_bridge::OrchestratorUpdate::Failed { message, tag: None } => o_svc.send(Event::Toast(Kind::Error, format!("Hugh: {message}"))),
                 _ => {}
@@ -601,14 +615,16 @@ pub(super) fn spawn_bridge(svc: &Services) {
         let _ = guard("bridge::set_media_anywhere", || b.set_media_anywhere(!s.protect_media));
         let w_svc = svc.clone();
         let _ = guard("bridge::on_watchdog_update", || b.on_watchdog_update(Box::new(move |u| w_svc.on_watchdog_update(u))));
-        let qr = guard("bridge::pairing_qr", || b.pairing_qr()).ok().flatten();
+        let qr = s.enabled.then(|| guard("bridge::pairing_qr", || b.pairing_qr()).ok().flatten()).flatten();
         svc.set_bridge(Some(b.clone()));
         svc.update(|st| st.bridge.qr = qr);
         svc.push_bridge_profiles();
         svc.push_known_folders();
         svc.send(Event::BridgeStarted);
+        drop(starting);
         // poll status while this bridge is the live one
         loop {
+            if svc.inner.stopping.load(Ordering::Acquire) || svc.inner.bridge.read().as_ref().is_none_or(|current| !current.same_service(&b)) { break; }
             match guard("bridge::status", || b.status()) {
                 Ok(status) => {
                     let projects: Vec<super::ClientProject> = guard("bridge::client_projects", || b.client_projects())
@@ -617,7 +633,7 @@ pub(super) fn spawn_bridge(svc: &Services) {
                         .map(|p| super::ClientProject { key: svc.project_for(&p.cwd).key, name: p.name, order: p.order })
                         .collect();
                     svc.update(|st| {
-                        st.bridge.status = Avail::Ready(status);
+                        st.bridge.status = if s.enabled { Avail::Ready(status) } else { Avail::Unavailable("LAN access is off · local workspace available".into()) };
                         st.bridge.projects = projects;
                     });
                 }
@@ -627,7 +643,7 @@ pub(super) fn spawn_bridge(svc: &Services) {
                 }
             }
             std::thread::sleep(Duration::from_secs(2));
-            if !svc.bridge_running() || !svc.state().bridge.enabled {
+            if !svc.bridge_running() || !(svc.state().bridge.enabled || svc.settings().orbit_voice.enabled) {
                 break;
             }
         }
