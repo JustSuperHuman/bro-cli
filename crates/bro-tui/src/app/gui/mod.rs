@@ -759,7 +759,9 @@ impl Gui {
         }
         // minimised: no swapchain image comes, and each try would block the loop for wgpu's 1 s acquire timeout.
         // Coming back resizes the window, which rebuilds the swapchain and draws; until then nothing moves.
-        if window.is_minimized() == Some(true) || self.occluded {
+        // macOS reports an initially hidden window as occluded. Its first frame
+        // must still render: that frame is what makes the window visible.
+        if window.is_minimized() == Some(true) || self.first_frame_done && self.occluded {
             self.orbit_stage.invalidate(&self.app.svc);
             self.ticking = false;
             self.moving = false;
@@ -885,6 +887,16 @@ impl Gui {
         };
         let gpu = gpu_started.elapsed();
         self.gfx = Some(gfx);
+        // Some compositors cannot present an initially hidden surface. Reveal
+        // the prepared scene so a skipped first present can receive a redraw.
+        if !self.first_frame_done {
+            self.first_frame_done = true;
+            window.set_visible(true);
+            // A replacement window takes focus after its predecessor goes away.
+            if self.old_window.take().is_some() {
+                window.focus_window();
+            }
+        }
         if !presented {
             self.apps.begin_frame();
             self.orbit_stage.invalidate(&self.app.svc);
@@ -893,14 +905,6 @@ impl Gui {
         self.update_hover();
         self.sync_page(&window);
         self.sync_apps(&window);
-        if !self.first_frame_done {
-            self.first_frame_done = true;
-            window.set_visible(true);
-            // a window swapped for a see-through one goes once its successor shows, which takes the keyboard on
-            if self.old_window.take().is_some() {
-                window.focus_window();
-            }
-        }
         if self.pages.stage_obscured() || self.apps.stage_obscured() {
             stage.suspend();
         }
