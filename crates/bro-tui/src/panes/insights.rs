@@ -277,6 +277,10 @@ fn step(harness: Harness, binder: &mut Binder, tail: &mut Option<Tail>, facts: &
             }
         }
         if history {
+            // and the pictures and videos from before those lines, for the media panel and the phone's gallery
+            if let Some(began) = read.began {
+                let _ = f.media_history(t.path(), began);
+            }
             match Conversation::history(harness, t.path(), t.lines_end()) {
                 Ok(whole) => *c = whole,
                 Err(_) => {

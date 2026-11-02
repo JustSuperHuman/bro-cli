@@ -1269,9 +1269,12 @@ fn draw_all(
         let key = app.keymap.primary(crate::keymap::Act::Media);
         media.draw(ui, media_r, focus.as_ref(), &key);
     }
+    // filling the window: its bar keeps clear of the window's buttons and is where the window drags from
+    let mut expanded_bar = None;
     if media.expanded {
         let focus = app.focused().and_then(|id| media::owner(app, id));
-        media.draw_expanded(ui, window, focus.as_ref());
+        let buttons = if buttons.is_some() { caption_r } else { Rect::ZERO };
+        expanded_bar = Some(media.draw_expanded(ui, window, buttons, focus.as_ref()));
     }
     // toasts go under a dialog (as in the terminal UI) but over everything else, the launcher included: `draw`
     // paints them here when a dialog is open, `hints::draw` (via `toasts::draw_late`) otherwise
@@ -1291,7 +1294,11 @@ fn draw_all(
         caption::draw(ui, caption_r, focused_window, maximized);
         let row = Rect::new(side_r.right(), window.y, (caption_r.x - side_r.right()).max(0.0), caption_r.h.max(strip_r.h));
         let head = Rect::new(side_r.x, side_r.y, side_r.w, sidebar::HEAD_BOTTOM);
-        let drag = [row, head].into_iter().filter(|r| r.w > 0.0 && r.h > 0.0).collect();
+        let areas = match expanded_bar {
+            Some(bar) => [Rect::new(bar.x, bar.y, (caption_r.x - bar.x).max(0.0), bar.h), Rect::ZERO],
+            None => [row, head],
+        };
+        let drag = areas.into_iter().filter(|r| r.w > 0.0 && r.h > 0.0).collect();
         caption::zones(caption_r, drag, ui.hits.iter().map(|h| h.rect));
     } else {
         caption::clear();

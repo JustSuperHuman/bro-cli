@@ -102,6 +102,8 @@ AVPlayer and Safari are strict:
   Responses also carry `X-Content-Type-Options: nosniff` and
   `Content-Security-Policy: sandbox` (served bytes are never treated as an active page).
 * `Content-Disposition: inline` by default, or `attachment; filename*=UTF-8''…` with `download=1`.
+* `thumbnail=<side>` returns a small JPEG instead (128, 256 or 512 px): a picture's first frame, or a
+  PDF's first page drawn on white.
 * `ETag` and `Last-Modified` come from size and mtime; `If-Range` is honoured, and
   `Cache-Control: private, max-age=0, must-revalidate`.
 * Auth is the usual header, Bearer, or `?token=`, and loopback is exempt.
@@ -166,8 +168,9 @@ the host machine (`BridgeCommand::OpenInEditor`). It is used by the web and mobi
 The **roots** are the session cwd and the project root (`SessionMeta.project`, else
 the git root above cwd). Resolution tries, in order:
 
-1. `file://` URLs become paths. `~/` expands to home. MSYS `/c/x` becomes `C:/x` on
-   Windows.
+1. `file://` URLs become paths. `~/` expands to home. On Windows, MSYS `/c/x` becomes `C:/x`
+   and a drive behind a slash, `/C:/x` (Codex's Markdown links write it), becomes `C:/x`
+   (`bro_core::file_links::plain_path`).
 2. An absolute path is accepted only if it canonicalises inside a root.
 3. A relative path is tried against cwd, then the project root, then with git diff
    prefixes stripped (`a/`, `b/`).

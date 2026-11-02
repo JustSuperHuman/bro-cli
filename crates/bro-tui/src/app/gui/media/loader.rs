@@ -1,4 +1,4 @@
-//! Decoding off the UI thread: thumbnails, full-size images (animated ones keep every frame) and opening video
+//! Decoding off the UI thread: thumbnails, full-size images (animated ones keep every frame), PDF pages and opening video
 //! players (Media Foundation can take a moment to start). Results come back on a channel; the window is woken
 //! so it picks them up at once.
 //!
@@ -12,10 +12,12 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
-/// The last number in `Image` and `Player` is the request's: a result for an older one is stale.
+/// The last number in `Image`, `Pdf` and `Player` is the request's: a result for an older one is stale.
 pub enum Job {
     Thumb(PathBuf),
     Image(PathBuf, u32, u64),
+    /// a PDF's page (0-based), drawn to fit that many pixels: it comes back as an [`Done::Image`]
+    Pdf(PathBuf, usize, u32, u64),
     Player(PathBuf, u32, u64),
 }
 
@@ -47,7 +49,7 @@ impl Job {
     fn failed(&self, e: &str) -> Done {
         match self {
             Job::Thumb(p) => Done::Thumb(p.clone(), Err(e.into())),
-            Job::Image(p, _, g) => Done::Image(p.clone(), *g, Err(e.into())),
+            Job::Image(p, _, g) | Job::Pdf(p, _, _, g) => Done::Image(p.clone(), *g, Err(e.into())),
             Job::Player(p, _, g) => Done::Player(p.clone(), *g, Err(e.into())),
         }
     }
@@ -60,6 +62,10 @@ impl Job {
             }
             Job::Image(p, max, g) => {
                 let r = bro_media::load_image(&p, max);
+                Done::Image(p, g, r)
+            }
+            Job::Pdf(p, page, max, g) => {
+                let r = bro_media::load_pdf_page(&p, page, max);
                 Done::Image(p, g, r)
             }
             Job::Player(p, max, g) => {

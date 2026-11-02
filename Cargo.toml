@@ -103,6 +103,28 @@ opt-level = 3
 [profile.dev.package.cosmic-text]
 opt-level = 3
 
+# PDF pages (bro-media's previews): seconds a page unoptimised
+[profile.dev.package.hayro]
+opt-level = 3
+
+[profile.dev.package.hayro-interpret]
+opt-level = 3
+
+[profile.dev.package.hayro-syntax]
+opt-level = 3
+
+[profile.dev.package.vello_cpu]
+opt-level = 3
+
+[profile.dev.package.vello_common]
+opt-level = 3
+
+[profile.dev.package.moxcms]
+opt-level = 3
+
+[profile.dev.package.pic-scale]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "thin"

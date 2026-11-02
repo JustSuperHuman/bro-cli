@@ -139,11 +139,8 @@ pub(crate) fn named_in(conversation: &Conversation) -> Vec<(PathBuf, Source, Opt
             Item::You { pictures, at_ms, .. } => out.extend(pictures.iter().map(|p| (PathBuf::from(p), Source::Pasted, *at_ms))),
             Item::Said { text, at_ms } => {
                 for link in crate::file_links::find_file_links(text) {
-                    let raw = link.path.trim().trim_start_matches("file:///");
-                    let path = match raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-                        Some(rest) => bro_core::util::home_dir().join(rest),
-                        None => PathBuf::from(raw),
-                    };
+                    // `/F:/x` (Codex's links), `file://`, `~/`
+                    let Some(path) = crate::file_links::plain_path(&link.path) else { continue };
                     if is_media(&path) {
                         out.push((path, Source::Sent, *at_ms));
                     }

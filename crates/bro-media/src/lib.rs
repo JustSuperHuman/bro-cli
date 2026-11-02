@@ -1,6 +1,7 @@
 //! Photo and video previews for bro's desktop sidebar.
 //!
 //! [`kind_of`] sorts a path into a media kind, [`load_image`] decodes stills, animations and SVG,
+//! [`load_pdf_page`] draws a PDF's page,
 //! [`thumbnail`] makes a small preview of an image or a video, and [`Player`] plays video and
 //! audio on background threads.
 //!
@@ -16,6 +17,7 @@ mod audio;
 mod decode;
 mod ffmpeg;
 mod kind;
+mod pdf;
 mod player;
 mod still;
 #[cfg(windows)]
@@ -30,6 +32,7 @@ use std::time::Duration;
 
 pub use ffmpeg::{ffmpeg_available, set_search_dirs};
 pub use kind::{MediaKind, is_executable, kind_of};
+pub use pdf::load_pdf_page;
 pub use player::Player;
 pub use still::{Image, is_animated, load_image};
 
@@ -91,7 +94,8 @@ pub fn thumbnail(path: &Path, max_side: u32) -> Result<Rgba, String> {
         MediaKind::Video => decode::video_thumbnail(path, max_side),
         // the cover art, when there is one (ffmpeg finds it)
         MediaKind::Audio => decode::video_thumbnail(path, max_side).map_err(|_| "no picture in this audio file".to_string()),
-        MediaKind::Pdf => Err("no preview for PDFs".into()),
+        // its first page
+        MediaKind::Pdf => load_pdf_page(path, 0, max_side).and_then(|image| image.frames.into_iter().next().map(|(frame, _)| frame).ok_or_else(|| "the PDF drew nothing".to_string())),
         // An unknown extension that still decodes: try it as an image, then as a video.
         MediaKind::Other => first_frame(path, max_side).or_else(|_| decode::video_thumbnail(path, max_side)).map_err(|_| "no preview for this file".to_string()),
     }

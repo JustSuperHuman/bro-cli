@@ -9,6 +9,7 @@
 //! API other crates build against. Add freely; do not rename or remove.
 
 pub mod util;
+pub mod file_links;
 pub mod audio;
 pub mod http;
 pub mod paths;

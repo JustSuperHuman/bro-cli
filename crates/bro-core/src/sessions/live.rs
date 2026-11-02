@@ -786,6 +786,68 @@ impl AgentFacts {
         }
     }
 
+    /// A long transcript's first read starts near its end ([`FIRST_READ_MAX`]), and a Codex session that makes
+    /// pictures gets long fast (each one is in it as megabytes of base64). The pictures, videos, sounds and PDFs
+    /// it sent, made and looked at before `end` (where that read began; at most [`MEDIA_HISTORY_MAX`] before it)
+    /// are read back and go below the newer ones. Blocking: lines that name no media and open no call aren't
+    /// parsed. True when it found any.
+    pub fn media_history(&mut self, path: &Path, end: u64) -> std::io::Result<bool> {
+        use std::io::{BufRead, BufReader};
+        let mut file = std::fs::File::open(path)?;
+        let start = end.saturating_sub(MEDIA_HISTORY_MAX);
+        // begun inside a line: that line is cut off
+        let mut cut = false;
+        if start > 0 {
+            let mut before = [0u8];
+            file.seek(SeekFrom::Start(start - 1))?;
+            file.read_exact(&mut before)?;
+            cut = before[0] != b'\n';
+        }
+        let mut older = AgentFacts::new(self.harness);
+        let mut reader = BufReader::with_capacity(1 << 20, file);
+        let (mut at, mut line) = (start, Vec::new());
+        // the line the first read cut through ends after `end`: it's read whole here
+        while at < end {
+            line.clear();
+            let n = reader.read_until(b'\n', &mut line)?;
+            if n == 0 {
+                break;
+            }
+            at += n as u64;
+            if std::mem::take(&mut cut) {
+                continue;
+            }
+            let wanted = mentions_media_bytes(&line)
+                || [&b"\"tool_use\""[..], b"\"function_call\"", b"\"custom_tool_call\"", b"\"session_meta\"", b"\"turn_context\""].iter().any(|k| memchr::memmem::find(&line, k).is_some());
+            if wanted && let Ok(v) = serde_json::from_slice::<Value>(&line) {
+                older.ingest_value(&v);
+                // calls whose results named nothing were never read: keep only the latest few waiting
+                if older.open.len() > 256 {
+                    older.open.drain(..128);
+                }
+            }
+        }
+        let before = (self.sent.len(), self.touched.len());
+        for s in older.sent {
+            if self.sent.len() < LIST_MAX && !self.sent.iter().any(|n| path_key(&n.path) == path_key(&s.path)) {
+                self.sent.push(s);
+            }
+        }
+        for t in older.touched.into_iter().filter(|t| media_mime(&t.path).is_some()) {
+            if self.touched.len() < LIST_MAX && !self.touched.iter().any(|n| path_key(&n.path) == path_key(&t.path)) {
+                self.touched.push(t);
+            }
+        }
+        if self.cwd.is_none() {
+            self.cwd = older.cwd;
+        }
+        let found = (self.sent.len(), self.touched.len()) != before;
+        if found {
+            self.revision += 1;
+        }
+        Ok(found)
+    }
+
     /// Whether Claude's `away_summary` is at least as new as the last assistant text.
     pub fn away_summary_is_fresh(&self) -> bool {
         match (&self.away_summary, &self.last_assistant) {
@@ -833,24 +895,71 @@ impl AgentFacts {
         h.finish()
     }
 
+    /// `raw` as an absolute path, however the agent spelled it (`file://` URLs, `/C:/x`, `~/`, doubled
+    /// separators), relative ones against the record's cwd (itself maybe a URL) or the session's.
     fn absolute(&self, raw: &str, record_cwd: Option<&str>) -> PathBuf {
-        let raw = raw
-            .strip_prefix("file:///")
-            .map(|s| {
-                if cfg!(windows) {
-                    s.to_string()
-                } else {
-                    format!("/{s}")
-                }
-            })
-            .unwrap_or_else(|| raw.to_string());
-        let p = PathBuf::from(raw);
+        let plain = |s: &str| crate::file_links::plain_path(s).map(|p| single_separators(&p)).unwrap_or_else(|| PathBuf::from(s));
+        let p = plain(raw);
         if p.is_absolute() {
             return p;
         }
-        match record_cwd.map(PathBuf::from).or_else(|| self.cwd.clone()) {
+        match record_cwd.filter(|c| !c.is_empty()).map(plain).or_else(|| self.cwd.clone()) {
             Some(cwd) => cwd.join(p),
             None => p,
+        }
+    }
+
+    /// The pictures, videos, sounds and PDFs a reply names by their path: what the agent shows you (Codex links
+    /// them, `[Before and after](/F:/x/compare.png)`; a Markdown link's words become the caption). Only files
+    /// that are there.
+    fn named_media(&mut self, text: &str, at_ms: Option<i64>) {
+        if !mentions_media(text) {
+            return;
+        }
+        // last first, so the one it names first ends up on top
+        for link in crate::file_links::find_file_links(text).into_iter().rev() {
+            let path = self.absolute(&link.path, None);
+            let Some(mime) = media_mime(&path) else { continue };
+            if !path.is_file() {
+                continue;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let caption = (text[link.start..].starts_with('[') && link.label.trim() != name && link.label.trim() != link.path)
+                .then(|| link.label.trim().trim_matches('`').to_string())
+                .filter(|l| !l.is_empty());
+            self.send(SentFile { path, caption, at_ms, size: None, is_image: mime.starts_with("image/"), mime_type: Some(mime.to_string()) });
+        }
+    }
+
+    /// Media a tool call's command or output names that was created or changed once the call began: what a
+    /// script, a converter, a copy or an MCP tool made. A file the call only read or listed is older than it.
+    fn made_media(&mut self, text: &str, began_ms: Option<i64>, at_ms: Option<i64>, record_cwd: Option<&str>) {
+        let Some(began) = began_ms else { return };
+        if !mentions_media(text) {
+            return;
+        }
+        let text = ends_of(text, MADE_SCAN_MAX);
+        for link in crate::file_links::find_file_links(&text) {
+            let path = self.absolute(&link.path, record_cwd);
+            if media_mime(&path).is_none() {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let ms = |t: std::io::Result<std::time::SystemTime>| t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64);
+            let (modified, created) = (ms(meta.modified()), ms(meta.created()));
+            let since = began - MADE_SLACK_MS;
+            // a copy keeps its source's modified time, but it was created now
+            let kind = if created.is_some_and(|c| c >= since) {
+                TouchKind::Create
+            } else if modified.is_some_and(|m| m >= since) {
+                TouchKind::Write
+            } else {
+                continue;
+            };
+            self.touch(path, kind, at_ms, None);
         }
     }
 
@@ -869,8 +978,15 @@ impl AgentFacts {
         self.touched.truncate(LIST_MAX);
     }
 
-    fn send(&mut self, file: SentFile) {
+    fn send(&mut self, mut file: SentFile) {
         let key = path_key(&file.path);
+        // sent again (a reply naming what SendUserFile sent): what was known about it stays
+        if let Some(old) = self.sent.iter().find(|s| path_key(&s.path) == key) {
+            file.caption = file.caption.or_else(|| old.caption.clone());
+            file.size = file.size.or(old.size);
+            file.mime_type = file.mime_type.or_else(|| old.mime_type.clone());
+            file.is_image |= old.is_image;
+        }
         self.sent.retain(|s| path_key(&s.path) != key);
         self.sent.insert(0, file);
         self.sent.truncate(LIST_MAX);
@@ -923,6 +1039,7 @@ impl AgentFacts {
             at_ms,
         });
         self.saw_urls(text, at_ms);
+        self.named_media(text, at_ms);
         self.asked = asked_line(text);
     }
 
@@ -1106,6 +1223,16 @@ impl AgentFacts {
                         || tool_result
                             .and_then(Value::as_str)
                             .is_some_and(|s| s.trim_start().starts_with("Error"));
+                    // pictures, videos, sounds and PDFs a script, an MCP tool or a subagent made
+                    if !failed && !matches!(call.name.as_str(), "Read" | "Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "SendUserFile" | "Glob" | "Grep" | "LS" | "TodoWrite" | "WebFetch" | "WebSearch") {
+                        let mut text = String::new();
+                        strings_in(&call.input, &mut text);
+                        strings_in(r.get("content").unwrap_or(&Value::Null), &mut text);
+                        if let Some(out) = tool_result.and_then(|t| t.get("stdout")).and_then(Value::as_str) {
+                            text.push_str(out);
+                        }
+                        self.made_media(&text, call.at_ms, at.or(call.at_ms), cwd);
+                    }
                     if !failed {
                         self.claude_success(&call, tool_result, at.or(call.at_ms), cwd);
                     }
@@ -1296,7 +1423,8 @@ impl AgentFacts {
                         return;
                     };
                     // command output (not a patch's or a web search's): addresses it printed
-                    let call = self.open.iter().find(|c| c.id == id).map(|c| c.name.clone());
+                    let open = self.open.iter().find(|c| c.id == id).cloned();
+                    let call = open.as_ref().map(|c| c.name.clone());
                     if call.as_deref().is_some_and(|n| n != "apply_patch" && !n.contains("search") && !n.contains("fetch")) {
                         let printed = match payload.get("output") {
                             Some(Value::String(s)) => s.clone(),
@@ -1304,6 +1432,30 @@ impl AgentFacts {
                             None => String::new(),
                         };
                         self.saw_urls(&printed, at);
+                        let failed = printed.trim_start().starts_with("Error") || printed.contains("unable to locate image");
+                        if let Some(c) = open.as_ref().filter(|_| !failed) {
+                            match c.name.as_str() {
+                                // the picture it looked at
+                                "view_image" => {
+                                    if let Some(p) = c.input.get("path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                                        let path = self.absolute(p, None);
+                                        self.touch(path, TouchKind::Read, at, None);
+                                    }
+                                }
+                                // what an older Codex's commands and MCP tools made (a newer one says in its items)
+                                "shell" | "local_shell" | "container.exec" | "shell_command" | "exec_command" => {
+                                    let mut text = String::new();
+                                    strings_in(&c.input, &mut text);
+                                    text.push_str(&printed);
+                                    let cwd = c.input.get("workdir").and_then(Value::as_str).map(str::to_string);
+                                    self.made_media(&text, c.at_ms, at, cwd.as_deref());
+                                }
+                                n if n.contains("__") => {
+                                    self.made_media(&printed, c.at_ms, at, None);
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     self.open.retain(|c| c.id != id);
                     if let Some(changes) = self.patches.remove(id) {
@@ -1354,6 +1506,20 @@ impl AgentFacts {
                     self.open.clear();
                     self.refresh_pending();
                 }
+                // an older Codex: a picture it looked at, one it made
+                Some("view_image_tool_call") => {
+                    if let Some(p) = payload.get("path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                        let path = self.absolute(p, None);
+                        self.touch(path, TouchKind::Read, at, None);
+                    }
+                }
+                Some(k) if k.starts_with("image_generation") => {
+                    if let Some(saved) = payload.get("saved_path").or_else(|| payload.get("savedPath")).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                        let path = self.absolute(saved, None);
+                        let mime = media_mime(&path);
+                        self.send(SentFile { path, caption: None, at_ms: at, size: None, is_image: mime.is_some_and(|m| m.starts_with("image/")), mime_type: mime.map(str::to_string) });
+                    }
+                }
                 Some("patch_apply_end") => {
                     let id = payload
                         .get("call_id")
@@ -1378,7 +1544,35 @@ impl AgentFacts {
                     if matches!(status, Some("failed") | Some("declined")) {
                         return;
                     }
+                    let began = payload.get("started_at_ms").and_then(Value::as_i64).or(at);
+                    // a picture it made you (image generation): where it was saved, after the ones it worked from
+                    if let Some(saved) = item.get("savedPath").or_else(|| item.get("saved_path")).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                        for input in item.get("inputImages").and_then(Value::as_array).into_iter().flatten() {
+                            if let Some(p) = input.get("path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                                let path = self.absolute(p, None);
+                                self.touch(path, TouchKind::Read, began, None);
+                            }
+                        }
+                        let path = self.absolute(saved, None);
+                        let mime = media_mime(&path);
+                        self.send(SentFile { path, caption: None, at_ms: at, size: None, is_image: mime.is_some_and(|m| m.starts_with("image/")), mime_type: mime.map(str::to_string) });
+                        return;
+                    }
                     match item.get("type").and_then(Value::as_str) {
+                        // a picture it looked at (`file:///F:/x.png`)
+                        Some("ImageView") => {
+                            if let Some(p) = item.get("path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                                let path = self.absolute(p, None);
+                                self.touch(path, TouchKind::Read, at, None);
+                            }
+                        }
+                        // what an MCP tool made (a picture generator's file, a render)
+                        Some("McpToolCall") => {
+                            let mut text = String::new();
+                            strings_in(item.get("arguments").unwrap_or(&Value::Null), &mut text);
+                            strings_in(item.get("result").unwrap_or(&Value::Null), &mut text);
+                            self.made_media(&text, began, at, None);
+                        }
                         Some("FileChange") => {
                             if let Some(changes) = item.get("changes").and_then(Value::as_object) {
                                 for (p, change) in changes {
@@ -1387,6 +1581,7 @@ impl AgentFacts {
                             }
                         }
                         Some("CommandExecution") => {
+                            let cwd = item.get("cwd").and_then(Value::as_str);
                             for c in item
                                 .get("parsed_cmd")
                                 .and_then(Value::as_array)
@@ -1399,8 +1594,17 @@ impl AgentFacts {
                                         .and_then(Value::as_str)
                                         .filter(|s| !s.is_empty())
                                 {
-                                    self.touch(self.absolute(p, None), TouchKind::Read, at, None);
+                                    self.touch(self.absolute(p, cwd), TouchKind::Read, at, None);
                                 }
+                            }
+                            // what the command made: a chart, a render, a converted or copied file
+                            if item.get("exit_code").and_then(Value::as_i64).unwrap_or(0) == 0 {
+                                let mut text = String::new();
+                                strings_in(item.get("command").unwrap_or(&Value::Null), &mut text);
+                                if let Some(out) = item.get("aggregated_output").and_then(Value::as_str) {
+                                    text.push_str(out);
+                                }
+                                self.made_media(&text, began, at, cwd);
                             }
                         }
                         _ => {}
@@ -1484,6 +1688,117 @@ pub fn parse_apply_patch(text: &str) -> Vec<(String, TouchKind)> {
         out.push((rest.trim().to_string(), kind));
     }
     out
+}
+
+/// Every string in `v` onto `out`, a line each, except pictures' bytes (`data`) and a block's `type`.
+fn strings_in(v: &Value, out: &mut String) {
+    match v {
+        Value::String(s) => {
+            out.push_str(s);
+            out.push('\n');
+        }
+        Value::Array(a) => a.iter().for_each(|v| strings_in(v, out)),
+        Value::Object(o) => o.iter().filter(|(k, _)| !matches!(k.as_str(), "data" | "type" | "media_type" | "mimeType")).for_each(|(_, v)| strings_in(v, out)),
+        _ => {}
+    }
+}
+
+/// The most of a transcript's earlier part [`AgentFacts::media_history`] reads back.
+pub const MEDIA_HISTORY_MAX: u64 = 256 * 1024 * 1024;
+
+/// How much of one tool call's command and output is read for the media it made (its start and its end).
+const MADE_SCAN_MAX: usize = 256 * 1024;
+/// A file created or changed this soon before its call began still counts as the call's (coarse file times).
+const MADE_SLACK_MS: i64 = 2_000;
+
+/// A picture, video, sound or PDF's type, by its extension (the set the media panel and the phone show).
+pub fn media_mime(path: &Path) -> Option<&'static str> {
+    mime_of_ext(&path.extension()?.to_str()?.to_ascii_lowercase())
+}
+
+/// [`media_mime`] for a lowercase extension.
+fn mime_of_ext(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "tif" | "tiff" => "image/tiff",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "ogv" => "video/ogg",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
+        "pdf" => "application/pdf",
+        _ => return None,
+    })
+}
+
+/// `text` names a file with a media extension somewhere (cheap: before looking for paths in it).
+fn mentions_media(text: &str) -> bool {
+    mentions_media_bytes(text.as_bytes())
+}
+
+/// [`mentions_media`] for a line not decoded yet.
+fn mentions_media_bytes(b: &[u8]) -> bool {
+    memchr::memchr_iter(b'.', b).any(|i| {
+        let mut ext = [0u8; 4];
+        let n = b[i + 1..].iter().take_while(|c| c.is_ascii_alphanumeric()).take(5).count();
+        if !(2..=4).contains(&n) {
+            return false;
+        }
+        for (d, c) in ext.iter_mut().zip(&b[i + 1..i + 1 + n]) {
+            *d = c.to_ascii_lowercase();
+        }
+        std::str::from_utf8(&ext[..n]).is_ok_and(|e| mime_of_ext(e).is_some())
+    })
+}
+
+/// `text`, or its first and last `max / 2` bytes when it's longer (a long log's paths are at either end).
+fn ends_of(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    if text.len() <= max {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut head = max / 2;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - max / 2;
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    std::borrow::Cow::Owned(format!("{}\n{}", &text[..head], &text[tail..]))
+}
+
+/// `F:\\x\\\\y.png` (a path from inside a quoted string) as `F:\x\y.png`; a leading `\\` (a share) stays.
+fn single_separators(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if !s.contains("\\\\") && !s.contains("//") {
+        return path.to_path_buf();
+    }
+    let (lead, rest) = s.split_at(if s.starts_with("\\\\") || s.starts_with("//") { 2 } else { 0 });
+    let mut out = String::with_capacity(s.len());
+    out.push_str(lead);
+    let mut last_sep = false;
+    for c in rest.chars() {
+        let sep = c == '/' || c == '\\';
+        if !(sep && last_sep) {
+            out.push(c);
+        }
+        last_sep = sep;
+    }
+    PathBuf::from(out)
 }
 
 fn guess_image_mime(path: &Path) -> Option<&'static str> {
@@ -2505,6 +2820,181 @@ mod tests {
         .unwrap();
         assert!(b.poll(t0 + CODEX_SEARCH_EVERY));
         assert_eq!(b.session_id(), Some(id));
+    }
+
+    fn iso(ms: i64) -> String {
+        chrono::DateTime::from_timestamp_millis(ms).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    /// How Codex links a file in its replies: a drive behind a slash on Windows.
+    fn codex_link(p: &Path) -> String {
+        let s = p.to_string_lossy().replace('\\', "/");
+        if cfg!(windows) { format!("/{s}") } else { s }
+    }
+
+    #[test]
+    fn codex_media_it_links_views_generates_and_makes_is_picked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for f in ["compare.png", "ref.png", "face.png", "gen.png", "chart.png", "old.jpg", "clip.mp4"] {
+            std::fs::write(root.join(f), b"x").unwrap();
+        }
+        let now = crate::util::now_ms();
+        let cwd_url = format!("file:///{}", root.to_string_lossy().replace('\\', "/").trim_start_matches('/'));
+        let f = codex_facts(&[
+            json!({"type": "session_meta", "timestamp": iso(now - 9000), "payload": {"id": "019a", "cwd": root}}),
+            // looked at, as `file:///` URLs
+            json!({"type": "event_msg", "timestamp": iso(now - 8000), "payload": {"type": "item_completed", "item": {"type": "ImageView", "path": format!("file:///{}", codex_link(&root.join("ref.png")).trim_start_matches('/'))}}}),
+            // an older Codex's view_image
+            json!({"type": "response_item", "timestamp": iso(now - 7900), "payload": {"type": "function_call", "name": "view_image", "call_id": "v1", "arguments": json!({"path": root.join("face.png")}).to_string()}}),
+            json!({"type": "response_item", "timestamp": iso(now - 7800), "payload": {"type": "function_call_output", "call_id": "v1", "output": "attached image"}}),
+            // made with image generation, from two pictures
+            json!({"type": "event_msg", "timestamp": iso(now - 7000), "payload": {"type": "item_completed", "started_at_ms": now - 7500, "item": {"type": "Extension", "kind": "image_gen.generation", "status": "completed", "savedPath": root.join("gen.png"), "inputImages": [{"path": root.join("ref.png")}]}}}),
+            // a command that wrote a chart, and one that only listed an older file
+            json!({"type": "event_msg", "timestamp": iso(now - 5000), "payload": {"type": "item_completed", "started_at_ms": now - 6000, "item": {"type": "CommandExecution", "status": "completed", "exit_code": 0, "cwd": cwd_url, "command": ["pwsh", "-Command", "python plot.py --out chart.png"], "aggregated_output": "Saved chart.png\r\n"}}}),
+            json!({"type": "event_msg", "timestamp": iso(now + 60_000), "payload": {"type": "item_completed", "started_at_ms": now + 60_000, "item": {"type": "CommandExecution", "status": "completed", "exit_code": 0, "cwd": cwd_url, "command": ["pwsh", "-Command", "Get-ChildItem"], "aggregated_output": "old.jpg\r\n"}}}),
+            // a reply that links what it made, and something that isn't there
+            json!({"type": "response_item", "timestamp": iso(now - 1000), "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": format!("[Before and after]({}) · [Gone]({}) · `clip.mp4`", codex_link(&root.join("compare.png")), codex_link(&root.join("gone.png")))}]}}),
+        ]);
+        let sent: Vec<_> = f.sent.iter().map(|s| (s.path.file_name().unwrap().to_string_lossy().to_string(), s.caption.clone(), s.is_image)).collect();
+        assert_eq!(
+            sent,
+            vec![
+                ("compare.png".into(), Some("Before and after".into()), true),
+                ("clip.mp4".into(), None, false),
+                ("gen.png".into(), None, true),
+            ],
+            "replies' links and generated pictures are sent; missing files aren't"
+        );
+        let touched: Vec<_> = f.touched.iter().map(|t| (t.path.file_name().unwrap().to_string_lossy().to_string(), t.kind)).collect();
+        assert!(touched.contains(&("chart.png".into(), TouchKind::Create)), "{touched:?}");
+        assert!(touched.contains(&("ref.png".into(), TouchKind::Read)), "{touched:?}");
+        assert!(touched.contains(&("face.png".into(), TouchKind::Read)), "{touched:?}");
+        assert!(!touched.iter().any(|t| t.0 == "old.jpg"), "a file older than the command that listed it wasn't made: {touched:?}");
+        // every path is a plain one, wherever it came from
+        for p in f.sent.iter().map(|s| &s.path).chain(f.touched.iter().map(|t| &t.path)) {
+            assert!(p.is_file(), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn claude_media_a_script_or_mcp_tool_makes_and_a_reply_names_is_picked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("out.mp4"), b"x").unwrap();
+        std::fs::write(root.join("cover.webp"), b"x").unwrap();
+        let now = crate::util::now_ms();
+        let cwd = root.to_string_lossy().to_string();
+        let say = |ts: i64, content: Value| json!({"type": "assistant", "timestamp": iso(ts), "sessionId": "s1", "cwd": cwd, "message": {"id": format!("m{ts}"), "role": "assistant", "content": content}});
+        let res = |ts: i64, id: &str, content: Value, tool: Value| json!({"type": "user", "timestamp": iso(ts), "cwd": cwd, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": content}]}, "toolUseResult": tool});
+        let f = claude_facts(&[
+            say(now - 5000, json!([{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "ffmpeg -i in.mov out.mp4"}}])),
+            res(now - 4000, "b1", json!("done"), json!({"stdout": "", "stderr": ""})),
+            say(now - 3000, json!([{"type": "tool_use", "id": "j1", "name": "mcp__justimagine__generate_image", "input": {"prompt": "a cover"}}])),
+            res(now - 2000, "j1", json!([{"type": "text", "text": format!("{{\"saved\":{}}}", json!(root.join("cover.webp")))}, {"type": "image", "source": {"data": "iVBORw0KGgo"}}]), Value::Null),
+            say(now - 1000, json!([{"type": "text", "text": "The cut is in `out.mp4`."}])),
+        ]);
+        let touched: Vec<_> = f.touched.iter().map(|t| (t.path.file_name().unwrap().to_string_lossy().to_string(), t.kind)).collect();
+        assert!(touched.contains(&("out.mp4".into(), TouchKind::Create)), "{touched:?}");
+        assert!(touched.contains(&("cover.webp".into(), TouchKind::Create)), "{touched:?}");
+        assert_eq!(f.sent.first().map(|s| s.path.clone()), Some(root.join("out.mp4")), "a reply naming it by a relative path sends it");
+    }
+
+    #[test]
+    fn a_reply_naming_what_send_user_file_sent_keeps_its_caption() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("chart.png");
+        std::fs::write(&p, b"x").unwrap();
+        let mut f = AgentFacts::new(Harness::Claude);
+        f.send(SentFile { path: p.clone(), caption: Some("The chart".into()), at_ms: Some(1), size: Some(9), is_image: true, mime_type: Some("image/png".into()) });
+        f.assistant_text(&format!("Sent {}", p.display()), Some(2));
+        assert_eq!(f.sent.len(), 1);
+        assert_eq!((f.sent[0].caption.as_deref(), f.sent[0].size, f.sent[0].at_ms), (Some("The chart"), Some(9), Some(2)));
+    }
+
+    #[test]
+    fn media_from_before_a_long_transcripts_last_lines_is_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for f in ["gen.png", "seen.png", "late.png"] {
+            std::fs::write(root.join(f), b"x").unwrap();
+        }
+        let now = crate::util::now_ms();
+        let pad = json!({"type": "event_msg", "timestamp": iso(now - 5000), "payload": {"type": "token_count", "info": "x".repeat(1 << 20)}}).to_string();
+        let mut lines = vec![
+            json!({"type": "session_meta", "timestamp": iso(now - 9000), "payload": {"id": "019a", "cwd": root}}).to_string(),
+            json!({"type": "event_msg", "timestamp": iso(now - 8000), "payload": {"type": "item_completed", "item": {"type": "ImageView", "path": root.join("seen.png")}}}).to_string(),
+            json!({"type": "event_msg", "timestamp": iso(now - 7000), "payload": {"type": "item_completed", "item": {"type": "Extension", "kind": "image_gen.generation", "status": "completed", "savedPath": root.join("gen.png"), "result": "iVBOR".repeat(200_000)}}}).to_string(),
+        ];
+        lines.extend(std::iter::repeat_n(pad, 6));
+        lines.push(json!({"type": "response_item", "timestamp": iso(now - 1000), "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": format!("[Late]({})", codex_link(&root.join("late.png")))}]}}).to_string());
+        let path = root.join("rollout-x.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let mut tail = Tail::new(&path);
+        let read = tail.read().unwrap();
+        let began = read.began.filter(|b| *b > 0).expect("only the last lines were read");
+        let mut f = AgentFacts::new(Harness::Codex);
+        f.ingest(&read.lines);
+        let names = |f: &AgentFacts| f.sent.iter().map(|s| s.path.file_name().unwrap().to_string_lossy().to_string()).collect::<Vec<_>>();
+        assert_eq!(names(&f), ["late.png"]);
+        assert!(f.media_history(&path, began).unwrap());
+        assert_eq!(names(&f), ["late.png", "gen.png"], "the older ones go below");
+        assert!(f.touched.iter().any(|t| t.path.ends_with("seen.png") && t.kind == TouchKind::Read));
+        assert!(!f.media_history(&path, began).unwrap(), "reading back again adds nothing");
+    }
+
+    #[test]
+    fn media_mentions_and_doubled_separators() {
+        assert!(mentions_media("saved to out/Chart.PNG."));
+        assert!(mentions_media("x.pdf"));
+        assert!(!mentions_media("src/main.rs and v1.2.3"));
+        assert!(!mentions_media("a.pngx"));
+        if cfg!(windows) {
+            assert_eq!(single_separators(Path::new(r"F:\\x\\\\y.png")), PathBuf::from(r"F:\x\y.png"));
+            assert_eq!(single_separators(Path::new(r"\\server\share\a.png")), PathBuf::from(r"\\server\share\a.png"));
+        }
+        let long = format!("{}{}", "a".repeat(400_000), " out.png");
+        assert!(ends_of(&long, MADE_SCAN_MAX).ends_with("out.png"));
+    }
+
+    /// The media bro finds in real transcripts: `BRO_MEDIA_TRANSCRIPTS` (paths, `;`-separated), else the newest
+    /// ten of each agent's. Prints what each one sent, made and looked at.
+    /// `cargo test -p bro-core live_real_media -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_real_media() {
+        let mut all: Vec<(Harness, PathBuf, SystemTime)> = Vec::new();
+        match std::env::var("BRO_MEDIA_TRANSCRIPTS") {
+            Ok(list) => all.extend(list.split(';').filter(|s| !s.is_empty()).map(|p| {
+                let h = if p.contains("rollout-") { Harness::Codex } else { Harness::Claude };
+                (h, PathBuf::from(p), SystemTime::now())
+            })),
+            Err(_) => {
+                let mut found = vec![];
+                transcripts_newest_first(&crate::util::home_dir(), &mut found);
+                for h in [Harness::Claude, Harness::Codex] {
+                    all.extend(found.iter().filter(|f| f.0 == h).take(10).cloned());
+                }
+            }
+        }
+        for (h, p, _) in &all {
+            let started = Instant::now();
+            let r = Tail::new(p).read().expect("read");
+            let mut f = AgentFacts::new(*h);
+            f.ingest(&r.lines);
+            let read_ms = started.elapsed().as_millis();
+            if let Some(began) = r.began.filter(|b| *b > 0) {
+                f.media_history(p, began).expect("media history");
+            }
+            println!("{} {} (last lines {read_ms} ms, all {} ms)", h.label(), p.display(), started.elapsed().as_millis());
+            for s in &f.sent {
+                println!("  sent   {} {}", s.path.display(), s.caption.as_deref().unwrap_or(""));
+            }
+            for t in f.touched.iter().filter(|t| media_mime(&t.path).is_some()) {
+                println!("  {:6} {}", t.kind.as_str(), t.path.display());
+            }
+        }
     }
 
     /// Read-only sanity pass over the real local transcripts: parsing never panics and

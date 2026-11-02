@@ -1,4 +1,5 @@
 //! Bounded still thumbnails for mobile. `/raw?thumbnail=256` uses the same access checks as the original.
+//! A PDF's thumbnail is its first page.
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -44,6 +45,9 @@ fn remember(key: String, bytes: Bytes) {
 }
 
 fn decode(path: &Path, side: u32) -> Result<Bytes, String> {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+        return first_page(path, side);
+    }
     let mut reader = ImageReader::open(path)
         .map_err(|_| "The picture could not be opened.")?
         .with_guessed_format()
@@ -75,11 +79,43 @@ fn decode(path: &Path, side: u32) -> Result<Bytes, String> {
         let alpha = pixel[3] as u32;
         image::Rgb([0, 1, 2].map(|c| ((pixel[c] as u32 * alpha + 24 * (255 - alpha)) / 255) as u8))
     });
+    jpeg(&rgb)
+}
+
+fn jpeg(rgb: &image::RgbImage) -> Result<Bytes, String> {
     let mut bytes = vec![];
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 72)
-        .encode_image(&rgb)
+        .encode_image(rgb)
         .map_err(|_| "The thumbnail could not be made.")?;
     Ok(Bytes::from(bytes))
+}
+
+/// A PDF's first page, drawn on white so its longer side is `side` pixels.
+fn first_page(path: &Path, side: u32) -> Result<Bytes, String> {
+    use hayro::hayro_interpret::InterpreterSettings;
+    use hayro::hayro_syntax::Pdf;
+    use hayro::vello_cpu::color::palette::css::WHITE;
+    use hayro::vello_cpu::peniko::ImageAlphaType;
+    let data = std::fs::read(path).map_err(|_| "The PDF could not be opened.")?;
+    let pdf = Pdf::new(data).map_err(|_| "This PDF has no thumbnail.")?;
+    let page = pdf.pages().first().ok_or("This PDF has no pages.")?;
+    let (w, h) = page.render_dimensions();
+    if !(w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0) {
+        return Err("This PDF has no thumbnail.".into());
+    }
+    let scale = side as f32 / w.max(h);
+    let settings = hayro::PixmapSettings { x_scale: scale, y_scale: scale, bg_color: WHITE };
+    let pixmap = hayro::render(page, &hayro::RenderCache::new(), &InterpreterSettings::default(), &hayro::RenderSettings::default(), &settings);
+    let (pw, ph) = (pixmap.width() as u32, pixmap.height() as u32);
+    let rgba = pixmap.take_rgba8(ImageAlphaType::Alpha);
+    let rgb = image::RgbImage::from_fn(pw, ph, |x, y| {
+        let i = (y as usize * pw as usize + x as usize) * 4;
+        image::Rgb([rgba[i], rgba[i + 1], rgba[i + 2]])
+    });
+    if rgb.width() == 0 || rgb.height() == 0 {
+        return Err("This PDF has no thumbnail.".into());
+    }
+    jpeg(&rgb)
 }
 
 pub(crate) async fn serve(
@@ -204,6 +240,37 @@ mod tests {
             "thumbnail benchmark: {original} original bytes -> {} thumbnail bytes",
             bytes.len()
         );
+    }
+
+    #[test]
+    fn a_pdfs_thumbnail_is_its_first_page() {
+        let root = tempfile::tempdir().unwrap();
+        let page = "0 0.5 0 rg 0 0 612 792 re f";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << >> >>".into(),
+            format!("<< /Length {} >>\nstream\n{page}\nendstream", page.len()),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![];
+        for (i, o) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+        for o in offsets {
+            pdf.extend(format!("{o:010} 00000 n \n").bytes());
+        }
+        pdf.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).bytes());
+        let path = root.path().join("Guide.PDF");
+        std::fs::write(&path, pdf).unwrap();
+        let small = image::load_from_memory(&decode(&path, 256).unwrap()).unwrap().to_rgb8();
+        assert!((255..=256).contains(&small.height()) && small.width() < small.height());
+        let [r, g, b] = small.get_pixel(small.width() / 2, small.height() / 2).0;
+        assert!(r < 30 && g > 100 && b < 30, "the page's green: {r},{g},{b}");
+        assert!(decode(&root.path().join("missing.pdf"), 128).is_err());
     }
 
     #[tokio::test]

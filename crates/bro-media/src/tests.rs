@@ -270,6 +270,85 @@ fn thumbnail_of_an_image_is_its_first_frame() {
     assert_eq!(thumb.pixel(30, 10), [10, 200, 30, 255]);
 }
 
+// ---- PDFs ----
+
+/// A two-page PDF: a portrait Letter page with its bottom-left quarter red, then a landscape one with its right
+/// half blue and a word in Helvetica.
+fn sample_pdf() -> Vec<u8> {
+    let page1 = "1 0 0 rg 0 0 306 396 re f";
+    let page2 = "0 0 1 rg 396 0 396 612 re f BT /F1 48 Tf 40 500 Td (bro) Tj ET";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << >> >>".into(),
+        format!("<< /Length {} >>\nstream\n{page1}\nendstream", page1.len()),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 792 612] /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>".into(),
+        format!("<< /Length {} >>\nstream\n{page2}\nendstream", page2.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![];
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+    for o in offsets {
+        out.extend(format!("{o:010} 00000 n \n").bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).bytes());
+    out
+}
+
+#[test]
+fn pdf_pages_draw_as_pictures() {
+    let dir = tempdir();
+    let path = write(dir.path(), "two.pdf", &sample_pdf());
+    let first = crate::load_pdf_page(&path, 0, 400).expect("page 1");
+    assert_eq!((first.page, first.format.as_str()), (Some((0, 2)), "PDF"));
+    // its actual size is the page at 100% (8.5 x 11 in at 96 px per inch)
+    assert_eq!(first.original, (816, 1056));
+    let (img, _) = &first.frames[0];
+    assert!((399..=400).contains(&img.h) && (308..=310).contains(&img.w), "{}x{}", img.w, img.h);
+    let red = img.pixel(img.w / 4, img.h * 3 / 4);
+    assert!(red[0] > 200 && red[1] < 60 && red[2] < 60 && red[3] == 255, "{red:?}");
+    assert_eq!(img.pixel(img.w * 3 / 4, img.h / 4), [255, 255, 255, 255], "drawn on white");
+    // past the end is the last page: landscape, its right half blue
+    let last = crate::load_pdf_page(&path, 9, 400).expect("page 2");
+    assert_eq!(last.page, Some((1, 2)));
+    let (img, _) = &last.frames[0];
+    assert!((399..=400).contains(&img.w) && img.w > img.h, "{}x{}", img.w, img.h);
+    let blue = img.pixel(img.w * 3 / 4, img.h / 2);
+    assert!(blue[2] > 200 && blue[0] < 60, "{blue:?}");
+    // its thumbnail is the first page
+    let thumb = thumbnail(&path, 64).expect("thumbnail");
+    assert!(thumb.h >= 63 && thumb.h <= 64 && thumb.w < thumb.h);
+    // what can't be drawn says why
+    assert!(crate::load_pdf_page(&dir.path().join("nope.pdf"), 0, 64).unwrap_err().contains("doesn't exist"));
+    assert!(!crate::load_pdf_page(&write(dir.path(), "bad.pdf", b"%PDF-1.4 not really"), 0, 64).unwrap_err().is_empty());
+}
+
+/// Draws every page of a real PDF (`BRO_PDF`) as PNGs into `BRO_PDF_OUT`, with how long each took.
+/// `BRO_PDF=x.pdf BRO_PDF_OUT=dir cargo test -p bro-media pdf_real -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn pdf_real_pages() {
+    let (Ok(pdf), Ok(out)) = (std::env::var("BRO_PDF"), std::env::var("BRO_PDF_OUT")) else { return };
+    let mut page = 0;
+    loop {
+        let started = Instant::now();
+        let img = crate::load_pdf_page(Path::new(&pdf), page, 1600).expect("page");
+        let (frame, _) = &img.frames[0];
+        println!("page {} of {}: {}x{} in {} ms", page + 1, img.page.unwrap().1, frame.w, frame.h, started.elapsed().as_millis());
+        RgbaImage::from_raw(frame.w, frame.h, frame.px.clone()).unwrap().save(Path::new(&out).join(format!("page-{}.png", page + 1))).unwrap();
+        page += 1;
+        if page >= img.page.unwrap().1 || page >= 6 {
+            break;
+        }
+    }
+}
+
 // ---- audio helpers ----
 
 #[test]

@@ -49,8 +49,10 @@ pub struct Image {
     pub frames: Vec<(Rgba, Duration)>,
     /// Size of the original before any downscale (after EXIF orientation).
     pub original: (u32, u32),
-    /// "PNG", "JPEG", "GIF", "WebP", "SVG", "BMP", "ICO", "TIFF", "AVIF"...
+    /// "PNG", "JPEG", "GIF", "WebP", "SVG", "BMP", "ICO", "TIFF", "AVIF"... or "PDF" for a document's page
     pub format: String,
+    /// A PDF's page: (which, 0-based; how many the document has). None for a picture.
+    pub page: Option<(usize, usize)>,
 }
 
 impl Image {
@@ -89,7 +91,7 @@ pub fn load_image(path: &Path, max_side: u32) -> Result<Image, String> {
     let decoded = match decoded {
         // AVIF, HEIC, JPEG XR, camera RAW...: Windows decodes them when the Store codec is there.
         Err(e) => crate::win::wic_load(path, max_side)
-            .map(|(rgba, original, container)| Image { frames: vec![(rgba, Duration::ZERO)], original, format: wic_format(&ext, &container) })
+            .map(|(rgba, original, container)| Image { page: None, frames: vec![(rgba, Duration::ZERO)], original, format: wic_format(&ext, &container) })
             .map_err(|wic| if format.is_some_and(|f| f.reading_enabled()) { e } else { wic }),
         ok => ok,
     };
@@ -120,7 +122,7 @@ pub(crate) fn ffmpeg_still(path: &Path, ext: &str, max_side: u32) -> Result<Imag
         "jxl" => "JPEG XL".to_string(),
         ext => ext.to_ascii_uppercase(),
     };
-    Ok(Image { frames: vec![(frame, Duration::ZERO)], original, format })
+    Ok(Image { page: None, frames: vec![(frame, Duration::ZERO)], original, format })
 }
 
 fn read_error(path: &Path, e: std::io::Error) -> String {
@@ -177,7 +179,7 @@ fn still(mut decoder: impl ImageDecoder, format: &str, max_side: u32) -> Result<
     let mut img = DynamicImage::from_decoder(decoder).map_err(decode_error)?;
     img.apply_orientation(orientation);
     let original = (img.width(), img.height());
-    Ok(Image { frames: vec![(downscale_image(img, max_side), Duration::ZERO)], original, format: format.into() })
+    Ok(Image { page: None, frames: vec![(downscale_image(img, max_side), Duration::ZERO)], original, format: format.into() })
 }
 
 fn open(path: &Path) -> Result<BufReader<File>, String> {
@@ -208,7 +210,7 @@ fn gif(path: &Path, max_side: u32) -> Result<Image, String> {
     decoder.set_limits(limits()).map_err(decode_error)?;
     let original = decoder.dimensions();
     check_size(original.0, original.1, CANVAS_BYTES_PER_PX)?;
-    Ok(Image { frames: collect_frames(decoder.into_frames(), max_side)?, original, format: "GIF".into() })
+    Ok(Image { page: None, frames: collect_frames(decoder.into_frames(), max_side)?, original, format: "GIF".into() })
 }
 
 fn webp(path: &Path, max_side: u32) -> Result<Image, String> {
@@ -218,7 +220,7 @@ fn webp(path: &Path, max_side: u32) -> Result<Image, String> {
     }
     let original = decoder.dimensions();
     check_size(original.0, original.1, CANVAS_BYTES_PER_PX)?;
-    Ok(Image { frames: collect_frames(decoder.into_frames(), max_side)?, original, format: "WebP".into() })
+    Ok(Image { page: None, frames: collect_frames(decoder.into_frames(), max_side)?, original, format: "WebP".into() })
 }
 
 fn png(path: &Path, max_side: u32) -> Result<Image, String> {
@@ -229,7 +231,7 @@ fn png(path: &Path, max_side: u32) -> Result<Image, String> {
     let original = decoder.dimensions();
     check_size(original.0, original.1, CANVAS_BYTES_PER_PX)?;
     let frames = collect_frames(decoder.apng().map_err(decode_error)?.into_frames(), max_side)?;
-    Ok(Image { frames, original, format: "APNG".into() })
+    Ok(Image { page: None, frames, original, format: "APNG".into() })
 }
 
 /// Every frame of an animation, downscaled, within [`MAX_FRAMES`] / [`MAX_ANIMATION_BYTES`] /
@@ -301,7 +303,7 @@ fn load_svg(path: &Path, max_side: u32) -> Result<Image, String> {
     let mut pixmap = tiny_skia::Pixmap::new(pw, ph).ok_or("the SVG is too large to render")?;
     resvg::render(&tree, tiny_skia::Transform::from_scale(pw as f32 / w, ph as f32 / h), &mut pixmap.as_mut());
     let original = ((w.round() as u32).max(1), (h.round() as u32).max(1));
-    Ok(Image { frames: vec![(Rgba { w: pw, h: ph, px: pixmap.take_demultiplied() }, Duration::ZERO)], original, format: "SVG".into() })
+    Ok(Image { page: None, frames: vec![(Rgba { w: pw, h: ph, px: pixmap.take_demultiplied() }, Duration::ZERO)], original, format: "SVG".into() })
 }
 
 /// More XML nodes than any drawing needs. The file caps alone don't bound the tree: a few MB of `<g/>` (or a

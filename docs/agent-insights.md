@@ -32,12 +32,22 @@ The reader is incremental. It keeps a byte offset and a partial-line buffer, and
 if the file shrinks or is replaced. The first read looks at the last 4 MB only. Focus mode's
 conversation reads a longer transcript from its start (`Conversation::history`, up to 256 MB,
 about 1 ms per MB): most of a long session is tool output and pictures, so its last 4 MB can
-hold just its last few items. None of it blocks the TUI thread. It produces `AgentFacts`:
+hold just its last few items. The pictures, videos, sounds and PDFs from before those 4 MB
+are read back too (`AgentFacts::media_history`, up to 256 MB, parsing only the lines that name
+media or open a tool call): a Codex session that makes pictures carries each one as megabytes of
+base64, so its last 4 MB soon holds none of them. None of it blocks the TUI thread. It produces
+`AgentFacts`:
 
-* **`sent`** (Claude only). Comes from successful `SendUserFile` calls. Prefer
-  `toolUseResult.attachments[]`, which gives `path`, `size`, `isImage` and `media_type`.
-  Otherwise use `input.files[]` when it is a real array. Skip `is_error` results. Keep
-  the caption and time. Dedupe by path, newest first.
+* **`sent`**, deduped by path, newest first. A file sent again keeps the caption it had.
+  * Claude: successful `SendUserFile` calls. Prefer `toolUseResult.attachments[]`, which
+    gives `path`, `size`, `isImage` and `media_type`. Otherwise use `input.files[]` when it
+    is a real array. Skip `is_error` results. Keep the caption and time.
+  * Codex: a generated picture, from an `item_completed` item with a `savedPath` (the
+    `Extension` item of kind `image_gen.generation`; older builds' `saved_path`). The pictures
+    it worked from (`inputImages[].path`) are `read`.
+  * Both: a picture, video, sound or PDF that a reply names by its path and that exists.
+    Codex links them as `[Before and after](/F:/x/compare.png)`, with a slash before the drive.
+    A Markdown link's words become the caption. Relative paths resolve against the session's cwd.
 * **`touched`**, newest first and deduped by path. Each entry has a kind: `edit`,
   `write`, `create`, `delete`, `move` or `read`.
   * Claude: Edit, MultiEdit and Write use `file_path`. NotebookEdit uses
@@ -49,7 +59,16 @@ hold just its last few items. None of it blocks the TUI thread. It produces `Age
     `delete`, and a non-null `move_path` means `move`. Reads come from
     `CommandExecution.parsed_cmd[].type=="read"` and its `path`. The fallback is the
     older stock format: `custom_tool_call name:"apply_patch"` with `*** (Add|Update|Delete) File: <path>`
-    lines, or `patch_apply_end`.
+    lines, or `patch_apply_end`. Pictures it looked at come from `ImageView` items (a `file:///`
+    path), an older build's `view_image` call or its `view_image_tool_call` event.
+  * Media a command or tool made, either agent. A picture, video, sound or PDF named in a tool
+    call's command or output counts as `create` or `write` when the file was created or changed
+    after the call began (with 2 s of slack). A copy keeps its source's modified time but has a
+    new created time. This covers Claude's Bash, MCP tools and subagents, and Codex's
+    `CommandExecution` (command and `aggregated_output`, against its `cwd`) and `McpToolCall`
+    items. A file the call only read or listed is older than the call, so it doesn't count.
+  * Paths are read however an agent spells them: `file://` URLs, `/C:/x`, MSYS `/c/x`, `~/`,
+    and doubled separators from inside quoted strings.
 * **`pending`**: the last tool call that has no result yet. Its reason text follows
   herdr-island:
 

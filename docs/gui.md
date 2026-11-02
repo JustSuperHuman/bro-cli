@@ -32,15 +32,20 @@ until it is ready. This also handles launches made while the proxy is starting.
   available to the running program, including Codex's reasoning controls. Wheel notches move two
   terminal rows or one conversation line; touchpads keep their pixel movement, with small movements accumulated
   until the terminal can move a row.
-- **Photos and videos.** Pictures and videos your agents open (`bro open`), send you, make, look at or print the
-  path of play in the media panel beside your sessions instead of another app: zoom pictures with the wheel,
+- **Photos, videos and PDFs.** Pictures, videos and PDFs your agents open (`bro open`), send you, make, look at
+  or name in a reply show in the media panel beside your sessions instead of another app. That includes what a
+  script or an MCP tool writes, Codex's generated pictures and the links in its replies. When the session
+  you're in sends one, the panel switches to it. Zoom pictures with the wheel,
   drag to pan, play, scrub, loop and unmute videos, then copy it (a still picture as the picture, to paste into
   a chat, a document or an editor; a video, a song, a GIF or a PDF as the file, as Explorer or Finder copies it),
   copy its path (click the path under its name), @mention it into the session, show it in its folder or open it
   in its own app. The gallery shows the session you're in, or all of them.
   Dropped files and alt+v pastes join it too. Programs and scripts are never run from a click.
-  Double-click a recent thumbnail or the preview to fill Bro's window with that media. Press **Esc** or
-  double-click again to return to the panel.
+  A PDF shows its pages, drawn by bro itself the same way on Windows, macOS and Linux: Page Up and Page Down
+  (or the arrows on the page while the pointer is over it) turn them, and they zoom and pan like a picture.
+  Double-click a recent thumbnail or the preview to fill Bro's window with that media. Its bar across the top
+  has **Back** at the far left, well away from the window's own close button; **Esc** or another double-click
+  also returns to the panel.
   Right-click a thumbnail or the preview for its menu: everything above, plus play, mute, loop, fit or actual size
   and filling the window, each with its key.
 - **HTML as the page.** An HTML file you click or an agent opens previews as the page itself, styles, scripts,

@@ -152,36 +152,12 @@ fn normalize(raw: &str) -> Result<PathBuf, String> {
     {
         return Err("Invalid file path.".into());
     }
-    let mut text = if raw
-        .get(..7)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
-    {
-        let path = crate::file_links::file_url_path(raw).ok_or("Invalid file path.")?;
-        // A fragment is a location, not part of the file name.
-        path.split('#').next().unwrap_or_default().to_string()
-    } else if raw.contains("://") {
+    // `file://` URLs (a fragment is a location, not part of the name), `~/`, `/C:/x` and MSYS `/c/x`
+    let path = crate::file_links::plain_path(raw).ok_or("Invalid file path.")?;
+    if path.as_os_str().is_empty() {
         return Err("Invalid file path.".into());
-    } else {
-        raw.to_string()
-    };
-    if let Some(rest) = text.strip_prefix("~/").or_else(|| text.strip_prefix("~\\")) {
-        return Ok(bro_core::util::home_dir().join(rest));
     }
-    if cfg!(windows) {
-        let bytes = text.as_bytes();
-        if bytes.len() >= 2
-            && bytes[0] == b'/'
-            && bytes[1].is_ascii_alphabetic()
-            && (bytes.len() == 2 || bytes[2] == b'/')
-        {
-            text = format!(
-                "{}:/{}",
-                bytes[1].to_ascii_uppercase() as char,
-                text.get(3..).unwrap_or_default()
-            );
-        }
-    }
-    Ok(PathBuf::from(text))
+    Ok(path)
 }
 
 /// Section 4 of `docs/file-links.md`: absolute paths inside a root; relative

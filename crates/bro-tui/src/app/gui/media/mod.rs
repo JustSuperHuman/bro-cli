@@ -1,8 +1,9 @@
-//! The media sidebar: photos, animations, video and audio that agents open, send or make — in a panel beside the
-//! sessions instead of another app.
+//! The media sidebar: photos, animations, video, audio and PDFs that agents open, send or make — in a panel beside
+//! the sessions instead of another app.
 //!
 //! Where items come from: an agent's `bro open`, a clicked file link and prefix f on a media file (the file preview
-//! hands media here), files an agent sends you (Claude's SendUserFile) or writes, creates or looks at, images pasted
+//! hands media here), files an agent sends you (Claude's SendUserFile, Codex's generated pictures, a reply's links)
+//! or writes, creates or looks at (a script's or an MCP tool's output too), images pasted
 //! with alt+v (and the last half day of them on start), files dropped on the window. Newest first, once each. The
 //! panel shows the selected one large (zoom and pan for images, a player for video and audio) and the rest as a
 //! gallery, for the session in focus or its whole project. A right-click on a thumbnail or the viewer (shift+F10 from
@@ -124,7 +125,8 @@ enum View {
     None,
     Loading(PathBuf),
     /// `asked`: the largest size requested for it (a zoomed-in still is decoded again, sharper)
-    Image { path: PathBuf, frames: Vec<(Rgba, Duration)>, frame: usize, next: Instant, tex: Option<ImageId>, dirty: bool, original: (u32, u32), format: String, asked: u32 },
+    /// `pages`: a PDF's page on view (which, 0-based; how many)
+    Image { path: PathBuf, frames: Vec<(Rgba, Duration)>, frame: usize, next: Instant, tex: Option<ImageId>, dirty: bool, original: (u32, u32), format: String, asked: u32, pages: Option<(usize, usize)> },
     Media { path: PathBuf, player: Box<Player>, tex: Option<ImageId>, size: (u32, u32) },
     Failed { path: PathBuf, message: String },
 }
@@ -174,6 +176,11 @@ enum Target {
     Prev,
     Next,
     Gallery,
+    /// the full-window bar's ⋯: the item's menu, opened at this point
+    More(Point),
+    /// a PDF's previous or next page
+    PagePrev,
+    PageNext,
     /// a line of the open menu (None: anywhere else, which closes it)
     Menu(Option<Cmd>),
 }
@@ -263,6 +270,8 @@ pub struct Media {
     revs: HashMap<PaneId, u64>,
     free: Vec<ImageId>,
     drag: Option<DragKind>,
+    /// the PDF page asked for last (the one on view until it's drawn: [`View::Image`]'s `pages`)
+    page: usize,
     /// The first viewer click's playback state, restored when it becomes a double-click.
     viewer_was_playing: Option<bool>,
     viewer: Rect,
@@ -287,6 +296,10 @@ const VIEW_SIDE: u32 = 2560;
 const SHARP_SIDE: u32 = 8192;
 /// Zooming in stops here, or at twice the picture's own pixels when that's further.
 const MAX_ZOOM: f32 = 16.0;
+/// The full-window viewer's top bar, at least (it matches the window's buttons when they're taller).
+const EXPANDED_BAR: f32 = 40.0;
+/// Media sent this recently by the session you're in is shown as it arrives.
+const FRESH_MS: i64 = 120_000;
 
 /// Media the panel can show: pictures, video, audio, and PDFs (a card that opens them in their app).
 pub fn is_media(path: &Path) -> bool {
@@ -377,6 +390,7 @@ impl Media {
             free: vec![],
             drag: None,
             viewer_was_playing: None,
+            page: 0,
             viewer: Rect::ZERO,
             scale: 1.0,
             wake,
@@ -461,10 +475,11 @@ impl Media {
         }
         match &self.view {
             // the picture on screen stays until the new one is in (no flash), zoomed where you were
-            View::Image { path: shown, asked, .. } if shown == path => {
-                let asked = *asked;
+            View::Image { path: shown, asked, pages, .. } if shown == path => {
+                let (asked, pdf) = (*asked, pages.is_some());
                 self.req += 1;
-                self.loader.ask(Job::Image(path.to_path_buf(), asked, self.req));
+                // a PDF written again stays on its page
+                self.loader.ask(if pdf { Job::Pdf(path.to_path_buf(), self.page, asked, self.req) } else { Job::Image(path.to_path_buf(), asked, self.req) });
             }
             _ => {
                 let (zoom, pan) = (self.zoom, self.pan);
@@ -529,7 +544,9 @@ impl Media {
                 self.loader.ask(Job::Player(path.to_path_buf(), 1920, self.req));
             }
             MediaKind::Pdf => {
-                self.view = View::Failed { path: path.to_path_buf(), message: "PDFs open in their own app: Open, below".into() };
+                self.page = 0;
+                self.view = View::Loading(path.to_path_buf());
+                self.loader.ask(Job::Pdf(path.to_path_buf(), 0, VIEW_SIDE, self.req));
             }
             MediaKind::Other => {
                 self.view = View::Failed { path: path.to_path_buf(), message: "Not a picture, video or song".into() };
@@ -662,7 +679,7 @@ impl Media {
                                 self.free.push(*t);
                             }
                             let delay = img.frames[0].1;
-                            self.view = View::Image { path: p, frames: img.frames, frame: 0, next: Instant::now() + delay, tex: None, dirty: true, original: img.original, format: img.format, asked };
+                            self.view = View::Image { path: p, frames: img.frames, frame: 0, next: Instant::now() + delay, tex: None, dirty: true, original: img.original, format: img.format, asked, pages: img.page };
                         }
                         _ if sharper => {}
                         Ok(_) => self.view = View::Failed { path: p, message: "The picture has nothing in it".into() },
@@ -839,23 +856,92 @@ impl Media {
         self.draw_menu(ui, item.as_ref());
     }
 
-    /// Draw the selected media over the workspace, keeping the same image or player loaded.
-    pub fn draw_expanded(&mut self, ui: &mut Ui, r: Rect, focus: Option<&Owner>) {
+    /// Draw the selected media over the whole window, keeping the same image or player loaded. A bar along the top
+    /// holds the way back at its left end, far from the window's own minimise, maximise and close (`buttons`, an
+    /// empty rect when the window has its title bar), which keep the bar's right end to themselves: nothing of the
+    /// viewer's sits under them. Returns the bar, which drags the window where nothing in it is clickable.
+    pub fn draw_expanded(&mut self, ui: &mut Ui, r: Rect, buttons: Rect, focus: Option<&Owner>) -> Rect {
         let prev = ui.layer();
         self.targets.clear();
         self.scale = ui.scale;
-        self.viewer = r;
-        ui.fill(r, ui.t.bg);
-        self.draw_viewer(ui, r, self.shown(focus).len());
-        let hint = Rect::new(r.x + 12.0, r.y + 12.0, 256.0_f32.min((r.w - 64.0).max(0.0)), 28.0);
-        ui.round_over(hint, super::kit::radius::CONTROL, Color::rgba(0.0, 0.0, 0.0, 0.65));
-        ui.label_in(hint, "Esc or double-click to close", Style::new(size::SMALL, weight::MEDIUM, Color::WHITE), Align::Center);
-        let close = Rect::new(r.right() - 40.0, r.y + 12.0, 28.0, 28.0);
-        let n = self.target(Target::Collapse);
-        widgets::icon_button(ui, close, "\u{F0156}", ui.t.text, Action::Media(n));
+        let t = ui.t;
+        ui.fill(r, t.bg);
+        let bar_h = if buttons.w > 0.0 { buttons.bottom() - r.y } else { 0.0 }.max(EXPANDED_BAR);
+        let bar = Rect::new(r.x, r.y, r.w, bar_h);
+        ui.hline(bar.x, bar.bottom() - ui.hair(), bar.w, t.stroke);
+        let shown: Vec<Item> = self.shown(focus).into_iter().cloned().collect();
         let item = self.selected_item();
+
+        // back to the panel, at the far left
+        let back_st = Style::new(size::BODY, weight::MEDIUM, t.text);
+        let back = Rect::new(bar.x + 10.0, bar.y + (bar_h - 30.0) / 2.0, 30.0 + ui.measure("Back", back_st) + 12.0, 30.0);
+        let h = ui.hover_amount("media-back", back);
+        let down = ui.pressing && h > 0.5;
+        ui.round(back, super::kit::radius::CONTROL, t.text.with_alpha(if down { 0.04 } else { 0.06 + 0.06 * h }));
+        ui.icon(Rect::new(back.x + 6.0, back.y + 3.0, 24.0, 24.0), "\u{F004D}", size::TITLE, t.text);
+        ui.label_in(Rect::new(back.x + 30.0, back.y, back.w - 36.0, back.h), "Back", back_st, Align::Left);
+        let n = self.target(Target::Collapse);
+        ui.hit(back, Action::Media(n));
+        if h > 0.5 {
+            widgets::tooltip(ui, back, "Back to the panel · Esc");
+        }
+
+        // what you can do with it, ending well short of the window's buttons
+        let end = if buttons.w > 0.0 { buttons.x - 28.0 } else { bar.right() - 10.0 };
+        let copy_tip = if item.as_ref().is_some_and(|it| self.copies_as_picture(it)) { "Copy the picture · c" } else { "Copy the file · c" };
+        let mut x = end;
+        let actions: [(&str, &str, Target); 4] = [
+            ("\u{F01D8}", "More", Target::More(Point::default())),
+            ("\u{F0256}", REVEAL, Target::Reveal),
+            ("\u{F03CC}", "Open with default app · o", Target::Open),
+            ("\u{F018F}", copy_tip, Target::Copy),
+        ];
+        for (glyph, tip, target) in actions {
+            if x - 30.0 < back.right() + 120.0 {
+                break;
+            }
+            x -= 30.0;
+            let b = Rect::new(x, bar.y + (bar_h - 30.0) / 2.0, 30.0, 30.0);
+            let target = match target {
+                Target::More(_) => Target::More(Point::new(b.x, b.bottom() + 4.0)),
+                other => other,
+            };
+            let n = self.target(target);
+            if widgets::icon_button(ui, b, glyph, t.muted, Action::Media(n)) {
+                widgets::tooltip(ui, b, tip);
+            }
+            x -= 4.0;
+        }
+
+        // its name, where it sits among the rest, who it's from
+        let text_x = back.right() + 14.0;
+        let text_w = (x - 12.0 - text_x).max(0.0);
+        if let Some(it) = &item
+            && text_w > 40.0
+        {
+            let name = it.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let mut about = vec![];
+            if let Some(i) = shown.iter().position(|s| s.path == it.path)
+                && shown.len() > 1
+            {
+                about.push(format!("{} of {}", i + 1, shown.len()));
+            }
+            about.push(match &it.owner {
+                Some(o) => format!("{} {} · {}", it.source.verb(), o.who, ago(it.at)),
+                None => format!("{} · {}", if it.source == Source::Pasted { "pasted" } else { "dropped here" }, ago(it.at)),
+            });
+            let spans = [(name, Style::new(size::BODY, weight::SEMIBOLD, t.text)), (format!("   {}", about.join(" · ")), Style::new(size::SMALL, weight::REGULAR, t.muted))];
+            let b = ui.rich(&spans, size::BODY, Some(text_w), false, Some(1));
+            ui.draw(&b, Point::new(text_x, bar.y + (bar_h - b.h) / 2.0));
+        }
+
+        // a margin all round, so a page or a photo doesn't run into the bar or the window's edge
+        let view = Rect::new(r.x + 12.0, bar.bottom() + 12.0, (r.w - 24.0).max(0.0), (r.bottom() - bar.bottom() - 24.0).max(0.0));
+        self.viewer = view;
+        self.draw_viewer(ui, view, shown.len());
         self.draw_menu(ui, item.as_ref());
         ui.set_layer(prev);
+        bar
     }
 
     /// The selected item, when it's still listed.
@@ -888,7 +974,7 @@ impl Media {
                 look.push(l("\u{F0C8D}", "Actual size", Some("1"), Cmd::Actual));
             }
         }
-        if it.kind != MediaKind::Pdf {
+        {
             look.push(if self.expanded { l("\u{F0294}", "Back to the panel", Some("esc"), Cmd::Expand) } else { l("\u{F0293}", "Fill the window", None, Cmd::Expand) });
         }
         if !look.is_empty() {
@@ -950,12 +1036,12 @@ impl Media {
         let title = match focus {
             Some(f) if self.whole_project => format!("Nothing in {} yet", f.place),
             Some(f) => format!("Nothing from {} yet", f.who),
-            None => "No pictures or videos yet".to_string(),
+            None => "Nothing to look at yet".to_string(),
         };
         let tb = ui.line(&title, Style::new(size::TITLE, weight::SEMIBOLD, t.text), Some(r.w - 24.0));
         ui.draw(&tb, Point::new(r.x + (r.w - tb.w) / 2.0, c.y + 44.0));
         let p = ui.para(
-            "When an agent opens, sends or makes a picture or a video, it shows up here, right beside the session. Drop a file on the window to look at it too.",
+            "Pictures, videos and PDFs your agents make, send or link to land here, right beside the session. Drop a file on the window to look at it too.",
             Style::new(size::SMALL, weight::REGULAR, t.muted),
             (r.w - 40.0).min(300.0),
             Some(5),
@@ -1080,6 +1166,33 @@ impl Media {
                 }
             }
         }
+        // a PDF's pages, while the pointer is over it (the page's own footer stays readable otherwise)
+        if let Some((at, n)) = self.pages().filter(|(_, n)| *n > 1) {
+            let k = ui.ease("pdf-pages", if ui.hovered(r) { 1.0 } else { 0.0 }, 160.0);
+            if k > 0.01 {
+                let st = Style::new(size::SMALL, weight::MEDIUM, Color::WHITE.with_alpha(k));
+                let label = format!("Page {} of {n}", at + 1);
+                let lw = ui.measure(&format!("Page {n} of {n}"), st);
+                let bar = Rect::new(r.center().x - (lw + 84.0) / 2.0, r.bottom() - 46.0, lw + 84.0, 36.0);
+                ui.round_over(bar, super::kit::radius::CONTROL, Color::rgba(0.0, 0.0, 0.0, 0.6 * k));
+                for (glyph, target, x, can, tip) in [("\u{F0141}", Target::PagePrev, bar.x + 4.0, at > 0, "Previous page · Page Up"), ("\u{F0142}", Target::PageNext, bar.right() - 32.0, at + 1 < n, "Next page · Page Down")] {
+                    let b = Rect::new(x, bar.y + 4.0, 28.0, 28.0);
+                    let h = if can { ui.hover_amount(("pdf-page", x as i32), b) } else { 0.0 };
+                    if h > 0.0 {
+                        ui.circle_over(b.center(), 13.0, Color::WHITE.with_alpha(0.14 * h * k));
+                    }
+                    ui.icon(b, glyph, size::TITLE, Color::WHITE.with_alpha(if can { k } else { 0.3 * k }));
+                    if can && k > 0.5 {
+                        let n = self.target(target);
+                        ui.hit(b, Action::Media(n));
+                        if h > 0.5 {
+                            widgets::tooltip(ui, b, tip);
+                        }
+                    }
+                }
+                ui.label_in(Rect::new(bar.x + 32.0, bar.y, bar.w - 64.0, bar.h), &label, st, Align::Center);
+            }
+        }
         // zoom badge
         if zoomed {
             let label = format!("{:.0}%", self.zoom * self.fit_scale() * self.scale * self.decoded_share() * 100.0);
@@ -1105,7 +1218,7 @@ impl Media {
     /// Zoomed in past the decoded pixels of a bigger picture (a photo larger than [`VIEW_SIDE`], an SVG): decode
     /// it again at the size shown, up to [`SHARP_SIDE`]. The copy on screen stays until the sharper one is in.
     fn sharpen(&mut self, scale: f32) {
-        let View::Image { path, frames, frame, original, asked, format, .. } = &self.view else { return };
+        let View::Image { path, frames, frame, original, asked, format, pages, .. } = &self.view else { return };
         let Some((img, _)) = frames.get(*frame) else { return };
         if frames.len() != 1 || self.zoom <= 1.01 {
             return;
@@ -1114,16 +1227,20 @@ impl Media {
         let need = (d.w.max(d.h) * scale).ceil() as u32;
         let have = img.w.max(img.h);
         // vector art draws sharp at any size; a photo has only its own pixels
-        let long = if format == "SVG" { SHARP_SIDE } else { original.0.max(original.1).min(SHARP_SIDE) };
+        let long = if format == "SVG" || pages.is_some() { SHARP_SIDE } else { original.0.max(original.1).min(SHARP_SIDE) };
         let side = (need + need / 4).min(long);
         if need <= have + have / 8 || have >= long || side <= *asked {
             return;
         }
         let path = path.clone();
+        let page = pages.map(|(i, _)| i);
         if let View::Image { asked, .. } = &mut self.view {
             *asked = side;
         }
-        self.loader.ask(Job::Image(path, side, self.req));
+        self.loader.ask(match page {
+            Some(i) => Job::Pdf(path, i, side, self.req),
+            None => Job::Image(path, side, self.req),
+        });
     }
 
     /// Decoded pixels per pixel of the picture's own size (below 1 for a photo decoded smaller, above for
@@ -1186,10 +1303,14 @@ impl Media {
         let mut meta = vec![];
         let mime = mime(&it.path).map(str::to_string);
         match &self.view {
-            View::Image { original, format, frames, .. } if self.view.path() == Some(it.path.as_path()) => {
+            View::Image { original, format, frames, pages, .. } if self.view.path() == Some(it.path.as_path()) => {
                 meta.push(format.clone());
                 meta.extend(mime);
-                meta.push(format!("{}×{}", original.0, original.1));
+                meta.push(match pages {
+                    Some((_, 1)) => "1 page".to_string(),
+                    Some((_, n)) => format!("{n} pages"),
+                    None => format!("{}×{}", original.0, original.1),
+                });
                 if frames.len() > 1 {
                     meta.push(format!("{} frames", frames.len()));
                 }
@@ -1290,7 +1411,7 @@ impl Media {
             ui.round(b, super::kit::radius::CONTROL, t.text.with_alpha(0.05));
             match self.thumbs.get(&it.path) {
                 None => {
-                    if matches!(it.kind, MediaKind::Image | MediaKind::Video) {
+                    if matches!(it.kind, MediaKind::Image | MediaKind::Video | MediaKind::Pdf) {
                         self.thumbs.insert(it.path.clone(), (Thumb::Loading, None));
                         self.loader.ask(Job::Thumb(it.path.clone()));
                     } else {
@@ -1303,6 +1424,9 @@ impl Media {
                     let uv = if w > hh {
                         let k = hh / w;
                         [(1.0 - k) / 2.0, 0.0, (1.0 + k) / 2.0, 1.0]
+                    } else if it.kind == MediaKind::Pdf {
+                        // a document's top, where its title is
+                        [0.0, 0.0, 1.0, w / hh]
                     } else {
                         let k = w / hh;
                         [0.0, (1.0 - k) / 2.0, 1.0, (1.0 + k) / 2.0]
@@ -1324,6 +1448,12 @@ impl Media {
                 let p = Rect::new(b.x + 6.0, b.bottom() - 24.0, 18.0, 18.0);
                 ui.circle_over(p.center(), 9.0, Color::rgba(0.0, 0.0, 0.0, 0.55));
                 ui.icon(p, "\u{F040A}", size::SMALL, Color::WHITE);
+            }
+            if it.kind == MediaKind::Pdf && matches!(self.thumbs.get(&it.path), Some((Thumb::Ready(..), _))) {
+                let st = Style::new(size::CAPTION, weight::BOLD, Color::WHITE);
+                let p = Rect::new(b.x + 5.0, b.bottom() - 21.0, ui.measure("PDF", st) + 10.0, 16.0);
+                ui.round_over(p, 4.0, Color::rgba(0.78, 0.16, 0.14, 0.92));
+                ui.label_in(p, "PDF", st, Align::Center);
             }
             // where it came from, quietly in the corner
             let badge = Rect::new(b.right() - 22.0, b.y + 4.0, 18.0, 18.0);
@@ -1430,6 +1560,13 @@ impl Media {
             Target::Remove => self.remove_selected(focus),
             Target::Prev => self.step(-1, focus),
             Target::Next => self.step(1, focus),
+            Target::More(at) => {
+                if self.sel.is_some() {
+                    self.menu = Some(Menu { at, sel: None, card: Rect::ZERO });
+                }
+            }
+            Target::PagePrev => self.turn_page(-1),
+            Target::PageNext => self.turn_page(1),
             Target::Gallery | Target::Menu(_) => {}
         }
         Ask::None
@@ -1447,7 +1584,7 @@ impl Media {
             Target::Thumb(path) => self.select(&path),
             Target::Viewer(_) | Target::Play | Target::Seek(_) | Target::Volume(_) | Target::Mute | Target::Loop => {}
             Target::Copy | Target::CopyPath | Target::Mention | Target::Open | Target::Reveal | Target::Remove | Target::Prev | Target::Next => {}
-            Target::Close | Target::Collapse | Target::Scope(_) | Target::Gallery | Target::Menu(_) => return,
+            Target::Close | Target::Collapse | Target::Scope(_) | Target::Gallery | Target::More(_) | Target::PagePrev | Target::PageNext | Target::Menu(_) => return,
         }
         if self.sel.is_some() {
             self.menu = Some(Menu { at: p, sel: None, card: Rect::ZERO });
@@ -1637,6 +1774,32 @@ impl Media {
         }
     }
 
+    /// The PDF on view: (the page asked for, 0-based; how many it has). None for anything else.
+    fn pages(&self) -> Option<(usize, usize)> {
+        match &self.view {
+            View::Image { pages: Some((_, n)), .. } => Some((self.page.min(n - 1), *n)),
+            _ => None,
+        }
+    }
+
+    /// Go `by` pages on in the PDF on view (as far as there are). The page shown stays until the next one is
+    /// drawn, so turning through quickly doesn't flash.
+    fn turn_page(&mut self, by: isize) {
+        let Some((at, n)) = self.pages() else { return };
+        let to = (at as isize).saturating_add(by).clamp(0, n as isize - 1) as usize;
+        if to == at {
+            return;
+        }
+        let View::Image { path, asked, .. } = &mut self.view else { return };
+        *asked = VIEW_SIDE;
+        let path = path.clone();
+        self.page = to;
+        self.zoom = 1.0;
+        self.pan = Point::default();
+        self.req += 1;
+        self.loader.ask(Job::Pdf(path, to, VIEW_SIDE, self.req));
+    }
+
     fn seek_to(&mut self, bar: Rect, p: Point) {
         if let View::Media { player, .. } = &mut self.view
             && let Some(d) = player.info().duration
@@ -1750,6 +1913,23 @@ impl Media {
                 pan(self, 0.0, -60.0);
                 Ask::None
             }
+            // a PDF's pages
+            KeyCode::PageUp if self.pages().is_some() => {
+                self.turn_page(-1);
+                Ask::None
+            }
+            KeyCode::PageDown if self.pages().is_some() => {
+                self.turn_page(1);
+                Ask::None
+            }
+            KeyCode::Home if self.pages().is_some() => {
+                self.turn_page(isize::MIN);
+                Ask::None
+            }
+            KeyCode::End if self.pages().is_some() => {
+                self.turn_page(isize::MAX);
+                Ask::None
+            }
             KeyCode::Left | KeyCode::Up => {
                 self.step(-1, focus);
                 Ask::None
@@ -1823,6 +2003,8 @@ impl Media {
     pub fn collect(&mut self, app: &crate::app::App) -> bool {
         use bro_core::sessions::live::TouchKind;
         let mut added = false;
+        // something the session you're in just sent you: the panel shows it
+        let mut fresh: Option<PathBuf> = None;
         let ids: Vec<PaneId> = app.panes.keys().copied().collect();
         for id in ids {
             let Some(t) = app.panes.get(&id).and_then(|p| p.as_term_ref()) else { continue };
@@ -1831,12 +2013,18 @@ impl Media {
             if self.revs.get(&id) == Some(&facts.revision) {
                 continue;
             }
-            self.revs.insert(id, facts.revision);
+            // the first read of a session's facts is its past: nothing in it is new to show
+            let first = self.revs.insert(id, facts.revision).is_none();
             let who = owner(app, id);
             // oldest first so the newest ends up on top; each at its own time, so reading the same facts again
             // changes nothing and a file sent again moves up
             for f in facts.sent.iter().rev() {
-                added |= self.add_seen(f.path.clone(), Source::Sent, who.clone(), f.caption.clone(), fact_time(f.at_ms));
+                let new = self.add_seen(f.path.clone(), Source::Sent, who.clone(), f.caption.clone(), fact_time(f.at_ms));
+                let recent = f.at_ms.is_some_and(|at| bro_core::util::now_ms() - at < FRESH_MS);
+                if new && recent && !first && app.focused() == Some(id) {
+                    fresh = Some(f.path.clone());
+                }
+                added |= new;
             }
             for f in facts.touched.iter().rev() {
                 let source = match f.kind {
@@ -1847,6 +2035,14 @@ impl Media {
                 };
                 added |= self.add_seen(f.path.clone(), source, who.clone(), None, fact_time(f.at_ms));
             }
+        }
+        // not while you're busy with what's on view: filling the window with it, dragging, in its menu
+        if let Some(path) = fresh
+            && !self.expanded
+            && self.drag.is_none()
+            && self.menu.is_none()
+        {
+            self.select(&path);
         }
         if let Some(o) = &app.last_opened {
             let seen = (o.pane, o.path.clone());
@@ -2252,9 +2448,9 @@ mod tests {
             assert!(m.menu_open());
             m.close_menu();
         }
-        // a PDF opens in its own app: nothing to fill the window with
+        // a PDF's pages show here too, and can fill the window
         m.select(&doc);
-        assert_eq!(cmds(&m), [Copy, CopyPath, Mention, Open, Reveal, Remove]);
+        assert_eq!(cmds(&m), [Copy, CopyPath, Mention, Expand, Open, Reveal, Remove]);
         assert_eq!(m.menu_lines(&m.selected_item().unwrap())[0].unwrap().label, "Copy file");
         m.select(&pic);
         assert_eq!(m.menu_lines(&m.selected_item().unwrap())[0].unwrap().label, "Copy picture");
