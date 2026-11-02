@@ -328,6 +328,7 @@ pub fn fallback_settings() -> Settings {
         summary_screensaver_secs: 0,
         shared_borders: false,
         project_tabs: false,
+        tab_overflow: Default::default(),
         permission: Default::default(),
         claude_env: Default::default(),
         caveman: Default::default(),

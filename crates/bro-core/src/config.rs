@@ -172,6 +172,9 @@ pub struct Settings {
     /// A strip of project tabs across the top of the sessions (not in the sidebar): All tiles every session,
     /// each project's tab tiles just its own. Off by default.
     pub project_tabs: bool,
+    /// What the project tabs do when there are more than fit across: scroll along one row (the default) or stack
+    /// into more rows.
+    pub tab_overflow: TabOverflow,
     /// Permission mode new sessions start on: the one last picked in the launcher.
     pub permission: crate::launch::Permission,
     /// Privacy / update / behaviour env for Claude launches (preset + overrides).
@@ -381,6 +384,28 @@ pub const MATERIAL_TINTS: [u8; 7] = [30, 45, 60, 70, 80, 88, 95];
 /// The tint until you pick one.
 pub const MATERIAL_TINT: u8 = 60;
 
+/// What the project tabs do when there are more than fit across the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabOverflow {
+    /// one row that scrolls sideways (the wheel, or the arrows at its ends)
+    #[default]
+    Scroll,
+    /// as many rows as they need (up to a few), the strip growing down
+    Stack,
+}
+
+impl TabOverflow {
+    pub const ALL: [TabOverflow; 2] = [TabOverflow::Scroll, TabOverflow::Stack];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            TabOverflow::Scroll => "scroll",
+            TabOverflow::Stack => "stack",
+        }
+    }
+}
+
 /// Where digital rain falls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -451,6 +476,7 @@ impl Default for Settings {
             summary_screensaver_secs: 0,
             shared_borders: false,
             project_tabs: false,
+            tab_overflow: TabOverflow::Scroll,
             permission: Default::default(),
             claude_env: Default::default(),
             caveman: Default::default(),

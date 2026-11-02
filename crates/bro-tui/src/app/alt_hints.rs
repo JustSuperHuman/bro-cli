@@ -105,7 +105,7 @@ impl App {
                     StripHit::New => Some(Act::NewSession),
                     _ => None,
                 };
-                if matches!(hit, StripHit::Tab(_) | StripHit::More) {
+                if matches!(hit, StripHit::Tab(_) | StripHit::More | StripHit::Scroll(_)) {
                     last = last.max(r.right());
                 }
                 if let Some(k) = act.and_then(|a| self.alt_key(a)) {

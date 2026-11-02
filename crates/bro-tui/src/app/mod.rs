@@ -246,6 +246,8 @@ pub struct App {
     pub(crate) strip_sel: Option<usize>,
     /// When the wheel last switched tabs (a trackpad's burst switches once).
     strip_wheel: Option<Instant>,
+    /// How far along the project tabs are scrolled, when they're more than fit and the setting scrolls them.
+    pub(crate) strip_scroll: project_tabs::StripScroll,
     /// The tab showing now and the one before it, for the last-tab key.
     tab_now: Option<project_tabs::StripTab>,
     pub(crate) tab_before: Option<project_tabs::StripTab>,
@@ -388,6 +390,7 @@ impl App {
             drawn_tab: None,
             strip_sel: None,
             strip_wheel: None,
+            strip_scroll: Default::default(),
             tab_now: None,
             tab_before: None,
             saved_locks: HashMap::new(),

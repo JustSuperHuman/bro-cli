@@ -80,12 +80,13 @@ impl App {
         self.side_area = Rect { width: side_w, ..area };
         self.side_hits.clear();
         self.drawn_tab = self.showing_tab();
-        // the project tabs (a setting) take the body's top row, kept while anything is open so the sessions
-        // don't resize as projects come and go
+        // the project tabs (a setting) take the body's top row (a few, when crowded tabs stack), kept while anything
+        // is open so the sessions don't resize as projects come and go
         self.strip = Rect::default();
         if self.strip_on() && self.body.height >= 8 && self.body.width >= 24 {
-            self.strip = Rect { height: 1, ..self.body };
-            self.body = Rect { y: self.strip.y + 1, height: self.body.height - 1, ..self.body };
+            let rows = self.strip_rows(Rect { height: 1, ..self.body }, (self.body.height / 6).clamp(1, 3));
+            self.strip = Rect { height: rows, ..self.body };
+            self.body = Rect { y: self.strip.y + rows, height: self.body.height - rows, ..self.body };
             self.draw_project_tabs(f, self.strip);
         } else {
             self.strip_sel = None;

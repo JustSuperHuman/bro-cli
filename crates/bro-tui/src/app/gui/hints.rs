@@ -170,13 +170,13 @@ fn draw_tips(app: &App, ui: &mut Ui, layout: &Layout) {
                 _ => None,
             })
             .collect();
-        let last = strip.iter().filter(|(_, s)| matches!(s, StripHit::Tab(_) | StripHit::More | StripHit::New)).map(|(r, _)| r.right()).fold(layout.strip.x, f32::max);
+        let last = strip.iter().filter(|(_, s)| matches!(s, StripHit::Tab(_) | StripHit::More | StripHit::Scroll(_) | StripHit::New)).map(|(r, _)| r.right()).fold(layout.strip.x, f32::max);
         let end = strip.iter().filter(|(_, s)| matches!(s, StripHit::Minimized)).map(|(r, _)| r.x).fold(layout.strip.right() - 8.0, f32::min);
         let list: Vec<(String, &str)> = [(Act::PrevProject, "‹ tab"), (Act::NextProject, "tab ›"), (Act::LastTab, "last")]
             .into_iter()
             .filter_map(|(a, what)| alt_key(app, a).map(|k| (k, what)))
             .collect();
-        if !list.is_empty() {
+        if !list.is_empty() && layout.strip.h <= super::layout::STRIP + 0.5 {
             let total = tip_widths(ui, &list).iter().sum::<f32>() + 14.0;
             let x = last + 12.0;
             if x + total <= end {

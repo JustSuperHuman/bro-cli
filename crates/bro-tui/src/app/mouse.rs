@@ -198,10 +198,10 @@ impl App {
             }
             return;
         }
-        // the wheel over the project tabs switches them
+        // the wheel over the project tabs scrolls them when they're more than fit, else switches them
         if self.strip.contains(pos) && matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp) {
             if !self.overlay.is_open() {
-                self.strip_wheel(matches!(m.kind, MouseEventKind::ScrollDown));
+                self.strip_wheel(if matches!(m.kind, MouseEventKind::ScrollDown) { 1.0 } else { -1.0 });
             }
             return;
         }
@@ -515,7 +515,7 @@ impl App {
                 true
             }
             SideHit::Strip(super::project_tabs::StripHit::Tab(_)) => false,
-            SideHit::Fable | SideHit::UsageToggle | SideHit::Minimized | SideHit::Strip(super::project_tabs::StripHit::Minimized) => false,
+            SideHit::Fable | SideHit::UsageToggle | SideHit::Minimized | SideHit::Strip(super::project_tabs::StripHit::Minimized | super::project_tabs::StripHit::Scroll(_)) => false,
             _ => {
                 self.overlay = Overlay::None;
                 false

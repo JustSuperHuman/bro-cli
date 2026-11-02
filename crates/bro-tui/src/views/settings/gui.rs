@@ -10,7 +10,7 @@
 //! page and the selection follows it, so it always stays in view.
 
 use super::{Block, BroOpt, CaveOpt, HostOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, SkillOpt, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, open_source, rows, source_link, team_knob};
-use bro_core::config::Material;
+use bro_core::config::{Material, TabOverflow};
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::brand::{self, Mark};
 use crate::app::gui::kit::{self, Cursor, Style, TextBox, Tokens, Ui, radius, size, weight, widgets};
@@ -474,6 +474,7 @@ fn option(row: Row, st: &Settings) -> Option<usize> {
     match row {
         Row::Bro(BroOpt::Rain) => RAIN.iter().position(|r| *r == st.rain),
         Row::Bro(BroOpt::Material) => Material::ALL.iter().position(|m| *m == st.material),
+        Row::Bro(BroOpt::TabOverflow) => TabOverflow::ALL.iter().position(|o| *o == st.tab_overflow),
         Row::Cave(CaveOpt::Mode) => cave_choices().iter().position(|c| *c == st.caveman.active()),
         Row::Watch(WatchOpt::Model) => crate::watchdog::MODEL_CHOICES.iter().position(|m| *m == st.watchdog.model),
         Row::Knob(k) => Some(st.claude_env.choice(&KNOBS[k]).0),
@@ -595,6 +596,7 @@ fn control(v: &SettingsView, it: &Item, ui: &Ui, st: &Settings, cx: &Cx) -> Ctl 
         Row::Voice(VoiceOpt::Upstream) => Ctl::Link { value, ink: vink.value(t) },
         Row::Bro(BroOpt::Material) => seg(Material::ALL.iter().map(|m| m.id().to_string()).collect(), None),
         Row::Bro(BroOpt::Rain) => seg(RAIN.iter().map(|r| rain_label(*r).to_string()).collect(), None),
+        Row::Bro(BroOpt::TabOverflow) => seg(TabOverflow::ALL.iter().map(|o| o.id().to_string()).collect(), None),
         Row::Cave(CaveOpt::Mode) => seg(cave_choices().iter().map(|c| c.map_or("off", |l| l.id()).to_string()).collect(), None),
         // Claude's models: Claude's logo beside them
         Row::Watch(WatchOpt::Model) => seg(crate::watchdog::MODEL_CHOICES.iter().map(|m| m.to_string()).collect(), Some(brand::harness(Harness::Claude))),

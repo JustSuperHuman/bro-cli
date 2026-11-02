@@ -30,6 +30,7 @@ mod redraw;
 mod script;
 mod scroll;
 mod sidebar;
+mod strip;
 pub(crate) mod surface;
 mod term;
 mod toasts;
@@ -1181,7 +1182,15 @@ fn draw_all(
     }
     let media_w = if prefs.media_open { prefs.media_width } else { 0.0 };
     let buttons_w = if buttons.is_some() { caption::BUTTONS_W } else { 0.0 };
-    let (side_r, strip_r, media_r, body, caption_r) = layout::frame(window, if sidebar_on { prefs.sidebar_width } else { 0.0 }, media_w, strip_on, buttons_w);
+    let side_w = if sidebar_on { prefs.sidebar_width } else { 0.0 };
+    let (mut side_r, mut strip_r, mut media_r, mut body, mut caption_r) = layout::frame(window, side_w, media_w, if strip_on { layout::STRIP } else { 0.0 }, buttons_w);
+    // crowded tabs that stack take a row more each, the sessions starting below them
+    if strip_on {
+        let rows = strip::rows(app, ui, strip_r, window.h);
+        if rows > 1 {
+            (side_r, strip_r, media_r, body, caption_r) = layout::frame(window, side_w, media_w, strip::TOP + rows as f32 * strip::ROW, buttons_w);
+        }
+    }
     // the terminal UI's notion of where the sidebar is (squeezed = asked for but no room)
     app.side_area = if side_r.w > 0.0 { ratatui::layout::Rect { x: 0, y: 0, width: 1, height: 1 } } else { ratatui::layout::Rect::default() };
     app.strip = if strip_r.h > 0.0 { ratatui::layout::Rect { x: 0, y: 0, width: 1, height: 1 } } else { ratatui::layout::Rect::default() };
@@ -1236,9 +1245,9 @@ fn draw_all(
     }
     // project tabs, their line carried on under the window's buttons
     if strip_r.h > 0.0 {
-        sidebar::draw_strip(app, ui, strip_r, &mut stage);
+        strip::draw(app, ui, strip_r, window.h, &mut stage);
         if caption_r.h > 0.0 {
-            ui.hline(caption_r.x, caption_r.bottom() - ui.hair(), caption_r.w, ui.t.stroke);
+            ui.hline(caption_r.x, strip_r.bottom() - ui.hair(), caption_r.w, ui.t.stroke);
         }
     }
     // sessions
@@ -1280,7 +1289,7 @@ fn draw_all(
     {
         ui.layer();
         caption::draw(ui, caption_r, focused_window, maximized);
-        let row = Rect::new(side_r.right(), window.y, (caption_r.x - side_r.right()).max(0.0), caption_r.h);
+        let row = Rect::new(side_r.right(), window.y, (caption_r.x - side_r.right()).max(0.0), caption_r.h.max(strip_r.h));
         let head = Rect::new(side_r.x, side_r.y, side_r.w, sidebar::HEAD_BOTTOM);
         let drag = [row, head].into_iter().filter(|r| r.w > 0.0 && r.h > 0.0).collect();
         caption::zones(caption_r, drag, ui.hits.iter().map(|h| h.rect));

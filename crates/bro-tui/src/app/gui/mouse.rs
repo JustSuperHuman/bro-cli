@@ -739,6 +739,11 @@ pub fn moved(g: &mut Gui, p: Point) {
     }
 }
 
+/// The wheel over the project tabs, toward the later ones: pixels when they scroll, else just its direction.
+fn strip_delta(g: &Gui, delta: super::scroll::Wheel) -> f32 {
+    if g.app.strip_scroll.scrolls() { -delta.pixels(super::strip::NOTCH) } else { -delta.units() }
+}
+
 pub fn wheel(g: &mut Gui, p: Point, delta: super::scroll::Wheel) {
     let dy = delta.units();
     if !dy.is_finite() || dy == 0.0 {
@@ -764,10 +769,11 @@ pub fn wheel(g: &mut Gui, p: Point, delta: super::scroll::Wheel) {
     }
     // nothing drawn over this spot but the sidebar and the tabs themselves (a dialog's scrim is)
     let bare = matches!(hit, None | Some(Action::None | Action::Side(_) | Action::SideList | Action::SideFilter | Action::SideScroll | Action::SideResize | Action::MediaToggle));
-    // anywhere over the project tabs steps them, once per burst (not while something is open over them)
+    // anywhere over the project tabs scrolls them when they're more than fit, else steps them once per burst (not
+    // while something is open over them)
     if bare && g.layout.strip.h > 0.0 && g.layout.strip.contains(p) {
         if !overlay {
-            g.app.strip_wheel(down);
+            g.app.strip_wheel(strip_delta(g, delta));
         }
         return;
     }
@@ -801,7 +807,7 @@ pub fn wheel(g: &mut Gui, p: Point, delta: super::scroll::Wheel) {
         return;
     }
     match hit {
-        Some(Action::Side(SideHit::Strip(_))) => g.app.strip_wheel(down),
+        Some(Action::Side(SideHit::Strip(_))) => g.app.strip_wheel(strip_delta(g, delta)),
         Some(Action::Focus(id, _)) => super::focus::wheel(g, id, delta),
         Some(Action::Pane(id, _)) => pane_wheel(g, id, p, delta, m),
         Some(Action::Media(n)) => g.media.wheel(n, p, dy),

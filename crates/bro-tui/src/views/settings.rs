@@ -19,7 +19,7 @@ use crate::services::skills::Bundled;
 use crate::ui::{self, fg, muted};
 use bro_core::caveman::Level;
 use bro_core::claude_env::{self, ClaudeEnvSettings, Group, KNOBS, PRESETS, Source};
-use bro_core::config::{MATERIAL_TINTS, Material, RainMode};
+use bro_core::config::{MATERIAL_TINTS, Material, RainMode, TabOverflow};
 use bro_core::justtools::Step;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -45,6 +45,8 @@ enum BroOpt {
     Screensaver,
     SharedBorders,
     ProjectTabs,
+    /// what crowded project tabs do: scroll or stack
+    TabOverflow,
     AutoResume,
     AutoApprove,
     Recaps,
@@ -54,7 +56,7 @@ enum BroOpt {
     Compression,
 }
 
-const BRO_OPTS: [BroOpt; 14] = [
+const BRO_OPTS: [BroOpt; 15] = [
     BroOpt::Theme,
     BroOpt::Font,
     BroOpt::Material,
@@ -63,6 +65,7 @@ const BRO_OPTS: [BroOpt; 14] = [
     BroOpt::Screensaver,
     BroOpt::SharedBorders,
     BroOpt::ProjectTabs,
+    BroOpt::TabOverflow,
     BroOpt::AutoResume,
     BroOpt::AutoApprove,
     BroOpt::Recaps,
@@ -72,7 +75,8 @@ const BRO_OPTS: [BroOpt; 14] = [
 ];
 
 /// bro's options this window can use: the font only where the terminal can switch it, the window's material only
-/// in the desktop app (a terminal draws its own window), its tint only once something shows through.
+/// in the desktop app (a terminal draws its own window), its tint only once something shows through, what crowded
+/// project tabs do only while they're on.
 fn bro_opts() -> Vec<BroOpt> {
     BRO_OPTS
         .into_iter()
@@ -80,6 +84,7 @@ fn bro_opts() -> Vec<BroOpt> {
             BroOpt::Font => crate::fonts::available(),
             BroOpt::Material => desktop_app(),
             BroOpt::Tint => desktop_app() && SEE_THROUGH.with(|s| s.get()),
+            BroOpt::TabOverflow => TABS_ON.with(|s| s.get()),
             _ => true,
         })
         .collect()
@@ -109,6 +114,7 @@ impl BroOpt {
             BroOpt::Screensaver => "Summary screensaver",
             BroOpt::SharedBorders => "Shared tile borders",
             BroOpt::ProjectTabs => "Project tabs",
+            BroOpt::TabOverflow => "Crowded tabs",
             BroOpt::AutoResume => "Auto-resume",
             BroOpt::AutoApprove => "Auto-approve prompts",
             BroOpt::Recaps => "Recaps",
@@ -127,6 +133,7 @@ impl BroOpt {
             BroOpt::Screensaver => "step away and every session turns over to what it's working on; any touch turns them back",
             BroOpt::SharedBorders => "tiles that sit together share one line instead of two; status and × move up beside the title",
             BroOpt::ProjectTabs => "a tab strip over your sessions: All tiles every one, a project's tab tiles just its own, in its color",
+            BroOpt::TabOverflow => "more projects than fit across: scroll keeps one row you page through, stack wraps them onto up to three",
             BroOpt::AutoResume => "types `continue` when an agent stops on an API error or a limit resets",
             BroOpt::AutoApprove => "answers Yes to Claude's \"Do you want to proceed?\" (bypass mode's rm / path safety checks)",
             BroOpt::Recaps => "asks Claude for a /recap of a pane left waiting unseen (a few cents each)",
@@ -137,7 +144,7 @@ impl BroOpt {
     }
     /// How bro looks (Appearance) rather than what it does (Sessions).
     fn looks(self) -> bool {
-        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Material | BroOpt::Tint | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::ProjectTabs)
+        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Material | BroOpt::Tint | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::ProjectTabs | BroOpt::TabOverflow)
     }
     /// The value as shown.
     fn value(self, cx: &Cx) -> String {
@@ -161,6 +168,7 @@ impl BroOpt {
             },
             BroOpt::SharedBorders => on(s.shared_borders),
             BroOpt::ProjectTabs => on(s.project_tabs),
+            BroOpt::TabOverflow => s.tab_overflow.id().to_string(),
             BroOpt::AutoResume => on(s.auto_resume.enabled),
             BroOpt::AutoApprove => on(s.auto_approve),
             BroOpt::Recaps => on(s.insights.generate_recaps),
@@ -203,6 +211,12 @@ impl BroOpt {
                 let mut s = cx.svc.settings();
                 let i = MATERIAL_TINTS.iter().position(|t| *t >= s.material_tint).unwrap_or(MATERIAL_TINTS.len() - 1) as isize;
                 s.material_tint = MATERIAL_TINTS[(i + dir).clamp(0, MATERIAL_TINTS.len() as isize - 1) as usize];
+                cx.svc.save_settings(s);
+            }
+            BroOpt::TabOverflow => {
+                let mut s = cx.svc.settings();
+                let i = TabOverflow::ALL.iter().position(|o| *o == s.tab_overflow).unwrap_or(0) as isize;
+                s.tab_overflow = TabOverflow::ALL[(i + dir).rem_euclid(TabOverflow::ALL.len() as isize) as usize];
                 cx.svc.save_settings(s);
             }
             BroOpt::Screensaver => {
@@ -322,11 +336,14 @@ enum SkillOpt {
 thread_local! {
     /// Whether the window was see-through as the view last read the settings: the tint row [`rows`] lists.
     static SEE_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether the project tabs were on: what crowded ones do is listed only then.
+    static TABS_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Note what of `s` decides which rows there are (a see-through window), for [`rows`].
 fn note_settings(s: &bro_core::config::Settings) {
     SEE_THROUGH.with(|w| w.set(s.material.see_through()));
+    TABS_ON.with(|w| w.set(s.project_tabs));
 }
 
 /// "just now", "4 min ago", "2 h ago".
@@ -1251,7 +1268,7 @@ impl SettingsView {
                     let v = o.value(cx);
                     let value = match o {
                         BroOpt::Theme => shown(format!("{v} ›"), fg(t.inline)),
-                        BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver | BroOpt::Material => {
+                        BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver | BroOpt::Material | BroOpt::TabOverflow => {
                             let style = if v == "off" || v == "solid" { muted(t) } else { fg(t.inline) };
                             choice(v, style, t)
                         }

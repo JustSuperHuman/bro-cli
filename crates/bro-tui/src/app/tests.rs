@@ -4994,21 +4994,82 @@ fn band_text_reads_on_bright_and_deep_project_colors() {
     assert_eq!(crate::ui::ink_on(Color::Blue, &dark), dark.deep(), "a named color keeps the theme's ink");
 }
 
+/// The strip's text on row `y` of `term`.
+fn strip_row(term: &ratatui::Terminal<ratatui::backend::TestBackend>, y: u16) -> String {
+    let w = term.backend().buffer().area.width;
+    (0..w).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect()
+}
+
 #[test]
-fn tabs_that_dont_fit_fold_into_plus_n_around_the_one_showing() {
+fn crowded_tabs_scroll_with_the_one_showing_in_view_and_arrows_that_page() {
     use super::project_tabs::{StripHit, StripTab};
     use ratatui::{backend::TestBackend, Terminal};
     let mut a = app(true);
     tabs_on(&mut a);
     a.sidebar = false;
-    let last = a.project_tabs().last().unwrap().key.clone();
+    let keys: Vec<String> = a.project_tabs().into_iter().map(|t| t.key).collect();
+    let last = keys.last().unwrap().clone();
     a.show_tab(StripTab::Project(last.clone()));
-    let mut term = Terminal::new(TestBackend::new(44, 20)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
     term.draw(|f| a.draw(f)).unwrap();
-    assert!(strip_hit(&a, &StripHit::Tab(StripTab::Project(last))).is_some(), "the showing tab stays in view");
+    assert_eq!(a.strip.height, 1, "scrolling keeps one row");
+    assert!(strip_hit(&a, &StripHit::Tab(StripTab::Project(last))).is_some(), "the showing tab is brought into view");
+    assert!(strip_hit(&a, &StripHit::Tab(StripTab::Project(keys[0].clone()))).is_none(), "the first is scrolled past");
+    assert!(strip_row(&term, a.strip.y).contains("◂2●"), "two before it, one of them wants you: {}", strip_row(&term, a.strip.y));
+    assert!(strip_hit(&a, &StripHit::More).is_none(), "nothing folds into the palette while they scroll");
+
+    // the arrow pages back, and stays there (the showing tab is only brought into view when it changes)
+    let back = strip_hit(&a, &StripHit::Scroll(false)).expect("an arrow back");
+    click_at(&mut a, back, MouseButton::Left);
+    assert!(matches!(a.overlay, Overlay::None));
+    term.draw(|f| a.draw(f)).unwrap();
+    assert!(strip_hit(&a, &StripHit::Tab(StripTab::Project(keys[1].clone()))).is_some());
+    assert!(strip_hit(&a, &StripHit::Scroll(true)).is_some(), "and one on, past what's now hidden");
+    term.draw(|f| a.draw(f)).unwrap();
+    assert!(strip_hit(&a, &StripHit::Tab(StripTab::Project(keys[1].clone()))).is_some(), "a redraw keeps the scroll");
+
+    // the wheel scrolls rather than switching while they're crowded
+    let showing = a.showing_tab();
+    let strip = a.strip;
+    a.mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: strip.x + 2, row: strip.y, modifiers: KeyModifiers::NONE });
+    term.draw(|f| a.draw(f)).unwrap();
+    assert_eq!(a.showing_tab(), showing);
+    assert!(strip_hit(&a, &StripHit::Tab(StripTab::Project(keys[2].clone()))).is_some());
+
+    // the keys' pick is brought into view too
+    a.run_act(Act::FocusSidebar);
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    term.draw(|f| a.draw(f)).unwrap();
+    assert!(strip_hit(&a, &StripHit::Tab(StripTab::Project(keys[0].clone()))).is_some());
+}
+
+#[test]
+fn crowded_tabs_can_stack_into_rows_and_fold_into_plus_n_when_those_run_out() {
+    use super::project_tabs::{StripHit, StripTab};
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut a = app(true);
+    tabs_on(&mut a);
+    let mut s = a.svc.settings();
+    s.tab_overflow = bro_core::config::TabOverflow::Stack;
+    a.svc.save_settings(s);
+    a.sidebar = false;
+    let keys: Vec<String> = a.project_tabs().into_iter().map(|t| t.key).collect();
+    let mut term = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    term.draw(|f| a.draw(f)).unwrap();
+    assert_eq!(a.strip.height, 2, "the third tab wraps onto a second row");
+    let wrapped = strip_hit(&a, &StripHit::Tab(StripTab::Project(keys[2].clone()))).expect("every tab shows");
+    assert_eq!(wrapped.y, a.strip.y + 1);
+    assert_eq!(wrapped.x, a.strip.x, "a row under the first starts at the strip's edge");
+    assert!(a.body.y >= a.strip.y + 2, "the sessions start under both rows");
+
+    // a short screen has room for one row: what doesn't fit folds into +N, which lists every tab
+    let mut short = Terminal::new(TestBackend::new(80, 10)).unwrap();
+    short.draw(|f| a.draw(f)).unwrap();
+    assert_eq!(a.strip.height, 1);
     let more = strip_hit(&a, &StripHit::More).expect("the rest fold into +N");
-    let strip: String = (0..44).map(|x| term.backend().buffer()[(x, a.strip.y)].symbol().to_string()).collect();
-    assert!(strip.contains("◂2●"), "two folded, one of them wants you: {strip}");
+    assert!(strip_row(&short, a.strip.y).contains("+2●"), "two folded, one of them wants you: {}", strip_row(&short, a.strip.y));
     click_at(&mut a, more, MouseButton::Left);
     let Overlay::Palette(p) = &a.overlay else { panic!("+N lists every tab") };
     let m = p.matches();

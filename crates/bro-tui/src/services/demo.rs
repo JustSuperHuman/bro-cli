@@ -386,17 +386,51 @@ pub struct DemoSession {
     pub done: bool,
 }
 
+/// More demo projects, one session each, for `BRO_DEMO_PROJECTS=<n>` (a crowded tab strip in captures).
+const MORE_PROJECTS: [&str; 18] = [
+    "orbit-voice",
+    "justimagine",
+    "website-studio",
+    "justposts",
+    "justmemes",
+    "analytics",
+    "status-page",
+    "justwatch",
+    "assistant",
+    "justtools",
+    "manage-portal",
+    "mobile",
+    "docs",
+    "marketing-site",
+    "billing",
+    "infra",
+    "design-kit",
+    "release-notes",
+];
+
 /// The live sessions `bro --demo` opens.
 pub fn sessions() -> Vec<DemoSession> {
     use Activity::*;
     let s = |harness, profile, model, project, activity, done| DemoSession { harness, profile, model, project, activity, done };
-    vec![
+    let mut v = vec![
         s(Some(Harness::Claude), Some("claude:work"), Some("claude-opus-5"), "bro-cli-v2", Some(Working), false),
         s(Some(Harness::Codex), Some("codex:local"), Some("gpt-5.2-codex"), "bro-cli-v2", Some(Idle), true),
         s(None, None, None, "bro-cli-v2", None, false),
         s(Some(Harness::Claude), Some("claude:personal"), Some("claude-sonnet-5"), "justgains", Some(Blocked), false),
         s(Some(Harness::Pi), Some("openrouter"), Some("moonshotai/kimi-k2"), "terminal", Some(Idle), false),
-    ]
+    ];
+    let more = std::env::var("BRO_DEMO_PROJECTS").ok().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+    for (i, project) in MORE_PROJECTS.iter().take(more).enumerate() {
+        // a mix of what agents do: mostly idle, some working, the odd one waiting on you or finished unseen
+        let (activity, done) = match i % 6 {
+            1 => (Some(Working), false),
+            3 => (Some(Idle), true),
+            4 if i % 4 == 0 => (Some(Blocked), false),
+            _ => (Some(Idle), false),
+        };
+        v.push(s(Some(Harness::Claude), Some("claude:work"), Some("claude-sonnet-5"), project, activity, done));
+    }
+    v
 }
 
 /// The agent team the first demo session leads: three teammates on a review, their task list half done.

@@ -3,7 +3,7 @@
 //! Steps: `wait:<ms>`, `key:<chord>` (any chord the keymap understands: `alt+n`, `ctrl+space`, `esc`, `enter`),
 //! `type:<text>`, `move:<x>,<y>` / `click:<x>,<y>` / `rclick:` / `dclick:` (logical pixels), `wheel:<x>,<y>,<lines>`,
 //! `alt:down` / `alt:up` (holding alt alone), `theme:<name>`, `material:<solid|acrylic|glass>[,<tint %>]`,
-//! `preview:<file>` (the file preview, as a view opens it), `shot:<file.png>`, `exit`.
+//! `tabs:<scroll|stack|off>` (the project tabs, and what they do when crowded), `preview:<file>` (the file preview, as a view opens it), `shot:<file.png>`, `exit`.
 
 use super::Gui;
 use crate::pane::Event;
@@ -33,6 +33,8 @@ pub enum Step {
     Theme(String),
     /// the window's material and tint (not saved)
     Material(bro_core::config::Material, Option<u8>),
+    /// the project tabs on, scrolling or stacking when crowded (None: off; not saved)
+    Tabs(Option<bro_core::config::TabOverflow>),
     /// Demo-only voice states for device-free settings captures.
     OrbitFixture(String),
     Exit,
@@ -94,6 +96,8 @@ fn parse(raw: &str) -> Option<Step> {
             let (m, tint) = arg.split_once(',').map_or((arg, None), |(m, t)| (m, t.trim().parse().ok()));
             Step::Material(bro_core::config::Material::ALL.into_iter().find(|x| x.id() == m.trim())?, tint)
         }
+        "tabs" if arg.trim() == "off" => Step::Tabs(None),
+        "tabs" => Step::Tabs(Some(bro_core::config::TabOverflow::ALL.into_iter().find(|x| x.id() == arg.trim())?)),
         "orbit-fixture" if matches!(arg, "off" | "connecting" | "error" | "setup" | "ready" | "talking") => Step::OrbitFixture(arg.into()),
         "exit" => Step::Exit,
         _ => return None,
@@ -156,6 +160,14 @@ pub fn step(g: &mut Gui) {
                 s.material = m;
                 if let Some(t) = tint {
                     s.material_tint = t;
+                }
+                g.app.svc.set_settings_unsaved(s);
+            }
+            Step::Tabs(overflow) => {
+                let mut s = g.app.svc.settings();
+                s.project_tabs = overflow.is_some();
+                if let Some(o) = overflow {
+                    s.tab_overflow = o;
                 }
                 g.app.svc.set_settings_unsaved(s);
             }
