@@ -32,6 +32,12 @@ pub fn create(el: &ActiveEventLoop, prefs: &Prefs, see_through: bool) -> Result<
         use winit::platform::windows::WindowAttributesExtWindows;
         attrs = attrs.with_no_redirection_bitmap(see_through);
     }
+    #[cfg(target_os = "linux")]
+    {
+        // Wayland's app_id and X11's WM_CLASS share this name in winit.
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        attrs = attrs.with_name("bro", "bro");
+    }
     if let Some((x, y)) = prefs.position {
         attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
     }

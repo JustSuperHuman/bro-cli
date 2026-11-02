@@ -114,6 +114,7 @@ impl Gui {
         window::remember_handle(&w);
         self.orbit_stage.new_window(&self.app.svc);
         self.occluded = false;
+        self.redraw = super::redraw::Redraw::default();
         self.scale = w.scale_factor() as f32;
         self.font_px = 0.0;
         text.reset_atlases();

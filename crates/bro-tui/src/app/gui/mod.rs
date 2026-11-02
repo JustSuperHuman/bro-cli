@@ -26,6 +26,7 @@ mod overlays;
 mod orbit_stage;
 mod page;
 mod prefs;
+mod redraw;
 mod script;
 mod scroll;
 mod sidebar;
@@ -281,6 +282,7 @@ pub struct Gui {
     links_refreshed: Instant,
     /// something changed since the last frame: draw now
     dirty: bool,
+    redraw: redraw::Redraw,
     /// something changed that can wait until then (output from sessions without the keyboard)
     due: Option<Instant>,
     /// a transition is under way (a fade, a card turning over): draw every frame until it settles
@@ -375,6 +377,7 @@ impl Gui {
             minute: 0,
             links_refreshed: Instant::now(),
             dirty: true,
+            redraw: redraw::Redraw::default(),
             due: None,
             moving: false,
             ticking: false,
@@ -971,30 +974,20 @@ impl Gui {
     /// When to wake next with nothing happening.
     fn next_wake(&self) -> Duration {
         let mut d = self.app.next_deadline();
-        if self.moving || self.shot_pending() {
-            d = d.min(Duration::from_millis(16));
-        }
-        // the clock's next frame, and output waiting for a frame
         let now = Instant::now();
-        if self.ticking {
-            d = d.min((self.drawn_at + AMBIENT).saturating_duration_since(now));
-        }
-        if let Some(at) = self.due {
-            d = d.min(at.saturating_duration_since(now));
-        }
+        // Once a frame is requested, only background work wakes us. On Wayland a hidden window
+        // receives no redraws; its expired animation/output deadlines would otherwise busy-loop.
+        let soon = now + Duration::from_millis(1);
+        d = self.redraw.next_wake(now, d, [
+            (self.moving || self.shot_pending()).then_some(now + Duration::from_millis(16)),
+            self.ticking.then_some(self.drawn_at + AMBIENT),
+            self.due,
+            self.prefs.media_open.then(|| self.media.next_wake()).flatten().map(|at| at.max(soon)),
+            self.pages.next_wake().map(|at| at.max(soon)),
+            self.apps.next_wake().map(|at| at.max(soon)),
+        ]);
         if let Some(s) = self.script.wake() {
             d = d.min(s.max(Duration::from_millis(1)));
-        }
-        if self.prefs.media_open
-            && let Some(at) = self.media.next_wake()
-        {
-            d = d.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
-        }
-        if let Some(at) = self.pages.next_wake() {
-            d = d.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
-        }
-        if let Some(at) = self.apps.next_wake() {
-            d = d.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
         }
         // the sidebar's clock turns over on the minute
         let into = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|t| t.as_secs() % 60).unwrap_or(0);
@@ -1322,6 +1315,7 @@ impl ApplicationHandler<UserEvent> for Gui {
         window::remember_handle(&w);
         self.orbit_stage.new_window(&self.app.svc);
         self.occluded = false;
+        self.redraw = redraw::Redraw::default();
         let size = w.inner_size();
         self.see_through_tried = see_through;
         self.window_see_through = see_through;
@@ -1395,6 +1389,7 @@ impl ApplicationHandler<UserEvent> for Gui {
         }
         if (self.dirty || self.moving || self.shot_pending())
             && let Some(w) = &self.window
+            && self.redraw.request()
         {
             w.request_redraw();
         }
@@ -1547,6 +1542,7 @@ impl ApplicationHandler<UserEvent> for Gui {
                 self.redraw();
             }
             WindowEvent::RedrawRequested => {
+                self.redraw.received();
                 self.dirty = false;
                 self.frame();
             }
