@@ -39,7 +39,7 @@ $app = Normalize-OrbitPath $env:BRO_ORBIT_SCAN_APP
     $descriptor = $null
     $identity = $null
     if ($selected) {
-        $managedFlags = @($arguments | Where-Object { $_ -ceq '--bro-managed' })
+        $managedFlags = @($arguments | Where-Object { $_ -ceq '--host-managed' })
         $descriptorFlags = @($arguments | Where-Object { $_ -ceq '--external-host-file' })
         $index = [Array]::IndexOf($arguments, '--external-host-file')
         if ($managedFlags.Count -eq 1 -and $descriptorFlags.Count -eq 1 -and $index -ge 0 -and $index + 1 -lt $arguments.Count) {

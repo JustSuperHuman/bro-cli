@@ -47,6 +47,8 @@ const EVENT_BATCH: usize = 128;
 const MAX_SESSIONS: usize = 256;
 const MAX_HOST_BYTES: usize = 256 * 1024;
 const THREAD_NAME: &str = "bro-orbit-voice";
+/// The inbox saves off the UI thread within milliseconds; past this, report bare receipt.
+const ADMISSION_WAIT: Duration = Duration::from_millis(2500);
 const CAPABILITIES: &[&str] = &[
     "sessions.read",
     "sessions.focus",
@@ -102,6 +104,8 @@ struct Shared {
     work_enabled: AtomicBool,
     shutdown: watch::Sender<bool>,
     in_flight: Arc<Semaphore>,
+    /// How long `POST /requests` waits for the durable inbox to admit or refuse work.
+    admission_wait: Duration,
     stage: watch::Sender<stage::Snapshot>,
     stage_in_flight: Arc<Semaphore>,
     stage_rate: Mutex<stage::Rate>,
@@ -281,6 +285,7 @@ fn start_service(data_root: &Path, callback: impl Fn(Command) + Send + Sync + 's
         work_enabled: AtomicBool::new(true),
         shutdown,
         in_flight: Arc::new(Semaphore::new(32)),
+        admission_wait: ADMISSION_WAIT,
         stage: watch::channel(stage::Snapshot::default()).0,
         stage_in_flight: Arc::new(Semaphore::new(stage::MAX_WATCHERS)),
         stage_rate: Mutex::new(stage::Rate::new()),
@@ -792,8 +797,8 @@ fn router(shared: Arc<Shared>) -> Router {
         .route("/orbit/v1/host", get(host))
         .route("/orbit/v1/stage", get(stage::get))
         .route("/orbit/v1/runtime/heartbeat", post(lifecycle::heartbeat))
-        .route("/orbit/v1/tools", get(tools::catalog))
-        .route("/orbit/v1/tools/read", post(tools::read))
+        .route("/orbit/v1/tools/catalog", get(tools::catalog))
+        .route("/orbit/v1/tools/call", post(tools::call))
         .route("/orbit/v1/utterances", post(utterance))
         .route("/orbit/v1/requests", post(submit))
         .route("/orbit/v1/requests/{id}", get(request_status))
@@ -1131,6 +1136,14 @@ async fn submit(
     };
     if !shared.dispatch(command) {
         shared.transition(&input.id, RequestState::Uncertain);
+    }
+    // Admission is asynchronous (the window or background bro saves its durable inbox).
+    // Hold the reply until it is decided so the companion can say "queued", not just "received".
+    let deadline = Instant::now() + shared.admission_wait;
+    while Instant::now() < deadline
+        && shared.data.lock().requests.get(&input.id).is_some_and(|request| request.state == RequestState::Received)
+    {
+        tokio::time::sleep(Duration::from_millis(15)).await;
     }
     let data = shared.data.lock();
     Ok(Json(request_json(
@@ -1763,6 +1776,7 @@ mod tests {
 
     mod stage_tests;
     mod managed_runtime;
+    mod orbit_client;
 
     struct Fixture {
         _root: tempfile::TempDir,
@@ -1789,6 +1803,7 @@ mod tests {
             work_enabled: AtomicBool::new(true),
             shutdown: watch::channel(false).0,
             in_flight: Arc::new(Semaphore::new(32)),
+            admission_wait: Duration::ZERO,
             stage: watch::channel(stage::Snapshot::default()).0,
             stage_in_flight: Arc::new(Semaphore::new(stage::MAX_WATCHERS)),
             stage_rate: Mutex::new(stage::Rate::new()),
@@ -1965,6 +1980,33 @@ mod tests {
                 generation: Some("generation-1".into()),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn submit_reply_reports_admission_decided_off_the_request_thread() {
+        // bro's window/background owner saves the inbox after the callback returns.
+        // The reply must carry that decision, or the companion can only say "received".
+        let root = tempfile::tempdir().unwrap();
+        let cell: Arc<std::sync::OnceLock<Handle>> = Arc::default();
+        let late = cell.clone();
+        let handle = start(root.path(), move |command| {
+            if let Command::Submit { id, text, .. } = command {
+                let late = late.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(60));
+                    let handle = late.get().unwrap();
+                    if text == "refuse" { handle.reject(&id, "The durable inbox is recovering."); } else { handle.queued(&id); }
+                });
+            }
+        }).unwrap();
+        assert!(cell.set(handle.clone()).is_ok());
+        assert!(handle.publish_host(snapshot(Some("a"), "first")));
+        let shared = handle.inner.shared.clone();
+        let _ = utterance(State(shared.clone()), Json(UtteranceInput { id: "u".into() })).await.unwrap();
+        let submit_text = |id: &str, text: &str| submit(State(shared.clone()), Json(SubmitInput { id: id.into(), utterance_id: "u".into(), text: text.into() }));
+        assert_eq!(submit_text("r", "Work").await.unwrap().0["state"], "queued");
+        assert_eq!(submit_text("refused", "refuse").await.unwrap().0["state"], "failed");
+        handle.shutdown();
     }
 
     #[tokio::test]

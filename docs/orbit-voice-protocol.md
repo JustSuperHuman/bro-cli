@@ -18,13 +18,23 @@ All paths below begin `/orbit/v1`.
 
 - `GET /host`: protocol/capabilities and safe host snapshot.
 - `POST /utterances`, `{id}`: latch the current target at audio/utterance start. Returns `{id,target:{sessionId,generation}|null,instanceId}`. Reject conflicting reuse. A new selected tab never retargets an existing utterance.
-- `POST /requests`, `{id,utteranceId,text}`: submit explicit user work referencing the latched utterance. Returns request state. `received` is transport receipt only; **`queued` means durably saved**. A retry of the same ID/content never executes again; changed content conflicts.
+- `POST /requests`, `{id,utteranceId,text}`: submit explicit user work referencing the latched utterance. Returns request state. `received` is transport receipt only; **`queued` means durably saved**. bro admits work on its window or background owner, so the reply waits up to 2.5 seconds for that decision and normally reports `queued` (or `failed` with the reason). A retry of the same ID/content never executes again; changed content conflicts.
 - `GET /requests/:id`: request status, progress and result. States: `received`, `queued`, `dispatched`, `completed`, `failed`, `cancelled`, `uncertain`. A recovered completion may omit result text rather than rerun work.
 - `POST /requests/:id/cancel`: cancel this request only. A host may reject cancellation it cannot safely target; never convert it to an unscoped stop.
 - `POST /focus`, `{sessionId}`: focus an existing advertised session.
 - `GET /events?after=<sequence>`: bounded ordered event batch `{events,cursor,gap}`. On a gap, refresh host/request snapshots. Polling this control channel does not replace the provider's realtime audio WebSocket.
 
+- `GET /tools/catalog` and `POST /tools/call`: the optional host tool catalog, below.
+
 Initial advertised capabilities: `sessions.read`, `sessions.focus`, `orchestrator.submit`, `requests.observe`, `requests.cancel-queued`, `avatar.desktop`, `avatar.attached`. Other operations are unsupported unless explicitly negotiated. No raw terminal writes, generic shell, filesystem or administration endpoint.
+
+## Host tools: `tools.v1`
+
+bro advertises `tools.v1` and `toolCatalogRevision` while a workspace is attached. `GET /orbit/v1/tools/catalog` returns `{schema:1,revision,tools:[{name,description,inputSchema,effect:"read",scope}]}`, built from the orchestrator's own definitions in `crates/bro-bridge/src/orbit_voice/tools.rs`. `scope` is `discovery` (no utterance needed) or `pinned` (limited to the project of the session latched at speech onset). Orbit forwards a model call as `POST /orbit/v1/tools/call` `{id,catalogRevision,utteranceId,name,arguments}` and returns the JSON result to the model as non-user data. Refusals use `{error:{code,message}}`, and Orbit passes the message on so the model can recover.
+
+To give the voice model another read, add it to `definitions()` and `ReadOperation` and change `REVISION`. Orbit needs no release: it validates each definition on its own and skips any it cannot enforce, such as an unknown effect or scope, rather than dropping the catalog. Anything that changes state stays out of the catalog. Spoken work goes through `orchestrator.submit`, where the user confirms a draft of their own words and the orchestrator carries it out with its full tool set.
+
+`cargo test -p bro-bridge orbit_client -- --ignored` with `BRO_ORBIT_SOURCE` set to an Orbit checkout runs Orbit's real voice server, host client and tool runner against bro's real host and workspace. A scripted realtime provider plays the model. The test covers every catalog read, a refused out-of-project read, spoken work through durable admission to a delivered result, and `request_status`. Point it at the PR branch or the companion preview branch.
 
 ## Host snapshot
 

@@ -42,7 +42,7 @@ fn hidden_managed_app_uses_native_controls_and_survives_owner_handover() {
     };
     let first = make_host();
     let child = ProcessCommand::new(&electron).arg(application.join("scripts/managed-runtime-e2e.mjs"))
-        .arg("--bro-managed").arg("--external-host-file").arg(first.descriptor_path())
+        .arg(bro_core::orbit_voice::MANAGED_FLAG).arg("--external-host-file").arg(first.descriptor_path())
         .arg("--acceptance-dir").arg(&evidence)
         .stdout(Stdio::from(std::fs::File::create(evidence.join("stdout.log")).unwrap()))
         .stderr(Stdio::from(std::fs::File::create(evidence.join("stderr.log")).unwrap())).spawn().unwrap();

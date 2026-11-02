@@ -15,7 +15,12 @@ use std::process::{Command, Stdio};
 pub const FORK_URL: &str = "https://github.com/JustSuperHuman/orbit-voice";
 pub const UPSTREAM_URL: &str = "https://github.com/Cookiebubba/orbit-voice";
 pub const TESTED_UPSTREAM_REVISION: &str = "f65f437d8df7b5a5b976da6b7bbd79476ebd7232";
-pub const MANIFEST_FILE: &str = "orbit-bro-compatibility.json";
+pub const MANIFEST_FILE: &str = "orbit-host-compatibility.json";
+/// Orbit's host-neutral companion identity: every paired launch uses it, for any host.
+pub const COMPANION_APP_ID: &str = "dev.orbit.voice.companion";
+pub const COMPANION_PROFILE: &str = "OrbitCompanion";
+/// Orbit runs hidden with an owner lease while a host manages its lifecycle.
+pub const MANAGED_FLAG: &str = "--host-managed";
 pub const PROTOCOL: u32 = 1;
 pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "sessions.read",
@@ -27,7 +32,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "avatar.attached",
 ];
 pub const RELEASE_UNAVAILABLE: &str = "Automatic Orbit Voice updates are not available for this compatibility preview. Install a tested companion package separately.";
-pub const SETUP_GUIDANCE: &str = "Download the Windows companion from https://github.com/JustSuperHuman/orbit-voice/releases/tag/bro-preview-v1.3.0.1, extract it and run install-bro-preview.ps1. Then enable Orbit Voice in bro settings. Developers can also build the integration fork and register its executable and application directory with bro orbit register. The preview uses its own profile and keeps the microphone off until you start voice.";
+pub const SETUP_GUIDANCE: &str = "Download the Windows companion from https://github.com/JustSuperHuman/orbit-voice/releases/tag/bro-preview-v1.3.0.3, extract it and run install-bro-preview.ps1. Then enable Orbit Voice in bro settings. Developers can also build the integration fork and register its executable and application directory with bro orbit register. The preview uses its own profile and keeps the microphone off until you start voice.";
 
 /// Opaque project identity for voice capture, with no filesystem access on the UI thread.
 pub fn project_scope_id(root: &Path) -> Option<String> {
@@ -284,8 +289,8 @@ pub fn validate_preview(
             "Orbit's preview does not advertise OpenAI Realtime; record/transcribe/playback is not compatible"
         );
     }
-    if manifest.app_id != "dev.justsuperhuman.orbit.bro-preview"
-        || manifest.profile != "OrbitBroPreview"
+    if manifest.app_id != COMPANION_APP_ID
+        || manifest.profile != COMPANION_PROFILE
         || !manifest.updates_disabled
     {
         bail!(
@@ -789,7 +794,7 @@ fn start(
 
 fn start_mode(found: &Detection, descriptor: Option<&Path>, settings: bool, managed: bool) -> anyhow::Result<LaunchOutcome> {
     let mut args = launch_arguments(found, descriptor, settings)?;
-    if managed { args.push("--bro-managed".into()); }
+    if managed { args.push(MANAGED_FLAG.into()); }
     let executable = found
         .executable
         .as_ref()
@@ -1034,12 +1039,12 @@ mod tests {
         let script = r#"
 function Get-CimInstance {
     @(
-        [pscustomobject]@{Name='electron.exe';ProcessId=41;ExecutablePath='C:\preview\electron.exe';CommandLine='"C:\preview\electron.exe" "\\?\F:\Orbit preview" --external-host-file "C:\bro data\orbit\connection.json" --bro-managed'},
+        [pscustomobject]@{Name='electron.exe';ProcessId=41;ExecutablePath='C:\preview\electron.exe';CommandLine='"C:\preview\electron.exe" "\\?\F:\Orbit preview" --external-host-file "C:\bro data\orbit\connection.json" --host-managed'},
         [pscustomobject]@{Name='electron.exe';ProcessId=42;ExecutablePath='C:\preview\electron.exe';CommandLine='"C:\preview\electron.exe" --type=gpu-process --user-data-dir="F:\Orbit preview"'},
         [pscustomobject]@{Name='Orbit Helper.exe';ProcessId=43;ExecutablePath='C:\preview\electron.exe';CommandLine='"C:\preview\electron.exe" --type=renderer'},
         [pscustomobject]@{Name='Orbit.exe';ProcessId=44;ExecutablePath='C:\stock\Orbit.exe';CommandLine='"C:\stock\Orbit.exe"'},
-        [pscustomobject]@{Name='electron.exe';ProcessId=45;ExecutablePath='C:\preview\electron.exe';CommandLine='"C:\preview\electron.exe" "F:\another app" --label "F:\Orbit preview --bro-managed --external-host-file C:\wrong.json"'},
-        [pscustomobject]@{Name='electron.exe';ProcessId=46;ExecutablePath='C:\preview\electron.exe';CommandLine='"C:\preview\electron.exe" "F:\Orbit preview" --label "--bro-managed --external-host-file C:\wrong.json"'}
+        [pscustomobject]@{Name='electron.exe';ProcessId=45;ExecutablePath='C:\preview\electron.exe';CommandLine='"C:\preview\electron.exe" "F:\another app" --label "F:\Orbit preview --host-managed --external-host-file C:\wrong.json"'},
+        [pscustomobject]@{Name='electron.exe';ProcessId=46;ExecutablePath='C:\preview\electron.exe';CommandLine='"C:\preview\electron.exe" "F:\Orbit preview" --label "--host-managed --external-host-file C:\wrong.json"'}
     )
 }
 function Get-Process { [pscustomobject]@{Path='C:\preview\electron.exe';StartTime=[DateTime]::UtcNow} }
@@ -1145,7 +1150,7 @@ function Get-Process { [pscustomobject]@{Path='C:\preview\electron.exe';StartTim
                 crate::self_update::sha256_file(&app.join(path)).unwrap(),
             );
         }
-        let manifest = json!({"schema":1,"version":"1.3.0-bro-preview.1","channel":"bro-preview","platform":platform().unwrap_or("win32-x64"),"source":{"repository":FORK_URL,"revision":"1234567890123456789012345678901234567890","upstreamRevision":TESTED_UPSTREAM_REVISION},"protocol":{"min":1,"max":1},"capabilities":REQUIRED_CAPABILITIES,"realtimeProviders":["openai"],"appId":"dev.justsuperhuman.orbit.bro-preview","profile":"OrbitBroPreview","updatesDisabled":true,"files":sums});
+        let manifest = json!({"schema":1,"version":"1.3.0-bro-preview.1","channel":"bro-preview","platform":platform().unwrap_or("win32-x64"),"source":{"repository":FORK_URL,"revision":"1234567890123456789012345678901234567890","upstreamRevision":TESTED_UPSTREAM_REVISION},"protocol":{"min":1,"max":1},"capabilities":REQUIRED_CAPABILITIES,"realtimeProviders":["openai"],"appId":COMPANION_APP_ID,"profile":COMPANION_PROFILE,"updatesDisabled":true,"files":sums});
         atomic_write(
             &app.join(MANIFEST_FILE),
             &serde_json::to_vec(&manifest).unwrap(),

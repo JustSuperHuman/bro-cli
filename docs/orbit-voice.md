@@ -8,11 +8,11 @@ Orbit Voice connects your workspace to Orbit’s native companion. Orbit handles
 
 ## Compatibility preview
 
-The first version uses a separate Windows x64 compatibility preview. Download the [tested companion package](https://github.com/JustSuperHuman/orbit-voice/releases/tag/bro-preview-v1.3.0.1), extract it and run `install-bro-preview.ps1` in PowerShell. The script installs the companion into your local Programs folder and registers its paths with Bro. Enable **Settings → Orbit Voice** to connect. You can also register the extracted `runtime/electron.exe` and `app` folder with `bro orbit register`.
+The first version uses a separate Windows x64 compatibility preview. Download the [tested companion package](https://github.com/JustSuperHuman/orbit-voice/releases/tag/bro-preview-v1.3.0.3), extract it and run `install-bro-preview.ps1` in PowerShell. The script installs the companion into your local Programs folder and registers its paths with Bro. Enable **Settings → Orbit Voice** to connect. You can also register the extracted `runtime/electron.exe` and `app` folder with `bro orbit register`.
 
 The package includes its runtime, so you do not need Node.js or a source build. Automatic companion updates are not available in this preview. Before installing a newer companion, choose **Quit companion** in Bro, then install and resume it. Stock Orbit downloads use a different connection and remain separate.
 
-The preview must have its own application identity, profile and update channel. It must not replace an existing Orbit installation, import its saved credentials or update itself back to an incompatible upstream build. If another Orbit instance is active, close it yourself before switching previews; bro never terminates an unrelated companion.
+The preview runs with Orbit's host-neutral companion identity: the `OrbitCompanion` profile and the `dev.orbit.voice.companion` app ID, never stock Orbit's `Orbit` profile. bro launches it with `--host-managed` and verifies its `orbit-host-compatibility.json` manifest first. It must not replace an existing Orbit installation, import its saved credentials or update itself back to an incompatible upstream build. Previews built before this identity (1.3.0.1 and 1.3.0.2) are refused; install the current package instead. If another Orbit instance is active, close it yourself before switching previews; bro never terminates an unrelated companion.
 
 Developers can build the fork using its compatibility-preview instructions and point Bro to that build. For an Electron source preview:
 

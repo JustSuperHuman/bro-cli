@@ -1,13 +1,22 @@
 //! Reviewed companion observations, not a proxy to MCP or coordinator authority.
+//!
+//! `tools.v1` is Orbit's host-neutral catalog: bro may add read tools here without an
+//! Orbit release. Orbit skips any definition it cannot enforce rather than the catalog.
 use super::*;
 use crate::Bridge;
 use crate::state::AppState;
 
-pub const CAPABILITY: &str = "bro.tools.v1";
-pub(super) const REVISION: &str = "bro.tools.v1.1";
+pub const CAPABILITY: &str = "tools.v1";
+/// Change whenever the catalog changes; Orbit refetches when `/host` reports a new one.
+pub(super) const REVISION: &str = "bro.tools.2";
 const RESULT_CHARS: usize = 16_000;
 
+/// Host-neutral `tools.v1` catalog: name, description, closed input schema, effect, scope.
 pub(super) fn catalog_value() -> Value {
+    json!({"schema":1,"revision":REVISION,"tools":definitions()})
+}
+
+fn definitions() -> Vec<Value> {
     let mut tools = Vec::new();
     for mut definition in crate::orchestrator::tools::definitions() {
         let Some(name) = definition["name"].as_str().map(str::to_owned) else { continue };
@@ -35,10 +44,7 @@ pub(super) fn catalog_value() -> Value {
             definition["inputSchema"]["properties"]["messages"]["maximum"] = json!(40);
         }
         definition["effect"] = json!("read");
-        definition["capability"] = json!(CAPABILITY);
-        definition["schemaVersion"] = json!(1);
-        definition["scope"] = json!(if matches!(name.as_str(), "list_sessions" | "list_projects") { "discovery" } else { "pinned-project" });
-        definition["resultSchema"] = json!({"type":"object","required":["nonUser"],"properties":{"nonUser":{"const":true}}});
+        definition["scope"] = json!(if matches!(name.as_str(), "list_sessions" | "list_projects") { "discovery" } else { "pinned" });
         tools.push(definition);
     }
     for (name, description, properties, required) in [
@@ -46,18 +52,18 @@ pub(super) fn catalog_value() -> Value {
         ("coordination_task", "Read one exact task's current status in the pinned project. This is a pure read; it does not invalidate source evidence or authorize another operation.", json!({"taskId":{"type":"string","maxLength":128}}), vec!["taskId"]),
     ] {
         let mut definition = crate::orchestrator::tools::tool(name, description, properties, &required);
-        definition["effect"] = json!("read"); definition["capability"] = json!(CAPABILITY);
-        definition["schemaVersion"] = json!(1); definition["scope"] = json!("pinned-project");
-        definition["resultSchema"] = json!({"type":"object","required":["nonUser"],"properties":{"nonUser":{"const":true}}});
+        definition["effect"] = json!("read");
+        definition["scope"] = json!("pinned");
         tools.push(definition);
     }
-    json!({"schema":1,"revision":REVISION,"tools":tools})
+    tools
 }
 
 pub(super) async fn catalog(State(shared): State<Arc<Shared>>) -> Result<Json<Value>, ApiError> {
     if shared.workspace.lock().is_none() { return Err(unavailable()); }
     Ok(Json(catalog_value()))
 }
+
 fn unavailable() -> ApiError { error(StatusCode::SERVICE_UNAVAILABLE, "tools_unavailable", "The local workspace service is not ready.") }
 
 #[derive(Deserialize)]
@@ -145,7 +151,7 @@ impl Scope {
     }
 }
 
-pub(super) async fn read(State(shared): State<Arc<Shared>>, Json(body): Json<Invocation>) -> Result<Json<Value>, ApiError> {
+pub(super) async fn call(State(shared): State<Arc<Shared>>, Json(body): Json<Invocation>) -> Result<Json<Value>, ApiError> {
     if body.catalog_revision != REVISION || validate_id(&body.id).is_err() {
         return Err(error(StatusCode::CONFLICT, "stale_catalog", "Refresh the reviewed tool catalog before calling it."));
     }
@@ -271,6 +277,8 @@ mod tests {
         let tools = value["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 7);
         assert!(tools.iter().all(|tool| tool["effect"] == "read" && tool["inputSchema"]["additionalProperties"] == false));
+        assert!(tools.iter().all(|tool| tool["scope"] == "discovery" || tool["scope"] == "pinned"));
+        assert!(tools.iter().all(|tool| tool.get("capability").is_none()), "the host-neutral catalog carries no vendor capability");
         for name in ["send_input", "send_keys", "coordination_command", "answer_prompt", "create_session", "coordination_accept"] {
             assert!(tools.iter().all(|tool| tool["name"] != name));
             assert!(ReadOperation::parse(name, json!({})).is_err());

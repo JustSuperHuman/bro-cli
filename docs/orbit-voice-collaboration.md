@@ -6,12 +6,15 @@ Fork: https://github.com/JustSuperHuman/orbit-voice
 
 Inspected base: `f65f437d8df7b5a5b976da6b7bbd79476ebd7232`
 
-Local branches:
+Branches:
 
 - bro: `feat/orbit-voice-integration`
-- Orbit: `feat/external-host-compatibility`
+- Orbit upstream PR: [Cookiebubba/orbit-voice#3](https://github.com/Cookiebubba/orbit-voice/pull/3), from `feat/external-host-integration`
+- Orbit companion preview: `feat/external-host-compatibility` (1.3.0-bro-preview.3)
 
-The Windows companion is distributed as a [separate compatibility preview](https://github.com/JustSuperHuman/orbit-voice/releases/tag/bro-preview-v1.3.0.1). Its source and portable package retain the upstream license and attribution. No upstream compatibility PR has been submitted.
+The Windows companion is distributed as a [separate compatibility preview](https://github.com/JustSuperHuman/orbit-voice/releases/tag/bro-preview-v1.3.0.3). Its source and portable package retain the upstream license and attribution.
+
+The PR and the preview share one host-neutral contract: the `tools.v1` catalog, the `--host-managed` flag, the `OrbitCompanion` profile with app ID `dev.orbit.voice.companion`, and the `orbit-host-compatibility.json` manifest. bro launches only builds whose manifest declares that identity. The preview adds Bro's distribution packaging (`bro-preview` channel, `install-bro-preview.ps1`) and keeps its isolated identity even for standalone launches.
 
 ## Keep the upstream review focused
 
@@ -21,7 +24,7 @@ Review the change in three parts:
 2. **Optional external workspace backend.** Versioned protected local discovery, capability negotiation, stable session and utterance identities, draft/send consent, correlated non-user results and outcomes. No selected host means the existing Claude Desktop backend; a selected but disconnected host fails closed rather than changing backends.
 3. **Native companion attachment and optional workspace stage.** Reuse the original avatar windows, director and throw engine. Explicit desktop/attached placement validates host identity. `avatar.stage.v1` adds a separate, latest-only geometry feed and a persistent client-area stage for Qubit; it does not change voice protocol v1 or execution authority. Old peers retain window-only attachment. Keep voice execution separate from window selection and character navigation.
 
-**Preview packaging is downstream scaffolding**, not a request to rename upstream Orbit. The fork’s app/profile/Keychain identity, update-feed changes and preview-only microphone/hotkey defaults must be kept separate from—or made build-variant-specific in—the compatibility PR. Do not merge those settings as new defaults for ordinary upstream installations.
+**Preview packaging is downstream scaffolding**, not a request to rename upstream Orbit. The companion identity itself is upstream's: the PR gives paired launches `OrbitCompanion` / `dev.orbit.voice.companion`, and the preview uses the same identity for every launch. The preview's Bro packaging, update-feed changes, macOS Keychain/bundle identity and preview-only microphone/hotkey defaults stay out of the PR. Do not merge those settings as new defaults for ordinary upstream installations.
 
 ## Compatibility contract
 
