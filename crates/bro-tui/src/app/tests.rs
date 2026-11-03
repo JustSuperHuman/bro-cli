@@ -4890,7 +4890,7 @@ fn settings_sections_open_from_the_left_or_say_where_they_sit() {
     let mut small = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, H)).unwrap();
     small.draw(|f| a.draw(f)).unwrap();
     let s = testkit::dump(small.backend().buffer());
-    assert!(s.contains("Updates  13 of 13") && !s.contains("SETTINGS"), "{s}");
+    assert!(s.contains("Updates  13 of 14") && !s.contains("SETTINGS"), "{s}");
 }
 
 fn tabs_on(a: &mut App) {
@@ -4911,6 +4911,29 @@ fn strip_line(a: &mut App) -> String {
 
 fn strip_hit(a: &App, want: &super::project_tabs::StripHit) -> Option<Rect> {
     a.side_hits.iter().find_map(|(r, h)| matches!(h, SideHit::Strip(x) if x == want).then_some(*r))
+}
+
+#[test]
+fn orchestrators_tab_only_appears_while_an_orchestrator_is_open() {
+    use super::project_tabs::{StripHit, StripTab};
+    let mut a = app(true);
+    tabs_on(&mut a);
+    let orchestrators = StripHit::Tab(StripTab::Orchestrator);
+    assert!(a.orchestrator_panes().is_empty());
+    assert!(!a.strip_items(&a.project_tabs()).contains(&StripTab::Orchestrator));
+    assert!(!strip_line(&mut a).contains("Orchestrators"));
+    assert!(strip_hit(&a, &orchestrators).is_none(), "no invisible tab hit target");
+
+    land_orchestrator(&mut a);
+    let id = a.orchestrator_panes()[0];
+    assert!(a.strip_items(&a.project_tabs()).contains(&StripTab::Orchestrator));
+    assert!(strip_line(&mut a).contains("Orchestrators"));
+    assert!(strip_hit(&a, &orchestrators).is_some());
+
+    a.close(id);
+    assert!(!a.strip_items(&a.project_tabs()).contains(&StripTab::Orchestrator));
+    assert!(!strip_line(&mut a).contains("Orchestrators"));
+    assert!(strip_hit(&a, &orchestrators).is_none(), "closing the last orchestrator removes its tab");
 }
 
 fn click_at(a: &mut App, r: Rect, button: MouseButton) {
@@ -5108,7 +5131,6 @@ fn keys_switch_step_and_go_back_through_project_tabs() {
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     let s = draw(&mut a);
     assert!(s.contains("bro-cli-v2"));
-    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(a.strip_sel, None);

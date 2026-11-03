@@ -9,6 +9,9 @@
 /// Drawn by the desktop app (`bro gui`).
 #[cfg(feature = "gui")]
 pub(crate) mod gui;
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MobileOpt { Access, Remote, ReadOnly, Display, Package, Disconnect }
+const MOBILE_OPTS: [MobileOpt; 6] = [MobileOpt::Access, MobileOpt::Remote, MobileOpt::ReadOnly, MobileOpt::Display, MobileOpt::Package, MobileOpt::Disconnect];
 
 use crate::keymap::Act;
 use crate::alerts::Kind;
@@ -503,6 +506,7 @@ enum Row {
     Skill(SkillOpt),
     Update(UpdOpt),
     Host(HostOpt),
+    Mobile(MobileOpt),
     Watch(WatchOpt),
     Mod(ModOpt),
     Preset,
@@ -527,6 +531,7 @@ fn rows() -> Vec<Row> {
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
         .chain([Row::Skill(SkillOpt::Imagine), Row::Skill(SkillOpt::AutoSync)])
         .chain([Row::Tool(ToolOpt::SoundsOn), Row::Tool(ToolOpt::Sounds), Row::Tool(ToolOpt::PeonPing), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
+        .chain(MOBILE_OPTS.map(Row::Mobile))
         .collect()
 }
 
@@ -598,9 +603,10 @@ enum Section {
     Skills,
     Sounds,
     Updates,
+    Mobile,
 }
 
-const SECTIONS: [Section; 13] = [
+const SECTIONS: [Section; 14] = [
     Section::Appearance,
     Section::Sessions,
     Section::Server,
@@ -614,6 +620,7 @@ const SECTIONS: [Section; 13] = [
     Section::Skills,
     Section::Sounds,
     Section::Updates,
+    Section::Mobile,
 ];
 
 impl Section {
@@ -623,6 +630,7 @@ impl Section {
             Row::Bro(o) if o.looks() => Section::Appearance,
             Row::Bro(_) => Section::Sessions,
             Row::Host(_) => Section::Server,
+            Row::Mobile(_) => Section::Mobile,
             Row::Voice(_) => Section::Voice,
             Row::Cave(_) => Section::Caveman,
             Row::Watch(_) => Section::Watchdog,
@@ -639,6 +647,7 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Sessions => "Sessions",
             Section::Server => "Session server",
+            Section::Mobile => "Mobile Companion",
             Section::Voice => "Orbit Voice",
             Section::Caveman => "Caveman",
             Section::Watchdog => "Watchdog",
@@ -657,6 +666,7 @@ impl Section {
             Section::Appearance => "theme",
             Section::Sessions => "term",
             Section::Server => "server",
+            Section::Mobile => "server",
             Section::Voice => "mic",
             Section::Caveman => "caveman",
             Section::Watchdog => "watchdog",
@@ -675,6 +685,7 @@ impl Section {
             Section::Appearance => "How bro looks. Every change shows up as you make it.",
             Section::Sessions => "What bro does on its own while your agents work.",
             Section::Server => "Your sessions run in a background process of bro's, so they keep running when bro closes, crashes or updates, and come back when it opens. The terminal UI and the desktop app both pick them up.",
+            Section::Mobile => "Your sessions and desktop on your paired phone. Remote control downloads its own package when you enable it.",
             Section::Voice => "Talk with your workspace. You decide when the microphone is on.",
             Section::Caveman => "Terse replies with every fact kept, in new Claude, Codex and Pi sessions.",
             Section::Watchdog => "A fresh reviewer reads a session that went quiet and hands it its next task. Prefix w on a session starts one.",
@@ -863,6 +874,13 @@ impl SettingsView {
     }
 
     fn visible(&self, row: Row, cx: &Cx) -> bool {
+        if let Row::Mobile(option) = row {
+            return match option {
+                MobileOpt::ReadOnly | MobileOpt::Display => cx.svc.settings().mobile_companion.enabled,
+                MobileOpt::Disconnect => cx.svc.rmm_status().is_some_and(|status| status.active_viewers > 0),
+                _ => true,
+            };
+        }
         if let Row::Voice(option) = row {
             let state = cx.svc.state().orbit_voice.clone();
             return voice_visible_options(cx.svc.settings().orbit_voice.enabled || state.owned_elsewhere && state.connected, &state).contains(&option);
@@ -872,7 +890,9 @@ impl SettingsView {
 
     fn normalize_selection(&mut self, cx: &Cx) {
         if !self.visible(self.row(), cx) {
-            self.sel = rows().iter().position(|r| *r == Row::Voice(VoiceOpt::On)).unwrap_or(0);
+            let home = if matches!(self.row(), Row::Mobile(_)) { Row::Mobile(MobileOpt::Remote) }
+                else { Row::Voice(VoiceOpt::On) };
+            self.sel = rows().iter().position(|r| *r == home).unwrap_or(0);
         }
     }
 
@@ -1064,6 +1084,19 @@ impl SettingsView {
         match self.row() {
             Row::Quips => return cx.act(Action::Run(Act::Quips)),
             Row::Bro(o) => return o.change(dir, cx),
+            Row::Mobile(MobileOpt::Access) => { cx.svc.set_bridge_enabled(!s.bridge.enabled); return; }
+            Row::Mobile(MobileOpt::Remote) => {
+                if !s.mobile_companion.enabled && !bro_core::rmm::supported() { return; }
+                s.mobile_companion.enabled = !s.mobile_companion.enabled;
+                let connect = s.mobile_companion.enabled && !s.bridge.enabled;
+                cx.svc.save_settings(s);
+                if connect { cx.svc.set_bridge_enabled(true); }
+                return;
+            }
+            Row::Mobile(MobileOpt::ReadOnly) => s.mobile_companion.read_only = !s.mobile_companion.read_only,
+            Row::Mobile(MobileOpt::Display) => s.mobile_companion.display = (s.mobile_companion.display as i64 + dir as i64).rem_euclid(bro_core::rmm::display_count() as i64) as u32,
+            Row::Mobile(MobileOpt::Package) => { cx.svc.rmm_retry(); return; }
+            Row::Mobile(MobileOpt::Disconnect) => { cx.svc.rmm_disconnect(); return; }
             Row::Voice(o) => return self.voice(o, dir, cx),
             Row::Tool(o) => return self.tool(o, cx),
             Row::Skill(o) => return self.skill(o, cx),
@@ -1147,7 +1180,7 @@ impl SettingsView {
         let mut s = cx.svc.settings();
         match self.row() {
             Row::Mod(ModOpt::TimerSecs) => s.claude_mod.timer_secs = bro_core::claude_mod::ClaudeModSettings::default().timer_secs,
-            Row::Quips | Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Skill(_) | Row::Update(_) | Row::Host(_) | Row::Mod(_) => return,
+            Row::Quips | Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Skill(_) | Row::Update(_) | Row::Host(_) | Row::Mobile(_) | Row::Mod(_) => return,
             Row::Voice(VoiceOpt::Escape) => {
                 s.orbit_voice.mode = "attached".into();
                 s.orbit_voice.allow_escape = false;
@@ -1284,6 +1317,7 @@ impl SettingsView {
                 })
                 .collect(),
             Section::Voice => self.voice_blocks(cx),
+            Section::Mobile => self.mobile_blocks(cx),
             Section::Caveman => {
                 let cave = &st.caveman;
                 let (value, help) = match cave.active() {
@@ -1481,6 +1515,65 @@ impl SettingsView {
                 vec![Block::Item(version), Block::Item(check)]
             }
         }
+    }
+
+    fn mobile_blocks(&self, cx: &Cx) -> Vec<Block> {
+        let t = cx.theme;
+        let settings = cx.svc.settings();
+        let config = &settings.mobile_companion;
+        let status = cx.svc.rmm_status();
+        let supported = bro_core::rmm::supported();
+        let enabled = config.enabled;
+        let (package, package_style) = match status.as_ref() {
+            Some(status) => {
+                use bro_bridge::rmm::Phase;
+                let label = match status.phase {
+                    Phase::Disabled if status.version.is_some() => "Installed · off".into(),
+                    Phase::Disabled | Phase::NotInstalled => "Not downloaded".into(),
+                    Phase::Installing => "Downloading…".into(),
+                    Phase::Ready => format!("v{} · ready", status.version.as_deref().unwrap_or(bro_core::rmm::VERSION)),
+                    Phase::Starting => "Starting desktop stream…".into(),
+                    Phase::Running => format!("{} connected", status.active_viewers),
+                    Phase::Error => "Download or connection needs attention".into(),
+                };
+                (label, if status.phase == Phase::Error { fg(t.danger) } else if status.phase == Phase::Ready || status.phase == Phase::Running { fg(t.good) } else { muted(t) })
+            }
+            None => ("Not downloaded".into(), muted(t)),
+        };
+        let mut remote = Item::new(Row::Mobile(MobileOpt::Remote), "Remote desktop", switch(enabled, supported, t),
+            if supported { "Download Bro RMM and let paired phones view or control this desktop. Turning this off disconnects every viewer." }
+            else { "The remote-control package is currently available on Windows x64." });
+        if let Some(message) = status.as_ref().and_then(|status| status.message.as_ref()) {
+            remote = remote.note(vec![Span::styled(message.clone(), fg(t.danger))]);
+        }
+        let display = if config.display == 0 { "Primary display".into() } else { format!("Display {}", config.display + 1) };
+        let viewers = status.as_ref().map_or(0, |status| status.active_viewers);
+        let relay = status.as_ref().is_some_and(|status| status.relay_configured);
+        let mut blocks = vec![
+            Block::Item(Item::new(Row::Mobile(MobileOpt::Access), "Mobile Companion", switch(settings.bridge.enabled, true, t),
+                "Connect your phone with the address and pairing code on the Bridge page.")),
+            Block::Sub("Remote viewing and control".into()),
+            Block::Item(remote),
+        ];
+        if enabled {
+            blocks.push(Block::Item(Item::new(Row::Mobile(MobileOpt::ReadOnly), "View only", switch(config.read_only, true, t),
+                "Paired phones can watch the screen. Mouse, keyboard and clipboard writes are blocked. Changing this ends current connections.")));
+            blocks.push(Block::Item(Item::new(Row::Mobile(MobileOpt::Display), "Shared display", choice(display, fg(t.inline), t),
+                "Choose the monitor shown on your phone. Changing it ends current connections; the next viewer opens this display.")));
+        }
+        blocks.push(Block::Item(Item::new(Row::Mobile(MobileOpt::Package), "Bro RMM package", shown(package, package_style),
+            "Maintained separately in JustSuperHuman/voxl. Bro verifies the download and starts it only when a viewer connects.")));
+        if viewers > 0 {
+            blocks.push(Block::Item(Item::new(Row::Mobile(MobileOpt::Disconnect), "Connected viewers", shown(format!("{viewers} connected"), fg(t.good)),
+                "End every remote connection now. A paired phone can reconnect while remote desktop stays enabled.")));
+        }
+        if enabled {
+            blocks.push(Block::Sub("Connection".into()));
+            blocks.push(Block::Text(vec![Span::styled(if relay { "WebRTC tries a direct connection, then the private TURN relay. TCP is available as a fallback." }
+                else { "WebRTC tries a direct connection. TCP is available as a fallback through your paired Bro address." }, muted(t))]));
+            blocks.push(Block::Text(vec![Span::styled("Windows lock screens and UAC prompts require someone at the computer. Bro RMM runs in your Windows session.", muted(t))]));
+        }
+        blocks
     }
 
     fn voice_blocks(&self, cx: &Cx) -> Vec<Block> {
@@ -1776,6 +1869,21 @@ impl SettingsView {
                 }
             }
             Section::Quips => Span::styled("local", muted(t)),
+            Section::Mobile => {
+                let on = st.mobile_companion.enabled;
+                let status = cx.svc.rmm_status();
+                let text = if !st.bridge.enabled { "off" } else if !on { "chats" } else { match status.as_ref().map(|s| s.phase) {
+                    Some(bro_bridge::rmm::Phase::Installing) => "downloading…",
+                    Some(bro_bridge::rmm::Phase::Running) => "connected",
+                    Some(bro_bridge::rmm::Phase::Ready) => "ready",
+                    Some(bro_bridge::rmm::Phase::Starting) => "starting…",
+                    Some(bro_bridge::rmm::Phase::NotInstalled) => "not downloaded",
+                    Some(bro_bridge::rmm::Phase::Disabled) => "off",
+                    Some(bro_bridge::rmm::Phase::Error) => "needs attention",
+                    None => "waiting for Bro",
+                }};
+                Span::styled(text, if on { fg(t.inline) } else { muted(t) })
+            }
             Section::Sounds => match st.peon.on {
                 true => Span::styled("on", fg(t.good)),
                 false => Span::styled("off", muted(t)),
@@ -2096,7 +2204,7 @@ mod tests {
         assert_eq!(r[sounds + 1], Row::Tool(ToolOpt::Sounds));
         assert_eq!(r[sounds + 2], Row::Tool(ToolOpt::PeonPing));
         assert_eq!(r[sounds + 3], Row::Update(UpdOpt::Version));
-        assert_eq!(r.len(), sounds + 5);
+        assert_eq!(r.len(), sounds + 5 + MOBILE_OPTS.len());
         // each section's rows sit together, in the order the sections are listed
         let order: Vec<usize> = r.iter().map(|row| SECTIONS.iter().position(|s| *s == Section::of(*row)).unwrap()).collect();
         assert!(order.is_sorted(), "{order:?}");
@@ -2148,5 +2256,22 @@ mod tests {
     #[test]
     fn caveman_choices_start_off() {
         assert_eq!(cave_choices(), vec![None, Some(Level::Caveman), Some(Level::Ultracave), Some(Level::Megacave)]);
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    fn enabling_remote_desktop_also_starts_a_disabled_mobile_connection() {
+        let mut settings = crate::services::fallback_settings();
+        settings.bridge.enabled = false;
+        let (tx, _) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(settings, tx.clone());
+        let theme = crate::theme::get("graphite");
+        let mut actions = vec![];
+        let mut cx = Cx { id: 1, theme: &theme, svc: &svc, tx: &tx, actions: &mut actions, focused: true };
+        let mut view = SettingsView::default();
+        view.sel = rows().iter().position(|row| *row == Row::Mobile(MobileOpt::Remote)).unwrap();
+        view.step(1, &mut cx);
+        assert!(svc.settings().mobile_companion.enabled);
+        assert!(svc.settings().bridge.enabled, "the download and phone connection need an active bridge");
     }
 }

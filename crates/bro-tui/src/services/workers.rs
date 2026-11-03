@@ -613,6 +613,9 @@ pub(super) fn spawn_bridge(svc: &Services) {
         // panels, schedules and stop / fresh start go to bro's orchestrator session, not Hugh's own Claude Code
         let _ = guard("bridge::route_orchestrator", || b.route_orchestrator(true));
         let _ = guard("bridge::set_media_anywhere", || b.set_media_anywhere(!s.protect_media));
+        let mut disk_mobile = std::fs::read_to_string(bro_core::paths::settings_path()).ok()
+            .and_then(|text| toml::from_str::<bro_core::config::Settings>(&text).ok()).map(|settings| settings.mobile_companion);
+        let _ = guard("bridge::set_rmm_settings", || b.set_rmm_settings(svc.settings().mobile_companion));
         let w_svc = svc.clone();
         let _ = guard("bridge::on_watchdog_update", || b.on_watchdog_update(Box::new(move |u| w_svc.on_watchdog_update(u))));
         let qr = s.enabled.then(|| guard("bridge::pairing_qr", || b.pairing_qr()).ok().flatten()).flatten();
@@ -625,6 +628,17 @@ pub(super) fn spawn_bridge(svc: &Services) {
         // poll status while this bridge is the live one
         loop {
             if svc.inner.stopping.load(Ordering::Acquire) || svc.inner.bridge.read().as_ref().is_none_or(|current| !current.same_service(&b)) { break; }
+            // Secondary windows save the same settings file. Observe changes to this
+            // section so their Off/View only switches revoke the primary's viewers too.
+            // Comparing disk snapshots avoids replaying an old file over an in-flight save.
+            if let Some(mobile) = std::fs::read_to_string(bro_core::paths::settings_path()).ok()
+                .and_then(|text| toml::from_str::<bro_core::config::Settings>(&text).ok()).map(|settings| settings.mobile_companion)
+                && disk_mobile.as_ref() != Some(&mobile)
+            {
+                disk_mobile = Some(mobile.clone());
+                svc.update(|state| state.settings.mobile_companion = mobile.clone());
+                let _ = guard("bridge::set_rmm_settings", || b.set_rmm_settings(mobile));
+            }
             match guard("bridge::status", || b.status()) {
                 Ok(status) => {
                     let projects: Vec<super::ClientProject> = guard("bridge::client_projects", || b.client_projects())

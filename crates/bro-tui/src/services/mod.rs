@@ -319,6 +319,7 @@ pub fn fallback_settings() -> Settings {
         material: Default::default(),
         material_tint: bro_core::config::MATERIAL_TINT,
         bridge: BridgeSettings::default(),
+        mobile_companion: bro_core::rmm::Settings::default(),
         proxy: ProxySettings::default(),
         voice: bro_core::config::VoiceSettings::default(),
         orbit_voice: bro_core::config::OrbitSettings::default(),
@@ -520,6 +521,7 @@ impl Services {
         });
         // the phone's media rule changes at once, without restarting the bridge
         self.with_bridge("bridge::set_media_anywhere", |b| b.set_media_anywhere(!s.bridge.protect_media));
+        self.with_bridge("bridge::set_rmm_settings", |b| b.set_rmm_settings(s.mobile_companion.clone()));
         if self.is_demo() {
             return;
         }
@@ -771,6 +773,15 @@ impl Services {
     pub fn bridge_running(&self) -> bool {
         self.inner.bridge.read().is_some() && !self.inner.bridge_fuse.blown()
     }
+
+    pub fn rmm_status(&self) -> Option<bro_bridge::rmm::Status> {
+        let mut status = None;
+        self.with_bridge("bridge::rmm_status", |b| status = Some(b.rmm_status()));
+        status
+    }
+
+    pub fn rmm_retry(&self) { self.with_bridge("bridge::rmm_retry", |b| b.rmm_retry()); }
+    pub fn rmm_disconnect(&self) { self.with_bridge("bridge::rmm_disconnect", |b| b.rmm_disconnect()); }
 
     /// Loopback URL of the running bridge, for `BRO_BRIDGE_URL` in pane env (`bro open`).
     pub fn bridge_local_url(&self) -> Option<String> {

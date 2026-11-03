@@ -92,6 +92,7 @@ pub(crate) struct AppState {
     /// Host exit observations survive unregister. Missing registry entries are never exit proof.
     pub coordination_exits: Arc<Mutex<HashMap<String, (Option<u32>, String, i64)>>>,
     pub coordination_wakes: Arc<Mutex<HashMap<String, (u64, u64, String)>>>,
+    pub rmm: Arc<crate::rmm::Rmm>,
 }
 
 impl AppState {
@@ -103,6 +104,9 @@ impl AppState {
         let projects = ProjectStore::load(&data_root);
         let published_projects = projects.visible(std::iter::empty());
         let (shutdown, _) = watch::channel(false);
+        let rmm_root = if data_root.file_name().is_some_and(|name| name == "bridge") {
+            data_root.parent().unwrap_or(&data_root).join("rmm")
+        } else { data_root.join("rmm") };
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 sessions: HashMap::new(),
@@ -137,6 +141,7 @@ impl AppState {
             mod_jobs: Arc::new(crate::mod_jobs::ModJobs::default()),
             coordination_exits: Arc::new(Mutex::new(HashMap::new())),
             coordination_wakes: Arc::new(Mutex::new(HashMap::new())),
+            rmm: Arc::new(crate::rmm::Rmm::new(rmm_root)),
         }
     }
 

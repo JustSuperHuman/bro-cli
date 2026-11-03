@@ -81,6 +81,7 @@ Running the install line again works too.
 - [The desktop app](docs/gui.md) and its keys
 - [Quick Install](docs/quick-install.md): `bro install` for Git, Node.js, the agents and more
 - [Orbit Voice](docs/orbit-voice.md): realtime voice, the moving companion, and compatibility-preview setup
+- [Remote desktop](docs/remote-desktop.md): optional Mobile Companion viewing and control, with a separate Bro RMM package
 - [Orbit collaboration notes](docs/orbit-voice-collaboration.md): protocol, upstream review scope and acceptance gates
 - [Gemini on your Google AI subscription](docs/gemini.md)
 - [Env files](docs/env-files.md): carry your API keys to a new machine

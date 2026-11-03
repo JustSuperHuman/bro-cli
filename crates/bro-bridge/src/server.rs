@@ -182,6 +182,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .layer(CompressionLayer::new().gzip(true));
     Router::new()
         .merge(protected)
+        .merge(crate::rmm::routes(state.clone()))
         .merge(crate::mod_jobs::routes())
         .merge(client)
         .with_state(state)
@@ -284,6 +285,7 @@ pub(crate) fn spawn_background(state: &AppState) {
         }
     });
     crate::hosts::spawn(state);
+    crate::rmm::spawn(state);
     crate::coordination::spawn_supervisor(state);
     let observer = state.clone();
     tokio::spawn(async move {

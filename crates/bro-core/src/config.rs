@@ -153,6 +153,8 @@ pub struct Settings {
     /// How much of the theme's colour covers a see-through window, in percent (the sessions keep a little more)
     pub material_tint: u8,
     pub bridge: BridgeSettings,
+    /// Optional desktop viewing/control, downloaded separately when enabled.
+    pub mobile_companion: crate::rmm::Settings,
     pub proxy: ProxySettings,
     /// Legacy voice preferences remain readable; they are not consent to start Orbit.
     pub voice: VoiceSettings,
@@ -467,6 +469,7 @@ impl Default for Settings {
             material: Material::Solid,
             material_tint: MATERIAL_TINT,
             bridge: BridgeSettings::default(),
+            mobile_companion: crate::rmm::Settings::default(),
             proxy: ProxySettings::default(),
             voice: VoiceSettings::default(),
             orbit_voice: OrbitSettings::default(),

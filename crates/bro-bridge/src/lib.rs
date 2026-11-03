@@ -74,6 +74,7 @@ mod thumbnail;
 mod waveform;
 mod rest;
 mod rest_sessions;
+pub mod rmm;
 mod server;
 mod session;
 pub mod slash_commands;
@@ -513,6 +514,11 @@ impl Bridge {
     /// Identity of the shared local service, independent of transport status.
     pub fn same_service(&self, other: &Bridge) -> bool { Arc::ptr_eq(&self.inner, &other.inner) }
 
+    pub fn set_rmm_settings(&self, settings: bro_core::rmm::Settings) { self.state().rmm.configure(settings); }
+    pub fn rmm_status(&self) -> rmm::Status { self.state().rmm.status() }
+    pub fn rmm_retry(&self) { self.state().rmm.retry(); }
+    pub fn rmm_disconnect(&self) { self.state().rmm.stop(); let settings = self.state().rmm.config_settings(); self.state().rmm.configure(settings); }
+
     pub fn register(&self, meta: SessionMeta) {
         let cwd = meta.cwd.as_deref().map(path_text).unwrap_or_default();
         let mut summary = model::TerminalSessionSummary::native(
@@ -883,6 +889,7 @@ impl Bridge {
 
     pub fn shutdown(&self) {
         let state = self.state();
+        state.rmm.stop();
         state.orchestrator.shutdown();
         for dog in state.watchdogs.all() {
             state.watchdogs.stop(&dog.session_id);

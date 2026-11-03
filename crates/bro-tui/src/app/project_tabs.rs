@@ -171,7 +171,10 @@ impl App {
 
     /// Every tab, left to right.
     pub(crate) fn strip_items(&self, tabs: &[ProjectTab]) -> Vec<StripTab> {
-        let mut v = vec![StripTab::All, StripTab::Orchestrator];
+        let mut v = vec![StripTab::All];
+        if !self.orchestrator_panes().is_empty() {
+            v.push(StripTab::Orchestrator);
+        }
         v.extend(tabs.iter().map(|t| StripTab::Project(t.key.clone())));
         v
     }
@@ -413,9 +416,16 @@ impl App {
         let star_text = format!(" ★ Orchestrators {} ", ids.len());
         let sx = all.right() + 1;
         let star_w = ui::width(&star_text) as u16 + 2 + badges_width(blocked, done) as u16;
-        let star = Rect { x: sx, width: star_w.min(end.saturating_sub(sx)), ..r };
-        let start = (end.saturating_sub(star.right()) >= 3).then_some(star.right() + 3);
-        Ends { plus, minimized, end, all: (all, all_text), star: (star, star_text, blocked, done, ids.iter().any(|id| self.panes.get(id).and_then(|p| p.activity()) == Some(Activity::Working))), start }
+        let star = (!ids.is_empty()).then(|| (
+            Rect { x: sx, width: star_w.min(end.saturating_sub(sx)), ..r },
+            star_text,
+            blocked,
+            done,
+            ids.iter().any(|id| self.panes.get(id).and_then(|p| p.activity()) == Some(Activity::Working)),
+        ));
+        let fixed_end = star.as_ref().map_or(all.right(), |(r, ..)| r.right());
+        let start = (end.saturating_sub(fixed_end) >= 3).then_some(fixed_end + 3);
+        Ends { plus, minimized, end, all: (all, all_text), star, start }
     }
 
     /// Where the project tabs go, from column `start` of the strip's first row `r` to `end` (and the full width of
@@ -547,8 +557,7 @@ impl App {
             self.side_hits.push((*b, SideHit::Strip(StripHit::Tab(StripTab::All))));
         }
         // every coordinator, with what they're doing and what wants you
-        let (b, label, blocked, done, working) = &ends.star;
-        if b.width > 0 {
+        if let Some((b, label, blocked, done, working)) = &ends.star && b.width > 0 {
             let gold = crate::theme::gold(&t);
             let on = showing == Some(StripTab::Orchestrator);
             let base = tab_style(gold, on, b.contains(hover), selected == Some(StripTab::Orchestrator), &t);
@@ -659,8 +668,8 @@ struct Ends {
     /// where the tabs stop on the first row
     end: u16,
     all: (Rect, String),
-    /// ★: where, its label, waiting on you, finished unseen, working
-    star: (Rect, String, usize, usize, bool),
+    /// ★ while an orchestrator is open: where, its label, waiting on you, finished unseen, working
+    star: Option<(Rect, String, usize, usize, bool)>,
     /// the first project tab's column (after the rule), when there's room for any
     start: Option<u16>,
 }

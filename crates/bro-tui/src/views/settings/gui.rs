@@ -10,6 +10,7 @@
 //! page and the selection follows it, so it always stays in view.
 
 use super::{Block, BroOpt, CaveOpt, HostOpt, IMAGINE_RECHECK, IMAGINE_WATCH_FOR, Item, RAIN, Row, SECTIONS, Section, SettingsView, SkillOpt, ToolOpt, UpdOpt, VoiceOpt, WatchOpt, cave_choices, open_source, rows, source_link, team_knob};
+use super::MobileOpt;
 use bro_core::config::{Material, TabOverflow};
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::brand::{self, Mark};
@@ -93,6 +94,7 @@ fn glyph(s: Section) -> &'static str {
         Section::Appearance => "\u{F03D8}",
         Section::Sessions => "\u{F018D}",
         Section::Server => "\u{F048B}",
+        Section::Mobile => "\u{F011C}",
         Section::Voice => "\u{F036C}",
         Section::Caveman => "\u{F08B7}",
         Section::Watchdog => "\u{F0A43}",
@@ -520,6 +522,13 @@ fn login_mark(id: &str, cx: &Cx) -> Option<Mark> {
 fn button(v: &SettingsView, row: Row, cx: &Cx) -> Option<(&'static str, widgets::Kind)> {
     use widgets::Kind::{Primary, Secondary};
     let jt = cx.svc.state().justtools.clone();
+    if row == Row::Mobile(MobileOpt::Package) {
+        if cx.svc.rmm_status().is_some_and(|status| matches!(status.phase, bro_bridge::rmm::Phase::Installing | bro_bridge::rmm::Phase::Starting)) { return None; }
+        return cx.svc.settings().mobile_companion.enabled.then_some(("Repair download", Secondary));
+    }
+    if row == Row::Mobile(MobileOpt::Disconnect) {
+        return Some(("Disconnect all", Secondary));
+    }
     match row {
         Row::Tool(ToolOpt::Install) => match () {
             _ if jt.job.is_some() || jt.checking || !jt.checked => None,
@@ -590,6 +599,7 @@ fn control(v: &SettingsView, it: &Item, ui: &Ui, st: &Settings, cx: &Cx) -> Ctl 
         Row::Bro(BroOpt::Theme) => Ctl::Link { value, ink: vink.value(t) },
         Row::Bro(BroOpt::Font) => Ctl::Step { value, ink: vink.value(t), mono: true, mark: None, press: None },
         Row::Watch(WatchOpt::Reviewer) => step(login_mark(&value, cx)),
+        Row::Mobile(MobileOpt::Display) => step(None),
         Row::Bro(BroOpt::Screensaver | BroOpt::Tint) | Row::Watch(WatchOpt::Wake | WatchOpt::Budget) | Row::Preset => step(None),
         Row::Voice(VoiceOpt::Escape | VoiceOpt::Background | VoiceOpt::Mute) => switch(),
         Row::Voice(VoiceOpt::Provider | VoiceOpt::Model | VoiceOpt::Voice | VoiceOpt::Volume | VoiceOpt::Listen) => step(None),

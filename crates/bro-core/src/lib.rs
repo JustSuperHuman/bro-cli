@@ -54,6 +54,7 @@ pub mod tool_skills;
 pub mod envfile;
 pub mod managed_skill;
 pub mod self_update;
+pub mod rmm;
 pub mod proc_tree;
 pub mod orchestrator;
 pub mod coordination;

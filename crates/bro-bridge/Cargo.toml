@@ -23,6 +23,7 @@ vt100.workspace = true
 tokio.workspace = true
 axum.workspace = true
 reqwest.workspace = true
+tokio-tungstenite.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
 http.workspace = true
@@ -38,4 +39,3 @@ hayro = "0.8"
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio-tungstenite.workspace = true
