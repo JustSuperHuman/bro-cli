@@ -90,6 +90,10 @@ impl Config {
     /// `provider_id` may be `provider@tier` (a new-api relay token for one tier); the
     /// provider's plain key is the fallback, as in v1 `newApiKey`.
     pub fn key_for(&self, provider_id: &str, key_env: Option<&str>) -> Option<String> {
+        // Just Superhuman's token lives in `~/.bro/jsh/token.json`, never in this file
+        if provider_id == crate::jsh::PROVIDER_ID {
+            return crate::jsh::token();
+        }
         let nonempty = |s: &String| !s.trim().is_empty();
         if let Some(k) = self.keys.get(provider_id).filter(|k| nonempty(k)) {
             return Some(k.clone());

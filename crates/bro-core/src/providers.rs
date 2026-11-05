@@ -257,7 +257,13 @@ pub fn load(cfg: &crate::config::Config) -> Vec<Provider> {
         .filter(|v| v.get("providers").is_some_and(Value::is_array))
         .or_else(|| serde_json::from_str(BUNDLED_MODELS_JSON).ok())
         .unwrap_or_else(|| serde_json::json!({ "providers": [] }));
-    merge(&catalogue, cfg)
+    let mut all = merge(&catalogue, cfg);
+    // signed in to Just Superhuman: its Claude is a provider like any other
+    if let Some(jsh) = crate::jsh::provider() {
+        all.retain(|p| p.id != jsh.id);
+        all.push(jsh);
+    }
+    all
 }
 
 /// Find a provider by id.

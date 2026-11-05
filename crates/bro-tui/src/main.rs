@@ -18,6 +18,7 @@ mod console_nav;
 mod editor;
 mod env_cmd;
 mod gemini_cmd;
+mod jsh_cmd;
 mod file_view;
 mod focus;
 mod folder;
@@ -226,6 +227,17 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("bro gemini: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(cli::Command::JshHelp) => {
+            print!("{}", jsh_cmd::HELP);
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Command::Jsh(cmd)) => match jsh_cmd::run(cmd) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro jsh: {e}");
                 ExitCode::FAILURE
             }
         },

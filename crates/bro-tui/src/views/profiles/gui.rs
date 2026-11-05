@@ -31,6 +31,10 @@ const YES: usize = 8;
 const ADD_GEMINI: usize = 9;
 const EDIT_KEY: usize = 10;
 const GOOGLE: usize = 11;
+const JSH_IN: usize = 12;
+const JSH_OUT: usize = 13;
+const JSH_CANCEL: usize = 14;
+const JSH_OPEN: usize = 15;
 const ROW: usize = 100;
 
 /// A login row (two lines), and the list's inner padding.
@@ -104,7 +108,8 @@ pub(crate) fn draw(v: &mut ProfilesView, ui: &mut Ui, area: Rect, cx: &mut Cx) -
     ];
     let widths: Vec<f32> = buttons.iter().map(|(icon, label, key, _)| key_button_width(ui, Some(*icon), label, Some(*key))).collect();
     let one_line = widths.iter().sum::<f32>() + 8.0 * 2.0 + 24.0 <= col.w;
-    let bar_y = col.y + head_h + 20.0;
+    let jsh = jsh_card(ui, Rect::new(col.x, col.y + head_h + 16.0, col.w, 0.0), id, !modal);
+    let bar_y = col.y + head_h + 16.0 + jsh + 16.0;
     let mut spots: Vec<Rect> = vec![];
     if one_line {
         let mut x = col.x;
@@ -465,6 +470,10 @@ fn saving_note(ui: &mut Ui, right: f32, mid: f32) {
 
 /// Target `n` was clicked: what the terminal UI does for the same button or row.
 pub(crate) fn click(v: &mut ProfilesView, n: usize, _p: Point, _mods: KeyModifiers, _count: u32, cx: &mut Cx) {
+    if (JSH_IN..=JSH_OPEN).contains(&n) {
+        jsh_click(n, cx);
+        return;
+    }
     if v.pending.is_some() {
         return;
     }
@@ -714,4 +723,133 @@ pub(crate) fn key_button_ink(ui: &mut Ui, r: Rect, icon: Option<&str>, label: &s
         ui.hit(r, a);
     }
     hot
+}
+
+// ------------------------------------------------------------------ Just Superhuman
+
+/// The sign-in as last read: one small read of two files at most twice a second, not on every frame.
+fn jsh_snapshot() -> bro_core::jsh::Snapshot {
+    use std::sync::Mutex;
+    static LAST: Mutex<Option<(std::time::Instant, bro_core::jsh::Snapshot)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, snap)) = last.as_ref()
+        && at.elapsed() < std::time::Duration::from_millis(500)
+    {
+        return snap.clone();
+    }
+    let snap = bro_core::jsh::login().snapshot();
+    *last = Some((std::time::Instant::now(), snap.clone()));
+    snap
+}
+
+/// The Just Superhuman card above the toolbar: signed out (what it is and **Sign in**), waiting (the code to
+/// check, the browser, cancel) or signed in (who, which organization, the credits and **Sign out**). Returns its
+/// height.
+fn jsh_card(ui: &mut Ui, at: Rect, id: u64, active: bool) -> f32 {
+    let t = ui.t;
+    let snap = jsh_snapshot();
+    let act = |n: usize| active.then_some(Action::View(id, n));
+    let h = match () {
+        _ if snap.pending.is_some() => 112.0,
+        _ if snap.signed_in => 96.0,
+        _ if snap.error.is_some() => 98.0,
+        _ => 76.0,
+    };
+    let card = Rect::new(at.x, at.y, at.w, h);
+    page_card(ui, card);
+    let inner = card.inset(16.0);
+    let title = Style::new(size::BODY, weight::SEMIBOLD, t.text);
+    let quiet = Style::new(size::SMALL, weight::REGULAR, t.muted);
+    let danger = Style::new(size::SMALL, weight::REGULAR, t.danger);
+    let sub = |ui: &mut Ui, y: f32, text: &str, st: Style, right: f32| {
+        ui.label_in(Rect::new(inner.x, y, (inner.w - right).max(40.0), 18.0), text, st, Align::Left);
+    };
+    if let Some(p) = &snap.pending {
+        ui.label_in(Rect::new(inner.x, inner.y, inner.w, 20.0), "Approve bro in your browser", title, Align::Left);
+        ui.label_in(Rect::new(inner.x, inner.y + 26.0, 260.0, 36.0), &p.user_code, Style::mono(26.0, t.text), Align::Left);
+        let mins = ((p.expires_at - bro_core::util::now_ms()) / 60_000).max(0);
+        let line = format!("Make sure this code matches the page, then approve. Waiting; the code expires in {mins} min.");
+        sub(ui, inner.y + 66.0, &line, quiet, 0.0);
+        let cw = key_button_width(ui, None, "Cancel", None);
+        let ow = key_button_width(ui, None, "Open browser", None);
+        key_button(ui, Rect::new(inner.right() - cw, inner.y, cw, BUTTON_H), None, "Cancel", None, Kind::Secondary, act(JSH_CANCEL));
+        key_button(ui, Rect::new(inner.right() - cw - 8.0 - ow, inner.y, ow, BUTTON_H), None, "Open browser", None, Kind::Secondary, act(JSH_OPEN));
+    } else if let (true, Some(a)) = (snap.signed_in, snap.account.as_ref()) {
+        let w = key_button_width(ui, None, "Sign out", None);
+        key_button(ui, Rect::new(inner.right() - w, inner.y, w, BUTTON_H), None, "Sign out", None, Kind::Secondary, act(JSH_OUT));
+        ui.label_in(Rect::new(inner.x, inner.y, (inner.w - w - 12.0).max(40.0), 20.0), &format!("Just Superhuman · {}", a.who()), title, Align::Left);
+        let who = [a.user.email.as_str(), a.organization.name.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
+        sub(ui, inner.y + 22.0, &who, quiet, w + 12.0);
+        let total = (a.credits.granted + a.credits.monthly_allowance).max(a.credits.available).max(1);
+        let g = crate::views::usage::gui::gauge_fit(ui, Rect::new(inner.x, inner.y + 52.0, 140.0, 10.0));
+        let left = a.credits.available as f32 / total as f32;
+        crate::views::usage::gui::gauge(ui, g, left.clamp(0.0, 1.0), if left < 0.1 { t.danger } else if left < 0.3 { t.inline } else { t.good });
+        let mut line = format!("{} left", a.credits_text());
+        if a.credits.granted > 0 {
+            line.push_str(&format!(" · {} granted", bro_core::jsh::grouped(a.credits.granted)));
+        }
+        if a.credits.monthly_allowance > 0 {
+            line.push_str(&format!(" · {} a month", bro_core::jsh::grouped(a.credits.monthly_allowance)));
+            if let Some(at) = a.credits.resets_at {
+                line.push_str(&format!(" · {}", bro_core::jsh::renews_text(at)));
+            }
+        }
+        if !a.claude.available && !a.claude.reason.is_empty() {
+            line = a.claude.reason.clone();
+        }
+        let ink = if a.claude.available { t.text } else { t.danger };
+        ui.label_in(Rect::new(inner.x + g.r.w + 12.0, inner.y + 47.0, (inner.w - g.r.w - 12.0).max(40.0), 20.0), &line, Style::new(size::SMALL, weight::MEDIUM, ink), Align::Left);
+        if let Some(e) = &snap.error {
+            sub(ui, inner.y + 70.0, e, danger, 0.0);
+        }
+    } else {
+        let w = key_button_width(ui, None, "Sign in", None);
+        key_button(ui, Rect::new(inner.right() - w, inner.y, w, BUTTON_H), None, "Sign in", None, Kind::Primary, act(JSH_IN));
+        ui.label_in(Rect::new(inner.x, inner.y, (inner.w - w - 12.0).max(40.0), 20.0), "Just Superhuman", title, Align::Left);
+        sub(ui, inner.y + 22.0, "Run Claude Code on your organization's credits. Sign in once; it shows up in the launcher.", quiet, w + 12.0);
+        if let Some(e) = &snap.error {
+            sub(ui, inner.y + 46.0, e, danger, 0.0);
+        }
+    }
+    h
+}
+
+/// A click on the Just Superhuman card. The requests run on their own threads; the card follows
+/// [`bro_core::jsh::Login`]'s state, which wakes the window when it changes.
+fn jsh_click(n: usize, cx: &mut Cx) {
+    use crate::alerts::Kind as Toast;
+    let tx = cx.tx.clone();
+    let say = move |kind: Toast, text: String| {
+        let _ = tx.send(crate::pane::Event::Toast(kind, text));
+    };
+    if cx.svc.is_demo() {
+        say(Toast::Info, "the demo doesn't sign in to anything".into());
+        return;
+    }
+    match n {
+        JSH_IN | JSH_OPEN => {
+            std::thread::spawn(move || match bro_core::jsh::login().begin() {
+                Ok((p, fresh)) => {
+                    if (fresh || n == JSH_OPEN)
+                        && let Err(e) = crate::panes::links::open(&p.verification_uri_complete)
+                    {
+                        say(Toast::Error, format!("couldn't open your browser ({e}). Go to {} and enter {}", p.verification_uri, p.user_code));
+                    }
+                }
+                Err(e) => say(Toast::Error, format!("{e:#}")),
+            });
+        }
+        JSH_CANCEL => bro_core::jsh::login().cancel(),
+        JSH_OUT => {
+            std::thread::spawn(move || {
+                let out = bro_core::jsh::login().sign_out();
+                if out.revoked {
+                    say(Toast::Info, "Signed out of Just Superhuman. This device can no longer spend your credits.".into());
+                } else {
+                    say(Toast::Error, "Signed out here, but Just Superhuman couldn't be reached to revoke this device. Revoke it under Account > Devices on the website.".into());
+                }
+            });
+        }
+        _ => {}
+    }
 }

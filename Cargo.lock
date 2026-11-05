@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "bro-bridge"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "anyhow",
  "axum",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "bro-core"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "anyhow",
  "argon2",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "bro-gfx"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "bro-host"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "anyhow",
  "bro-core",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "bro-media"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "cpal",
  "hayro",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "bro-proxy"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "bro-tui"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "bro-voice"
-version = "2.1.26"
+version = "2.1.27"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

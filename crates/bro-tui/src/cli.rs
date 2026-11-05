@@ -43,6 +43,9 @@ pub enum Command {
     /// `bro gemini login | status | logout` — the Google sign-in behind the `gemini` provider.
     Gemini(crate::gemini_cmd::GeminiCmd),
     GeminiHelp,
+    /// `bro jsh login | status | logout`: the Just Superhuman account behind the `justsuperhuman` provider.
+    Jsh(crate::jsh_cmd::JshCmd),
+    JshHelp,
     /// `bro hook <kind> …` — Claude Code runs this as a hook bro gave the session (`peers`: see
     /// [`bro_core::peers`]); the event comes in on stdin. Not for typing, so not in [`HELP`].
     Hook(Vec<String>),
@@ -92,6 +95,8 @@ usage
   bro gemini login | status | logout
                    sign in with Google to run Claude Code, Codex and Pi on Gemini 4 Argon through
                    your Google AI subscription (status: plan and quota left per model)
+  bro jsh login | status | logout
+                   sign in to Just Superhuman to run Claude Code on your organization's credits
   bro skills [add | remove | sync] [repo]
                    agent skills from git repos bro watches (e.g. bro skills add t3dotgg/tstack):
                    every skill in them goes into your Claude and Codex homes and stays in step
@@ -160,6 +165,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
     if args.first().map(String::as_str) == Some("host") {
         return crate::host_cmd::parse(&args[1..]).map(Command::Host);
+    }
+    if args.first().map(String::as_str) == Some("jsh") {
+        return crate::jsh_cmd::parse(&args[1..]).map(|a| a.map_or(Command::JshHelp, Command::Jsh));
     }
     if args.first().map(String::as_str) == Some("gemini") {
         return crate::gemini_cmd::parse(&args[1..]).map(|a| a.map_or(Command::GeminiHelp, Command::Gemini));

@@ -1265,6 +1265,12 @@ impl Services {
                 list.push(tp(&p.id, format!("{} · {}", if p.is_codex() { "Codex" } else { "Claude" }, p.name), h, vec![], "agent", (!desc.is_empty()).then_some(desc), Some(h)));
             }
         }
+        if let (true, Some((account, _))) = (bro_core::jsh::signed_in(), bro_core::jsh::cached_account()) {
+            let credits = format!("{} · {}", account.credits_text(), account.organization.name);
+            list.push(tp(bro_core::jsh::BRIDGE_PROFILE_ID, "Claude Code · Just Superhuman".into(), "claude", vec![], "agent", Some(credits), Some("claude")));
+        } else if bro_core::jsh::signed_in() {
+            list.push(tp(bro_core::jsh::BRIDGE_PROFILE_ID, "Claude Code · Just Superhuman".into(), "claude", vec![], "agent", Some("Your Just Superhuman credits".into()), Some("claude")));
+        }
         list.push(tp("pi", "Pi".into(), "pi", vec![], "agent", Some("pi coding agent".into()), None));
         list.push(tp("omp", "omp".into(), "omp", vec![], "agent", Some("oh-my-pi".into()), None));
         self.with_bridge("bridge::set_profiles", |b| b.set_profiles(list));

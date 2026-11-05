@@ -19,6 +19,7 @@ pub mod profiles;
 pub mod creds;
 pub mod gemini;
 pub mod gemini_api;
+pub mod jsh;
 pub mod sessions;
 pub mod terminal_prompt;
 pub mod recap;

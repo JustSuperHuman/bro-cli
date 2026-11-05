@@ -539,7 +539,9 @@ impl Launcher {
         let n = self.data.models.get(&p.id).map(Vec::len).unwrap_or(p.models.len());
         let keyed = p.no_key || self.data.keyed.iter().any(|k| k == &p.id);
         let mut detail = format!("{n} model{}", if n == 1 { "" } else { "s" });
-        if p.is_google_login() {
+        if p.id == bro_core::jsh::PROVIDER_ID {
+            detail.push_str(" · your credits");
+        } else if p.is_google_login() {
             detail.push_str(if keyed { " · google ai subscription" } else { " · enter signs in with Google" });
         } else if !keyed {
             detail.push_str(" · no key");

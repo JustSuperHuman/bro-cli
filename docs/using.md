@@ -26,6 +26,30 @@ Select a profile and choose **Remove** to delete its local login, settings and
 saved sessions after confirmation. Bro protects the machine's default logins
 (`claude:local` and `codex:local`) from removal.
 
+## Just Superhuman
+
+Profiles opens with a **Just Superhuman** card. **Sign in** opens your browser to approve "bro" on this computer
+(the card shows the code to check, and waits), or run `bro jsh login`. Signed in, the card shows your name,
+organization and credits with **Sign out** (`bro jsh logout`), and **Just Superhuman** appears in the launcher:
+Claude Code started on it runs through Just Superhuman's Claude and spends the organization's credits; no Claude
+login is involved. Codex and Pi can use it through bro-proxy. The token lives in `~/.bro/jsh/token.json`, apart
+from `config.json`. `BRO_JSH_ORIGIN` points bro at another accounts server (`http://auth.localhost:8790` locally).
+Credits refresh every few minutes; if the device is revoked on the website, bro signs out and says so.
+
+Phone (bridge, same token auth as the other `/api/*` routes; times are ms since the epoch, the token is never sent):
+
+- `GET /api/jsh` returns `{ signedIn, account?: { user: { name, email }, organization: { name, slug }, credits:
+  { available, granted, monthlyAllowance, resetsAt }, claude: { available, reason }, host?: { url, status } },
+  pending?: { userCode, verificationUri, verificationUriComplete, expiresAt }, error? }`.
+- `POST /api/jsh/login` starts the device flow on this computer and polls it in the background; it returns the
+  same shape with `pending`. A second call while one waits returns that flow. If Just Superhuman can't be reached:
+  502 with the same shape, `error` and `message`.
+- `POST /api/jsh/logout` revokes and returns `{ signedIn: false }` (plus `warning` if the revoke couldn't reach
+  the server; the token is gone from this computer either way).
+- While signed in, the profile list has `{ id: "jsh:claude", label: "Claude Code · Just Superhuman", group:
+  "agent", agent: "claude", description: "1,840 credits · Org" }`. Creating a session with that `profileId`
+  launches Claude Code on the Just Superhuman provider.
+
 ## Proxy mode
 
 With several Claude or ChatGPT subscriptions you don't have to pick one per session. Turn on **Proxy mode**

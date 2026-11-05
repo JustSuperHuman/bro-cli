@@ -44,6 +44,9 @@ pub(crate) fn create_target(profile_id: Option<&str>) -> Option<(Harness, Option
     if let Some(h) = Harness::ALL.iter().find(|h| h.label() == id) {
         return Some((*h, None));
     }
+    if id == bro_core::jsh::BRIDGE_PROFILE_ID {
+        return Some((Harness::Claude, None));
+    }
     match id.split_once(':') {
         Some(("claude", _)) => Some((Harness::Claude, Some(id.to_string()))),
         Some(("codex", _)) => Some((Harness::Codex, Some(id.to_string()))),
@@ -315,8 +318,10 @@ impl App {
                 let cwd = req.cwd.clone().filter(|c| c.is_dir()).or_else(|| self.current_project()).or_else(dirs::home_dir).unwrap_or_default();
                 match create_target(req.profile_id.as_deref()) {
                     Some((harness, profile_id)) => {
+                        // Claude Code on the signed-in Just Superhuman account
+                        let jsh = req.profile_id.as_deref() == Some(bro_core::jsh::BRIDGE_PROFILE_ID);
                         // a watchdog's second opinion asks for a model ("opus")
-                        let spec = LaunchSpec { harness, profile_id, provider_id: None, model: req.model.clone(), cwd, resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: req.args.clone(), orchestrator: false };
+                        let spec = LaunchSpec { harness, profile_id: if jsh { None } else { profile_id }, provider_id: jsh.then(|| bro_core::jsh::PROVIDER_ID.to_string()), model: req.model.clone().or_else(|| if jsh { bro_core::jsh::default_model() } else { None }), cwd, resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: req.args.clone(), orchestrator: false };
                         let mut lr = LaunchRequest::new(spec, Place::Tab);
                         lr.reply = Some(reply);
                         lr.name = req.title.clone();

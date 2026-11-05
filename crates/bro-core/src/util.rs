@@ -249,6 +249,7 @@ pub(crate) mod test_env {
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
         "BRO_GEMINI_BASE_URL",
+        "BRO_JSH_ORIGIN",
         "BRO_DIR",
         "CLAUDE_POOL_DIR",
         "BRO_CODEX_PROFILES_DIR",

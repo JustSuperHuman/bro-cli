@@ -56,6 +56,7 @@ pub mod insights;
 mod file_search;
 mod folders;
 mod hosts;
+mod jsh;
 mod media;
 mod mod_jobs;
 mod model;

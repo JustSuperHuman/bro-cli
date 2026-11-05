@@ -2626,3 +2626,42 @@ async fn the_gallery_lists_a_sessions_media_newest_first_and_media_tied_to_the_w
     assert_eq!(raw_status(stray).await, 403);
     let _ = std::fs::remove_file(attached);
 }
+
+// ----- Just Superhuman sign-in (jsh.rs) ----------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jsh_routes_report_sign_in_state_and_never_the_token() {
+    let harness = Harness::start();
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: only this test touches these in this crate's test binary.
+    unsafe {
+        std::env::set_var("BRO_DIR", home.path().join(".bro"));
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("USERPROFILE", home.path());
+        std::env::set_var("BRO_JSH_ORIGIN", "http://127.0.0.1:9");
+    }
+    let client = reqwest::Client::new();
+    let out: Value = client.get(harness.url("/api/jsh")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(out, json!({ "signedIn": false }));
+    // the server can't be reached: 502 with the same shape and a plain-English error
+    let res = client.post(harness.url("/api/jsh/login")).send().await.unwrap();
+    assert_eq!(res.status(), 502);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["signedIn"], false);
+    assert!(body["error"].as_str().unwrap().starts_with("Couldn't reach Just Superhuman"), "{body}");
+    // signed in on disk: account shown, token never
+    let dir = home.path().join(".bro").join("jsh");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("token.json"), r#"{"token":"jsh_user_secret","origin":"http://127.0.0.1:9"}"#).unwrap();
+    std::fs::write(dir.join("account.json"), json!({ "account": { "user": { "name": "Sam", "email": "s@x.io" }, "organization": { "name": "Org", "slug": "org" }, "credits": { "available": 5, "granted": 5, "monthlyAllowance": 0, "resetsAt": null } }, "fetchedAt": 1 }).to_string()).unwrap();
+    let text = client.get(harness.url("/api/jsh")).send().await.unwrap().text().await.unwrap();
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!((body["signedIn"].clone(), body["account"]["credits"]["available"].clone()), (json!(true), json!(5)));
+    assert!(!text.contains("jsh_user_secret"));
+    // logout with an unreachable server still signs out here, with a warning
+    let out: Value = client.post(harness.url("/api/jsh/logout")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(out["signedIn"], false);
+    assert!(out["warning"].is_string());
+    let after: Value = client.get(harness.url("/api/jsh")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(after["signedIn"], false);
+}

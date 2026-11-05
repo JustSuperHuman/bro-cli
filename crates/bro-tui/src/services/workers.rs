@@ -33,6 +33,24 @@ pub(super) fn spawn_all(svc: &Services) {
     }
     svc.start_orbit_relay();
     svc.start_orbit_voice(false);
+    spawn_jsh(svc);
+}
+
+/// Just Superhuman: a sign-in (from the window, the phone or `bro jsh`) or a new reading of the credits puts the
+/// provider in the launcher and the phone's profile list; the account is re-read every few minutes, off the UI thread.
+fn spawn_jsh(svc: &Services) {
+    let s = svc.clone();
+    bro_core::jsh::login().on_change(move || {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            let cfg = s.state().config.clone().unwrap_or_default();
+            let providers = guard("providers::load", || bro_core::providers::load(&cfg));
+            s.update(|st| st.providers = avail(providers, &mut st.issues));
+            load_models(&s);
+            s.push_bridge_profiles();
+        });
+    });
+    bro_core::jsh::spawn_refresher();
 }
 
 /// What a second bro runs (see `Services::start_guest`): data and usage, with its proxy started on demand.

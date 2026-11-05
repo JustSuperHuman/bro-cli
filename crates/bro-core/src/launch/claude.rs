@@ -101,6 +101,13 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             if p.disable_1m_context {
                 cmd.set_env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
             }
+            if p.id == crate::jsh::PROVIDER_ID {
+                // Just Superhuman's token is the only credential here: no Claude login's token (from this
+                // shell or a profile) may stand in for it or send Claude Code to /login
+                for var in ["CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"] {
+                    cmd.remove_env(var);
+                }
+            }
             for (k, v) in &p.env {
                 cmd.set_env(k, v.clone());
             }

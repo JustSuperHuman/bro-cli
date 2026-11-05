@@ -136,6 +136,9 @@ pub(crate) fn router(state: AppState) -> Router {
             patch(rest::rename_project).delete(rest::delete_project),
         )
         .route("/api/peers/{*rest}", any(rest::peers_unavailable))
+        .route("/api/jsh", get(crate::jsh::get))
+        .route("/api/jsh/login", post(crate::jsh::login))
+        .route("/api/jsh/logout", post(crate::jsh::logout))
         .route("/api/orchestrator", get(rest::orchestrator_status))
         .route("/api/coordination", get(crate::coordination::http_snapshot))
         .route("/api/coordination/command", post(crate::coordination::http_command))
