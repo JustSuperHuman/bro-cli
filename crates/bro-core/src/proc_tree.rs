@@ -100,6 +100,54 @@ impl Drop for ProcessTree {
     }
 }
 
+impl ProcessTree {
+    /// A handle for looking through this tree while it runs (the Slop Collector, [`crate::slop`]).
+    pub fn scope(&self) -> Scope {
+        Scope {
+            root: self.root,
+            #[cfg(windows)]
+            job: self.job.clone(),
+        }
+    }
+}
+
+/// What the Slop Collector looks through: the processes a tree holds now, and ending one only while the tree still
+/// holds it. Cheap to clone. Hold it only while looking: on Windows it keeps the job open.
+#[derive(Clone)]
+pub struct Scope {
+    root: Option<u32>,
+    #[cfg(windows)]
+    job: std::sync::Arc<imp::Job>,
+}
+
+impl Scope {
+    /// The tree's first process (the session's program).
+    pub fn root(&self) -> Option<u32> {
+        self.root
+    }
+
+    /// Every process the tree holds now, however it was started and whoever started it (Windows: the job's
+    /// members, which no launcher exiting can lose). Empty where bro can't tell.
+    pub fn pids(&self) -> Vec<u32> {
+        #[cfg(windows)]
+        return imp::members(&self.job);
+        #[cfg(not(windows))]
+        Vec::new()
+    }
+
+    /// End `pid`, but only while this tree still holds it and it's the process that started at `started` (as
+    /// [`crate::slop`] read it), so a reused PID is never touched. True when it was ended.
+    pub fn end(&self, pid: u32, started: u64) -> bool {
+        #[cfg(windows)]
+        return imp::end(&self.job, pid, started);
+        #[cfg(not(windows))]
+        {
+            let _ = (pid, started);
+            false
+        }
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use std::io;
@@ -176,6 +224,62 @@ mod imp {
             job.terminate();
         }
         result
+    }
+
+    /// The job's processes now.
+    pub fn members(job: &Job) -> Vec<u32> {
+        use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, GetLastError};
+        use windows_sys::Win32::System::JobObjects::{JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectBasicProcessIdList, QueryInformationJobObject};
+        let word = std::mem::size_of::<usize>();
+        let head = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+        let mut room = 256usize;
+        for _ in 0..4 {
+            let mut buf = vec![0usize; (head + room * word).div_ceil(word)];
+            let ok = unsafe { QueryInformationJobObject(job.0.as_raw_handle(), JobObjectBasicProcessIdList, buf.as_mut_ptr().cast(), (buf.len() * word) as u32, std::ptr::null_mut()) };
+            // SAFETY: the buffer is word-aligned and at least the header long; the list sits after the header
+            let list = unsafe { &*(buf.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST) };
+            let assigned = list.NumberOfAssignedProcesses as usize;
+            if ok == 0 {
+                if unsafe { GetLastError() } == ERROR_MORE_DATA && assigned > room {
+                    room = assigned + 64;
+                    continue;
+                }
+                return vec![];
+            }
+            let n = (list.NumberOfProcessIdsInList as usize).min(room);
+            if assigned > n {
+                room = assigned + 64;
+                continue;
+            }
+            let ids = unsafe { std::slice::from_raw_parts((buf.as_ptr() as *const u8).add(head) as *const usize, n) };
+            return ids.iter().map(|&p| p as u32).collect();
+        }
+        vec![]
+    }
+
+    /// End `pid` while the job holds it and it started at `started` (a FILETIME, as `GetProcessTimes` says).
+    pub fn end(job: &Job, pid: u32, started: u64) -> bool {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::{GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION};
+        let raw = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if raw.is_null() {
+            return false;
+        }
+        let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut inside = 0;
+        if unsafe { IsProcessInJob(process.as_raw_handle(), job.0.as_raw_handle(), &mut inside) } == 0 || inside == 0 {
+            return false;
+        }
+        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        if unsafe { GetProcessTimes(process.as_raw_handle(), &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+            return false;
+        }
+        if ((created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64) != started {
+            return false;
+        }
+        unsafe { TerminateProcess(process.as_raw_handle(), 1) != 0 }
     }
 
     fn resume(pid: u32) -> io::Result<()> {

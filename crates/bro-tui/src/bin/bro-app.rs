@@ -45,10 +45,12 @@ fn main() {
 }
 
 /// The desktop app: `bro gui` from the newest bro, hidden from the console (a console bro.exe gets one, hidden:
-/// its sessions' programs share it instead of each opening their own).
+/// its sessions' programs share it instead of each opening their own). That bro starts the window as a copy of
+/// its own and stays until it's on screen: a window that a graphics driver crashes is started again without that
+/// graphics API, and a window that can't start says why in a message box.
 fn desktop(args: Vec<String>) {
     let mut cmd = Command::new(find_bro());
-    cmd.arg("gui").arg("--gui-child").args(&args);
+    cmd.arg("gui").args(&args);
     if let Ok(cwd) = std::env::current_dir() {
         cmd.current_dir(cwd);
     }

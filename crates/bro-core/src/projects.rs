@@ -88,6 +88,19 @@ fn normalized_key(root: &Path) -> String {
     if cfg!(windows) { s.to_lowercase() } else { s }
 }
 
+/// A fixed hash of the project's folder name (the last segment of its `key`, any case): what its colour is picked by,
+/// so a project keeps its colour wherever it lives and on every screen bro draws it on.
+pub fn color_hash(key: &str) -> u64 {
+    let name = key.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(key).to_lowercase();
+    // FNV-1a, explicitly fixed instead of a platform-dependent/randomized hasher.
+    name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The project's hue in degrees (20 to 340), for its letter tile.
+pub fn hue(key: &str) -> f32 {
+    20.0 + (color_hash(key) % 3200) as f32 / 10.0
+}
+
 fn display_name(root: &Path) -> String {
     if let Some(name) = root.file_name() {
         return name.to_string_lossy().into_owned();
@@ -135,6 +148,16 @@ fn read_branch(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_keeps_its_hue_wherever_it_lives() {
+        assert_eq!(hue("f:/code/justgains"), hue("J:\\JustGains"));
+        assert_eq!(hue("f:/code/justgains/"), hue("justgains"));
+        assert_ne!(hue("f:/claudia"), hue("f:/holmes"));
+        for key in ["f:/claudia", "j:/ads/holmes", "k:", "/", ""] {
+            assert!((20.0..340.0).contains(&hue(key)), "{key}");
+        }
+    }
 
     #[test]
     fn git_root_and_plain_dir() {

@@ -1,13 +1,22 @@
-//! The sidebar (the project tabs above the sessions are `strip.rs`).
+//! The sidebar (the session tabs above the sessions are `strip.rs`).
 //!
-//! Sidebar, top to bottom: the wordmark with settings and the clock; the filter; the orchestrator, pinned;
-//! projects with their sessions (status, agent, name, login · model, age, a note on why one waits or what it
-//! did); then, pinned to the bottom, the tile switch, New / Continue with one-click agents, the usage left on
-//! each login, and the proxy and phone bridge. Rows, order, numbering and every click do what the terminal UI's
-//! sidebar does (they're the same [`crate::sidebar`] rows and [`SideHit`]s).
+//! Sidebar, top to bottom: the wordmark with voice, pictures, settings and the clock; the filter; the
+//! orchestrator, pinned; projects with their sessions (status, agent, name, login · model, age, a note on why one
+//! waits or what it did); then, pinned to the bottom, the tile switch, New / Continue with one-click agents, the
+//! usage left on each login, and the proxy and phone bridge. Rows, order, numbering and every click do what the
+//! terminal UI's sidebar does (they're the same [`crate::sidebar`] rows and [`SideHit`]s).
+//!
+//! Beside the session tabs, which hold the sessions, the list is compact ([`compact`]): what needs you, every
+//! session and the orchestrators, then the projects with their icons. Only a window too short for the tabs lists
+//! the sessions here.
+
+mod compact;
+pub(super) use compact::project_icon;
 
 use super::actions::Action;
 use super::chrome::{harness_mark, session_badge, session_mark, status_dot};
+use super::kit::motion::Spring;
+use super::layout::{flow_begin, key_of};
 use super::kit::{Cursor, Style, Ui, radius, size, weight, widgets};
 use crate::app::App;
 use crate::app::SideHit;
@@ -83,7 +92,49 @@ const PAD: f32 = 10.0;
 /// The header (wordmark, buttons, clock) ends this far below the sidebar's top.
 pub const HEAD_BOTTOM: f32 = 44.0;
 
-pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_window: bool, media_open: bool, media_unseen: usize, stage: &mut super::orbit_stage::Drawn) {
+/// How wide the sidebar is drawn right now: `target` (where it settles) reached on a spring, or followed 1:1 while its
+/// edge is dragged. Safe to ask for more than once a frame (the content layer's edge follows it too).
+pub fn slide_width(ui: &mut Ui, target: f32, dragging: bool) -> f32 {
+    if dragging || super::layout::resizing() {
+        ui.spring_set("side-slide", target / 64.0);
+    }
+    // (in 64ths of a pixel, so it counts as arrived when it stops showing)
+    ui.spring("side-slide", target / 64.0, super::layout::FLOW, target / 64.0).max(0.0) * 64.0
+}
+
+/// The sidebar as it comes and goes: `r` is where it settles (zero wide when it's hidden), `full_w` the width it has
+/// when shown. The layout around it jumps to its final shape at once (so nothing is resized along the way) while the
+/// sidebar itself slides in or out on a spring, the cards gliding into the room it leaves in step with it. A drag
+/// of its edge is followed 1:1.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_sliding(app: &mut App, ui: &mut Ui, r: Rect, full_w: f32, s: &mut SideState, focused_window: bool, media_open: bool, media_unseen: usize, icons: &mut super::icons::Icons) {
+    let shown = slide_width(ui, r.w, s.resizing);
+    let width = if r.w > 0.0 { r.w } else { full_w.max(shown) };
+    if shown < 0.5 && r.w <= 0.0 {
+        return;
+    }
+    if (shown - width).abs() < 0.5 {
+        draw(app, ui, Rect { w: width, ..r }, s, focused_window, media_open, media_unseen, icons);
+        return;
+    }
+    // the sidebar keeps its full width and slides: its right edge is where the spring has got to
+    let at = Rect { x: r.x + shown - width, w: width, ..r };
+    ui.clip(Rect { w: shown, ..r }, 0.0);
+    draw(app, ui, at, s, focused_window, media_open, media_unseen, icons);
+    ui.unclip();
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, focused_window: bool, media_open: bool, media_unseen: usize, icons: &mut super::icons::Icons) {
+    let tokens = ui.t.sidebar();
+    ui.with_tokens(&tokens, |ui| {
+        if ui.t.palette.is_some() { ui.glass(r, bro_gfx::Corners::all(0.0), ui.t.bg); }
+        draw_inner(app, ui, r, s, focused_window, media_open, media_unseen, icons);
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_inner(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_window: bool, media_open: bool, media_unseen: usize, icons: &mut super::icons::Icons) {
     let t = ui.t;
     let focused = app.side_focus && !app.overlay.is_open();
     // resize edge: lit under the pointer and while it's dragged
@@ -100,7 +151,8 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_win
     let clock = crate::util::clock();
     let cs = Style::new(size::SMALL, weight::MEDIUM, t.faint);
     let cw = ui.measure(&clock, cs);
-    ui.label(Point::new(head.right() - cw - 4.0, head.y + 10.0), &clock, cs);
+    // its minutes roll over like an odometer's
+    ui.rolling("side-clock", head.right() - 4.0, head.y + 10.0, &clock, cs, None);
     let gear = Rect::new(head.right() - cw - 38.0, head.y + 5.0, 26.0, 26.0);
     widgets::icon_button(ui, gear, "\u{F0493}", t.muted, Action::Side(SideHit::Settings));
     let media = Rect::new(gear.x - 30.0, gear.y, 26.0, 26.0);
@@ -110,47 +162,44 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_win
         let what = if fresh { format!("{media_unseen} new · pictures and videos · {key}") } else { format!("Pictures and videos · {key}") };
         widgets::tooltip(ui, media, &what);
     }
+    let voice = Rect::new(media.x - 30.0, gear.y, 26.0, 26.0);
+    voice_button(app, ui, voice);
+    // beside the session tabs the list has no room for the Tasks link: it's up here
+    if app.side.compact && voice.x - 30.0 > head.x + mark.w + 18.0 {
+        let tasks = Rect::new(voice.x - 30.0, gear.y, 26.0, 26.0);
+        if widgets::icon_button(ui, tasks, "\u{F08C9}", t.muted, Action::Side(SideHit::Tasks)) {
+            widgets::tooltip(ui, tasks, "Tasks · the outcomes you've handed your agents");
+        }
+    }
 
     // ---- filter
     let filter_r = Rect::new(inner.x, head.bottom() + 4.0, inner.w, 32.0);
     let filtering = app.side_filtering || !app.side.filter.is_empty();
-    let placeholder = if focused { "Type to filter" } else { "Filter" };
+    let placeholder = match (app.side.compact, focused) {
+        (true, true) => "Type to search",
+        (true, false) => "Search",
+        (false, true) => "Type to filter",
+        (false, false) => "Filter",
+    };
     let cursor = filtering.then_some(app.side.filter.len());
-    widgets::field(ui, filter_r, &app.side.filter, cursor, placeholder, focused && filtering, Action::SideFilter);
+    widgets::field_with(ui, filter_r, Some("\u{F0349}"), &app.side.filter, cursor, placeholder, focused && filtering, Action::SideFilter);
     if !filtering && !app.alt_hints() {
         // the terminal UI's frame subtitle, from the live keymap: with the keyboard here, where the keys are listed;
-        // else how to come here
-        let k = if focused {
-            Some(app.keymap.primary(crate::keymap::Act::Help)).filter(|k| !k.is_empty()).map(|k| format!("{k} keys")).unwrap_or_default()
-        } else {
-            app.keymap.primary(crate::keymap::Act::FocusSidebar)
-        };
-        if !k.is_empty() {
+        // else how to come here, as keycaps
+        if focused {
+            let k = Some(app.keymap.primary(crate::keymap::Act::Help)).filter(|k| !k.is_empty()).map(|k| format!("{k} keys")).unwrap_or_default();
             let st = Style::new(size::CAPTION, weight::MEDIUM, t.faint);
             let kw = ui.measure(&k, st);
             ui.label(Point::new(filter_r.right() - kw - 10.0, filter_r.y + 8.0), &k, st);
+        } else {
+            let k = app.keymap.primary(crate::keymap::Act::FocusSidebar);
+            if !k.is_empty() {
+                let kw = widgets::kbd_width(ui, &k);
+                widgets::kbd(ui, Point::new(filter_r.right() - kw - 7.0, filter_r.y + 7.0), &k);
+            }
         }
     }
 
-    // One native control surface; this does not own a microphone or renderer.
-    let voice = Rect::new(inner.x, filter_r.bottom() + 8.0, inner.w, 44.0);
-    let orbit = app.svc.state().orbit_voice.clone();
-    let talking = orbit.runtime.as_ref().is_some_and(|r| r.phase != bro_bridge::orbit_voice::Phase::Off) || orbit.starting;
-    let muted = orbit.runtime.as_ref().is_some_and(|r| r.muted);
-    ui.round(voice, radius::CONTROL, t.text.with_alpha(0.025));
-    let controls_x = voice.right() - 86.0;
-    ui.label_in(Rect::new(voice.x + 8.0, voice.y + 4.0, (controls_x - voice.x - 12.0).max(0.0), 18.0), "Orbit Voice", Style::new(size::SMALL, weight::SEMIBOLD, t.text), Align::Left);
-    let status = if orbit.starting { "Starting voice…" } else if orbit.status.is_empty() { "OpenAI Realtime · off" } else { orbit.status.as_str() };
-    ui.label_in(Rect::new(voice.x + 8.0, voice.y + 22.0, (controls_x - voice.x - 12.0).max(0.0), 17.0), status, Style::new(size::CAPTION, weight::REGULAR, if talking { t.good } else { t.muted }), Align::Left);
-    let talk = Rect::new(controls_x, voice.y + 9.0, 26.0, 26.0);
-    if widgets::icon_button(ui, talk, if talking { "\u{F04DB}" } else { "\u{F036C}" }, if talking { t.good } else { t.muted }, Action::OrbitVoice(0)) {
-        widgets::tooltip(ui, talk, if talking { "Stop voice and release the microphone" } else { "Start voice · the selected realtime provider is billed while connected" });
-    }
-    let mute = Rect::new(controls_x + 28.0, talk.y, 26.0, 26.0);
-    if widgets::icon_button(ui, mute, "\u{F036D}", if muted { t.danger } else { t.muted }, Action::OrbitVoice(1)) { widgets::tooltip(ui, mute, if muted { "Unmute microphone" } else { "Mute microphone audio · Stop releases the device" }); }
-    let settings = Rect::new(controls_x + 56.0, talk.y, 26.0, 26.0);
-    if widgets::icon_button(ui, settings, "\u{F0493}", t.muted, Action::OrbitVoice(2)) { widgets::tooltip(ui, settings, "Advanced Orbit settings"); }
-    stage.chrome("sidebar-voice", voice, r, bro_bridge::orbit_voice::StageKind::OneWay);
 
     // ---- footer (measured first, pinned to the bottom)
     let usage = app.usage_lines();
@@ -164,10 +213,40 @@ pub fn draw(app: &mut App, ui: &mut Ui, r: Rect, s: &mut SideState, _focused_win
     draw_footer(app, ui, foot, &usage, tile_row, sessions);
 
     // ---- list
-    let list = Rect::new(r.x, voice.bottom() + 8.0, r.w - 1.0, (foot.y - voice.bottom() - 12.0).max(0.0));
-    stage.chrome("sidebar-filter", filter_r, r, bro_bridge::orbit_voice::StageKind::OneWay);
-    stage.chrome("sidebar-rail", Rect::new(r.right() - 1.0, r.y, 1.0, r.h), r, bro_bridge::orbit_voice::StageKind::Solid);
-    draw_list(app, ui, list, s, focused, stage);
+    let top = filter_r.bottom() + if app.side.compact { 10.0 } else { 8.0 };
+    let list = Rect::new(r.x, top, r.w - 1.0, (foot.y - top - 12.0).max(0.0));
+    if app.side.compact {
+        compact::draw_list(app, ui, list, s, focused, icons);
+    } else {
+        draw_list(app, ui, list, s, focused);
+    }
+}
+
+/// Voice settings, with the listener or current calls reflected in the microphone color.
+fn voice_button(app: &App, ui: &mut Ui, r: Rect) {
+    let st = app.svc.state();
+    let calls = st.bridge.voice_calls.len();
+    let voice = &st.voice;
+    let ink = if calls > 0 || voice.running.is_some() { ui.t.good }
+        else if voice.error.is_some() { ui.t.danger } else { ui.t.muted };
+    if widgets::icon_button(ui, r, "\u{F036C}", ink, Action::Voice(2)) {
+        let what = if calls > 0 {
+            format!("{calls} live voice call{} · right-click to end", if calls == 1 { "" } else { "s" })
+        } else if let Some(key) = &voice.running {
+            format!("Hold {} to talk with Hugh · click for voice settings", bro_voice::Voice::hotkey_label(key))
+        } else {
+            "Voice settings · set your push-to-talk key".into()
+        };
+        widgets::tooltip(ui, r, &what);
+    }
+}
+
+/// What a row is, for the motion that follows it from place to place: a project by its key, a session by its pane.
+fn row_key(row: &Row) -> u64 {
+    match row {
+        Row::Project { key, .. } => key_of(("project", key)),
+        Row::Live { info, .. } => key_of(("session", info.pane)),
+    }
 }
 
 /// (gap above, height) of a row: a project gets a gap above it (none for the first) and two lines; a session one
@@ -218,12 +297,13 @@ fn draw_team(ui: &mut Ui, r: Rect, top: f32, x: f32, team: &bro_core::agent_team
         let all = c.done == c.total;
         let label = format!("{}/{}", c.done, c.total);
         let st = Style::new(size::CAPTION, weight::SEMIBOLD, if all { t.good } else { t.muted });
-        let lw = ui.measure(&label, st);
-        ui.label(Point::new(right - lw, mid - 7.5), &label, st);
+        // the tally rolls and the bar springs as tasks get done (Rune's `todo`)
+        let lw = ui.rolling(("team-tally", pane), right, mid - 7.5, &label, st, Some(c.done as f64));
         let bar = Rect::new(right - lw - 6.0 - 34.0, mid - 1.5, 34.0, 3.0);
         ui.round(bar, 1.5, t.text.with_alpha(0.1));
-        if c.done > 0 {
-            ui.round(Rect::new(bar.x, bar.y, (bar.w * c.done as f32 / c.total as f32).max(3.0), bar.h), 1.5, t.good);
+        let done = ui.spring(("team-bar", pane), c.done as f32 / c.total as f32, Spring::BAR, 0.0);
+        if done > 0.01 {
+            ui.round(Rect::new(bar.x, bar.y, (bar.w * done).clamp(3.0, bar.w + 1.0), bar.h), 1.5, t.good);
         }
         room = bar.x - 8.0;
     }
@@ -263,9 +343,10 @@ fn draw_team(ui: &mut Ui, r: Rect, top: f32, x: f32, team: &bro_core::agent_team
     }
 }
 
-fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused: bool, stage: &mut super::orbit_stage::Drawn) {
+fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused: bool) {
     let t = ui.t;
-    let rows = app.rows();
+    let model = app.sidebar_model_at(Some(ui.now));
+    let rows = &model.rows;
     app.side_sel = app.side_sel.min(rows.len().saturating_sub(1));
     let focus_pane = app.focused();
     let cur_key = app.current_project().map(|r| app.svc.project_for(&r).key);
@@ -297,7 +378,7 @@ fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused:
     if pinned {
         let (_, h) = row_height(&rows[0], renaming);
         let r = Rect::new(list.x + PAD, y, list.w - 2.0 * PAD, h);
-        draw_row(app, ui, r, 0, &rows[0], focused, focus_pane, cur_key.as_deref(), stage, list);
+        draw_row(app, ui, r, 0, &rows[0], focused, focus_pane, cur_key.as_deref(), model.history_at);
         s.rows.push((0, r));
         y += h + 6.0;
         ui.hline(list.x + PAD + 8.0, y - 3.0, list.w - 2.0 * PAD - 16.0, t.hairline);
@@ -339,13 +420,27 @@ fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused:
     s.scroll = s.scroll.clamp(0.0, (s.content - view.h).max(0.0));
     ui.clip(view, 0.0);
     ui.hit_with(view, Action::SideList, Cursor::Default);
+    // rows glide when sessions come, go, change state or reorder; a new one opens from nothing in its slot while
+    // the rows below slide down (a filter, a width change or a drag snaps)
+    let snap = flow_begin("side-rows", ui.now, key_of((list.w.round() as i32, &s.filter, app.side.compact, super::layout::resizing())));
     for (i, top, h) in tops {
-        let ry = view.y + top - s.scroll;
+        let (sy, reveal) = ui.flow_row("side-rows", row_key(&rows[i]), top, snap);
+        let ry = view.y + sy - s.scroll;
         if ry + h < view.y || ry > view.bottom() {
             continue;
         }
         let r = Rect::new(list.x + PAD, ry, list.w - 2.0 * PAD, h);
-        draw_row(app, ui, r, i, &rows[i], focused, focus_pane, cur_key.as_deref(), stage, view);
+        let opened = Rect { h: h * reveal, ..r }.intersect(&view);
+        if opened.is_empty() {
+            continue;
+        }
+        if reveal < 0.999 {
+            ui.clip(opened, 0.0);
+        }
+        draw_row(app, ui, r, i, &rows[i], focused, focus_pane, cur_key.as_deref(), model.history_at);
+        if reveal < 0.999 {
+            ui.unclip();
+        }
         s.rows.push((i, r));
     }
     ui.unclip();
@@ -361,7 +456,19 @@ fn draw_list(app: &mut App, ui: &mut Ui, list: Rect, s: &mut SideState, focused:
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: bool, focus_pane: Option<crate::layout::PaneId>, cur_key: Option<&str>, stage: &mut super::orbit_stage::Drawn, stage_clip: Rect) {
+fn age_label(ui: &mut Ui, age: u64) -> String {
+    let unit = match age {
+        0..=59 => 1,
+        60..=3599 => 60,
+        3600..=86_399 => 3600,
+        86_400..=1_209_599 => 86_400,
+        _ => 604_800,
+    };
+    ui.wake_after(std::time::Duration::from_secs(unit - age % unit));
+    crate::util::short_dur(age)
+}
+
+fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: bool, focus_pane: Option<crate::layout::PaneId>, cur_key: Option<&str>, history_at: std::time::Instant) {
     let t = ui.t;
     let selected = focused && i == app.side_sel;
     let hot = ui.hover_amount(("side-row", i, row.project_key()), r);
@@ -370,8 +477,10 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
             let current = cur_key == Some(key.as_str());
             let tiled = matches!(&app.drawn_tab, Some(StripTab::Project(k)) if k == key);
             if selected {
-                ui.round(r, radius::CONTROL, t.selected);
-                ui.outline(r, radius::CONTROL, 1.0, t.accent.with_alpha(0.5));
+                // the keys' pick glides from row to row
+                let g = ui.glide("side-pick", i, r, Spring::GLIDE);
+                ui.round(g, radius::CONTROL, t.selected);
+                ui.outline(g, radius::CONTROL, 1.0, t.accent.with_alpha(0.5));
             } else if current {
                 ui.round(r, radius::CONTROL, t.text.with_alpha(if t.light { 0.04 } else { 0.045 }));
             } else if hot > 0.0 {
@@ -388,10 +497,9 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
             } else if *live == 0
                 && let Some(age) = last_age
             {
-                let a = crate::util::short_dur(*age);
+                let a = age_label(ui, *age + history_at.elapsed().as_secs());
                 let st = Style::new(size::CAPTION, weight::MEDIUM, t.faint);
-                let w = ui.measure(&a, st);
-                ui.label(Point::new(right - w, l1.y + 2.0), &a, st);
+                let w = ui.rolling(("side-project-age", key.as_str()), right, l1.y + 2.0, &a, st, None);
                 right -= w + 6.0;
             }
             if *attention {
@@ -431,16 +539,15 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
             let renaming = app.renaming.as_ref().filter(|(id, _)| *id == info.pane).map(|(_, s)| s.clone());
             // its project's colour (the orchestrator's is gold)
             let color = t.project(&info.project_key, &app.theme);
-            if selected || (is_focus && !app.side_focus) || stacked || hot > 0.0 || notice.is_some_and(|n| n.unread) {
-                stage.sidebar_row(info.pane, r, stage_clip);
-            }
             if selected {
-                ui.round(r, radius::CONTROL, t.selected);
-                ui.outline(r, radius::CONTROL, 1.0, t.accent.with_alpha(0.5));
+                let g = ui.glide("side-pick", i, r, Spring::GLIDE);
+                ui.round(g, radius::CONTROL, t.selected);
+                ui.outline(g, radius::CONTROL, 1.0, t.accent.with_alpha(0.5));
             } else if is_focus && !app.side_focus {
                 // the session you're in, washed in its project's colour; while the sidebar has the keyboard only
-                // its selection shows
-                ui.round(r, radius::CONTROL, color.with_alpha(if t.light { 0.1 } else { 0.11 }));
+                // its selection shows. Moving to another session, the wash glides over to it
+                let g = ui.glide("side-wash", info.pane, r, Spring::GLIDE);
+                ui.round(g, radius::CONTROL, color.with_alpha(if t.light { 0.1 } else { 0.11 }));
             } else if stacked {
                 ui.round(r, radius::CONTROL, t.text.with_alpha(0.035));
             } else if hot > 0.0 {
@@ -477,18 +584,43 @@ fn draw_row(app: &mut App, ui: &mut Ui, r: Rect, i: usize, row: &Row, focused: b
                 widgets::icon_button(ui, close, "\u{F0156}", if selected { t.danger } else { t.muted }, Action::Side(SideHit::Close(info.pane)));
                 right = close.x - 2.0;
             } else {
-                let a = crate::util::short_dur(info.age_secs);
+                let age = app.panes.get(&info.pane).and_then(|p| p.as_term_ref()).map_or(0, |t| t.meta.started.elapsed().as_secs());
+                let a = age_label(ui, age);
                 let st = Style::new(size::CAPTION, weight::MEDIUM, t.faint);
-                let w = ui.measure(&a, st);
-                ui.label(Point::new(right - w, mid - 7.5), &a, st);
+                let w = ui.rolling(("side-age", info.pane), right, mid - 7.5, &a, st, None);
                 right -= w + 6.0;
             }
-            if let Some(notice) = notice {
+            // its turn is over but subagents or background tasks work on: it's still working, not done
+            let asks = notice.as_ref().is_some_and(|n| n.unread && n.kind == bro_bridge::insights::NoticeKind::Input);
+            let finished = notice.as_ref().is_some_and(|n| n.unread && n.kind == bro_bridge::insights::NoticeKind::Finished);
+            let finished_for = ui.since_on(("side-finished", info.pane), finished);
+            // a question or permission arriving: its alert pops in
+            let asked_for = ui.since_on(("side-asked", info.pane), asks);
+            let (subs, tasks) = info.background;
+            if subs + tasks > 0 && !asks && !matches!(info.activity, Some(Activity::Working | Activity::Blocked)) {
+                status_dot(ui, Point::new(right - 7.0, mid), Some(Activity::Working), false);
+                let at = Rect::new(right - 15.0, mid - 9.0, 16.0, 18.0);
+                if ui.hovered(at) {
+                    widgets::tooltip(ui, at, &crate::sidebar::background_words(subs, tasks));
+                }
+                right -= 18.0;
+            } else if let Some(notice) = notice {
                 let (glyph, ink) = if !notice.unread { ("\u{F012C}", t.faint) } else { match notice.kind {
                     bro_bridge::insights::NoticeKind::Input => ("\u{F0026}", t.warn),
                     bro_bridge::insights::NoticeKind::Finished => ("\u{F012C}", t.good),
                 }};
-                ui.icon(Rect::new(right - 15.0, mid - 8.0, 16.0, 16.0), glyph, 14.0, ink);
+                // the moment it finishes: the check pops in, a ring bursts from it and green sweeps the row
+                let size = match finished_for {
+                    Some(s) => 14.0 * ui.celebrate(r, Point::new(right - 7.0, mid), s, t.good),
+                    None => match asked_for {
+                        Some(s) if s < 1.2 => {
+                            ui.anim.moving = true;
+                            14.0 * Spring::POP.step(s)
+                        }
+                        _ => 14.0,
+                    },
+                };
+                ui.icon(Rect::new(right - 15.0, mid - 8.0, 16.0, 16.0), glyph, size.max(1.0), ink);
                 right -= 18.0;
             } else if matches!(info.activity, Some(Activity::Working | Activity::Blocked)) || info.done {
                 status_dot(ui, Point::new(right - 7.0, mid), info.activity, info.done);
@@ -659,13 +791,20 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
         }
         y += 26.0;
         let now = crate::util::now_secs();
+        let mut keys: Vec<(Option<bro_core::Harness>, Option<&str>, &str)> = Vec::with_capacity(usage.len());
         for u in usage {
             if y + 24.0 > r.bottom() - status_h {
                 break;
             }
+            // what the row's hover, meter and figures move under: its own, even beside another row of the same name
+            // (a Claude and a Codex login both called "local"); sharing one, they'd pull it between their two levels
+            // every frame and never come to rest
+            let ident = (u.harness, u.profile.as_deref(), u.label.as_str());
+            let key = (ident, keys.iter().filter(|k| **k == ident).count());
+            keys.push(ident);
             let row = Rect::new(r.x, y, r.w, 24.0);
             let launchable = u.harness.is_some();
-            let rh = if launchable { ui.hover_amount(("usage", &u.label), row) } else { 0.0 };
+            let rh = if launchable { ui.hover_amount(("usage", key), row) } else { 0.0 };
             ui.round(row, radius::CONTROL, t.hover.fade(rh));
             // the row launches (a family's line: your usual login; a profile's: that login); the Fable arrow on it,
             // registered after, wins its own spot
@@ -673,13 +812,19 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
                 Some(h) => Action::Side(SideHit::LaunchUsage(h, u.profile.clone())),
                 None => Action::Side(SideHit::Usage),
             });
+            // a Gemini login or the Just Superhuman account: its own mark, and its figure in words (no meter)
+            let worded = u.profile.as_deref().is_some_and(|p| bro_core::profiles::is_gemini_id(p) || p == bro_core::jsh::PROVIDER_ID);
             if let Some(h) = u.harness {
-                let mark = if u.profile.as_deref().is_some_and(|p| bro_core::profiles::is_gemini_id(&p)) { super::kit::brand::provider("gemini").unwrap() } else { harness_mark(Some(h)) };
+                let mark = match u.profile.as_deref() {
+                    Some(p) if bro_core::profiles::is_gemini_id(p) => super::kit::brand::provider("gemini").unwrap(),
+                    Some(bro_core::jsh::PROVIDER_ID) => super::kit::brand::Mark::Logo(super::kit::brand::Logo::JustSuperhuman),
+                    _ => harness_mark(Some(h)),
+                };
                 ui.mark(mark, Rect::new(row.x + 4.0, row.y, 16.0, row.h), 13.0, None);
             }
             let label_x = row.x + 24.0;
             let ls = Style::new(size::SMALL, if launchable { weight::SEMIBOLD } else { weight::REGULAR }, if launchable { t.text } else { t.muted });
-            let label_room = if u.profile.as_deref().is_some_and(bro_core::profiles::is_gemini_id) {
+            let label_room = if worded {
                 let note_w = u.note.as_ref().map(|note| ui.measure(note, Style::new(size::SMALL, weight::MEDIUM, t.faint))).unwrap_or(0.0);
                 (wk_r - label_x - note_w - 12.0).max(32.0)
             } else { 66.0 };
@@ -711,19 +856,20 @@ fn draw_footer(app: &mut App, ui: &mut Ui, r: Rect, usage: &[crate::app::side_vi
                     if meter_w >= 24.0 && tight.is_finite() {
                         let n = widgets::segment_count(meter_w, 6.0).min(8);
                         let w = (n as f32 * 6.0).min(meter_w);
-                        widgets::segments(ui, Rect::new(meter_x, row.y + 9.0, w, 6.0), (tight / 100.0) as f32, n, left_color(tight, t));
+                        // the meter springs to its level (from empty when it first shows): segments light one by one
+                        let level = ui.spring(("usage-meter", key), (tight / 100.0) as f32, Spring::BAR, 0.0);
+                        widgets::segments(ui, Rect::new(meter_x, row.y + 9.0, w, 6.0), level, n, left_color(tight, t));
                     } else if app.usage_expanded && let Some(at) = u.resets_at {
                         ui.label(Point::new(meter_x, row.y + 4.0), &crate::util::countdown(at - now), Style::new(size::CAPTION, weight::REGULAR, t.faint));
                     }
                     let fig = |v: Option<f64>, approx: bool| v.map(|v| (format!("{}{v:.0}%", if approx { "≈" } else { "" }), left_color(v, t))).unwrap_or(("—".into(), t.faint));
                     let (b, bc) = fig(u.wk, false);
                     let st = Style::new(size::SMALL, weight::SEMIBOLD, t.text);
-                    let bw = ui.measure(&b, st);
-                    ui.label(Point::new(wk_r - bw, row.y + 4.0), &b, st.color(bc));
+                    // the figures roll as they change: down as an allowance is spent, up when it resets
+                    ui.rolling(("usage-wk", key), wk_r, row.y + 4.0, &b, st.color(bc), u.wk);
                     if show_h5 {
                         let (a, ac) = fig(u.h5, u.approx);
-                        let aw = ui.measure(&a, st);
-                        ui.label(Point::new(h5_r - aw, row.y + 4.0), &a, st.color(ac));
+                        ui.rolling(("usage-h5", key), h5_r, row.y + 4.0, &a, st.color(ac), u.h5);
                     }
                 }
             }

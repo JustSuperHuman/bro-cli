@@ -2,7 +2,10 @@
 //! (its markdown, as written) and what it did in between, each tool call one step in plain words ("Read
 //! live.rs", "Ran cargo test", "Edited chrome.rs") that says how it went. Built a line at a time as the
 //! transcript grows ([`Conversation::ingest`]), from the lines [`super::live::AgentFacts`] reads, so it costs no
-//! extra file I/O. Thinking, tool output, injected context and sub-agents' own turns are left out.
+//! extra file I/O. Thinking, tool output and injected context are left out. The subagents it starts are kept apart
+//! ([`Conversation::subagents`]: what each was asked, how it ended, what it reported), and each one's own turns are
+//! read from its own transcript into a conversation of its own ([`Conversation::subagent`], see
+//! [`super::subagents`]).
 //!
 //! Claude Code writes one content block per record (a reply's text, then its tool calls, under one message id);
 //! Codex writes `response_item`s and, from 0.16x, `item_completed` events that describe each command, file change
@@ -10,6 +13,8 @@
 
 use super::describe::{CLAUDE_NOISE, CODEX_NOISE, command_title, is_noise, strip_images};
 use super::live::{TouchKind, parse_apply_patch};
+use super::subagents::{self, Subagent, SubagentState};
+use super::tasks::{self, Task};
 use crate::Harness;
 use crate::util::parse_iso_ms;
 use serde_json::Value;
@@ -38,7 +43,7 @@ pub enum StepKind {
     Run,
     Search,
     Web,
-    /// a helper agent (Claude's Task, Codex's sub-agents)
+    /// a subagent it started or talked to (Claude's Agent tool, Codex's spawned agents)
     Agent,
     /// its own task list, or a plan for you to approve
     Plan,
@@ -109,6 +114,9 @@ pub enum NoteKind {
     Error,
     /// how long a turn took (`text` is "4m 5s")
     Worked,
+    /// a subagent reported back: `text` holds the call that started it and how it ended
+    /// ([`subagents::read_note`])
+    Subagent,
 }
 
 /// One thing in the conversation, in order.
@@ -150,15 +158,122 @@ pub struct Conversation {
     pub version: Option<String>,
     /// Bumped whenever anything changed
     pub revision: u64,
+    /// The subagents it started, the oldest first, as far as its transcript says: what each was asked, how it
+    /// ended and what it reported (their own transcripts are read by a [`subagents::Follower`])
+    pub subagents: Vec<Subagent>,
+    /// The background tasks it started (commands, watches, workflows), the oldest first: what each is and how it
+    /// ended ([`super::tasks`])
+    pub tasks: Vec<Task>,
+    /// A subagent's own transcript: how its latest turn stands, as its records say (None until they do)
+    pub turn: Option<SubagentState>,
+    /// When its first and its newest record were written
+    pub first_ms: Option<i64>,
+    pub last_ms: Option<i64>,
+    /// Codex: a subagent's nickname and role, as its own transcript names them
+    pub nickname: Option<String>,
+    pub role: Option<String>,
     /// Codex: `item_completed` events describe the steps (tool calls in `response_item`s are left alone)
     codex_items: bool,
     /// MCP calls waiting on their results, by id: what they were given (an app shows it)
     mcp_calls: HashMap<String, Value>,
+    /// Codex: what each call to the other agents was and what it asked (`spawn_agent`'s task), by its id
+    collab: HashMap<String, (String, Value)>,
+    /// Reading a subagent's own transcript ([`Conversation::subagent`])
+    own: Option<Own>,
+}
+
+/// Where reading a subagent's own transcript is.
+#[derive(Debug, Clone, Default)]
+struct Own {
+    /// records read so far: a forked Codex subagent's first ones (up to `subagent_history_start_ordinal`, or its
+    /// own thread's settings) are its parent's history
+    records: usize,
+    skip_until: usize,
+    until_thread: Option<String>,
+    /// Claude: inside a fork's preamble (its parent's call and the fork's boilerplate)
+    preamble: bool,
 }
 
 impl Conversation {
     pub fn new(harness: Harness) -> Conversation {
-        Conversation { harness, items: vec![], model: None, effort: None, cwd: None, branch: None, thought: None, version: None, revision: 0, codex_items: false, mcp_calls: HashMap::new() }
+        Conversation {
+            harness,
+            items: vec![],
+            model: None,
+            effort: None,
+            cwd: None,
+            branch: None,
+            thought: None,
+            version: None,
+            revision: 0,
+            subagents: vec![],
+            tasks: vec![],
+            turn: None,
+            first_ms: None,
+            last_ms: None,
+            nickname: None,
+            role: None,
+            codex_items: false,
+            mcp_calls: HashMap::new(),
+            collab: HashMap::new(),
+            own: None,
+        }
+    }
+
+    /// A subagent's own transcript (see [`super::subagents`]): its records are a sidechain's, a Claude fork's start
+    /// with its parent's call, a forked Codex agent's with its parent's history, and what the agent that started it
+    /// sends it mid-turn is a message to it.
+    pub fn subagent(harness: Harness) -> Conversation {
+        Conversation { own: Some(Own::default()), ..Conversation::new(harness) }
+    }
+
+    /// Whether this is a subagent's own transcript.
+    pub fn is_subagent(&self) -> bool {
+        self.own.is_some()
+    }
+
+    /// When a record was written: the first and the newest so far.
+    fn seen_at(&mut self, at: Option<i64>) {
+        if let Some(at) = at {
+            self.first_ms.get_or_insert(at);
+            self.last_ms = Some(self.last_ms.map_or(at, |l| l.max(at)));
+        }
+    }
+
+    /// How its turn stands now.
+    fn turn_is(&mut self, state: SubagentState) {
+        if self.turn != Some(state) {
+            self.turn = Some(state);
+            self.revision += 1;
+        }
+    }
+
+    /// A subagent it started (the first word of each call is kept).
+    fn spawned(&mut self, s: Subagent) {
+        if s.call.is_empty() || self.subagents.iter().any(|o| o.call == s.call) {
+            return;
+        }
+        self.subagents.push(s);
+        if self.subagents.len() > subagents::REMEMBER_MAX {
+            self.subagents.remove(0);
+        }
+        self.revision += 1;
+    }
+
+    /// A subagent of its reported back (`state`, what it said): its note goes where the conversation heard it,
+    /// unless it said just that already.
+    fn reported(&mut self, i: usize, state: SubagentState, result: Option<String>, at: Option<i64>) {
+        let s = &mut self.subagents[i];
+        let result = result.filter(|r| !r.trim().is_empty()).or_else(|| s.result.clone());
+        if !s.state.running() && s.state == state && s.result == result {
+            return;
+        }
+        s.state = state;
+        s.result = result;
+        s.ended_ms = at.or(s.ended_ms);
+        let text = subagents::note_text(&s.call, state);
+        self.revision += 1;
+        self.note(NoteKind::Subagent, text, at);
     }
 
     /// Set one of the session's facts (model, effort, cwd, branch) when it says something new.
@@ -205,7 +320,7 @@ impl Conversation {
         match self.harness {
             Harness::Claude => self.claude(v),
             Harness::Codex => self.codex(v),
-            Harness::Pi | Harness::Omp => {}
+            Harness::Pi | Harness::Omp | Harness::Antigravity => {}
         }
         if self.items.len() > ITEMS_MAX {
             let extra = self.items.len() - ITEMS_MAX;
@@ -234,8 +349,18 @@ impl Conversation {
         Self::read_back(harness, path, end, HISTORY_MAX)
     }
 
+    /// [`Conversation::history`] of a subagent's own transcript ([`Conversation::subagent`]).
+    pub fn subagent_history(harness: Harness, path: &Path, end: u64) -> std::io::Result<Conversation> {
+        Self::read_back_into(Conversation::subagent(harness), path, end, HISTORY_MAX)
+    }
+
     /// [`Conversation::history`] from at most `max` bytes before `end`.
     fn read_back(harness: Harness, path: &Path, end: u64, max: u64) -> std::io::Result<Conversation> {
+        Self::read_back_into(Conversation::new(harness), path, end, max)
+    }
+
+    /// [`Conversation::read_back`] into `c` (a subagent's own conversation, or a session's).
+    fn read_back_into(mut c: Conversation, path: &Path, end: u64, max: u64) -> std::io::Result<Conversation> {
         use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
         let mut file = std::fs::File::open(path)?;
         let end = end.min(file.metadata()?.len());
@@ -249,7 +374,6 @@ impl Conversation {
             cut = before[0] != b'\n';
         }
         let mut reader = BufReader::with_capacity(1 << 20, file.take(end - start));
-        let mut c = Conversation::new(harness);
         let mut line = Vec::new();
         loop {
             line.clear();
@@ -384,10 +508,26 @@ impl Conversation {
     // ---- Claude --------------------------------------------------------------------------
 
     fn claude(&mut self, v: &Value) {
-        if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-            return;
+        let kind = v.get("type").and_then(Value::as_str);
+        match self.own.as_mut() {
+            // a subagent's own transcript: a fork's starts with its parent's call and the fork's boilerplate, up to
+            // the first user record
+            Some(own) => {
+                if kind == Some("fork-context-ref") {
+                    own.preamble = true;
+                    return;
+                }
+                if own.preamble {
+                    own.preamble = kind != Some("user");
+                    return;
+                }
+            }
+            // a subagent's records in its session's transcript (older Claude Code): its own transcript has them
+            None if v.get("isSidechain").and_then(Value::as_bool) == Some(true) => return,
+            None => {}
         }
         let at = stamp(v);
+        self.seen_at(at);
         let s = |v: &Value, path: &str| v.pointer(path).and_then(Value::as_str).map(str::to_string);
         Self::fact(&mut self.cwd, s(v, "/cwd").as_deref(), &mut self.revision);
         Self::fact(&mut self.branch, s(v, "/gitBranch").as_deref(), &mut self.revision);
@@ -407,8 +547,14 @@ impl Conversation {
                 if v.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true) {
                     let text = blocks_text(msg.and_then(|m| m.get("content")));
                     self.settle(StepState::Failed);
+                    self.turn_is(SubagentState::Failed);
                     self.note(NoteKind::Error, text, at);
                     return;
+                }
+                // a turn goes on while it waits on its tools, and ends with anything else
+                match msg.and_then(|m| m.get("stop_reason")).and_then(Value::as_str) {
+                    Some("tool_use") | None => self.turn_is(SubagentState::Running),
+                    Some(_) => self.turn_is(SubagentState::Done),
                 }
                 let Some(blocks) = msg.and_then(|m| m.get("content")).and_then(Value::as_array) else { return };
                 for b in blocks {
@@ -428,6 +574,7 @@ impl Conversation {
                                 self.mcp_calls.insert(id.to_string(), serde_json::json!({ "name": name, "input": input }));
                             }
                             self.step(Step { id: id.to_string(), kind, label, detail, state: StepState::Running, added: 0, removed: 0, line, at_ms: at, app: None });
+                            self.claude_agent_call(id, name, &input, at);
                         }
                         _ => {}
                     }
@@ -435,8 +582,16 @@ impl Conversation {
             }
             Some("user") => {
                 if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+                    // in a subagent's own transcript, what the agent that started it sent it while it worked
+                    if self.own.is_some() && v.pointer("/origin/kind").and_then(Value::as_str) == Some("coordinator") {
+                        let text = blocks_text(v.pointer("/message/content"));
+                        let text = text.split_once("while you were working:").map_or(text.as_str(), |(_, t)| t).trim().to_string();
+                        self.turn_is(SubagentState::Running);
+                        self.you_in(text, 0, false, at, false);
+                    }
                     return;
                 }
+                self.turn_is(SubagentState::Running);
                 // the summary a compaction leaves behind: the boundary already says so
                 if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
                     self.note(NoteKind::Compacted, String::new(), at);
@@ -470,6 +625,10 @@ impl Conversation {
                                 }
                             }
                         });
+                        self.claude_agent_result(&id, structured, r, failed, at);
+                        if !failed {
+                            self.claude_task_result(&id, structured, r, at);
+                        }
                     }
                     return;
                 }
@@ -511,8 +670,19 @@ impl Conversation {
             let t = raw.trim_start();
             if t.starts_with("[Request interrupted") {
                 self.settle(StepState::Failed);
+                self.turn_is(SubagentState::Stopped);
+                // the subagents it was waiting on stop with it (those in the background go on)
+                for s in self.subagents.iter_mut().filter(|s| s.state.running() && !s.background) {
+                    s.state = SubagentState::Stopped;
+                    s.ended_ms = at;
+                }
                 self.note(NoteKind::Interrupted, String::new(), at);
                 return;
+            }
+            // a background task of its stopped (a subagent reporting back)
+            if t.starts_with("<task-notification>") {
+                self.claude_notified(t, at);
+                continue;
             }
             if t.starts_with("<command-name>") || t.starts_with("<command-message>") {
                 let cmd = command_title(t);
@@ -549,11 +719,16 @@ impl Conversation {
     /// A message Claude Code queued while it worked and read mid-turn (`attachment` of type `queued_command`).
     fn claude_queued(&mut self, a: Option<&Value>, at: Option<i64>) {
         let Some(a) = a.filter(|a| a.get("type").and_then(Value::as_str) == Some("queued_command")) else { return };
-        // only what you typed (its own background work queues notifications the same way)
+        let at = a.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms).or(at);
+        // its own background work queues notifications the same way: a subagent reporting back
+        if let Some(text) = a.get("prompt").and_then(Value::as_str).filter(|t| t.trim_start().starts_with("<task-notification>")) {
+            self.claude_notified(text, at);
+            return;
+        }
+        // only what you typed
         if a.pointer("/origin/kind").and_then(Value::as_str).is_some_and(|k| k != "human") {
             return;
         }
-        let at = a.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms).or(at);
         let (text, images) = match a.get("prompt") {
             Some(Value::String(s)) => (s.clone(), 0),
             Some(Value::Array(blocks)) => (
@@ -571,6 +746,153 @@ impl Conversation {
                 self.you_in(text, images, command, at, false);
             }
             _ => {}
+        }
+    }
+
+    /// A tool call that starts a subagent (Agent, or Task as older Claude Code calls it), or wakes one up again
+    /// (SendMessage to it).
+    fn claude_agent_call(&mut self, id: &str, name: &str, input: &Value, at: Option<i64>) {
+        let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        match name {
+            "Task" | "Agent" => {
+                let title = s("description").or_else(|| s("name")).map_or_else(|| "A subagent".to_string(), |d| line(d, LABEL_MAX));
+                let mut sub = Subagent::started(id, title, at);
+                sub.name = s("name").map(str::to_string);
+                sub.kind = subagents::kind_of(s("subagent_type"));
+                sub.brief = s("prompt").map(str::to_string);
+                sub.model = subagents::model_of(s("model"));
+                sub.background = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
+                self.spawned(sub);
+            }
+            "SendMessage" => {
+                let Some(to) = s("to") else { return };
+                if let Some(sub) = self.subagents.iter_mut().rev().find(|x| x.id.as_deref() == Some(to) || x.name.as_deref() == Some(to)) {
+                    if !sub.state.running() {
+                        sub.state = SubagentState::Running;
+                        sub.ended_ms = None;
+                        self.revision += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// What came back from a call that started a subagent: its id, whether it went to the background, and (a
+    /// subagent the turn waited on) its report. A skill run in a fork of its own is a subagent too.
+    fn claude_agent_result(&mut self, call: &str, structured: Option<&Value>, block: &Value, failed: bool, at: Option<i64>) {
+        let agent = structured.and_then(|s| s.get("agentId")).and_then(Value::as_str).filter(|a| !a.is_empty());
+        let i = match self.subagents.iter().rposition(|s| s.call == call) {
+            Some(i) => i,
+            None => {
+                let Some(agent) = agent else { return };
+                let Some((it, j)) = self.find_step(call) else { return };
+                let Item::Did { steps } = self.items[it].as_ref() else { return };
+                let mut sub = Subagent::started(call, steps[j].label.clone(), steps[j].at_ms.or(at));
+                sub.id = Some(agent.to_string());
+                sub.kind = (steps[j].kind == StepKind::Skill).then(|| "skill".to_string());
+                self.spawned(sub);
+                match self.subagents.iter().rposition(|s| s.call == call) {
+                    Some(i) => i,
+                    None => return,
+                }
+            }
+        };
+        let st = |k: &str| structured.and_then(|s| s.get(k));
+        let status = st("status").and_then(Value::as_str);
+        let sub = &mut self.subagents[i];
+        if let Some(agent) = agent {
+            sub.id = Some(agent.to_string());
+        }
+        if let Some(m) = subagents::model_of(st("resolvedModel").and_then(Value::as_str)) {
+            sub.model = Some(m);
+        }
+        if st("isAsync").and_then(Value::as_bool) == Some(true) || st("background").and_then(Value::as_bool) == Some(true) || matches!(status, Some("async_launched" | "forked")) {
+            sub.background = true;
+        }
+        sub.tool_uses = st("totalToolUseCount").and_then(Value::as_u64).or(sub.tool_uses);
+        sub.tokens = st("totalTokens").and_then(Value::as_u64).or(sub.tokens);
+        if failed {
+            sub.state = SubagentState::Failed;
+            sub.result = Some(blocks_text(block.get("content"))).filter(|t| !t.is_empty());
+            sub.ended_ms = at;
+        } else if status == Some("completed") {
+            // the turn waited on it: its report is the call's result
+            sub.state = SubagentState::Done;
+            sub.result = Some(blocks_text(st("content").or_else(|| block.get("content")))).filter(|t| !t.is_empty());
+            sub.ended_ms = at;
+        }
+        self.revision += 1;
+    }
+
+    /// Claude Code telling it a background task stopped: a subagent's report, a command that finished, a watch that
+    /// saw something (or stopped watching).
+    fn claude_notified(&mut self, text: &str, at: Option<i64>) {
+        for n in subagents::notices(text) {
+            self.task_notified(&n, at);
+            let found = self.subagents.iter().rposition(|s| n.call.as_deref() == Some(s.call.as_str()) || (n.task.is_some() && s.id == n.task));
+            let Some(i) = found else { continue };
+            if self.subagents[i].id.is_none() {
+                self.subagents[i].id = n.task.clone();
+            }
+            self.subagents[i].background = true;
+            self.reported(i, n.state, n.result, at);
+        }
+    }
+
+    /// What came back from a call that may have left a task running in the background (a backgrounded command, a
+    /// Monitor, a workflow), or stopped one (`TaskStop`).
+    fn claude_task_result(&mut self, call: &str, structured: Option<&Value>, block: &Value, at: Option<i64>) {
+        let said = blocks_text(block.get("content"));
+        if let Some((id, kind, output, lasts)) = tasks::started(structured, &said) {
+            if self.tasks.iter().any(|t| t.id == id) {
+                return;
+            }
+            let step = self.find_step(call).and_then(|(i, j)| match self.items[i].as_ref() {
+                Item::Did { steps } => steps.get(j).cloned(),
+                _ => None,
+            });
+            let title = step.as_ref().map_or_else(|| "A background task".to_string(), |s| s.label.clone());
+            let started_ms = step.as_ref().and_then(|s| s.at_ms).or(at);
+            let expires_ms = lasts.zip(at.or(started_ms)).map(|(ms, from)| from + ms);
+            self.tasks.push(Task { id, call: call.to_string(), kind, title, detail: step.and_then(|s| s.detail), started_ms, expires_ms, output, ..Task::default() });
+            if self.tasks.len() > tasks::REMEMBER_MAX {
+                self.tasks.remove(0);
+            }
+            self.revision += 1;
+            return;
+        }
+        let stop = structured.and_then(|s| s.get("message")).and_then(Value::as_str).is_some_and(|m| m.starts_with("Successfully stopped") || m.starts_with("Successfully killed"));
+        if let Some(id) = tasks::stopped(structured, None).filter(|_| stop) {
+            if let Some(t) = self.tasks.iter_mut().rev().find(|t| t.id == id && t.state.running()) {
+                t.state = SubagentState::Stopped;
+                t.ended_ms = at;
+                self.revision += 1;
+            }
+            // a subagent can be stopped the same way
+            if let Some(i) = self.subagents.iter().rposition(|s| s.id.as_deref() == Some(id.as_str()) && s.state.running()) {
+                self.reported(i, SubagentState::Stopped, None, at);
+            }
+        }
+    }
+
+    /// A notification about one of its background tasks: how it ended, or (a watch) what it saw.
+    fn task_notified(&mut self, n: &subagents::Notice, at: Option<i64>) {
+        let Some(t) = self.tasks.iter_mut().rev().find(|t| n.task.as_deref() == Some(t.id.as_str()) || n.call.as_deref() == Some(t.call.as_str())) else { return };
+        let before = t.clone();
+        let event = n.event.as_deref().unwrap_or_default();
+        if n.ended {
+            t.state = n.state;
+            t.ended_ms = at;
+            t.news = n.summary.as_deref().and_then(tasks::outcome).or_else(|| tasks::event_line(event)).or(t.news.take());
+        } else if tasks::watch_over(event) || n.summary.as_deref().is_some_and(tasks::watch_over) {
+            t.state = SubagentState::Done;
+            t.ended_ms = at;
+        } else if let Some(news) = tasks::event_line(event) {
+            t.news = Some(news);
+        }
+        if *t != before {
+            self.revision += 1;
         }
     }
 
@@ -609,13 +931,41 @@ impl Conversation {
     // ---- Codex ---------------------------------------------------------------------------
 
     fn codex(&mut self, v: &Value) {
+        let record = v.get("type").and_then(Value::as_str);
+        if let Some(own) = self.own.as_mut() {
+            let n = own.records;
+            own.records += 1;
+            let p = v.get("payload");
+            if n == 0 && record == Some("session_meta") {
+                // a forked subagent's transcript carries its parent's history up to here
+                let ordinal = p.and_then(|p| p.get("subagent_history_start_ordinal")).and_then(|o| o.as_u64().or_else(|| o.as_str()?.trim().parse().ok()));
+                own.skip_until = ordinal.unwrap_or(0) as usize;
+                let forked = p.and_then(|p| p.get("forked_from_id")).and_then(Value::as_str).is_some_and(|f| !f.is_empty());
+                if ordinal.is_none() && forked {
+                    own.until_thread = p.and_then(|p| p.get("id")).and_then(Value::as_str).map(str::to_string);
+                }
+                let spawn = |k: &str| p.and_then(|p| p.get(k).or_else(|| p.pointer(&format!("/source/subagent/thread_spawn/{k}")))).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                self.nickname = spawn("agent_nickname");
+                self.role = spawn("agent_role");
+            } else if n < own.skip_until {
+                return;
+            } else if let Some(thread) = own.until_thread.clone() {
+                // its own thread's settings are where its own part starts
+                let own_settings = p.and_then(|p| p.get("type")).and_then(Value::as_str) == Some("thread_settings_applied") && p.and_then(|p| p.get("thread_id")).and_then(Value::as_str) == Some(thread.as_str());
+                if !own_settings {
+                    return;
+                }
+                own.until_thread = None;
+            }
+        }
         let at = stamp(v);
+        self.seen_at(at);
         let Some(p) = v.get("payload") else {
             return;
         };
         let kind = p.get("type").and_then(Value::as_str);
         let s = |path: &str| p.pointer(path).and_then(Value::as_str).map(str::to_string);
-        match v.get("type").and_then(Value::as_str) {
+        match record {
             Some("compacted") => self.note(NoteKind::Compacted, String::new(), at),
             // the session and each turn say where it works, on what model and how hard it thinks
             Some("session_meta") => {
@@ -633,6 +983,40 @@ impl Conversation {
                 let summary = p.get("summary").and_then(Value::as_array).and_then(|a| a.iter().rev().find_map(|b| b.get("text").and_then(Value::as_str)));
                 if let Some(text) = summary {
                     self.reasoned(text, at);
+                }
+            }
+            // a subagent's final answer, as the agent that started it hears it
+            Some("response_item") if kind == Some("agent_message") => {
+                if let Some((author, answer)) = subagents::codex_answer(p)
+                    && let Some(i) = self.subagents.iter().rposition(|s| s.path.as_deref() == Some(author.as_str()))
+                {
+                    self.reported(i, SubagentState::Done, Some(answer), at);
+                }
+            }
+            // what each call to the other agents asked, and a wait for them (which says nothing until it's over)
+            Some("response_item") if matches!(kind, Some("function_call")) && p.get("name").and_then(Value::as_str).is_some_and(is_collab) => {
+                let name = p.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+                let id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
+                let args = match p.get("arguments") {
+                    Some(Value::String(a)) => serde_json::from_str(a).unwrap_or(Value::Null),
+                    Some(a) => a.clone(),
+                    None => Value::Null,
+                };
+                if self.collab.len() >= 64 {
+                    self.collab.clear();
+                }
+                if matches!(name.as_str(), "wait_agent" | "wait") && !id.is_empty() {
+                    self.step(Step { id: id.clone(), kind: StepKind::Agent, label: "Waiting for its subagents".into(), detail: None, state: StepState::Running, added: 0, removed: 0, line: None, at_ms: at, app: None });
+                } else if name == "spawn_agent" && !self.codex_items {
+                    self.step(Step { id: id.clone(), kind: StepKind::Agent, label: "Started a subagent".into(), detail: None, state: StepState::Running, added: 0, removed: 0, line: None, at_ms: at, app: None });
+                }
+                self.collab.insert(id, (name, args));
+            }
+            Some("response_item") if matches!(kind, Some("function_call_output")) && p.get("call_id").and_then(Value::as_str).is_some_and(|id| self.collab.contains_key(id)) => {
+                let id = p.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string();
+                self.waited(&id);
+                if !self.codex_items {
+                    self.update_step(&id, |s| s.state = StepState::Done);
                 }
             }
             Some("response_item") => match kind {
@@ -686,14 +1070,20 @@ impl Conversation {
                         self.codex_item(item, at);
                     }
                 }
+                Some("task_started") => self.turn_is(SubagentState::Running),
                 Some("turn_aborted") => {
                     self.settle(StepState::Failed);
+                    self.turn_is(SubagentState::Stopped);
                     self.note(NoteKind::Interrupted, String::new(), at);
                 }
-                Some("task_complete") => self.settle(StepState::Done),
+                Some("task_complete") => {
+                    self.settle(StepState::Done);
+                    self.turn_is(SubagentState::Done);
+                }
                 Some("error") => {
                     let text = p.get("message").and_then(Value::as_str).unwrap_or_default().trim().to_string();
                     self.settle(StepState::Failed);
+                    self.turn_is(SubagentState::Failed);
                     self.note(NoteKind::Error, text, at);
                 }
                 Some("context_compacted") => self.note(NoteKind::Compacted, String::new(), at),
@@ -804,11 +1194,9 @@ impl Conversation {
                 let st = step(StepKind::Web, web(s("query").unwrap_or_default()), None, failed_status, 0, 0);
                 self.step(st);
             }
-            Some("SubAgentActivity") if s("kind") == Some("started") => {
-                let who = s("agent_path").map(|p| wording::name(p.rsplit('/').next().unwrap_or(p))).unwrap_or_else(|| "a helper".to_string());
-                let st = step(StepKind::Agent, format!("Started a helper: {who}"), s("model").map(str::to_string), failed_status, 0, 0);
-                self.step(st);
-            }
+            Some("SubAgentActivity") => self.codex_subagent(item, &id, at),
+            // a wait for its subagents is over
+            Some("CollabAgentToolCall") if s("tool").is_some_and(|t| t.starts_with("wait")) => self.waited(&id),
             Some("ContextCompaction") => self.note(NoteKind::Compacted, String::new(), at),
             Some("Reasoning") => {
                 let summary = item.get("summary_text").and_then(Value::as_array).and_then(|a| a.iter().rev().find_map(Value::as_str));
@@ -819,6 +1207,77 @@ impl Conversation {
             _ => {}
         }
     }
+
+    /// What Codex says of one of its subagents (`SubAgentActivity`): it started (its step, and the subagent with
+    /// what its spawn call asked), finished, was interrupted, or was given a new task.
+    fn codex_subagent(&mut self, item: &Value, id: &str, at: Option<i64>) {
+        let s = |k: &str| item.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        let (thread, path) = (s("agent_thread_id"), s("agent_path"));
+        let find = |subs: &[Subagent]| subs.iter().rposition(|x| (thread.is_some() && x.id.as_deref() == thread) || (path.is_some() && x.path.as_deref() == path));
+        match s("kind") {
+            Some("started") => {
+                let call = self.collab.get(id).map(|(_, args)| args.clone()).unwrap_or(Value::Null);
+                let arg = |k: &str| call.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+                let task = arg("task_name").or_else(|| path.map(|p| p.rsplit('/').next().unwrap_or(p))).filter(|t| !t.is_empty());
+                let title = task.map_or_else(|| "A subagent".to_string(), wording::name);
+                let step = Step { id: id.to_string(), kind: StepKind::Agent, label: format!("Started a subagent: {title}"), detail: s("model").map(str::to_string), state: StepState::Done, added: 0, removed: 0, line: None, at_ms: at, app: None };
+                self.step(step);
+                let mut sub = Subagent::started(id, title, at);
+                sub.id = thread.map(str::to_string);
+                sub.path = path.map(str::to_string);
+                sub.kind = subagents::kind_of(arg("agent_type"));
+                sub.brief = arg("message").filter(|m| subagents::readable(m)).map(str::to_string);
+                sub.model = s("model").map(str::to_string);
+                sub.effort = s("reasoning_effort").map(str::to_string);
+                sub.background = true;
+                self.spawned(sub);
+            }
+            Some("completed") => {
+                if let Some(i) = find(&self.subagents)
+                    && self.subagents[i].state.running()
+                {
+                    self.subagents[i].state = SubagentState::Done;
+                    self.subagents[i].ended_ms = at;
+                    self.revision += 1;
+                }
+            }
+            Some("interrupted") => {
+                if let Some(i) = find(&self.subagents)
+                    && self.subagents[i].state.running()
+                {
+                    self.subagents[i].state = SubagentState::Stopped;
+                    self.subagents[i].ended_ms = at;
+                    self.revision += 1;
+                }
+            }
+            // a new task wakes it up again (a message alone doesn't)
+            Some("interacted") if self.collab.get(id).is_some_and(|(name, _)| name == "followup_task") => {
+                if let Some(i) = find(&self.subagents)
+                    && !self.subagents[i].state.running()
+                {
+                    self.subagents[i].state = SubagentState::Running;
+                    self.subagents[i].ended_ms = None;
+                    self.revision += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Call `id` was a wait for its subagents, and it's over.
+    fn waited(&mut self, id: &str) {
+        if self.collab.get(id).is_some_and(|(name, _)| matches!(name.as_str(), "wait_agent" | "wait")) {
+            self.update_step(id, |s| {
+                s.state = StepState::Done;
+                s.label = "Waited for its subagents".into();
+            });
+        }
+    }
+}
+
+/// Codex's calls to the other agents in its team.
+fn is_collab(name: &str) -> bool {
+    matches!(name, "spawn_agent" | "send_message" | "send_input" | "followup_task" | "wait_agent" | "wait" | "list_agents" | "close_agent" | "resume_agent")
 }
 
 /// Text Claude Code puts in user records that the user didn't type (beyond what titles already skip).
@@ -1318,7 +1777,7 @@ fn codex_call(p: &Value, at: Option<i64>) -> Option<Step> {
                 None => make(StepKind::Run, "Ran a script".into(), Some(script.to_string())),
             }
         }
-        "spawn_agent" => make(StepKind::Agent, "Started a helper".into(), None),
+        "spawn_agent" => make(StepKind::Agent, "Started a subagent".into(), None),
         "send_message" | "followup_task" | "wait" | "list_agents" => None,
         "" => None,
         n => match n.strip_prefix("mcp__").unwrap_or(n).split_once("__") {
@@ -1760,6 +2219,149 @@ mod tests {
         let got: Vec<(&str, StepState)> = steps.iter().map(|s| (s.label.as_str(), s.state)).collect();
         assert_eq!(got, [("Read a.jsonl", StepState::Done), ("Tested bro-proxy", StepState::Failed), ("Edited golden.rs", StepState::Done), ("Searched the web for “responses api streaming”", StepState::Done)], "the script's own call is left to the items");
         assert_eq!((steps[2].added, steps[2].removed), (2, 1));
+    }
+
+    #[test]
+    fn claude_subagents_are_kept_with_their_brief_state_and_report() {
+        // as Claude Code 2.1.318 records a background fork, a foreground Explore agent and their reports
+        let notice = |id: &str, call: &str, status: &str, result: &str| format!("<task-notification>\n<task-id>{id}</task-id>\n<tool-use-id>{call}</tool-use-id>\n<output-file>C:\\t\\{id}.output</output-file>\n<status>{status}</status>\n<summary>Agent finished</summary>\n<result>{result}</result>\n</task-notification>");
+        let launched = |call: &str, id: &str| json!({"type":"user","timestamp":"2026-11-04T00:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":call,"content":[{"type":"text","text":"Async agent launched successfully."}]}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":id,"description":"x","resolvedModel":"claude-opus-5-5"}});
+        let mut c = claude(&[
+            user("fix selection and add swipe"),
+            tool("m1", "toolu_A", "Agent", json!({"description":"Add swipe between media","subagent_type":"fork","name":"media-swipe","prompt":"You are the fork handling swipe."})),
+            launched("toolu_A", "a0b8"),
+            text("m2", "I started a fork for the swipe."),
+            json!({"type":"system","subtype":"turn_duration","durationMs":4000}),
+            json!({"type":"attachment","timestamp":"2026-11-04T00:10:00Z","attachment":{"type":"queued_command","prompt":notice("a0b8", "toolu_A", "completed", "Swiping works now."),"origin":{"kind":"task-notification"}}}),
+            text("m3", "The swipe fork is done."),
+        ]);
+        assert_eq!(kinds(&c), ["you", "did", "said", "note", "note", "said"], "{:?}", c.items);
+        let s = &c.subagents[0];
+        assert_eq!((s.call.as_str(), s.id.as_deref(), s.title.as_str(), s.name.as_deref(), s.kind.as_deref()), ("toolu_A", Some("a0b8"), "Add swipe between media", Some("media-swipe"), Some("fork")));
+        assert_eq!((s.background, s.state, s.result.as_deref(), s.model.as_deref()), (true, SubagentState::Done, Some("Swiping works now."), Some("claude-opus-5-5")));
+        assert_eq!(s.brief.as_deref(), Some("You are the fork handling swipe."));
+        let Item::Note { kind: NoteKind::Subagent, text, .. } = c.items[4].as_ref() else { panic!("{:?}", c.items[4]) };
+        assert_eq!(subagents::read_note(text), Some(("toolu_A", SubagentState::Done)), "the note goes where the session heard it");
+        // the same report again (it's queued, then read) adds nothing
+        c.ingest(&user(&notice("a0b8", "toolu_A", "completed", "Swiping works now.")));
+        assert_eq!(c.items.iter().filter(|i| matches!(i.as_ref(), Item::Note { kind: NoteKind::Subagent, .. })).count(), 1);
+        // a message wakes it again; its next report is news
+        c.ingest(&tool("m4", "t9", "SendMessage", json!({"to":"a0b8","message":"also videos"})));
+        assert_eq!(c.subagents[0].state, SubagentState::Running);
+        c.ingest(&user(&notice("a0b8", "toolu_A", "killed", "")));
+        assert_eq!((c.subagents[0].state, c.subagents[0].result.as_deref()), (SubagentState::Stopped, Some("Swiping works now.")), "a stop without words keeps the last report");
+
+        // one the turn waits on reports in its call's result
+        let c = claude(&[
+            user("where are the routes?"),
+            tool("m1", "toolu_E", "Task", json!({"description":"Find the route code","subagent_type":"Explore","prompt":"Find it"})),
+            json!({"type":"user","timestamp":"2026-11-04T00:01:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_E","content":[{"type":"text","text":"In src/routes."}]}]},"toolUseResult":{"status":"completed","agentId":"e1","content":[{"type":"text","text":"In src/routes."}],"totalDurationMs":42000,"totalTokens":31000,"totalToolUseCount":7}}),
+        ]);
+        let s = &c.subagents[0];
+        assert_eq!((s.background, s.state, s.result.as_deref(), s.tool_uses, s.tokens, s.kind.as_deref()), (false, SubagentState::Done, Some("In src/routes."), Some(7), Some(31000), Some("Explore")));
+        // and stops with the turn when you stop it
+        let c = claude(&[user("go"), tool("m1", "toolu_F", "Agent", json!({"description":"Dig"})), user("[Request interrupted by user for tool use]")]);
+        assert_eq!(c.subagents[0].state, SubagentState::Stopped);
+        // a skill run in a fork of its own is a subagent too
+        let c = claude(&[user("/code-review"), tool("m1", "toolu_S", "Skill", json!({"skill":"code-review"})), json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_S","content":"Running in the background"}]},"toolUseResult":{"success":true,"commandName":"code-review","status":"forked","background":true,"agentId":"a7b4"}})]);
+        assert_eq!((c.subagents[0].title.as_str(), c.subagents[0].kind.as_deref(), c.subagents[0].background), ("Code review", Some("skill"), true));
+    }
+
+    #[test]
+    fn background_commands_and_watches_run_on_until_they_are_heard_from() {
+        use super::tasks::TaskKind;
+        let bg = |call: &str, structured: Value, said: &str| json!({"type":"user","timestamp":"2026-11-04T00:00:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":call,"content":said}]},"toolUseResult":structured});
+        let mut c = claude(&[
+            user("render the ads"),
+            tool("m1", "toolu_B", "Bash", json!({"command":"node render.mjs --all","description":"Re-render the three ads","run_in_background":true})),
+            bg("toolu_B", json!({"stdout":"","stderr":"","interrupted":false,"backgroundTaskId":"bzzk17aji"}), "Command running in background with ID: bzzk17aji. Output is being written to: C:\\T\\tasks\\bzzk17aji.output. You will be notified when it completes."),
+            tool("m2", "toolu_M", "Monitor", json!({"description":"new review sheets","command":"watch.sh"})),
+            bg("toolu_M", json!({"taskId":"bwen2xvol","timeoutMs":1_800_000,"persistent":false}), "Monitor started (task bwen2xvol, expires in 30m)."),
+            text("m3", "Both are going."),
+            json!({"type":"system","subtype":"turn_duration","durationMs":4000}),
+        ]);
+        assert_eq!(c.tasks.len(), 2);
+        let b = &c.tasks[0];
+        assert_eq!((b.id.as_str(), b.call.as_str(), b.kind, b.title.as_str(), b.state), ("bzzk17aji", "toolu_B", TaskKind::Command, "Re-render the three ads", SubagentState::Running));
+        assert_eq!((b.output.as_deref(), b.detail.as_deref()), (Some("C:\\T\\tasks\\bzzk17aji.output"), Some("node render.mjs --all")));
+        let m = &c.tasks[1];
+        assert_eq!((m.kind, m.title.as_str()), (TaskKind::Watch, "Watching new review sheets"));
+        assert_eq!(m.expires_ms, parse_iso_ms("2026-11-04T00:00:05Z").map(|s| s + 1_800_000), "a watch gives up when its time is up, from when it started watching");
+        // a watch's event is news; it watches on
+        c.ingest(&json!({"type":"attachment","timestamp":"2026-11-04T00:02:00Z","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>bwen2xvol</task-id>\n<summary>Monitor event: \"new review sheets\"</summary>\n<event>sheet ready: a.png\nsheet ready: b.png</event>\n</task-notification>"}}));
+        assert_eq!((c.tasks[1].state, c.tasks[1].news.as_deref()), (SubagentState::Running, Some("sheet ready: b.png")));
+        // the command ends badly
+        c.ingest(&user("<task-notification>\n<task-id>bzzk17aji</task-id>\n<tool-use-id>toolu_B</tool-use-id>\n<status>failed</status>\n<summary>Background command \"Re-render the three ads\" failed (exit code 1)</summary>\n</task-notification>"));
+        assert_eq!((c.tasks[0].state, c.tasks[0].news.as_deref()), (SubagentState::Failed, Some("exit code 1")));
+        assert!(c.tasks[0].ended_ms.is_some());
+        assert_eq!(kinds(&c).iter().filter(|k| **k == "you").count(), 1, "a notification isn't something you said");
+        // and the watch is stopped
+        c.ingest(&tool("m4", "toolu_S", "TaskStop", json!({"task_id":"bwen2xvol"})));
+        c.ingest(&bg("toolu_S", json!({"message":"Successfully stopped task: bwen2xvol (watch.sh)","task_id":"bwen2xvol","task_type":"local_bash"}), "{\"message\":\"Successfully stopped task: bwen2xvol\"}"));
+        assert_eq!(c.tasks[1].state, SubagentState::Stopped);
+        // a command that ran to its end in the turn is no task
+        let c = claude(&[user("ls"), tool("m1", "toolu_L", "Bash", json!({"command":"ls"})), bg("toolu_L", json!({"stdout":"a b","stderr":"","interrupted":false}), "a b")]);
+        assert!(c.tasks.is_empty());
+    }
+
+    #[test]
+    fn a_subagents_own_transcript_reads_as_its_own_conversation() {
+        let mut c = Conversation::subagent(Harness::Claude);
+        for l in [
+            json!({"type":"user","isSidechain":true,"timestamp":"2026-11-04T00:00:00Z","message":{"content":"Find the swipe handlers"}}),
+            json!({"type":"assistant","isSidechain":true,"timestamp":"2026-11-04T00:00:05Z","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Grep","input":{"pattern":"onSwipe"}}]}}),
+            json!({"type":"user","isSidechain":true,"isMeta":true,"message":{"content":[{"type":"text","text":"[Image: original 2160x1080]"}]}}),
+            json!({"type":"user","isSidechain":true,"isMeta":true,"origin":{"kind":"coordinator"},"timestamp":"2026-11-04T00:00:07Z","message":{"content":[{"type":"text","text":"The coordinator sent a message while you were working:\nCheck the videos too."}]}}),
+        ] {
+            c.ingest(&l);
+        }
+        assert_eq!(kinds(&c), ["you", "did", "you"], "its brief, its work, and what the agent that started it sent it: {:?}", c.items);
+        assert!(matches!(c.items[2].as_ref(), Item::You { text, .. } if text == "Check the videos too."));
+        assert_eq!(c.turn, Some(SubagentState::Running));
+        c.ingest(&json!({"type":"assistant","isSidechain":true,"timestamp":"2026-11-04T00:01:00Z","message":{"id":"m2","stop_reason":"end_turn","content":[{"type":"text","text":"Found them in Swipe.tsx."}]}}));
+        assert_eq!((c.turn, c.first_ms.is_some(), c.last_ms.is_some()), (Some(SubagentState::Done), true, true));
+        // a session's own conversation still leaves a subagent's records out
+        let main = claude(&[json!({"type":"user","isSidechain":true,"message":{"content":"Find the swipe handlers"}})]);
+        assert!(main.items.is_empty());
+    }
+
+    #[test]
+    fn codex_subagents_are_kept_with_their_task_and_final_answer() {
+        let mut c = Conversation::new(Harness::Codex);
+        let item = |v: Value| json!({"type":"event_msg","timestamp":"2026-11-04T00:23:26Z","payload":{"type":"item_completed","item":v}});
+        let call = |name: &str, id: &str, args: Value| json!({"type":"response_item","payload":{"type":"function_call","name":name,"namespace":"collaboration","arguments":args.to_string(),"call_id":id}});
+        let output = |id: &str, out: &str| json!({"type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":out}});
+        for l in [
+            item(json!({"type":"UserMessage","id":"u1","content":[{"type":"text","text":"audit the competitors"}]})),
+            call("spawn_agent", "call_1", json!({"task_name":"strength_tracking","agent_type":"worker","message":"gAAAAABq6nrqHd8lBGIjTFNg2H8Mz4tz"})),
+            item(json!({"type":"SubAgentActivity","model":"gpt-6.1-sol","reasoning_effort":"max","id":"call_1","kind":"started","agent_thread_id":"01a1a3f0-2900","agent_path":"/root/strength_tracking"})),
+            output("call_1", "{\"task_name\":\"/root/strength_tracking\"}"),
+            call("wait_agent", "call_2", json!({"timeout_ms":45000})),
+        ] {
+            c.ingest(&l);
+        }
+        let s = &c.subagents[0];
+        assert_eq!((s.call.as_str(), s.id.as_deref(), s.title.as_str(), s.kind.as_deref(), s.brief.as_deref()), ("call_1", Some("01a1a3f0-2900"), "Strength tracking", Some("worker"), None), "an encrypted task isn't a brief");
+        assert_eq!((s.model.as_deref(), s.effort.as_deref(), s.path.as_deref(), s.state), (Some("gpt-6.1-sol"), Some("max"), Some("/root/strength_tracking"), SubagentState::Running));
+        assert_eq!(c.running().map(|s| s.label.as_str()), Some("Waiting for its subagents"), "a wait says so while it lasts");
+        for l in [
+            item(json!({"type":"CollabAgentToolCall","id":"call_2","tool":"wait","status":"completed"})),
+            output("call_2", "{\"message\":\"Wait completed.\",\"timed_out\":false}"),
+            item(json!({"type":"SubAgentActivity","id":"subagent-completed-x","kind":"completed","agent_thread_id":"01a1a3f0-2900","agent_path":"/root/strength_tracking"})),
+            json!({"type":"response_item","timestamp":"2026-11-04T00:40:00Z","payload":{"type":"agent_message","author":"/root/strength_tracking","recipient":"/root","content":[{"type":"input_text","text":"Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/strength_tracking\nPayload:\nCompleted all 15 strength competitors."}]}}),
+        ] {
+            c.ingest(&l);
+        }
+        assert!(c.running().is_none());
+        let s = &c.subagents[0];
+        assert_eq!((s.state, s.result.as_deref()), (SubagentState::Done, Some("Completed all 15 strength competitors.")));
+        assert_eq!(c.items.iter().filter(|i| matches!(i.as_ref(), Item::Note { kind: NoteKind::Subagent, .. })).count(), 1, "its answer is news even after it was seen to finish");
+        let Item::Did { steps } = c.items[1].as_ref() else { panic!("{:?}", c.items) };
+        assert_eq!(steps.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["Started a subagent: Strength tracking", "Waited for its subagents"]);
+        // a new task wakes it again
+        c.ingest(&call("followup_task", "call_3", json!({"target":"strength_tracking","message":"gAAAAABq"})));
+        c.ingest(&item(json!({"type":"SubAgentActivity","id":"call_3","kind":"interacted","agent_thread_id":"01a1a3f0-2900","agent_path":"/root/strength_tracking"})));
+        assert_eq!(c.subagents[0].state, SubagentState::Running);
     }
 
     #[test]

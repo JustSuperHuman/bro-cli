@@ -26,10 +26,9 @@ pub enum Action {
     Overlay(usize),
     /// An entry in the shared session context menu.
     Menu(usize),
-    /// Copy (`true`) or paste (`false`) in the terminal's clipboard menu.
-    Clipboard(bool),
     /// A view pane's target `n`.
     View(PaneId, usize),
+    ThemeEditor(usize),
     /// Target `n` of a session's focus view (its conversation, reply box, choice).
     Focus(PaneId, usize),
     /// The media panel's target `n`.
@@ -38,12 +37,19 @@ pub enum Action {
     MediaResize,
     /// Show or hide the media panel.
     MediaToggle,
-    /// Native Orbit controls: 0 conversation, 1 mute, 2 advanced settings.
-    OrbitVoice(u8),
+    /// Voice controls: 0 toggle push-to-talk, 2 settings, 3 browser call, 4 end calls.
+    Voice(u8),
+    /// Line `n` of the open context menu. `side_menu::OUTSIDE` closes it.
+    SideMenu(usize),
+    /// The + on the sidebar's projects: open a project folder.
+    OpenProject,
     /// Dismiss toast `n`.
     Toast(usize),
     /// The welcome screen's target `n`.
     Welcome(usize),
+    /// An exact agent-requested handoff; the id protects against a stale button.
+    BrowserHandoff { tab_id: u32, id: String, finish: bool },
+    BrowserHandoffNext,
     /// Close the open overlay (clicks on a scrim).
     CloseOverlay,
 }

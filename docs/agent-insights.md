@@ -210,6 +210,17 @@ after only the new bytes. The phone's chat view polls it:
 
 * `items` holds the latest `limit` (default 150, at most 400) of `total`. Keys stay
   with their items as the conversation grows.
+* The desktop's notes that a subagent reported back aren't sent: the apps don't know them
+  yet. Subagents themselves (`bro_core::sessions::subagents`) aren't served yet either, nor are
+  the background tasks a session leaves running (`bro_core::sessions::tasks`).
+* A step's `kind` is one of read, edit, create, delete, run, search, web, agent, plan, ask,
+  send or other. Skills and MCP tools stay `other` for older apps and add `"family": "skill"`
+  (the label names the skill) or `"family": "mcp"` (`detail` names the server). A Codex
+  change to several files lists one path per line in `detail`.
+* Codex panes are bound to the rollout their own processes hold open (Windows asks the
+  Restart Manager, Linux reads `/proc`; see `bro_core::sessions::holders`), so two Codex
+  sessions in one folder never show each other's conversation. Where that can't be told,
+  bro falls back to the folder's newest rollout.
 * `?since=` with the current `rev` answers `{ "rev": …, "unchanged": true }`.
 * Before bro binds a transcript: `{ "rev": "0", "ready": false, "total": 0, "items": [] }`.
   bro tells the bridge which transcript a session has again whenever a session is announced

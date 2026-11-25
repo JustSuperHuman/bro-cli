@@ -1,0 +1,158 @@
+{
+  "voice": "3TStB8f3X3To0Uj5R7RK",
+  "model": "eleven_multilingual_v2",
+  "folder": "bro/T3 Code story VO",
+  "beats": [
+    {
+      "id": "b01",
+      "scene": "intro",
+      "say": "T3 Code is another app for running coding agents. We read its source from end to end, looking for anything it does that bro doesn't."
+    },
+    {
+      "id": "b02",
+      "scene": "intro",
+      "say": "One rule decided what we took. When bro reaches another computer, it goes through your Just Superhuman account, and nothing else."
+    },
+    {
+      "id": "b03",
+      "scene": "path",
+      "say": "A remote request crosses four links: this computer, Just Superhuman, the other computer, and Bro running there."
+    },
+    {
+      "id": "b04",
+      "scene": "path",
+      "say": "Until now, the other computer asked for work every five seconds. Anything you started remotely could sit that long before it began.",
+      "show": "Until now, the other computer asked for work every 5 seconds. Anything you started remotely could sit that long before it began.",
+      "min": 8.2
+    },
+    {
+      "id": "b05",
+      "scene": "path",
+      "say": "Now it keeps one request open with the account, for up to twenty-five seconds at a time. When work comes in, the account answers that request straight away.",
+      "show": "Now it keeps one request open with the account, for up to 25 seconds at a time. When work comes in, the account answers that request straight away.",
+      "min": 9.2
+    },
+    {
+      "id": "b06",
+      "scene": "path",
+      "say": "That half lives on the account server. It's written and tested, and it hasn't been deployed.",
+      "min": 6.4
+    },
+    {
+      "id": "b07",
+      "scene": "path",
+      "say": "Until it is, bro works from a clock. Right after a job it asks four times a second, then eases off in steps to once every five seconds.",
+      "show": "Until it is, bro works from a clock. Right after a job it asks four times a second, then eases off in steps to once every 5 seconds.",
+      "min": 8.0
+    },
+    {
+      "id": "b08",
+      "scene": "pool",
+      "say": "Two more changes on the same path. Each request used to open its own encrypted connection. They now share one pool, along with bro's sign-in, usage checks and downloads."
+    },
+    {
+      "id": "b09",
+      "scene": "pool",
+      "say": "And the other computer runs up to four jobs at once, so a quick read no longer waits behind a slow session start. Keystrokes for a session still arrive in order."
+    },
+    {
+      "id": "b10",
+      "scene": "doctor",
+      "say": "When something fails, bro says where. It checks the four links in order and stops at the first one that's broken, with the steps that fix it."
+    },
+    {
+      "id": "b11",
+      "scene": "doctor",
+      "say": "From a terminal, that's bro computers doctor.",
+      "min": 5.0
+    },
+    {
+      "id": "b12",
+      "scene": "view",
+      "say": "There's also one place to see all of it. Search for computers in the palette.",
+      "show": "There's also one place to see all of it. Search for “computers” in the palette.",
+      "min": 5.4
+    },
+    {
+      "id": "b13",
+      "scene": "view",
+      "say": "Each computer on your account is listed with its sessions, and it only offers the actions that can work right now.",
+      "min": 9.5
+    },
+    {
+      "id": "b14",
+      "scene": "log",
+      "say": "On speed, the biggest finding was in bro's own log. Over fourteen and a half hours, it recorded two thousand four hundred and five slow passes.",
+      "show": "On speed, the biggest finding was in bro's own log. Over 14½ hours, it recorded 2,405 slow passes."
+    },
+    {
+      "id": "b15",
+      "scene": "log",
+      "say": "About three quarters were the app waiting on the graphics system. Most lasted around a fifteenth of a second. A few ran for five to nine seconds, and your keys wait on the same thread.",
+      "show": "About three quarters were the app waiting on the graphics system. Most lasted around a fifteenth of a second. A few ran for 5 to 9 seconds, and your keys wait on the same thread."
+    },
+    {
+      "id": "b16",
+      "scene": "stall",
+      "say": "We haven't found the cause. We measured both ways of handing a frame to the display, and switching only moves the stall from one step to the other."
+    },
+    {
+      "id": "b17",
+      "scene": "stall",
+      "say": "So bro now gets out of the way. After a frame blocks for four hundred milliseconds or more, it stops drawing for a while, and the next key or pointer move ends the hold.",
+      "show": "So bro now gets out of the way. After a frame blocks for 400 milliseconds or more, it stops drawing for a while, and the next key or pointer move ends the hold.",
+      "min": 9.6
+    },
+    {
+      "id": "b18",
+      "scene": "stall",
+      "say": "The log also records which step stalled.",
+      "min": 5.5
+    },
+    {
+      "id": "b19",
+      "scene": "small",
+      "say": "Two smaller fixes. A settings file bro couldn't read used to be replaced with defaults at your next change. Now the old file is kept beside the new one, and bro tells you at startup."
+    },
+    {
+      "id": "b20",
+      "scene": "small",
+      "say": "And a phone that goes away without closing its connection no longer stays counted as a viewer.",
+      "min": 6.5
+    },
+    {
+      "id": "b21",
+      "scene": "next",
+      "say": "What happens next depends on three things.",
+      "min": 3.4
+    },
+    {
+      "id": "b22",
+      "scene": "next",
+      "say": "Deploy the account server change, and remote work starts the moment you ask. Bro notices by itself."
+    },
+    {
+      "id": "b23",
+      "scene": "next",
+      "say": "Add a second computer to your account, and this path gets its first real test between two machines."
+    },
+    {
+      "id": "b24",
+      "scene": "next",
+      "say": "Give the new log a day, and it should show where the long stalls sit."
+    },
+    {
+      "id": "b25",
+      "scene": "next",
+      "say": "Still to build: starting and answering a remote session from the Computers view, and a relay for live remote terminals.",
+      "min": 7.0
+    },
+    {
+      "id": "b26",
+      "scene": "end",
+      "say": "All of it is in bro, version two point one point forty-nine, installed on this computer.",
+      "show": "All of it is in bro 2.1.49, installed on this computer.",
+      "min": 5.5
+    }
+  ]
+}

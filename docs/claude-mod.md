@@ -37,6 +37,14 @@ Three parts:
   seconds, firmer for the last five. At zero the mod answers for you: the question closes as Claude Code's
   own away-from-keyboard answer does (`afkTimeoutMs`), with a note telling Claude to go with its best
   judgement and say which way it went. The mod passes the timer as `timer` in seconds, 0 for none.
+  Start answering and the countdown stops ("paused while you answer"), along with its ticks. Leave the
+  question a minute without a key and the countdown runs again from where it stopped, with at least 15
+  seconds to go so the ticks can warn you; a key in that time stops it again. Claude Code's dialog tells
+  hooks nothing about your keys, but bro sees every one you send the session (window, focus view, phone):
+  once a second the mod asks the bridge `GET /api/mod/<BRO_SESSION_ID>/typed` and gets `{ "idleMs": n }`,
+  how long ago you last typed (`null` before you have; bro typing for you, like auto-resume, doesn't count).
+  Only keys after the question opened count. A bro without the route (404) is asked once, and its
+  countdown runs as before. A question closed after you'd started tells Claude so.
 - **apps/**: MCP Apps for bro's focus mode. When a tool answers with a widget (a `ui://` resource), bro
   draws it in the conversation, but the widget's HTML and the tools it calls sit behind Claude Code's own MCP
   connections (claude.ai connectors and their sign-ins, stdio servers). So bro asks the session's mod, and the

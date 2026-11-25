@@ -546,6 +546,7 @@ pub(crate) fn harness_name(h: Harness) -> &'static str {
         Harness::Codex => "Codex",
         Harness::Pi => "Pi",
         Harness::Omp => "omp",
+        Harness::Antigravity => "Antigravity",
     }
 }
 

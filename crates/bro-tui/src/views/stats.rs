@@ -94,6 +94,13 @@ impl StatsView {
         let mut seen = std::collections::HashSet::new();
         let profiles: Vec<_> = profiles.into_iter().filter(|p| !p.is_gemini()).filter(|p| seen.insert((p.is_claude(), bro_core::util::path_key(&p.dir)))).collect();
         let job = Arc::new(Job { progress: Progress::default(), started: Instant::now(), report: Mutex::new(None) });
+        // the demo never reads anyone's logs: its logins have made up months of work
+        if cx.svc.is_demo() {
+            *job.report.lock() = Some(demo_report(&profiles));
+            self.job = Some(job.clone());
+            self.shown = Some(job);
+            return;
+        }
         self.job = Some(job.clone());
         let waker: Waker = cx.waker();
         std::thread::spawn(move || {
@@ -178,6 +185,48 @@ fn spark(values: &[u64]) -> String {
 }
 
 /// A share bar `w` cells wide in `color`, eighth-block resolution; anything above zero keeps a sliver.
+/// Made-up months of work for each demo login: busy weekdays, quiet weekends, a heavy cache.
+fn demo_report(profiles: &[bro_core::profiles::Profile]) -> Report {
+    let now = crate::util::now_secs();
+    let top = now - now.rem_euclid(3600);
+    let logins = profiles
+        .iter()
+        .enumerate()
+        .map(|(n, p)| {
+            let scale = [9u64, 4, 12, 3, 2, 5, 3][n % 7];
+            let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ (n as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03);
+            let mut next = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed
+            };
+            let mut hours = std::collections::BTreeMap::new();
+            for back in 0..24 * 45 {
+                let at = top - back * 3600;
+                let local = tokens::local_date(at);
+                let weekend = matches!(chrono::Datelike::weekday(&local), chrono::Weekday::Sat | chrono::Weekday::Sun);
+                let busy = (next() % 100) < if weekend { 14 } else { 46 };
+                if !busy {
+                    continue;
+                }
+                let r = next();
+                let input = (6_000 + r % 40_000) * scale;
+                hours.insert(at, Tokens { input, output: input / 5 + r % 9_000, cache_read: input * (14 + r % 9), cache_write: input * 2 });
+            }
+            let logs = LogTotals { hours, files: 120 + n * 37 };
+            let counter = p.is_claude().then(|| ClaudeCounter {
+                lifetime: logs.all().total() * 3,
+                daily: logs.daily(),
+                sessions: Some(310 + n as u64 * 84),
+                through: Some(tokens::local_date(now)),
+            });
+            Login { harness: if p.is_claude() { Harness::Claude } else { Harness::Codex }, name: p.name.clone(), counter, logs }
+        })
+        .collect();
+    Report { logins, at: now, took: Duration::from_millis(1_240) }
+}
+
 fn share_bar(frac: f64, w: usize, color: Color, t: &Theme) -> Vec<Span<'static>> {
     const PARTS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
     let eighths = (frac.clamp(0.0, 1.0) * (w * 8) as f64).round() as usize;

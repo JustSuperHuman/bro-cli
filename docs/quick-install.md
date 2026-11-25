@@ -7,9 +7,10 @@ bro install recommended            # JustTools, Git, Node.js, Bun, Claude Code, 
 bro install agents                 # claude codex pi omp
 bro install dotnet9 dotnet10 dotnet11
 bro install codex --force          # reinstall / update one
+bro install cua                   # Cua Driver, configured by Bro
 ```
 
-Tools: `justtools`, `justpaste` (Windows), `justwatch` (Windows), `justimagine`, `justbrowse`, `git`, `gh`, `node`, `bun`, `python`, `uv`, `dotnet9`, `dotnet10`, `dotnet11`,
+Tools: `justtools`, `justpaste` (Windows), `justwatch` (Windows), `justimagine`, `justbrowse`, `cua`, `git`, `gh`, `node`, `bun`, `python`, `uv`, `dotnet9`, `dotnet10`, `dotnet11`,
 `claude`, `codex`, `pi`, `omp`, `agent-desktop`, `rg`, `ffmpeg`, `yt-dlp`, `tailscale`, `powertoys` (Windows), `sharex` (Windows, JustSuperHuman's fork). Windows installs with WinGet, macOS with Homebrew
 (installed first if missing), Linux with apt, dnf, pacman, zypper or apk. Bun, uv and .NET on
 macOS / Linux (into `~/.dotnet`) use their official install scripts; JustTools, Claude Code, Codex,
@@ -37,6 +38,27 @@ them, reinstalls dependencies and restarts the service.
 
 ## Browser and desktop tools
 
+The empty desktop screen has **JustBrowse** and **CUA** setup cards. Open either, or choose
+**Settings → Integrations → Browser and computer**, to install, switch each integration on or off,
+and check its connection. The command palette opens the same page. Its switches are saved in
+`~/.bro/v2.toml` as `[automation] justbrowse = true` and `cua = true`; both default to using the tool
+when it is installed. Existing sessions retain their tools until resumed.
+
+Installing either integration makes Bro responsible for UI automation in its Claude, Codex, Pi and
+omp sessions. Claude launches with `--no-chrome` and denies built-in computer/browser tools.
+Codex launches with its native computer/browser features and bundled UI plugins disabled. Switching
+off a Bro integration also disables its MCP tools for that session; it does not restore a built-in
+fallback. These overrides apply to Bro launches and do not rewrite global agent MCP configuration.
+
+`bro install cua` installs [Cua Driver](https://cua.ai/docs/cua-driver/quickstart) with its official
+installer and version-matched skill pack. Bro skips the installer's global MCP registration and
+desktop test. Claude and Codex receive a session-scoped `cua-driver` stdio MCP server; Pi and omp
+receive the skill and use `cua-driver call`. macOS needs Accessibility and Screen Recording grants
+for CuaDriver; Windows needs a signed-in desktop, and Linux needs a supported graphical session.
+**Check readiness** runs `cua-driver doctor --json` without clicking or typing in your apps.
+`bro install cua --force` updates the driver and its guides. `BRO_CUA_DRIVER` can select an existing
+driver executable, including one outside PATH.
+
 `bro install justbrowse` downloads the newest [JustBrowseMCP release](https://github.com/JustSuperHuman/mcp-chrome-but-good/releases),
 requires a matching SHA-256 in `SHA256SUMS`, extracts the extension and registers its native bridge.
 It needs Node.js 20 or newer. Files go in `%LOCALAPPDATA%\JustBrowseMCP` on Windows,
@@ -54,6 +76,16 @@ Select JustBrowseMCP in Quick install to see those instructions and the exact fo
 not merely whether the bridge is running. New Claude and Codex sessions, including pooled logins,
 get the local `justbrowse` MCP server automatically. Bro does not rewrite global agent configuration.
 Claude's explicit `--strict-mcp-config` still excludes Bro's automatic browser configuration.
+Pi and omp use `bro browse` to list and call the same JustBrowse tools. The CLI keeps an MCP
+session per `BRO_SESSION_ID`, so tab ownership survives between calls. It saves screenshot results
+to files for the agent to read. Run these commands inside a Bro pane.
+
+A JustBrowse bridge you set up another way counts too: a source checkout, the repository's own installer,
+or the upstream mcp-chrome bridge. Bro follows the browser's `com.chromemcp.nativehost` manifest to the
+bridge it runs (the per-user file the bridge's `register` command writes), wires new sessions the same way
+and takes the `justbrowse-browser` skill from that checkout's `skills/` folder. A bridge without a skill of
+its own gets it from GitHub, following the skills auto-sync setting. Quick install then shows the checkout's
+folder, and installing from there registers Bro's release copy in place of that bridge.
 
 `bro install agent-desktop` installs [Vercel's native desktop CLI](https://github.com/vercel-labs/agent-desktop)
 through npm. It needs Node.js and Git. Bro installs the main `agent-desktop` skill and the guide for

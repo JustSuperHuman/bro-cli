@@ -9,6 +9,8 @@ Open **Settings → Quips → Manage Quips** to browse, edit, or create shortcut
 
 In the desktop app, type `:` in an agent session to find a Quip. Pick one with **↑/↓**, then **Tab** or **Enter**. This works in conversation view and the regular terminal view. Sending is a separate step. Try `Explain this bill :plain-english :keep-it-short`.
 
+The last entry in that list is **New…**. It opens the Quip editor with whatever you typed after the colon as the shortcut, and saving puts the new Quip straight into your message. Esc takes you back to the message as you left it.
+
 In conversation view, recognized shortcuts light up in your message. In terminal view, selected Quips stay in small removable tags below the editor; Bro adds their instructions when you press **Enter** to send. **Esc** clears the tags. If a colon starts ordinary text, keep typing or press **Esc** to put it in the terminal as written. Shell sessions keep their own keys.
 
 Quips are Bro's quick, local alternative to loading a skill. Bro expands each shortcut when you send, so your AI gets the instructions directly without choosing or opening a skill. Unused Quips add nothing to context. The instructions you send still use prompt tokens. Your conversation keeps the short form.
@@ -16,6 +18,21 @@ Quips are Bro's quick, local alternative to loading a skill. Bro expands each sh
 **Full-Send** tells the AI to make reasonable assumptions, finish and check the task without questions, and carry a pull request through to merge. **Full-Stop** does the work and checks it, then leaves the final action to you, including merging a pull request. These two are inspired by [TStack](https://github.com/t3dotgg/tstack); Bro keeps their instructions short and lets you edit them. Use one per message.
 
 The other starters are **Plain English**, **Keep It Short**, **Step by Step**, **Make a Plan**, **Second Look**, and **Check the Facts**. In Settings, choose **Edit** to see or change a Quip's instructions, or **New** to write your own. Custom Quips stay on this computer in `~/.bro/quips.json`.
+
+**Remotion Update** (`:remotion-update`) asks the agent for a short narrated Remotion video about the work it just did: the goal, what changed and why, and what you need to know, including decisions, risks, anything untested and next steps. It voices the video with ElevenLabs when the agent can use it, otherwise with JustImagine, and falls back to captions alone when neither is there. Starters added in an update show up once at the end of a library you've already saved. If you delete one, it stays deleted.
+
+## New session
+
+**New session** (`alt+n`) asks for two things. **Harness** is the agent: Claude Code, Codex, Pi or omp. **Providers**
+is what it runs on, in one list:
+
+- Your subscriptions come first: your Claude and ChatGPT logins with what each has left, the Just Superhuman
+  account, Gemini. With proxy mode on, Claude and ChatGPT are one row each.
+- **Connected** lists the API providers you have a key for (OpenRouter, Z.ai, a local Ollama).
+- **Other providers** holds the ones with no key yet. Click it, or press Enter on it, to open it.
+
+A login of the harness's own kind launches straight away. Anything else asks for a model beside the list. The list
+opens on what that harness ran last, with its model already picked. Typing picks the project.
 
 ## Profiles
 
@@ -28,13 +45,21 @@ saved sessions after confirmation. Bro protects the machine's default logins
 
 ## Just Superhuman
 
-Profiles opens with a **Just Superhuman** card. **Sign in** opens your browser to approve "bro" on this computer
-(the card shows the code to check, and waits), or run `bro jsh login`. Signed in, the card shows your name,
-organization and credits with **Sign out** (`bro jsh logout`), and **Just Superhuman** appears in the launcher:
-Claude Code started on it runs through Just Superhuman's Claude and spends the organization's credits; no Claude
-login is involved. Codex and Pi can use it through bro-proxy. The token lives in `~/.bro/jsh/token.json`, apart
-from `config.json`. `BRO_JSH_ORIGIN` points bro at another accounts server (`http://auth.localhost:8790` locally).
-Credits refresh every few minutes; if the device is revoked on the website, bro signs out and says so.
+Your Just Superhuman account sits at the bottom of Settings, under the sections, marked with the knot. **Sign in**
+opens your browser to approve "bro" on this computer (Settings shows the code to check, with **Open browser** and
+**Cancel**, and waits), or run `bro jsh login`. Signed in, it shows your name and credits (hover for the email and
+organization) with **Sign out** (`bro jsh logout`), and the launcher gets a **Just Superhuman** row straight
+after your logins, with the organization, its credits and how much of the month's allowance is left. Claude Code started on it runs through Just Superhuman's Claude and spends the organization's credits; no
+Claude login is involved. Codex and Pi can use it through bro-proxy. The token lives in `~/.bro/jsh/token.json`,
+apart from `config.json`. `BRO_JSH_ORIGIN` points bro at another accounts server (`http://auth.localhost:8790`
+locally).
+
+The credits show where your logins' usage does. The usage view's first card is the account: the credits left and
+their dollar value, this month's allowance as a meter with when it resets, and what's been spent, granted (one-time
+credits that never expire) and held for replies still being written, plus anything stopping Claude (out of credits,
+AI paused). The sidebar's **Usage left** has a **Just Superhuman** line with the credits left. Clicking either opens
+the launcher on the account to pick a model. Credits refresh every few minutes, and again when you press refresh in
+the usage view; if the device is revoked on the website, bro signs out and says so.
 
 Phone (bridge, same token auth as the other `/api/*` routes; times are ms since the epoch, the token is never sent):
 
@@ -78,24 +103,28 @@ Two differences remain, both from the harnesses themselves:
 - Claude Code's Remote Control isn't available while `ANTHROPIC_BASE_URL` points elsewhere. bro's phone bridge
   still reaches the session.
 
-Pi and omp keep their own login. In the launcher they can also run on all your Claude or all your ChatGPT logins.
-The same rows let Claude Code run on your ChatGPT logins and Codex on your Claude ones. The proxy view lists each
+In the launcher, proxy mode shows **Claude** and **ChatGPT** as one row each (how many logins share the work and
+what they have left together) in place of a row per login. Pi and omp keep their own login and can also run on
+either row. The same rows let Claude Code run on your ChatGPT logins and Codex on your Claude ones. The proxy view lists each
 shared login: ready or back at its reset, how much of its 5-hour and weekly windows it has used, and how many
 conversations it carries. Add or sign out a login in Profiles and it joins or leaves within seconds, with no
 restart. Turning proxy mode off changes new sessions only.
 
 ## Session menu and reload
 
-Right-click a session's title bar, or press **Ctrl+Space**, to open the
-session menu in the desktop app or terminal UI. Click an action, press its key,
-or use **Up/Down** and **Enter**. **Esc** closes the menu. The menu follows your
-custom prefix and key bindings; **Ctrl+Space** twice still sends it to the agent.
+In the desktop app, right-click a session's title bar or tab to fork, rename,
+reload, or close that session. Press **Ctrl+Space** for the full list of prefix
+commands. In the terminal UI, right-clicking the title bar opens that full list.
+Click an action or use **Up/Down** and **Enter**. **Esc** closes the menu. The
+prefix menu follows your custom bindings. **Ctrl+Space** twice sends it to the agent.
 
-In the desktop app, right-click terminal content for **Copy** and **Paste**.
-Programs that handle mouse input keep their right-clicks; hold **Shift** while
-right-clicking to open Bro's clipboard menu instead.
+In the desktop app, right-click terminal or conversation content for **Paste**,
+**Copy** when text is selected, and **Fork conversation** in Claude Code and
+Codex sessions. Hold **Shift** while right-clicking if the terminal program
+handles mouse input.
 
-Choose **Reload session with a profile**, or press **Ctrl+Space**, then **Shift+R**.
+Choose **Reload session…** in the desktop context menu, or press **Ctrl+Space**,
+then **Shift+R**.
 Pick the current profile to load its latest settings, or choose another profile
 to continue the conversation there. Reload keeps the pane's position and your
 session name. If Bro cannot find the transcript or build the new command, the
@@ -134,8 +163,50 @@ would be hard to read.
 - **Light:** GitHub Light, Atom One Light, Night Owl Light, Ayu Light, Solarized Light, Catppuccin Latte and Rosé
   Pine Dawn.
 
-Make your own in `~/.bro/themes/<name>.toml`: start from any of them (`base = "dracula"`) and list only what you
-change. bro picks up each save as you make it.
+In the desktop app, Settings → Appearance → **Create a custom theme** opens a floating editor over your
+workspace. Background and Accent derive the full palette using T3 Code's color engine. Every valid change
+previews across the app; nothing is saved until **Save theme**. Cancel restores the theme you started with.
+Drag the panel by its heading, resize its lower-right corner or minimize it to see more of the app.
+
+**Advanced** has T3's 22 color families. Each updates its related foregrounds, borders and hover colors together.
+**Inspect app colors** selects the family used by a visible app area; its click does not run the underlying
+button or link. Registered targets include the sidebar, headers, controls, message bubbles, code blocks and
+terminal backgrounds. The editor outlines visible uses of the selected family. Light and Dark retain separate
+palettes in the same file. Returning to the two-color controls regenerates the active palette and replaces its
+advanced adjustments. Escape in a color field reverts that color edit, including linked colors; Escape again
+closes the editor. Tab moves between fields, Alt+Up/Down selects color families, and Ctrl+S saves a copy.
+
+**Aurora studio demo** starts a paired light/dark theme with violet and sea-glass colors, ambient gradients,
+rounded message and code surfaces, and embedded CSS for T3 Code. The bundled stylesheet has a matching native
+treatment in Bro; arbitrary browser CSS still does not run in Bro. The editor's Custom CSS field edits the
+exported browser stylesheet. Changes to that field take effect in T3 Code after import.
+
+You can also make your own in `~/.bro/themes/<name>.toml`: start from any built-in (`base = "dracula"`) and list
+only what you change. Bro picks up each save as you make it.
+
+Appearance and the theme picker both have **Import** and **Export**. Import a T3 Code v1 theme or a self-contained VS Code
+color-theme file (`.json` or `.jsonc`). You can also put the file directly in `~/.bro/themes/`. Existing themes
+are kept; importing another theme with the same name creates a separate copy. Files must be 2 MB or smaller.
+An invalid edit keeps the last working palette and shows the problem.
+
+T3 imports keep all 61 color roles, collection metadata and both appearances. A file with a dark variant has a
+second picker entry marked **dark**; choosing it is independent of the system appearance. Literal CSS colors,
+including OKLCH, Display P3 and alpha, are supported. The desktop app uses the palette's UI and terminal colors
+separately; the terminal UI composites transparent colors onto their corresponding surfaces.
+
+VS Code files support comments and trailing commas. Bro maps their workbench colors using T3 Code's importer
+and keeps their sixteen terminal colors too. Import the actual color-theme file, not an extension's
+`package.json` or a VSIX archive. Local `include` files are not loaded, and syntax-token rules do not change
+Bro's interface.
+
+**Export** saves a new T3 Code JSON file under `~/.bro/themes/exports/`, ready to import into T3 Code. A native
+T3 theme keeps its variants and embedded CSS when exported. Browser CSS is preserved as data but is not
+executed by Bro's native renderer; CSS selectors, web fonts and layout effects do not carry over. Colors set
+only through that CSS need to be moved into the file's `colors` map to affect Bro.
+
+Compatibility tests use published Catppuccin Mocha, Dracula, Nord, One Dark Pro, Vitesse Dark and Solarized
+Light files, with pinned sources and licenses in
+[`crates/bro-tui/tests/fixtures/themes/`](../crates/bro-tui/tests/fixtures/themes/README.md).
 
 ## Tasks
 
@@ -165,11 +236,13 @@ See [Coordination](coordination.md) for the task tools, evidence protocol, recov
 - **Reaches your phone** — a built-in bridge lets the Just Terminal mobile and web clients connect. The phone opens the pictures, videos and sounds that belong to your work, even outside the session's folder: the ones in your projects, the ones your agents made, sent, looked at or named, and the ones you attached. Its gallery lists them for a chat or for all of them. Code and text never leave the session's folders. To let the phone open any media on this computer, turn off **Protect phone media** in Settings › Session server.
 - **Sets how Claude Code runs** — pick a preset (Quiet, Private, Lockdown, Incognito, Presenter, Marathon) in Settings (the ⚙ in the sidebar, `alt+,` or prefix `A`), next to theme, icons, auto-resume, recaps and compression, to control telemetry, updates, retries and more for every launch. See [docs/claude-env.md](claude-env.md).
 - **Keeps projects apart** — Claude sessions only find and message sessions in their own project and the orchestrator. Claude Code on its own lets any session reach any other. Change it under Settings › Claude Code › Messages between sessions. See [docs/claude-env.md](claude-env.md#messages-between-sessions).
-- **Orchestrators** — each project can have its own coordinator on Claude Code, Codex, Pi or omp. Open New session's gold ★ orchestrator tab (or `alt+O`), choose its project folder, and launch it. Starting another in the same project takes you to the running one. The Orchestrators project tab shows every coordinator; each project tab shows that project's coordinator with its workers. Choose **Orchestrator** (`alt+g` in the launcher) for the root coordinator across projects. It runs in `~/orchestrator`, opens or reuses project orchestrators, and starts new ones with its own model and launch settings. Push-to-talk, phone and web panel messages, watchdog reviews and scheduled reminders go to the root Orchestrator. Each running orchestrator comes back with its own project and settings when you reopen bro. `bro ctl <tool>` gives any shell the same tools, including `open_orchestrator`.
+- **Orchestrators** — each project can have its own coordinator on Claude Code, Codex, Pi or omp. Open New session's gold ★ orchestrator tab (or `alt+O`), choose its project folder, and launch it. Starting another in the same project takes you to the running one. **Orchestrators** in the sidebar lists every coordinator in the session tabs; each project lists its own coordinator beside its workers. Choose **Orchestrator** (`alt+g` in the launcher) for the root coordinator across projects. It runs in `~/orchestrator`, opens or reuses project orchestrators, and starts new ones with its own model and launch settings. Push-to-talk, phone and web panel messages, watchdog reviews and scheduled reminders go to the root Orchestrator. Each running orchestrator comes back with its own project and settings when you reopen bro. `bro ctl <tool>` gives any shell the same tools, including `open_orchestrator`.
 - **Agent teams** — on for every Claude session: ask Claude for teammates and watch them work. Each lead lists its teammates in the sidebar (working or idle, what each is doing, tasks done), and `ctrl+space M` opens the team board with the shared task list. Switch them off or pick the teammates' model under Settings → Claude Code → agent teams. See [docs/claude-env.md](claude-env.md#agent-teams).
+- **Create Slop** — start a session for making video and media. Open New session's Create Slop tab (or `alt+shift+s`), cast characters from character.slop.cc or Claudia, and start. The session gets each character's MCP server and the media tools this computer has (JustImagine, ElevenLabs, Higgsfield, SLOPCANNON, ffmpeg, Remotion). A project remembers its cast. See [docs/create-slop.md](create-slop.md).
 - **Watchdogs** — keep a session working while you're away. Press `ctrl+space w` on a session and list its milestones. Each time the agent stops and sits idle, bro hands the review to the orchestrator, starting one if none is running. It reads the chat and the code, checks the work against the milestones and sends the agent its next task. It can clear the agent's context before a new milestone, or open a second-opinion session (an Opus pass over UI work Codex did, for example). Edit what every reviewer is told under Settings → watchdog. See [docs/watchdog.md](watchdog.md).
 - **The desktop app** — `bro gui` opens the same workspace in its own window: terminals drawn on the GPU, every row, tab and button clickable, and the pictures and videos your agents make, open or send you shown in a panel beside your sessions instead of another app. See [docs/gui.md](docs/gui.md).
 - **The bro mod for Claude Code** — off by default, in Settings › bro mod: `/bro` for your sessions and limits, a chime when Claude asks you something and an optional timer on its questions. See [docs/claude-mod.md](claude-mod.md).
+- **Slop Collector (beta)** — when a render or test your agent runs gets cut short, the programs it started can keep running out of sight (usually a headless browser from Remotion, Playwright or Puppeteer, holding gigabytes until the session closes), and its throwaway temp folder stays on disk. Turn on Settings › Slop Collector and the session server checks your sessions every 30 seconds, closes a leftover once nothing has used it for 10 minutes (you can change that, or have it wait for you), clears the temp folders those runs leave, and tells you what came back. It never closes anything with a window, a server you're using, or anything your sessions are still running. `bro slop` lists what it finds; `bro slop collect` cleans it up now. See [docs/slop-collector.md](slop-collector.md).
 - **Caveman mode** — terse replies that keep every technical fact ([Caveman](https://github.com/JuliusBrussee/caveman) rules: caveman, ultracave or megacave) for new Claude, Codex and Pi sessions. Turn it on in Settings or the palette ("caveman"); ⛏ in the sidebar and on each session's header shows it. Nothing to install. See [docs/caveman.md](caveman.md).
-- **Skills** — The Skills view (`skills` in the palette, or Settings › Skills › Manage skills) shows every skill your agents have, grouped by where each came from (bro's own, a repo bro watches, Skill Issue, Codex's built-ins, yours) with the agents that get it: Claude, Codex, `~/.agents`, Pi, omp. Each sidebar project has a page of its own: its `.claude/skills`, `.codex/skills` and `.agents/skills`, then the skills every project gets, so you see exactly what an agent working there has. `enter` opens a skill's SKILL.md in bro's preview, `o` shows its folder, `/` searches, `tab` goes to the next page, and `m` (or a right-click, or a row's ⋯) opens a skill's menu with everything that can be done with it. **Add repo** (`a`) watches a git repo: paste `https://github.com/t3dotgg/tstack`, `owner/repo` or any git URL (or run `bro skills add t3dotgg/tstack`) and its page lists every folder with a `SKILL.md` at the repo's root, one folder down or under its `skills/` (or, in a repo with none there, under `.claude/skills/`, `.agents/skills/` or `plugins/*/skills/`). Watching installs nothing: tick the skills you want (`space`, or their boxes) and install them together everywhere (`i`: every Claude and Codex home, so every project) or into one project (`p`: its `.claude/skills` and `.agents/skills`), or use a row's Install. bro pulls the repos when it opens and every 6 hours (Settings › Skills › Keep them in sync) and keeps what you installed in step: a skill that leaves its repo leaves too, and a skill of yours with the same name is never replaced. A repo's page pulls it now (`r`) or stops watching it (`w`: keep what you installed from it, or disable that too). **Removing a skill disables it** (`d`, or Disable in its menu): every copy of it moves out of your agents' reach into `~/.bro/disabled-skills/<name>`, with a note of where each was, and the **Disabled** page enables it again (`e`: each copy goes back where it was) or deletes it for good (`x`, asked once more). bro's own skills are switched off instead, and Codex keeps its own. **Discover** features Theo's [tstack](https://github.com/t3dotgg/tstack) and browses [Skill Issue](https://skill-issue.in), 300+ agent skills ranked by what actually gets used: its domain tabs (`←`/`→` or `1`–`9`), its ranking or most clicked (`s`), a search (`/`), and `enter` installs one, asking where (`i` installs it everywhere straight away, `p` into a project). bro watches just that skill's folder in its repo (`owner/repo#skill`), so it stays in step, and `d` disables it. bro's own skills (`bro-open`, JustTools', JustWatch's, JustImagine's) have their switches on the bro page and in Settings › Skills. From a shell: `bro skills installed [--project <dir>]`, `bro skills install t3dotgg/tstack council full-send [--project <dir>]`, `bro skills disable <skill>`, `bro skills enable <skill>`, `bro skills disabled`, `bro skills search react --domain frontend`, then `bro skills install <id>`.
+- **Skills** — The Skills view (`skills` in the palette, or Settings › Skills › Manage skills) shows every skill your agents have, grouped by where each came from (bro's own, a repo bro watches, Skill Issue, Codex's built-ins, yours) with the agents that get it: Claude, Codex, `~/.agents`, Pi, omp. Each sidebar project has a page of its own: its `.claude/skills`, `.codex/skills` and `.agents/skills`, then the skills every project gets, so you see exactly what an agent working there has. `enter` opens a skill's SKILL.md in bro's preview, `o` shows its folder, `/` searches, `tab` goes to the next page, and `m` (or a right-click, or a row's ⋯) opens a skill's menu with everything that can be done with it. **Add repo** (`a`) watches a git repo: paste `https://github.com/t3dotgg/tstack`, `owner/repo` or any git URL (or run `bro skills add t3dotgg/tstack`) and its page lists every folder with a `SKILL.md` at the repo's root, one folder down or anywhere under its `skills/`, including families of skills kept in folders of their own (`skills/dcc/blender/<name>`; in a repo with none there, under `.claude/skills/`, `.agents/skills/` or `plugins/*/skills/`, else wherever they are). A SKILL.md inside another skill's folder is part of that skill, and when two folders share a name the shallowest is the one listed. Paste a link to a folder (`https://github.com/scenario-labs/skills/tree/main/skills/dcc/blender`) to watch just the skills in it; `owner/repo#dcc` or `owner/repo#blender` does the same by the folder's name. A repo that keeps its skills in families lists each family under its own heading, with how many of it are installed and **Tick all**: a family's skills often lean on each other (Blender's specialists run the lead skill's scripts), so install them together. Watching installs nothing: tick the skills you want (`space`, or their boxes) and install them together everywhere (`i`: every Claude and Codex home, so every project) or into one project (`p`: its `.claude/skills` and `.agents/skills`), or use a row's Install. bro pulls the repos when it opens and every 6 hours (Settings › Skills › Keep them in sync) and keeps what you installed in step: a skill that leaves its repo leaves too, and a skill of yours with the same name is never replaced. A repo's page pulls it now (`r`) or stops watching it (`w`: keep what you installed from it, or disable that too). **Removing a skill disables it** (`d`, or Disable in its menu): every copy of it moves out of your agents' reach into `~/.bro/disabled-skills/<name>`, with a note of where each was, and the **Disabled** page enables it again (`e`: each copy goes back where it was) or deletes it for good (`x`, asked once more). bro's own skills are switched off instead, and Codex keeps its own. **Discover** features Theo's [tstack](https://github.com/t3dotgg/tstack) and browses [Skill Issue](https://skill-issue.in), 300+ agent skills ranked by what actually gets used: its domain tabs (`←`/`→` or `1`–`9`), its ranking or most clicked (`s`), a search (`/`), and `enter` installs one, asking where (`i` installs it everywhere straight away, `p` into a project). bro watches just that skill's folder in its repo (`owner/repo#skill`), so it stays in step, and `d` disables it. bro's own skills (`bro-open`, JustTools', JustWatch's, JustImagine's) have their switches on the bro page and in Settings › Skills. From a shell: `bro skills installed [--project <dir>]`, `bro skills install t3dotgg/tstack council full-send [--project <dir>]`, `bro skills disable <skill>`, `bro skills enable <skill>`, `bro skills disabled`, `bro skills search react --domain frontend`, then `bro skills install <id>`.
 - **Sounds** — PeonPing voice lines when a session starts, finishes, fails or needs you, in Claude Code, Codex, Pi and omp. Settings › Integrations › Sounds (or "sounds" in the palette): pick a pack, preview and install from the registry, choose which moments speak. Shares peon-ping's config and packs when it's installed. See [docs/sounds.md](sounds.md).

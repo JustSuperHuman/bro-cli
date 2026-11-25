@@ -22,8 +22,9 @@ struct ImageOut {
 
 @vertex
 fn vs_image(@builtin(vertex_index) vi: u32, i: ImageIn) -> ImageOut {
-    let c = corner(vi);
-    let p = i.rect.xy + c * i.rect.zw;
+    // clipped like the others; the texture coordinates follow the corner where it ended up
+    let p = clip_point(i.rect.xy + corner(vi) * i.rect.zw, i.clip);
+    let c = (p - i.rect.xy) / i.rect.zw;
     var o: ImageOut;
     o.pos = to_clip(p);
     o.p = p;

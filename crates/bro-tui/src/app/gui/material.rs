@@ -78,7 +78,6 @@ impl Gui {
     pub(super) fn swap_window(&mut self, el: &ActiveEventLoop) {
         self.swap_window = false;
         let (Some(old), Some(gfx)) = (self.window.clone(), self.gfx.take()) else { return };
-        self.orbit_stage.invalidate(&self.app.svc);
         self.prefs.note_size(Some(&old));
         let maximized = old.is_maximized();
         let fullscreen = old.fullscreen();
@@ -92,7 +91,7 @@ impl Gui {
                 w.set_outer_position(p);
             }
             let size = w.inner_size();
-            Renderer::with_options(w.clone(), size.width, size.height, Options { vsync: true, transparent: true }).map(|r| (w, r))
+            Renderer::with_options(w.clone(), size.width, size.height, Options { vsync: true, transparent: true, skip: super::startup::skip() }).map(|r| (w, r))
         });
         let (w, renderer) = match new {
             Ok((w, r)) if r.see_through() => {
@@ -112,7 +111,6 @@ impl Gui {
         w.set_fullscreen(fullscreen);
         w.set_ime_allowed(true);
         window::remember_handle(&w);
-        self.orbit_stage.new_window(&self.app.svc);
         self.occluded = false;
         self.redraw = super::redraw::Redraw::default();
         self.scale = w.scale_factor() as f32;
@@ -120,8 +118,11 @@ impl Gui {
         text.reset_atlases();
         text.set_antialias(window::text_antialias(renderer.subpixel_text()));
         self.media.gpu_lost();
+        self.icons.gpu_lost();
+        self.cast.gpu_lost();
         self.gfx = Some(Gfx { renderer, text, scene });
         self.window = Some(w);
+        self.cursor = None;
         self.old_window = Some(old);
         self.window_see_through = true;
         // shown after its first frame (which puts the material on), and the old one goes then

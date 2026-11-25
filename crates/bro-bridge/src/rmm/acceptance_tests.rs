@@ -43,6 +43,7 @@ fn viewer(id: &str, read_only: bool, transport: &str) -> Arc<Lease> {
     Arc::new(Lease {
         id: id.into(),
         read_only,
+        peer: None,
         transport: transport.into(),
         deadline: Mutex::new(Instant::now() + LEASE_TTL),
         reconnect_at: Instant::now() + Duration::from_secs(50 * 60),
@@ -50,6 +51,7 @@ fn viewer(id: &str, read_only: bool, transport: &str) -> Arc<Lease> {
         attached: AtomicBool::new(false),
         rtc_id: Mutex::new(None),
         ice_servers: json!([]),
+        trickle_ice: false,
         _control_lock: None,
     })
 }
@@ -203,6 +205,7 @@ fn process(origin: String) -> Process {
         target: Target {
             origin,
             password: "fixture-password".into(),
+            trickle_ice: false,
         },
     }
 }
@@ -231,6 +234,7 @@ async fn changing_to_view_only_while_admission_waits_cannot_publish_an_old_contr
     let pending = tokio::spawn(async move {
         open(
             State(pending_state),
+            Ok(axum::extract::ConnectInfo("127.0.0.1:9".parse().unwrap())),
             Json(Open {
                 read_only: false,
                 transport: "websocket".into(),
@@ -503,4 +507,47 @@ async fn real_heartbeat_cannot_extend_a_lease_past_its_absolute_reconnect_deadli
         assert!(response.json::<Value>().await.unwrap()["reconnectAt"].is_string());
     }
     state.rmm.stop();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn trickle_ice_is_authenticated_and_scoped_to_the_leases_own_peer() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let forwarded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = forwarded.clone();
+    let router = Router::new().route("/rtc/owned-peer/ice", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+        let seen = seen.clone();
+        async move {
+            assert_eq!(headers.get(header::AUTHORIZATION).unwrap(), "Bearer fixture-password");
+            assert_eq!(body["after"], 0);
+            seen.fetch_add(1, Ordering::AcqRel);
+            Json(json!({"candidates":[],"next":0,"complete":true}))
+        }
+    }));
+    let (upstream, _host) = serve(router).await;
+    state.rmm.config.write().enabled = true;
+    let mut lease = viewer("trickle-viewer", true, "webrtc");
+    Arc::get_mut(&mut lease).unwrap().trickle_ice = true;
+    *lease.rtc_id.lock() = Some("owned-peer".into());
+    {
+        let mut inner = state.rmm.inner.lock();
+        inner.phase = Phase::Running;
+        inner.process = Some(process(upstream));
+        inner.leases.insert(lease.id.clone(), lease.clone());
+    }
+    assert_eq!(lease_json(&lease, None)["trickleIce"], true);
+    let (origin, _server) = serve(crate::server::router(state.clone())).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let path = format!("{origin}/rmm/trickle-viewer/rtc/owned-peer/ice");
+    assert_eq!(client.post(&path).json(&json!({})).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(client.post(format!("{origin}/rmm/trickle-viewer/rtc/another-peer/ice"))
+        .bearer_auth(TOKEN).json(&json!({"after":0})).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    let response = client.post(&path).bearer_auth(TOKEN).json(&json!({"after":0})).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json::<Value>().await.unwrap()["complete"], true);
+    assert_eq!(forwarded.load(Ordering::Acquire), 1);
+    state.rmm.stop();
+    assert_eq!(client.post(&path).bearer_auth(TOKEN).json(&json!({"after":0})).send().await.unwrap().status(), StatusCode::GONE);
+    assert_eq!(forwarded.load(Ordering::Acquire), 1);
 }

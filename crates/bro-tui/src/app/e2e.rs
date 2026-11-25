@@ -513,6 +513,7 @@ fn e2e_inbox_panels_schedule_fresh_start_and_watchdog_go_through_the_orchestrato
         browser: bro_core::browser::BrowserMode::Off,
         extra_args: vec![],
         orchestrator: true,
+        studio: None,
     };
     h.app.launch_spec(spec, Place::Tab);
     assert!(h.until(40, |h| h.app.orchestrator_pane().is_some()), "no orchestrator");

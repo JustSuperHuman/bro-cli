@@ -59,6 +59,8 @@ const I_CTL: usize = 10_000;
 const I_MORE: usize = 20_000;
 /// `I_TICK + k`: line `k`'s tick box
 const I_TICK: usize = 30_000;
+/// `I_FAMILY + n`: the `n`th family heading's "Tick all" (a repo that keeps its skills in families)
+const I_FAMILY: usize = 40_000;
 
 const ROW_H: f32 = 52.0;
 const HEAD_H: f32 = 34.0;
@@ -271,7 +273,7 @@ fn empty_message(v: &SkillsView, cx: &Cx) -> String {
         Page::Repo(spec) => match st.skills.repos.get(spec) {
             Some(r) if r.syncing.is_some() => format!("Pulling {}…", skill_repos::label(spec)),
             Some(r) if r.error.is_some() => "Its last pull didn't work, so bro can't list its skills yet.".into(),
-            Some(r) if r.skills.is_some() => "No skills in it: bro looks for a folder with a SKILL.md at its root, one folder down, or under skills/.".into(),
+            Some(r) if r.skills.is_some() => "No skills in it: bro looks for a folder with a SKILL.md at its root, one folder down, or anywhere under skills/.".into(),
             _ => "Not pulled yet: pull it to see the skills in it.".into(),
         },
         Page::Installed => "No skills yet. Add a repo, or find some on Discover.".into(),
@@ -297,8 +299,8 @@ fn draw_list(v: &mut SkillsView, ui: &mut Ui, list: Rect, entries: &[Entry], cx:
     let (mut y, mut k) = (0.0, 0);
     for (n, e) in entries.iter().enumerate() {
         let h = match e {
-            Entry::Head(_) if n == 0 => HEAD_H - 8.0,
-            Entry::Head(_) => HEAD_H,
+            Entry::Head(_) | Entry::Family(_) if n == 0 => HEAD_H - 8.0,
+            Entry::Head(_) | Entry::Family(_) => HEAD_H,
             Entry::Note(_) => NOTE_H,
             _ => ROW_H,
         };
@@ -315,7 +317,7 @@ fn draw_list(v: &mut SkillsView, ui: &mut Ui, list: Rect, entries: &[Entry], cx:
     if v.installed.shown_sel != Some(v.installed.sel) {
         if let Some(at) = items.iter().position(|i| i.3 == Some(v.installed.sel)) {
             // a group's heading comes into view with its first skill
-            let top = if at > 0 && matches!(items[at - 1].0, Entry::Head(_)) { items[at - 1].1 } else { items[at].1 };
+            let top = if at > 0 && matches!(items[at - 1].0, Entry::Head(_) | Entry::Family(_)) { items[at - 1].1 } else { items[at].1 };
             let bottom = items[at].1 + items[at].2;
             if top - 4.0 < scroll {
                 scroll = top - 4.0;
@@ -331,7 +333,11 @@ fn draw_list(v: &mut SkillsView, ui: &mut Ui, list: Rect, entries: &[Entry], cx:
     v.sel_at = None;
     let spin = |name: &str| pending.iter().any(|(n, _)| n.eq_ignore_ascii_case(name));
     ui.clip(view, 0.0);
+    let mut families = 0;
     for (e, top, h, k) in &items {
+        if matches!(e, Entry::Family(_)) {
+            families += 1;
+        }
         let ry = view.y + top - shown;
         if ry + h < view.y || ry > view.bottom() {
             continue;
@@ -345,6 +351,10 @@ fn draw_list(v: &mut SkillsView, ui: &mut Ui, list: Rect, entries: &[Entry], cx:
         }
         match (e, k) {
             (Entry::Head(text), _) => widgets::section(ui, Rect::new(r.x + 8.0, r.bottom() - 24.0, r.w - 8.0, 18.0), text),
+            (Entry::Family(group), _) => {
+                let (Some(inv), Page::Repo(spec)) = (inv.as_deref(), &v.page) else { continue };
+                family_head(ui, Rect::new(r.x + 8.0, r.bottom() - 26.0, r.w - 16.0, 22.0), group, spec, &found, inv, &v.ticked, families - 1, id);
+            }
             (Entry::Note(text), _) => {
                 ui.icon(Rect::new(r.x + 8.0, r.y + 5.0, 16.0, 18.0), INFO, size::SMALL, t.faint);
                 ui.label_in(Rect::new(r.x + 30.0, r.y + 5.0, r.w - 36.0, 18.0), text, Style::new(size::SMALL, weight::REGULAR, t.muted), Align::Left);
@@ -447,6 +457,47 @@ fn skill_row(ui: &mut Ui, r: Rect, s: &Skill, page: &Page, on: bool, hot: f32, b
     // a page that mixes sources names each one's
     let pill = matches!(page, Page::Project(_)).then(|| if s.project.is_some() { ("this project".to_string(), t.accent) } else { (origin_tag(&s.origin), t.muted) });
     name_and_about(ui, r, r.x + 14.0, right, &s.name, s.summary().as_deref(), pill.as_ref().map(|(p, c)| (p.as_str(), *c)), on, t.text);
+}
+
+/// The heading of a family of skills on a repo's page (`group`, "dcc/blender"; it's the `n`th): its folder and how
+/// many of its skills are installed, and on the right a button that ticks the ones that aren't (or unticks them).
+/// A family's skills often lean on each other (Blender's specialists run the lead's scripts), so they go in together.
+#[allow(clippy::too_many_arguments)]
+fn family_head(ui: &mut Ui, r: Rect, group: &str, spec: &str, found: &[RepoSkill], inv: &bro_core::skill_inventory::Inventory, ticked: &[String], n: usize, id: PaneId) {
+    let t = ui.t;
+    let members: Vec<&RepoSkill> = found.iter().filter(|f| f.group == group).collect();
+    let installed = members.iter().filter(|f| repo_status(spec, &f.name, inv).installed()).count();
+    let open: Vec<&str> = members.iter().filter(|f| repo_status(spec, &f.name, inv).tickable()).map(|f| f.name.as_str()).collect();
+    let all_ticked = !open.is_empty() && open.iter().all(|o| ticked.iter().any(|t| t == o));
+    let mut right = r.right();
+    // one skill on its own has its own box
+    if open.len() > 1 || (all_ticked && members.len() > 1) {
+        let label = if all_ticked { "Untick" } else if open.len() == members.len() { "Tick all" } else { "Tick the rest" };
+        let st = Style::new(size::SMALL, weight::MEDIUM, t.accent);
+        let w = ui.measure(label, st) + 18.0;
+        let br = Rect::new(right - w, r.y, w, r.h);
+        let hot = ui.hover_amount(("skills-family", id, n), br);
+        if hot > 0.01 {
+            ui.round(br, radius::CONTROL, t.accent.with_alpha(0.12 * hot));
+        }
+        ui.label_in(br, label, st, Align::Center);
+        ui.hit(br, Action::View(id, I_FAMILY + n));
+        if hot > 0.6 && !all_ticked {
+            let tip = if open.len() == 1 { "Tick the one that isn't installed".to_string() } else { format!("Tick the {} that aren't installed: a family's skills work best together", open.len()) };
+            widgets::tooltip(ui, br, &tip);
+        }
+        right = br.x - 12.0;
+    }
+    let label = SkillsView::family_label(group);
+    let b = ui.line(&label, Style::new(size::SMALL, weight::SEMIBOLD, t.text.mix(t.muted, 0.35)), Some(((right - r.x) * 0.7).max(40.0)));
+    ui.draw(&b, Point::new(r.x, r.y + (r.h - b.h) / 2.0));
+    let count = match installed {
+        0 => plural(members.len(), "skill"),
+        i if i == members.len() => if i == 1 { "installed".to_string() } else { format!("all {i} installed") },
+        i => format!("{i} of {} installed", members.len()),
+    };
+    let cb = ui.line(&format!("·  {count}"), Style::new(size::SMALL, weight::REGULAR, t.faint), Some((right - r.x - b.w - 10.0).max(20.0)));
+    ui.draw(&cb, Point::new(r.x + b.w + 8.0, r.y + (r.h - cb.h) / 2.0));
 }
 
 /// Where a skill of the repo shown is installed, in a few words.
@@ -935,6 +986,13 @@ pub(super) fn click(v: &mut SkillsView, n: usize, p: Point, count: u32, cx: &mut
         MORE_SEL => v.open_menu(at, cx),
         BULK_CLEAR => v.ticked.clear(),
         TICK_ALL => v.tick_all(cx),
+        // a family heading's Tick all: the family as the page lists it
+        n if n >= I_FAMILY => {
+            let group = v.installed_list(cx).into_iter().filter_map(|e| if let Entry::Family(g) = e { Some(g) } else { None }).nth(n - I_FAMILY);
+            if let Some(g) = group {
+                v.tick_family(&g, cx);
+            }
+        }
         n if n >= I_TICK => {
             v.installed.sel = n - I_TICK;
             v.tick_chosen(cx);

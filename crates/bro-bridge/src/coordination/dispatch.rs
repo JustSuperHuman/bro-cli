@@ -50,6 +50,7 @@ pub(super) async fn dispatch(app: &AppState, args: &Value) -> Result<Value, Stri
             return Err("Worker directory differs from the task workspace. Open the worker in that exact workspace.".into());
         }
         let adapter=adapter(&session);
+        prune_adapters(&app2, now())?;
         host_execute(&app2,&format!("adapter-{}-{}",session.id,uuid::Uuid::new_v4().simple()),Command::RegisterAdapter{adapter:adapter.clone()})?;
         let outcome = engine.execute(&command2, &actor2, now(), Command::Claim { task_id: task.id, session_id: session2, adapter_id: Some(adapter.id), lease_seconds: 0 }).map_err(|e| e.to_string())?;
         let outbox_id = outcome.outbox_id.clone().ok_or("Claim did not produce a delivery.")?;

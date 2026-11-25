@@ -20,7 +20,7 @@ pub mod text;
 
 pub use color::Color;
 pub use geom::{Corners, Edges, Point, Rect, Size};
-pub use renderer::{Effects, FrameError, Options, Renderer};
+pub use renderer::{Effects, FrameError, FrameTimes, Options, Renderer, Starting, attempts, backend_names, backend_titles, on_start};
 pub use scene::{Fill, GlyphFormat, ImageId, Quad, Scene};
 pub use text::{Align, Antialias, Face, Layout, MonoMetrics, Span, Text, TextOpts, raster_path};
 

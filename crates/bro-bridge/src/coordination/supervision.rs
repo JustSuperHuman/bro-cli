@@ -36,6 +36,8 @@ pub(super) fn reconcile_at(
     let host_execute =
         |app: &AppState, id: &str, command: Command| host_execute_at(app, id, observed_at, command);
     let engine = Engine::open(app.data_root.as_path()).map_err(|e| e.to_string())?;
+    // Before registering: a full registry would refuse every new session and stall this pass.
+    prune_adapters(app, observed_at)?;
     let initial = engine.snapshot().map_err(|e| e.to_string())?;
     let sessions = app.summaries();
     for session in &sessions {
@@ -65,24 +67,6 @@ pub(super) fn reconcile_at(
         }
     }
     let exits = app.coordination_exits.lock().clone();
-    for observed in &initial.adapters {
-        if let Some(id) = observed.id.strip_prefix("session-") {
-            if exits.contains_key(id)
-                && !initial
-                    .attempts
-                    .iter()
-                    .any(|a| a.adapter_id.as_deref() == Some(&observed.id) && !a.stopped)
-            {
-                let _ = host_execute(
-                    &app,
-                    &format!("remove-adapter-{}", observed.id),
-                    Command::RemoveAdapter {
-                        adapter_id: observed.id.clone(),
-                    },
-                );
-            }
-        }
-    }
     for attempt in initial.attempts.iter().filter(|a| !a.stopped) {
         if let Some((pid, created, at)) = exits.get(&attempt.session_id) {
             let provenance = std::fs::read(owned_worker_path(&app, &attempt.session_id))

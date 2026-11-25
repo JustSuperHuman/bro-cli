@@ -116,7 +116,7 @@ pub struct TerminalProfile {
 }
 
 /// A project (working directory group) as clients see it.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalProject {
     pub id: String,
@@ -125,6 +125,16 @@ pub struct TerminalProject {
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automatic: Option<bool>,
+    /// The picture bro's window shows for it, when it shows one: a versioned path under
+    /// `/api/project-icons/` (see [`crate::project_icons`]). Without one, clients show its letter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// What the picture needs behind it: "opaque" (it fills its tile), "dark" or "light" (marks on clear), "mid".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_tone: Option<String>,
+    /// Its letter tile's hue in degrees, the window's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hue: Option<u16>,
 }
 
 /// A recorded notification (`notify` event / `GET /api/notifications`).

@@ -1,0 +1,16 @@
+[
+  {
+    "Name": "bro.exe",
+    "Path": "C:\\Users\\james\\AppData\\Local\\Programs\\bro\\bro.exe",
+    "SHA256": "21B4DB03CBA5FCCA18A6D946425FFA1F808B687ED72B7B598074EBCC6066CA7C",
+    "MatchesBuild": true,
+    "Previous": "C:\\Users\\james\\AppData\\Local\\Programs\\bro\\bro.exe.cua-previous-20261107-144827-446"
+  },
+  {
+    "Name": "bro-app.exe",
+    "Path": "C:\\Users\\james\\AppData\\Local\\Programs\\bro\\bro-app.exe",
+    "SHA256": "D280EB48AB814743DE559E7095C1F4778C491A6E72FF417BE0E516AC7B9B16D2",
+    "MatchesBuild": true,
+    "Previous": "C:\\Users\\james\\AppData\\Local\\Programs\\bro\\bro-app.exe.cua-previous-20261107-144827-446"
+  }
+]

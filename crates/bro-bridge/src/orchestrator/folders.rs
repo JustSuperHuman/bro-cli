@@ -82,7 +82,7 @@ fn child_dirs(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn drive_roots() -> Vec<PathBuf> {
+pub(crate) fn drive_roots() -> Vec<PathBuf> {
     if cfg!(windows) {
         (b'C'..=b'Z')
             .map(|letter| PathBuf::from(format!("{}:\\", letter as char)))

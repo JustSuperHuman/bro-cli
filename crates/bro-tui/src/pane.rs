@@ -46,6 +46,9 @@ pub enum Event {
     EditorPane(Box<crate::editor::EditorPane>),
     /// A theme file changed on disk.
     ThemeFilesChanged,
+    /// A validated file has been installed by the theme worker (name, contains browser-only CSS).
+    ThemeImported(Result<(String, bool), String>),
+    ThemeEditor(Box<crate::theme::editor::Reply>),
     /// Another `bro` was started in this folder: open it here as a project.
     OpenProject(std::path::PathBuf),
     /// ctrl+shift+o read the clipboard: the folder to open as a project, or why there isn't one.
@@ -56,7 +59,7 @@ pub enum Event {
     Watchdog(bro_bridge::WatchdogUpdate),
     /// Push-to-talk: words for the orchestrator session.
     Voice(Box<crate::services::VoiceMsg>),
-    OrbitVoice(u64, bro_bridge::orbit_voice::Command),
+    Dictation(u64, crate::app::dictation::Update),
     CoordinationTaskAction { task_id: String, revision: u64, action: String },
     OrchestratorInbox(Box<crate::app::inbox_store::Update>),
     /// The session server went away, another window took it over, or a restart finished.
@@ -89,10 +92,14 @@ pub enum Action {
     LaunchUsage(bro_core::Harness, Option<String>),
     /// Connect a Google AI subscription through Bro's existing browser sign-in.
     GeminiSignIn,
+    /// Appearance controls: customize (0), import (1), export (2).
+    ThemeControl(u8),
     /// Run an app action (the settings view's theme picker and toggles).
     Run(crate::keymap::Act),
     /// Show a file in bro's file preview (a skill's SKILL.md).
     Preview(std::path::PathBuf),
+    /// Say this to the session with this id, as a message typed into it and sent (the Storyboard's changes).
+    Tell(String, String),
 }
 
 /// Agent activity scraped from the screen.

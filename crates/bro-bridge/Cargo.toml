@@ -22,8 +22,11 @@ tracing.workspace = true
 vt100.workspace = true
 tokio.workspace = true
 axum.workspace = true
-reqwest.workspace = true
-tokio-tungstenite.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
+# live voice: the sideband socket bro holds on each realtime call (an explicit ring provider, as in bro-voice)
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+rustls.workspace = true
+webpki-roots.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
 http.workspace = true

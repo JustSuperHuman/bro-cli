@@ -3,14 +3,18 @@
 pub mod settings;
 pub mod setup;
 pub mod quick_install;
+pub mod automation;
 pub mod sounds;
 pub mod skills;
 pub mod bridge;
+pub mod computers;
 pub mod profiles;
 pub mod proxy;
 pub mod stats;
 pub mod usage;
+pub mod new_session;
 pub mod coordination;
+pub mod storyboard;
 
 use crate::pane::Pane;
 
@@ -22,9 +26,11 @@ pub fn open(name: &str) -> Option<Box<dyn Pane>> {
         "profiles" => Box::new(profiles::ProfilesView::new()),
         "proxy" => Box::new(proxy::ProxyView::new()),
         "bridge" => Box::new(bridge::BridgeView::new()),
+        "computers" => Box::new(computers::ComputersView::new()),
         "stats" => Box::new(stats::StatsView::new()),
         "settings" => Box::new(settings::SettingsView::new()),
         "quick-install" => Box::new(quick_install::QuickInstallView::new()),
+        "automation" => Box::new(automation::AutomationView::new()),
         "sounds" => Box::new(sounds::SoundsView::new()),
         "skills" => Box::new(skills::SkillsView::new()),
         "setup" => Box::new(setup::SetupView::new()),

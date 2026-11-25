@@ -63,7 +63,7 @@ fn tool_access(harness: Harness) -> String {
             them directly. If the server is ever unavailable, run the same tools from your shell with `bro ctl` \
             (see below)."
             .into(),
-        Harness::Pi | Harness::Omp => "You have no MCP client, so you reach your bro tools from your shell with \
+        Harness::Pi | Harness::Omp | Harness::Antigravity => "You have no MCP client, so you reach your bro tools from your shell with \
             `bro ctl` (see below). Every tool named in these instructions is a `bro ctl` call."
             .into(),
     }

@@ -118,7 +118,7 @@ impl Pane for BridgeView {
             KeyCode::Char('r') => self.reveal = !self.reveal,
             KeyCode::Char('t') => {
                 let on = !cx.svc.state().bridge.enabled;
-                cx.svc.set_bridge_enabled(on);
+                if on { cx.svc.turn_on_mobile() } else { cx.svc.set_bridge_enabled(false) }
                 cx.toast(Kind::Bridge, if on { "starting the bridge…" } else { "bridge off" });
             }
             KeyCode::Char('j') | KeyCode::Down => self.sel += 1,

@@ -143,7 +143,8 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         let _ = crate::skills::write_bro_open_skill(&home);
     }
     crate::skill_repos::write_cached(&home, &ctx.skill_repos);
-    crate::tool_skills::write_cached(&home);
+    let automation = crate::automation::Active::for_launch(ctx);
+    crate::tool_skills::write_configured(&home, &automation);
     if spec.orchestrator {
         let _ = crate::orchestrator::write_skill(&home);
     }
@@ -259,8 +260,23 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     }
     // Instructions bro adds: caveman's rules, the orchestrator's brief.
     let mut added: Vec<String> = vec![];
+    if automation.managed() {
+        added.push(automation.prompt(Harness::Codex));
+    }
     if spec.orchestrator {
         added.push(crate::orchestrator::scoped_prompt(Harness::Codex, &spec.cwd));
+    }
+    if let Some(kit) = &spec.studio {
+        // Create Slop: the servers that need no sign-in, session-scoped like the browser's; one this home
+        // already declares stays its own (and counts as connected, whatever it needs)
+        let facts = super::studio_facts(ctx);
+        let config = std::fs::read_to_string(home.join("config.toml")).ok().and_then(|s| s.parse::<toml::Table>().ok());
+        let own = |name: &str| config.as_ref().is_some_and(|t| t.get("mcp_servers").and_then(|m| m.get(name)).is_some());
+        let (theirs, rest): (Vec<_>, Vec<_>) = crate::studio::servers(kit, &facts).into_iter().partition(|s| own(&s.name));
+        let ours: Vec<_> = rest.into_iter().filter(|s| !s.sign_in).collect();
+        args.extend(crate::studio::codex_mcp_args(&ours));
+        let connected: Vec<_> = ours.into_iter().chain(theirs).collect();
+        added.push(crate::studio::brief(kit, &facts, Harness::Codex, &spec.cwd, &connected));
     }
     if let Some(level) = ctx.caveman.active() {
         added.push(level.rules().to_string());
@@ -280,12 +296,33 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         .and_then(|s| s.parse::<toml::Table>().ok())
         .is_some_and(|t| t.get("mcp_servers").and_then(|m| m.get(crate::justbrowse::SERVER_NAME)).is_some());
     let browser_override = spec.extra_args.iter().any(|a| a.starts_with("mcp_servers.justbrowse."));
-    if !owns_browser && !browser_override && crate::justbrowse::installed().is_some() {
+    if !owns_browser && !browser_override && automation.browser {
         // Session-scoped: profiles do not need individual `codex mcp add` calls. Do not mix a
         // default HTTP URL with a user's existing stdio transport, or re-enable their disabled entry.
         args.extend(["-c".into(), format!("mcp_servers.{}.url={}", crate::justbrowse::SERVER_NAME, toml_str(crate::justbrowse::MCP_URL))]);
+        args.extend(["-c".into(), "mcp_servers.justbrowse.env_http_headers={\"x-bro-session-id\"=\"BRO_SESSION_ID\"}".into()]);
+    }
+    let owns_cua = std::fs::read_to_string(home.join("config.toml")).ok()
+        .and_then(|s| s.parse::<toml::Table>().ok())
+        .is_some_and(|t| t.get("mcp_servers").and_then(|m| m.get(crate::cua::SERVER_NAME)).is_some());
+    let cua_override = spec.extra_args.iter().take_while(|a| a.as_str() != "--").any(|a| a.starts_with("mcp_servers.cua-driver."));
+    if let Some(binary) = &automation.desktop
+        && !owns_cua && !cua_override
+    {
+        args.extend(["-c".into(), format!("mcp_servers.cua-driver.command={}", toml_str(&binary.to_string_lossy())),
+            "-c".into(), "mcp_servers.cua-driver.args=[\"mcp\"]".into()]);
     }
     args.extend(spec.extra_args.iter().cloned());
+    if automation.managed() {
+        let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+        args.splice(end..end, crate::automation::codex_native_off());
+    }
+    for (off, server) in [(automation.browser_off, crate::justbrowse::SERVER_NAME), (automation.desktop_off, crate::cua::SERVER_NAME), (automation.desktop_off, "cua-computer-use")] {
+        if off {
+            let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+            args.splice(end..end, ["-c".into(), format!("mcp_servers.{server}.enabled=false")]);
+        }
+    }
     (cmd.program, cmd.args) = super::program_and_args("codex", args);
     cmd.label = label(Harness::Codex, &who, spec.model.as_deref());
     Ok(cmd)

@@ -87,19 +87,12 @@ impl App {
             Act::ShowTab(0) => self.show_tab(super::project_tabs::StripTab::All),
             Act::ShowTab(n) => match self.project_tabs().get(n as usize - 1) {
                 Some(tab) => self.show_tab(super::project_tabs::StripTab::Project(tab.key.clone())),
-                None => self.toast(Kind::Info, format!("no project tab {n}")),
+                None => self.toast(Kind::Info, format!("no project {n} with sessions running")),
             },
             Act::LastTab => match self.tab_before.clone() {
                 Some(tab) => self.show_tab(tab),
-                None => self.toast(Kind::Info, "no earlier tab yet"),
+                None => self.toast(Kind::Info, "nothing earlier to go back to yet"),
             },
-            Act::ToggleProjectTabs => {
-                let mut s = self.svc.settings();
-                s.project_tabs = !s.project_tabs;
-                let on = s.project_tabs;
-                self.svc.save_settings(s);
-                self.toast(Kind::Info, if on { "project tabs on: All and each project, over the sessions" } else { "project tabs off" });
-            }
             Act::Attention => match self.attention_target() {
                 Some(id) => self.go_session(id),
                 None => self.toast(Kind::Info, "nothing needs you right now"),
@@ -111,9 +104,9 @@ impl App {
                 }
             }
             Act::FocusSidebar if self.strip_sel.is_some() => self.strip_sel = None,
-            // no sidebar on screen (hidden, or the window's too narrow): the project tabs take the keys
+            // no sidebar on screen (hidden, or the window's too narrow): the session tabs take the keys
             Act::FocusSidebar if self.strip.height > 0 && (!self.sidebar || self.sidebar_squeezed()) => self.focus_strip(),
-            Act::FocusSidebar if self.sidebar_squeezed() => self.toast(Kind::Info, "the window is too narrow for the sidebar · widen it, or turn on project tabs"),
+            Act::FocusSidebar if self.sidebar_squeezed() => self.toast(Kind::Info, "the window is too narrow for the sidebar · widen it to bring it back"),
             Act::FocusSidebar => {
                 self.sidebar = true;
                 if self.side_focus {
@@ -136,6 +129,7 @@ impl App {
             Act::Setup => self.open_view("setup"),
             Act::Proxy => self.open_view("proxy"),
             Act::Bridge => self.open_view("bridge"),
+            Act::Computers => self.open_view("computers"),
             Act::Tasks => self.open_view("tasks"),
             Act::Help => self.overlay = Overlay::Help(Help::default()),
             Act::Rename => {
@@ -175,6 +169,11 @@ impl App {
                 self.set_caveman((!s.on).then_some(s.level));
             }
             Act::Continue => self.open_continue(),
+            Act::ForkConversation => {
+                if let Some(id) = self.focused() {
+                    self.fork_conversation(id);
+                }
+            }
             Act::Reload => {
                 if let Some(id) = self.focused() {
                     self.open_reload(id);
@@ -183,6 +182,7 @@ impl App {
                 }
             }
             Act::Orchestrator => self.open_orchestrator(),
+            Act::CreateSlop => self.open_create_slop(),
             Act::CloseProject => {
                 if let Some(root) = self.current_project() {
                     let key = self.svc.project_for(&root).key;
@@ -333,7 +333,7 @@ impl App {
     }
 
     fn cycle_project(&mut self, d: i32) {
-        // in a grid: the next project tab (All, then each project)
+        // in a grid: the next scope (All, then each project)
         if self.tile_all {
             self.step_tab(d, false);
             return;
@@ -372,11 +372,30 @@ impl App {
         self.overlay = Overlay::Launcher(Box::new(self.session_launcher(cwd, place)));
     }
 
-    fn session_launcher(&self, cwd: Option<PathBuf>, place: Place) -> Launcher {
+    pub(crate) fn session_launcher(&self, cwd: Option<PathBuf>, place: Place) -> Launcher {
         let permission = self.svc.state().settings.permission;
         let launcher = Launcher::new(launcher_data(self), cwd, place).with_projects(self.launcher_projects()).with_permission(permission);
         let project = self.svc.project_for(&launcher.dir);
         launcher.with_continue(self.continue_entries(), Some((project.key, project.name)))
+    }
+
+    /// The launcher on its Create Slop tab: a session cast and tooled up for video and media.
+    pub(crate) fn open_create_slop(&mut self) {
+        self.svc.refresh_usage();
+        self.leave_sidebar();
+        let l = self.session_launcher(self.preferred_dir(), Place::Tab).with_studio();
+        self.overlay = Overlay::Launcher(Box::new(l));
+        self.launcher_asks();
+    }
+
+    /// What the open launcher asked of the services since it was last looked at: the Create Slop tab's roster and
+    /// toolkit, the first time the tab opens and on a refresh.
+    pub(crate) fn launcher_asks(&mut self) {
+        if let Overlay::Launcher(l) = &mut self.overlay
+            && let Some(force) = l.studio.ask.take()
+        {
+            self.svc.refresh_studio(force);
+        }
     }
 
     /// Go to the orchestrator, or open the launcher on its tab to start one.
@@ -474,6 +493,14 @@ impl App {
             return;
         };
         self.svc.refresh_usage();
+        if profile == bro_core::jsh::PROVIDER_ID {
+            // the Just Superhuman account's usage: the launcher on it, its models to pick from
+            match self.session_launcher(self.preferred_dir(), Place::Tab).with_harness(bro_core::Harness::Claude).with_provider(&profile) {
+                Some(l) => self.launch_or_choose(l),
+                None => self.toast(Kind::Error, "Just Superhuman isn't signed in on this computer any more. Sign in again at the bottom of Settings."),
+            }
+            return;
+        }
         let is_gemini = bro_core::profiles::is_gemini_id(&profile);
         let h = if is_gemini {
             self.recents.iter().find(|r| r.profile_id.as_deref() == Some(&profile)).map(|r| r.harness).unwrap_or(h)
@@ -503,7 +530,7 @@ impl App {
             None => match h {
                 bro_core::Harness::Claude => Some(true),
                 bro_core::Harness::Codex => Some(false),
-                bro_core::Harness::Pi | bro_core::Harness::Omp => None,
+                bro_core::Harness::Pi | bro_core::Harness::Omp | bro_core::Harness::Antigravity => None,
             },
         }
     }
@@ -560,15 +587,39 @@ impl App {
         }
     }
 
+    /// Open Voice settings without toggling an already focused Settings tab away.
+    #[cfg(feature = "gui")]
+    pub(crate) fn show_voice_settings(&mut self) {
+        if let Some(id) = self.panes.iter().find(|(_, p)| p.view() == Some("settings")).map(|(id, _)| *id) {
+            self.focus_pane(id);
+            self.leave_sidebar();
+        } else {
+            self.open_view("settings");
+        }
+        if let Some(view) = self.panes.values_mut().find_map(|p| p.as_any_mut().downcast_mut::<crate::views::settings::SettingsView>()) {
+            view.show_voice();
+        }
+    }
+
+    #[cfg(feature = "gui")]
+    pub(crate) fn show_dictation_settings(&mut self) {
+        self.show_voice_settings();
+        if let Some(view) = self.panes.values_mut().find_map(|p| p.as_any_mut().downcast_mut::<crate::views::settings::SettingsView>()) {
+            view.show_dictation();
+        }
+    }
+
     pub(crate) fn open_palette(&mut self, query: &str) {
         self.leave_sidebar();
         let themes = crate::theme::names();
         let tiles: Vec<(String, String, usize)> = self.project_tabs().into_iter().map(|t| (t.key, t.name, t.live)).collect();
         let all = self.tile_ids(None).len();
+        let sessions: Vec<_> = self.session_tabs().into_iter().map(|t| (t.id, t.label, if t.global { "every project".to_string() } else { t.project_name })).collect();
         let mut p = Palette::new(&self.keymap, &self.recents, &themes, &self.theme.name, query)
             .with_presets(&self.svc.settings().claude_env.preset)
             .with_caveman(self.svc.settings().caveman.active())
-            .with_tiles(&tiles, all);
+            .with_tiles(&tiles, all)
+            .with_sessions(&sessions);
         // the desktop app has a window of its own to dress
         if crate::fonts::GUI.load(std::sync::atomic::Ordering::Relaxed) {
             p = p.with_materials(self.svc.settings().material);
@@ -593,9 +644,38 @@ impl App {
     pub(crate) fn run_palette(&mut self, c: Cmd) {
         match c {
             Cmd::Act(a) => self.run_act(a),
+            Cmd::Automation => self.open_view("automation"),
+            Cmd::Browser => self.svc.open_browser_page(),
             Cmd::Theme(t) => {
                 self.set_theme(&t, true);
-                self.toast(Kind::Info, format!("theme: {t}"));
+                self.toast(Kind::Info, format!("theme: {}", crate::theme::label(&self.theme)));
+            }
+            Cmd::CustomizeTheme => self.open_theme_editor(),
+            Cmd::ImportTheme => {
+                #[cfg(feature = "gui")]
+                if crate::fonts::GUI.load(std::sync::atomic::Ordering::Relaxed) {
+                    let tx = self.tx.clone();
+                    std::thread::spawn(move || {
+                        let start = dirs::download_dir().unwrap_or_else(crate::theme::themes_dir);
+                        if let Some(path) = super::gui::pick::theme(&start) {
+                            let result = crate::theme::import_file(&path);
+                            let _ = tx.send(crate::pane::Event::ThemeImported(result));
+                        }
+                    });
+                    return;
+                }
+                self.toast(Kind::Info, format!("Put T3 Code or VS Code JSON files in {}", crate::theme::themes_dir().display()));
+            }
+            Cmd::ExportTheme => {
+                let theme = self.theme.clone();
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let (kind, text) = match crate::theme::export_file(&theme) {
+                        Ok(path) => (Kind::Info, format!("Theme exported to {}", path.display())),
+                        Err(why) => (Kind::Error, format!("Could not export theme: {why}")),
+                    };
+                    let _ = tx.send(crate::pane::Event::Toast(kind, text));
+                });
             }
             Cmd::ClaudePreset(id) => {
                 let mut s = self.svc.settings();
@@ -611,11 +691,22 @@ impl App {
                 self.svc.save_settings(s);
                 self.toast(Kind::Info, format!("window: {}", m.id()));
             }
-            Cmd::Tiles(None) => self.show_tab(super::project_tabs::StripTab::All),
+            Cmd::Showcase if self.svc.is_demo() => self.open_showcase(),
+            // a real bro shows your own accounts: the showcase is a separate demo window with made-up ones
+            Cmd::Showcase => match std::env::current_exe().and_then(|exe| {
+                let mut c = std::process::Command::new(exe);
+                c.args(["--demo"]).env("BRO_SHOWCASE", "1").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                c.spawn()
+            }) {
+                Ok(_) => self.toast(Kind::Info, "opening the JustGains showcase in its own window"),
+                Err(e) => self.toast(Kind::Error, format!("couldn't open the showcase: {e}")),
+            },
+            Cmd::Tiles(None) =>self.show_tab(super::project_tabs::StripTab::All),
             Cmd::Tiles(Some(key)) => self.show_tab(super::project_tabs::StripTab::Project(key)),
+            Cmd::Session(id) => self.click_session_tab(super::project_tabs::SessionTab::Session(id)),
             Cmd::Recent(i) => {
                 if let Some(r) = self.recents.get(i).cloned() {
-                    let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: self.svc.state().settings.permission, browser: r.browser, extra_args: vec![], orchestrator: false };
+                    let spec = bro_core::launch::LaunchSpec { harness: r.harness, profile_id: r.profile_id, provider_id: r.provider_id, model: r.model, cwd: r.cwd, resume: None, permission: self.svc.state().settings.permission, browser: r.browser, extra_args: vec![], orchestrator: false, studio: None };
                     self.launch_spec(spec, Place::Tab);
                 }
             }
@@ -719,6 +810,14 @@ impl App {
         let Some(r) = rows.get(i) else { return };
         self.side_sel = i;
         match r {
+            // the window's sidebar picks what the session tabs list: the project's sessions (or, with none
+            // running, where new ones start); the terminal UI's toggles its grid
+            Row::Project { key, root, live, .. } if self.side.compact => {
+                self.pick_project(root.clone());
+                if *live > 0 {
+                    self.show_tab(super::project_tabs::StripTab::Project(key.clone()));
+                }
+            }
             Row::Project { key, root, .. } => {
                 self.pick_project(root.clone());
                 self.toggle_project_tiles(key);

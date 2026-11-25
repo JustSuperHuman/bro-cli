@@ -59,6 +59,7 @@ pub(crate) fn create_request(state: &AppState, body: &Value) -> CreateRequest {
         (None, None) => (None, explicit_args.unwrap_or_default()),
     };
     CreateRequest {
+        permission: body.get("permission").cloned().and_then(|v| serde_json::from_value(v).ok()),
         title: string_field(body, "title"),
         profile_id,
         shell,
@@ -66,6 +67,7 @@ pub(crate) fn create_request(state: &AppState, body: &Value) -> CreateRequest {
         cwd: string_field(body, "cwd").map(PathBuf::from),
         project_id: string_field(body, "projectId"),
         model: string_field(body, "model"),
+        effort: string_field(body, "effort"),
     }
 }
 
@@ -74,6 +76,10 @@ pub(crate) async fn launch_terminal(
     state: &AppState,
     body: Value,
 ) -> Result<TerminalSessionSummary, String> {
+    if let Some(permission) = body.get("permission").filter(|v| !v.is_null()) {
+        serde_json::from_value::<bro_core::launch::Permission>(permission.clone())
+            .map_err(|_| "Choose a supported permission mode: default, auto, or skip.".to_string())?;
+    }
     let request = create_request(state, &body);
     // A mistyped folder must not quietly become bro's current project.
     if let Some(cwd) = &request.cwd {
@@ -123,10 +129,11 @@ pub(crate) fn submit_settle(bytes: usize) -> Duration {
     Duration::from_millis((350 + bytes as u64 / 40).min(800))
 }
 
-fn agent_submit_settle(state: &AppState, id: &str, bytes: usize) -> Duration {
+/// The agent's paste-settle window, shared by focus view and bridge submissions.
+pub fn input_submit_delay(agent: Option<&str>, bytes: usize) -> Duration {
     // Codex can keep its paste-burst window open after the PTY write returns.
     // A terminal write receipt is not an acknowledgement from the agent.
-    if state.summary(id).is_some_and(|s| s.agent.as_deref() == Some("codex")) {
+    if agent == Some("codex") {
         submit_settle(bytes).max(Duration::from_millis(1500))
     } else {
         submit_settle(bytes)
@@ -152,7 +159,8 @@ pub(crate) async fn compose_input(state: &AppState, id: &str, data: &str, submit
     write_paced(state, id, data).await?;
     if submit {
         if !data.is_empty() {
-            tokio::time::sleep(agent_submit_settle(state, id, data.len())).await;
+            let agent = state.summary(id).and_then(|s| s.agent);
+            tokio::time::sleep(input_submit_delay(agent.as_deref(), data.len())).await;
         }
         write_confirmed(state, id, "\r").await?;
     }
@@ -233,6 +241,8 @@ mod tests {
         assert_eq!(compose_payload("a\x1b[201~b", true), "\x1b[200~ab\x1b[201~");
         assert!(submit_settle(0) >= Duration::from_millis(350));
         assert_eq!(submit_settle(1_000_000), Duration::from_millis(800));
+        assert_eq!(input_submit_delay(Some("codex"), 10), Duration::from_millis(1500));
+        assert_eq!(input_submit_delay(Some("claude"), 1_000_000), Duration::from_millis(800));
     }
 
     fn input_state() -> (tempfile::TempDir, AppState, tokio::sync::mpsc::UnboundedReceiver<BridgeCommand>) {

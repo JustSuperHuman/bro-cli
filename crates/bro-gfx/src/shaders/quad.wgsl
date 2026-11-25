@@ -7,7 +7,7 @@ struct QuadIn {
     @location(3) fill2: vec4<f32>,
     @location(4) border: vec4<f32>,
     @location(5) clip: vec4<f32>,
-    // border width, gradient (0 none, 1 vertical, 2 horizontal), clip radius, dashed
+    // border width, gradient (0 none, 1 vertical, 2 horizontal, 3 radial), clip radius, dashed
     @location(6) params: vec4<f32>,
 };
 
@@ -27,7 +27,7 @@ struct QuadOut {
 fn vs_quad(@builtin(vertex_index) vi: u32, q: QuadIn) -> QuadOut {
     // one pixel of room around the box for the antialiased edge
     let r = vec4<f32>(q.rect.xy - vec2<f32>(1.0, 1.0), q.rect.zw + vec2<f32>(2.0, 2.0));
-    let p = r.xy + corner(vi) * r.zw;
+    let p = clip_point(r.xy + corner(vi) * r.zw, q.clip);
     var o: QuadOut;
     o.pos = to_clip(p);
     o.p = p;
@@ -57,7 +57,14 @@ fn quad_color(o: QuadOut) -> vec4<f32> {
     var fill = o.fill;
     if (o.params.y > 0.5) {
         var t: f32;
-        if (o.params.y < 1.5) { t = (o.p.y - o.rect.y) / max(o.rect.w, 1.0); } else { t = (o.p.x - o.rect.x) / max(o.rect.z, 1.0); }
+        if (o.params.y < 1.5) {
+            t = (o.p.y - o.rect.y) / max(o.rect.w, 1.0);
+        } else if (o.params.y < 2.5) {
+            t = (o.p.x - o.rect.x) / max(o.rect.z, 1.0);
+        } else {
+            // radial: the centre out to the middle of each side
+            t = length(local / max(half, vec2<f32>(1.0, 1.0)));
+        }
         fill = mix(o.fill, o.fill2, clamp(t, 0.0, 1.0));
     }
     var color = fill;

@@ -31,7 +31,7 @@ use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
 
 const LEASE_TTL: Duration = Duration::from_secs(90);
-const IDLE_STOP: Duration = Duration::from_secs(15);
+const IDLE_STOP: Duration = Duration::from_secs(60);
 const MAX_VIEWERS: usize = 4;
 
 #[cfg(test)]
@@ -60,6 +60,25 @@ pub struct Status {
     pub message: Option<String>,
     pub active_viewers: usize,
     pub relay_configured: bool,
+    /// Who holds those connections, for bro's own settings page (not sent to phones).
+    #[serde(skip)]
+    pub viewers: Vec<Viewer>,
+    /// The release channel is being asked whether there's a newer Bro RMM ([`Rmm::check_update`]).
+    #[serde(skip)]
+    pub checking: bool,
+    /// A newer Bro RMM it found, held back because someone was on the desktop.
+    #[serde(skip)]
+    pub update: Option<String>,
+    /// When the channel last answered (unix ms).
+    #[serde(skip)]
+    pub checked_ms: Option<i64>,
+}
+
+/// A remote-desktop connection: where it was opened from and whether it can drive the desktop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Viewer {
+    pub address: Option<std::net::IpAddr>,
+    pub read_only: bool,
 }
 
 struct Process {
@@ -109,11 +128,14 @@ impl Drop for Process {
 struct Target {
     origin: String,
     password: String,
+    trickle_ice: bool,
 }
 
 struct Lease {
     id: String,
     read_only: bool,
+    /// the address that opened it
+    peer: Option<std::net::IpAddr>,
     transport: String,
     deadline: Mutex<Instant>,
     reconnect_at: Instant,
@@ -121,6 +143,7 @@ struct Lease {
     attached: AtomicBool,
     rtc_id: Mutex<Option<String>>,
     ice_servers: Value,
+    trickle_ice: bool,
     _control_lock: Option<File>,
 }
 
@@ -138,6 +161,9 @@ struct Inner {
     leases: HashMap<String, Arc<Lease>>,
     idle_since: Instant,
     generation: u64,
+    checking: bool,
+    update: Option<String>,
+    checked_ms: Option<i64>,
 }
 
 pub(crate) struct Rmm {
@@ -168,6 +194,9 @@ impl Rmm {
                 leases: HashMap::new(),
                 idle_since: Instant::now(),
                 generation: 0,
+                checking: false,
+                update: None,
+                checked_ms: None,
             }),
             installing: AtomicBool::new(false),
             start_lock: tokio::sync::Mutex::new(()),
@@ -196,6 +225,10 @@ impl Rmm {
             message: inner.message.clone(),
             active_viewers: inner.leases.len(),
             relay_configured: self.root.join("relay.json").is_file(),
+            viewers: inner.leases.values().map(|lease| Viewer { address: lease.peer, read_only: lease.read_only }).collect(),
+            checking: inner.checking,
+            update: inner.update.clone(),
+            checked_ms: inner.checked_ms,
         }
     }
 
@@ -239,6 +272,7 @@ impl Rmm {
             match result {
                 Ok(manifest) => {
                     inner.version = Some(manifest.version);
+                    inner.update = None;
                     inner.phase = if enabled {
                         Phase::Ready
                     } else {
@@ -293,6 +327,49 @@ impl Rmm {
         drop(leases);
     }
 
+    /// Ask the release channel for a newer Bro RMM without touching the running one: nothing newer, and every
+    /// viewer stays connected; something newer installs straight away when nobody is on the desktop, else it waits
+    /// in [`Status::update`] for [`Rmm::retry`]. A package that never installed is simply tried again.
+    pub fn check_update(self: &Arc<Self>) {
+        if !self.config.read().enabled {
+            return;
+        }
+        {
+            let mut inner = self.inner.lock();
+            match inner.phase {
+                Phase::Error | Phase::NotInstalled => {
+                    drop(inner);
+                    return self.retry();
+                }
+                Phase::Installing | Phase::Starting | Phase::Disabled => return,
+                Phase::Ready | Phase::Running => {}
+            }
+            if inner.checking {
+                return;
+            }
+            inner.checking = true;
+            inner.message = None;
+        }
+        let owner = self.clone();
+        std::thread::spawn(move || {
+            let found = package::update_available(&owner.root);
+            let mut inner = owner.inner.lock();
+            inner.checking = false;
+            match found {
+                Ok(newer) => {
+                    inner.checked_ms = Some(chrono::Utc::now().timestamp_millis());
+                    let install = newer.is_some() && inner.leases.is_empty();
+                    inner.update = newer;
+                    if install {
+                        drop(inner);
+                        owner.retry();
+                    }
+                }
+                Err(error) => inner.message = Some(format!("{error:#}")),
+            }
+        });
+    }
+
     pub fn retry(self: &Arc<Self>) {
         self.stop();
         self.inner.lock().phase = Phase::NotInstalled;
@@ -303,7 +380,7 @@ impl Rmm {
         if !self.config.read().enabled {
             return Err(failure(
                 StatusCode::FORBIDDEN,
-                "Remote control is disabled in Mobile Companion settings.",
+                "Remote desktop is off in bro's Remote Control settings.",
             ));
         }
         self.inner
@@ -359,6 +436,12 @@ impl Rmm {
             inner.phase = Phase::Starting;
             inner.generation
         };
+        // A session that can't be shared says why, before anything starts: no Mac permission prompt (or Linux
+        // capture of a Wayland desktop's empty X11 screen) waits on a computer nobody's at.
+        if let Ok(Some(problem)) = tokio::task::spawn_blocking(package::session_problem).await {
+            self.start_failed(generation, problem.clone());
+            return Err(failure(StatusCode::SERVICE_UNAVAILABLE, &problem));
+        }
         let root = self.root.clone();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Process> {
             let (exe, _) = package::installed(&root)?;
@@ -371,23 +454,7 @@ impl Rmm {
             );
             let mut command = Command::new(exe);
             command
-                .args([
-                    "--addr=127.0.0.1",
-                    &format!("--port={port}"),
-                    "--title=Bro remote desktop",
-                    "--audio-enabled=false",
-                    "--enable-clipboard=true",
-                    "--file-transfers=none",
-                    "--enable-resize=false",
-                    "--framerate=60",
-                    "--stripes=1",
-                    "--max-kbps=12000",
-                    "--min-kbps=800",
-                    "--max-capture-width=2560",
-                    "--max-capture-height=1440",
-                    "--max-capture-pixels=3686400",
-                    &format!("--display={}", config.display),
-                ])
+                .args(host_args(port, config.display))
                 .env("VOXL_PASSWORD", &password)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -400,6 +467,7 @@ impl Rmm {
                 target: Target {
                     origin: format!("http://127.0.0.1:{port}"),
                     password,
+                    trickle_ice: false,
                 },
             })
         })
@@ -416,7 +484,7 @@ impl Rmm {
                 self.start_failed(generation, format!("{error:#}"));
                 return Err(failure(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "Could not start remote control. Check Mobile Companion settings.",
+                    "Could not start remote control. Check bro's Remote Control settings.",
                 ));
             }
         };
@@ -438,6 +506,8 @@ impl Rmm {
                 .await
                 && response.status().is_success()
             {
+                process.target.trickle_ice = response.json::<Value>().await
+                    .ok().is_some_and(|stats| stats["trickleIce"] == true);
                 ready = true;
                 break;
             }
@@ -446,11 +516,11 @@ impl Rmm {
         if !ready {
             self.start_failed(
                 generation,
-                "The desktop stream did not start. Unlock Windows and try again.".into(),
+                package::locked_hint().into(),
             );
             return Err(failure(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "The desktop stream did not start. Unlock Windows and try again.",
+                package::locked_hint(),
             ));
         }
         let mut inner = self.inner.lock();
@@ -497,20 +567,24 @@ impl Rmm {
 
     async fn ice_servers(&self) -> (Value, Option<String>) {
         let fallback = json!([{"urls":["stun:stun.cloudflare.com:3478"]}]);
-        let Some(config) = std::fs::read(self.root.join("relay.json"))
+        // This computer's own relay file comes first.
+        let own = std::fs::read(self.root.join("relay.json"))
             .ok()
             .filter(|data| data.len() < 16 * 1024)
             .and_then(|data| serde_json::from_slice::<Value>(&data).ok())
-        else {
-            return (fallback, None);
-        };
-        let Some(url) = config["brokerUrl"]
-            .as_str()
-            .filter(|url| url.starts_with("https://"))
-        else {
-            return (fallback, None);
-        };
-        let Some(token) = config["token"].as_str() else {
+            .and_then(|config| {
+                let url = config["brokerUrl"].as_str().filter(|url| url.starts_with("https://"))?;
+                Some((url.to_owned(), config["token"].as_str()?.to_owned()))
+            });
+        // Without one, a computer signed in to Just Superhuman asks its account: the relay comes with the sign-in,
+        // so a desktop opened from a phone on another network needs nothing set up here. (Never in tests: the
+        // sign-in is the real one's.)
+        let account = (own.is_none() && !cfg!(test))
+            .then(bro_core::jsh::stored)
+            .flatten()
+            .map(|stored| (bro_core::justconnect::endpoint(&stored, "/ice"), stored.token));
+        let from_account = account.is_some();
+        let Some((url, token)) = own.or(account) else {
             return (fallback, None);
         };
         let result = self
@@ -529,6 +603,10 @@ impl Rmm {
                 .filter(|servers| !servers.is_empty() && servers.len() <= 8)
         {
             return (Value::Array(servers.clone()), None);
+        }
+        // an account with no relay to hand out is the ordinary case, not something to report
+        if from_account {
+            return (fallback, None);
         }
         (
             fallback,
@@ -591,6 +669,43 @@ impl Rmm {
             }
         }
     }
+}
+
+/// Bro RMM's command line on this system: loopback only, Bro's own window title, no audio or file transfers, one
+/// stripe for WebRTC, and a frame mobile decoders open.
+fn host_args(port: u16, display: u32) -> Vec<String> {
+    host_args_for(std::env::consts::OS, port, display)
+}
+
+fn host_args_for(os: &str, port: u16, display: u32) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--addr=127.0.0.1".to_string(),
+        format!("--port={port}"),
+        "--title=Bro remote desktop".into(),
+        "--audio-enabled=false".into(),
+        "--enable-clipboard=true".into(),
+        "--file-transfers=none".into(),
+        "--enable-resize=false".into(),
+        "--framerate=60".into(),
+        "--stripes=1".into(),
+        "--max-kbps=12000".into(),
+        "--min-kbps=800".into(),
+    ]
+    .into();
+    match os {
+        // fit within 2560×1440, so an ultrawide still opens in a phone's hardware decoder
+        "windows" => args.extend([
+            "--max-capture-width=2560".to_string(),
+            "--max-capture-height=1440".into(),
+            "--max-capture-pixels=3686400".into(),
+            format!("--display={display}"),
+        ]),
+        // a Retina display scales down to the same pixel budget
+        "macos" => args.extend(["--max-capture-pixels=3686400".to_string(), format!("--display={display}")]),
+        // Linux shares the X11 screen in $DISPLAY, which the child inherits
+        _ => {}
+    }
+    args
 }
 
 pub(crate) fn spawn(state: &AppState) {
@@ -663,7 +778,9 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
 
 /// Unlike ordinary loopback tools, desktop control always needs the pairing token.
 async fn paired(State(state): State<AppState>, request: Request<Body>, next: Next) -> Response {
-    if !paired_request(request.headers(), request.uri(), &state.token) {
+    // through the account relay the account server has vouched for the caller; that stands in for the pairing
+    let relayed = request.extensions().get::<crate::relay::RelayPeer>().is_some();
+    if !relayed && !paired_request(request.headers(), request.uri(), &state.token) {
         return failure(
             StatusCode::UNAUTHORIZED,
             "Pair with Bro before opening remote control.",
@@ -686,7 +803,7 @@ async fn paired(State(state): State<AppState>, request: Request<Body>, next: Nex
     response
 }
 
-fn paired_request(headers: &HeaderMap, uri: &Uri, token: &str) -> bool {
+pub(crate) fn paired_request(headers: &HeaderMap, uri: &Uri, token: &str) -> bool {
     let synthetic_peer = Some(std::net::SocketAddr::from(([192, 0, 2, 1], 1)));
     if !crate::auth::is_authorized(synthetic_peer, headers, uri, token) {
         return false;
@@ -736,6 +853,7 @@ fn default_transport() -> String {
 
 async fn open(
     State(state): State<AppState>,
+    peer: Result<axum::extract::ConnectInfo<std::net::SocketAddr>, axum::extract::rejection::ExtensionRejection>,
     Json(request): Json<Open>,
 ) -> Result<Json<Value>, ApiError> {
     if !matches!(request.transport.as_str(), "webrtc" | "websocket") {
@@ -748,7 +866,7 @@ async fn open(
     if !settings.enabled {
         return Err(failure(
             StatusCode::FORBIDDEN,
-            "Enable remote control in Bro’s Mobile Companion settings first.",
+            "Turn on Remote desktop in bro's Remote Control settings first.",
         ));
     }
     let read_only = settings.read_only || request.read_only;
@@ -758,16 +876,20 @@ async fn open(
         Some(package::lock(&state.rmm.root, "control.lock")
         .map_err(|_| failure(StatusCode::CONFLICT, "Another device is controlling this computer. End its connection or choose View only."))?)
     };
-    // Fetch relay credentials before starting capture; a slow broker cannot hold up the screen worker.
-    let (ice_servers, message) = if request.transport == "webrtc" {
-        state.rmm.ice_servers().await
-    } else {
-        (json!([]), None)
-    };
-    state.rmm.start().await?;
+    // Capture startup and relay lookup are independent. Do both together instead
+    // of adding a broker round trip to every cold connection.
+    let (target, (ice_servers, message)) = tokio::join!(state.rmm.start(), async {
+        if request.transport == "webrtc" {
+            state.rmm.ice_servers().await
+        } else {
+            (json!([]), None)
+        }
+    });
+    let target = target?;
     let lease = Arc::new(Lease {
         id: uuid::Uuid::new_v4().simple().to_string(),
         read_only,
+        peer: peer.ok().map(|axum::extract::ConnectInfo(peer)| peer.ip().to_canonical()),
         transport: request.transport,
         deadline: Mutex::new(Instant::now() + LEASE_TTL),
         reconnect_at: Instant::now() + Duration::from_secs(50 * 60),
@@ -775,6 +897,7 @@ async fn open(
         attached: AtomicBool::new(false),
         rtc_id: Mutex::new(None),
         ice_servers,
+        trickle_ice: target.trickle_ice,
         _control_lock: control_lock,
     });
     let current_config = state.rmm.config.read();
@@ -805,7 +928,7 @@ fn lease_json(lease: &Lease, message: Option<String>) -> Value {
     };
     json!({"id":lease.id,"basePath":format!("/rmm/{}/",lease.id),"wsPath":format!("/rmm/{}/ws",lease.id),
         "rtcPath":format!("/rmm/{}/rtc/offer",lease.id),"readOnly":lease.read_only,"transport":lease.transport,
-        "iceServers":lease.ice_servers,"expiresAt":timestamp(*lease.deadline.lock()),"reconnectAt":timestamp(lease.reconnect_at),"message":message})
+        "iceServers":lease.ice_servers,"trickleIce":lease.trickle_ice,"expiresAt":timestamp(*lease.deadline.lock()),"reconnectAt":timestamp(lease.reconnect_at),"message":message})
 }
 
 async fn close(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
@@ -915,6 +1038,7 @@ async fn proxy(
                 }
                 offer["readOnly"] = json!(lease.read_only);
                 offer["iceServers"] = lease.ice_servers.clone();
+                offer["trickle"] = json!(lease.trickle_ice && offer["trickle"] == true);
                 let response = state
                     .rmm
                     .http
@@ -978,6 +1102,24 @@ async fn proxy(
                 lease.attached.store(false, Ordering::Release);
             }
             result
+        }
+        (&Method::POST, _) if path.starts_with("rtc/") && path.ends_with("/ice") => {
+            let peer = lease.rtc_id.lock().clone();
+            let requested = path.strip_prefix("rtc/").and_then(|p| p.strip_suffix("/ice"));
+            if peer.as_deref() != requested || !lease.trickle_ice || peer.is_none() {
+                return Err(failure(StatusCode::NOT_FOUND, "Unknown remote viewer."));
+            }
+            let body = to_bytes(request.into_body(), 160 * 1024).await
+                .map_err(|_| failure(StatusCode::PAYLOAD_TOO_LARGE, "ICE candidates are too large."))?;
+            let response = state.rmm.http.post(format!("{}/{path}", target.origin))
+                .bearer_auth(&target.password)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body).send().await
+                .map_err(|_| failure(StatusCode::BAD_GATEWAY, "ICE exchange failed."))?;
+            let code = response.status();
+            let body = response.bytes().await
+                .map_err(|_| failure(StatusCode::BAD_GATEWAY, "ICE exchange failed."))?;
+            Ok((code, [(header::CONTENT_TYPE, "application/json")], body).into_response())
         }
         (&Method::DELETE, _) if path.starts_with("rtc/") => {
             let peer = lease.rtc_id.lock().clone();
@@ -1095,6 +1237,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn each_system_gets_the_host_flags_it_understands() {
+        let has = |args: &[String], flag: &str| args.iter().any(|a| a.starts_with(flag));
+        for os in ["windows", "macos", "linux"] {
+            let args = host_args_for(os, 6901, 1);
+            // loopback only, Bro's limits, everywhere
+            assert!(args.contains(&"--addr=127.0.0.1".to_string()) && args.contains(&"--port=6901".to_string()), "{os}");
+            assert!(args.contains(&"--file-transfers=none".to_string()) && args.contains(&"--audio-enabled=false".to_string()), "{os}");
+            assert!(has(&args, "--stripes=1"), "{os}");
+        }
+        let windows = host_args_for("windows", 1, 2);
+        assert!(windows.contains(&"--display=2".to_string()) && has(&windows, "--max-capture-width"));
+        let mac = host_args_for("macos", 1, 2);
+        assert!(mac.contains(&"--display=2".to_string()) && has(&mac, "--max-capture-pixels") && !has(&mac, "--max-capture-width"));
+        // Linux streams $DISPLAY: no display index
+        assert!(!has(&host_args_for("linux", 1, 2), "--display"));
+    }
+
+    #[test]
     fn localhost_still_requires_pairing_and_cross_site_is_refused() {
         let uri: Uri = "/api/rmm".parse().unwrap();
         let mut headers = HeaderMap::new();
@@ -1151,6 +1311,7 @@ mod tests {
         let lease = Arc::new(Lease {
             id: "viewer".into(),
             read_only: true,
+            peer: None,
             transport: "webrtc".into(),
             deadline: Mutex::new(Instant::now() + LEASE_TTL),
             reconnect_at: Instant::now() + Duration::from_secs(50 * 60),
@@ -1158,6 +1319,7 @@ mod tests {
             attached: AtomicBool::new(false),
             rtc_id: Mutex::new(None),
             ice_servers: json!([]),
+            trickle_ice: false,
             _control_lock: None,
         });
         rmm.inner

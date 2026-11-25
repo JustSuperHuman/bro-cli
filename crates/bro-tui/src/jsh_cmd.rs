@@ -7,6 +7,7 @@ pub const HELP: &str = "bro jsh: Claude on your Just Superhuman account
 
 usage
   bro jsh login    sign in in the browser; approve \"bro\" and this computer
+  bro jsh login --no-browser    print the sign-in link for an SSH or RMM session
   bro jsh status   who is signed in, the organization and the credits left
   bro jsh logout   revoke this computer's sign-in and forget it
 
@@ -17,6 +18,7 @@ accounts server (http://auth.localhost:8790 for local development).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JshCmd {
     Login,
+    LoginNoBrowser,
     Status,
     Logout,
 }
@@ -26,6 +28,7 @@ pub fn parse(args: &[String]) -> Result<Option<JshCmd>, String> {
     match (args.first().map(String::as_str), args.len()) {
         (None, _) | (Some("-h" | "--help" | "help"), _) => Ok(None),
         (Some("login"), 1) => Ok(Some(JshCmd::Login)),
+        (Some("login"), 2) if args[1] == "--no-browser" => Ok(Some(JshCmd::LoginNoBrowser)),
         (Some("status"), 1) => Ok(Some(JshCmd::Status)),
         (Some("logout"), 1) => Ok(Some(JshCmd::Logout)),
         (Some(c @ ("login" | "status" | "logout")), _) => Err(format!("bro jsh {c}: takes no arguments")),
@@ -35,7 +38,8 @@ pub fn parse(args: &[String]) -> Result<Option<JshCmd>, String> {
 
 pub fn run(cmd: JshCmd) -> Result<(), String> {
     match cmd {
-        JshCmd::Login => login(),
+        JshCmd::Login => login(true),
+        JshCmd::LoginNoBrowser => login(false),
         JshCmd::Status => status(),
         JshCmd::Logout => {
             let out = jsh::login().sign_out();
@@ -49,17 +53,19 @@ pub fn run(cmd: JshCmd) -> Result<(), String> {
     }
 }
 
-fn login() -> Result<(), String> {
+fn login(open_browser: bool) -> Result<(), String> {
     if let Some((account, _)) = jsh::cached_account().filter(|_| jsh::signed_in()) {
         println!("Already signed in as {}. `bro jsh logout` first to switch accounts.", account.who());
         return Ok(());
     }
     let (pending, _) = jsh::login().begin().map_err(|e| format!("{e:#}"))?;
     println!("Your code is  {}", pending.user_code);
-    println!("Opening {}", pending.verification_uri_complete);
+    println!("Sign in at {}", pending.verification_uri_complete);
     println!("If the browser doesn't open, go to {} and enter the code.", pending.verification_uri);
     println!("Waiting for you to approve it...");
-    let _ = crate::panes::links::open(&pending.verification_uri_complete);
+    if open_browser {
+        let _ = crate::panes::links::open(&pending.verification_uri_complete);
+    }
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
         let snap = jsh::login().snapshot();
@@ -117,6 +123,7 @@ mod tests {
     fn parses() {
         assert_eq!(p(&[]), Ok(None));
         assert_eq!(p(&["login"]), Ok(Some(JshCmd::Login)));
+        assert_eq!(p(&["login", "--no-browser"]), Ok(Some(JshCmd::LoginNoBrowser)));
         assert_eq!(p(&["status"]), Ok(Some(JshCmd::Status)));
         assert_eq!(p(&["logout"]), Ok(Some(JshCmd::Logout)));
         assert!(p(&["login", "now"]).is_err());

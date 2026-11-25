@@ -11,6 +11,19 @@ use crate::sidebar::Row;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 impl App {
+    /// Where ctrl+v sends a picture when the clipboard has no text: the focused session, in focus mode (its box
+    /// attaches it) or as a terminal (its path is pasted; Claude Code and Codex attach a pasted picture's path).
+    /// Never a dialog, the sidebar or a rename.
+    pub(crate) fn picture_paste_target(&self) -> Option<crate::layout::PaneId> {
+        self.focused().filter(|id| {
+            !self.overlay.is_open()
+                && !self.side_focus
+                && self.renaming.is_none()
+                && self.theme_editor.as_ref().is_none_or(|e|e.minimized || (e.field==crate::theme::editor::Field::None && !e.inspect))
+                && (self.focus_view(*id) || self.panes.get(id).is_some_and(|p| p.is_terminal()))
+        })
+    }
+
     pub(crate) fn key(&mut self, k: KeyEvent) {
         self.sel = None;
         self.link_press = None;
@@ -21,8 +34,8 @@ impl App {
         if !self.prefix_armed && paste_key {
             let request = std::time::Instant::now();
             self.clipboard_request = Some(request);
-            // focus mode's box takes a picture too (a screenshot): text first, else the image
-            let focus = self.focused().filter(|id| !self.overlay.is_open() && !self.side_focus && self.renaming.is_none() && self.focus_view(*id));
+            // text first; with none, a picture (a screenshot) or copied files go to the session, as alt+v does
+            let focus = self.picture_paste_target();
             if !cfg!(test) {
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
@@ -39,6 +52,7 @@ impl App {
             }
             return;
         }
+        if !self.overlay.is_open() && self.theme_editor_key(k) {return;}
         if self.overlay.is_open() {
             self.overlay_key(k);
             return;
@@ -83,6 +97,10 @@ impl App {
         // Codex uses Alt+Up to edit queued input. Keep prefix+k for pane navigation.
         if !self.side_focus && k.code == KeyCode::Up && k.modifiers == KeyModifiers::ALT
             && let Some(id) = self.focused().filter(|id| self.panes.get(id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.harness == Some(bro_core::Harness::Codex))) {
+                if self.focus_view(id) && self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.focus_queued_questions()).is_some_and(|q| q.shortcut == bro_core::terminal_prompt::QuestionShortcut::AltUp) {
+                    self.focus_open_queued_questions(id);
+                    return;
+                }
                 self.with_pane(id, |p, cx| p.key(k, cx));
                 return;
             }
@@ -111,6 +129,12 @@ impl App {
         if self.focus_view(id) {
             return self.focus_key(id, k);
         }
+        if self.dictation.phase(id).is_some() && self.can_dictate(id) {
+            if k.code == KeyCode::Enter && !k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
+                self.dictation.finish(id, true);
+            }
+            return;
+        }
         if self.terminal_quip_key(id, k) { return; }
         let used = self.with_pane(id, |p, cx| p.key(k, cx)).unwrap_or(false);
         let terminal = self.panes.get(&id).is_some_and(|p| p.is_terminal());
@@ -128,6 +152,7 @@ impl App {
 
     fn welcome_key(&mut self, k: KeyEvent) {
         match k.code {
+            KeyCode::Char('w') | KeyCode::Char('c') => self.open_view("automation"),
             KeyCode::Enter | KeyCode::Char('n') => self.run_act(crate::keymap::Act::NewSession),
             KeyCode::Char('s') => self.run_act(crate::keymap::Act::NewShell),
             KeyCode::Char('?') => self.run_act(crate::keymap::Act::Help),
@@ -136,6 +161,9 @@ impl App {
                 self.side_focus = true;
             }
             KeyCode::Char('q') => self.run_act(crate::keymap::Act::Quit),
+            // the "Did you know?" tips
+            KeyCode::Char(']') => self.tip_step(1),
+            KeyCode::Char('[') => self.tip_step(-1),
             _ => {}
         }
     }
@@ -174,6 +202,11 @@ impl App {
                     self.overlay = Overlay::None;
                     self.sign_in_gemini();
                 }
+                Outcome::InstallTool(tool, again) => {
+                    self.overlay = Overlay::None;
+                    self.install_tool(tool, again);
+                }
+                Outcome::SaveKey(tool, key) => self.svc.save_studio_key(tool, key),
             },
             Overlay::Palette(p) => {
                 let out = p.key(k);
@@ -278,6 +311,21 @@ impl App {
         }).unwrap_or(0);
     }
 
+    /// Open or fold the window's sidebar's Recent: the projects with no session running.
+    pub(crate) fn toggle_recent(&mut self) {
+        self.side.recent = !self.side.recent;
+        let n = self.rows().len();
+        self.side_sel = self.side_sel.min(n.saturating_sub(1));
+    }
+
+    /// The window's sidebar folds projects away in Recent.
+    pub(crate) fn recent_folded(&self) -> bool {
+        self.side.compact && {
+            let (idle, at) = crate::sidebar::recent(&self.live_infos(), &self.past_infos(), &self.open_infos(), &self.side);
+            !idle.is_empty() && at == crate::sidebar::Recent::Folded { open: false }
+        }
+    }
+
     pub(crate) fn leave_sidebar(&mut self) {
         self.clear_sidebar_filter();
         self.side_focus = false;
@@ -301,6 +349,11 @@ impl App {
         let n = rows.len();
         let sel = self.side_sel.min(n.saturating_sub(1));
         match k.code {
+            // down past the last project opens Recent, onto its first
+            KeyCode::Down if sel + 1 >= n && self.recent_folded() => {
+                self.toggle_recent();
+                self.side_sel = n;
+            }
             KeyCode::Down => self.side_sel = (sel + 1).min(n.saturating_sub(1)),
             KeyCode::Up => self.side_sel = sel.saturating_sub(1),
             KeyCode::Home => self.side_sel = 0,

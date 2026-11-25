@@ -24,13 +24,14 @@ pub fn display_name(h: Harness) -> &'static str {
         Harness::Codex => "Codex",
         Harness::Pi => "Pi",
         Harness::Omp => "omp (oh-my-pi)",
+        Harness::Antigravity => "Antigravity",
     }
 }
 
 /// The package a package-manager install fetches (None: Claude Code's native installer).
 pub fn package(h: Harness) -> Option<&'static str> {
     match h {
-        Harness::Claude => None,
+        Harness::Claude | Harness::Antigravity => None,
         Harness::Codex => Some("@openai/codex"),
         Harness::Pi => Some("@mariozechner/pi-coding-agent"),
         Harness::Omp => Some("@oh-my-pi/pi-coding-agent"),
@@ -39,7 +40,7 @@ pub fn package(h: Harness) -> Option<&'static str> {
 
 /// Where the agent's executable is, if it is installed.
 pub fn installed(h: Harness) -> Option<PathBuf> {
-    which(h.label())
+    which(h.program())
 }
 
 /// A shell one-liner (`irm … | iex` on Windows, `curl … | bash` elsewhere).
@@ -71,6 +72,12 @@ pub fn plan(h: Harness) -> Result<Vec<Step>, String> {
 }
 
 fn plan_with(h: Harness, has_npm: bool, has_bun: bool) -> Result<Vec<Step>, String> {
+    if h == Harness::Antigravity {
+        return Ok(vec![script(
+            "$installer = Join-Path $env:TEMP ('agy-install-' + [guid]::NewGuid().ToString('N') + '.cmd'); try { Invoke-WebRequest 'https://antigravity.google/cli/install.cmd' -OutFile $installer -ErrorAction Stop; & $installer; exit $LASTEXITCODE } finally { Remove-Item -LiteralPath $installer -ErrorAction SilentlyContinue }",
+            "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+        )]);
+    }
     let Some(pkg) = package(h) else {
         return Ok(vec![script("irm https://claude.ai/install.ps1 | iex", "curl -fsSL https://claude.ai/install.sh | bash")]);
     };
@@ -85,13 +92,27 @@ fn plan_with(h: Harness, has_npm: bool, has_bun: bool) -> Result<Vec<Step>, Stri
 
 /// Install `h`, running each step in the current terminal. `say` gets progress lines.
 /// Ok holds where the executable now is (None: installed, but not found on PATH yet).
-pub fn install(h: Harness, mut say: impl FnMut(&str)) -> Result<Option<PathBuf>, String> {
+pub fn install(h: Harness, say: impl FnMut(&str)) -> Result<Option<PathBuf>, String> {
+    install_with(h, say, false)
+}
+
+/// [`install`] for a caller with no terminal (the bridge): the installers' stdin is closed, so
+/// none of them can wait for a keypress.
+pub fn install_unattended(h: Harness, say: impl FnMut(&str)) -> Result<Option<PathBuf>, String> {
+    install_with(h, say, true)
+}
+
+fn install_with(h: Harness, mut say: impl FnMut(&str), no_stdin: bool) -> Result<Option<PathBuf>, String> {
     for step in plan(h)? {
         // a step planned before Bun existed: resolve it now that the previous step installed it
         let step = if step.program == "bun" { global("bun", package(h).unwrap_or_default()) } else { step };
         say(&format!("$ {}", step.display));
-        let status = Command::new(&step.program)
-            .args(&step.args)
+        let mut command = Command::new(&step.program);
+        command.args(&step.args);
+        if no_stdin {
+            command.stdin(std::process::Stdio::null());
+        }
+        let status = command
             .status()
             .map_err(|e| format!("couldn't run {}: {e}", step.program))?;
         if !status.success() {

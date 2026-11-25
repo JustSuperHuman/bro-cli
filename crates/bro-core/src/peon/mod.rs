@@ -59,6 +59,7 @@ impl PeonSettings {
             Harness::Codex => self.codex,
             Harness::Pi => self.pi,
             Harness::Omp => self.omp,
+            Harness::Antigravity => false,
         }
     }
     pub fn set_harness(&mut self, h: Harness, on: bool) {
@@ -67,6 +68,7 @@ impl PeonSettings {
             Harness::Codex => self.codex = on,
             Harness::Pi => self.pi = on,
             Harness::Omp => self.omp = on,
+            Harness::Antigravity => {}
         }
     }
 }

@@ -8,7 +8,7 @@ terminal UI's, and the desktop app adds the window, pixel layout, drawing and th
 
 | Crate | What it does |
 |---|---|
-| `crates/bro-gfx` | The renderer. wgpu pipelines for soft shadows, rounded rects (borders, gradients), images and glyphs; text with cosmic-text (shaping, fallback) and swash (rasterising) into glyph atlases; box drawing, blocks, braille and powerline drawn to the cell; runs of punctuation shaped together so font ligatures join up on the cell grid; a theme's effects pass (neon glow from a half-size bloom, CRT phosphor, scanlines, vignette); a see-through swap chain on request (`Options::transparent`: DX12 DirectComposition on Windows, the frame premultiplied). No knowledge of bro. |
+| `crates/bro-gfx` | The renderer. wgpu pipelines for soft shadows, rounded rects (borders, gradients), images and glyphs; text with cosmic-text (shaping, fallback) and swash (rasterising) into glyph atlases; box drawing, blocks, braille and powerline drawn to the cell; runs of punctuation shaped together so font ligatures join up on the cell grid; a theme's effects pass (neon glow from a half-size bloom, CRT phosphor, scanlines, vignette); a see-through swap chain on request (`Options::transparent`: DX12 DirectComposition on Windows, the frame premultiplied); graphics APIs started one at a time in `attempts()` order (Windows: DX12, Vulkan, OpenGL), minus `Options::skip`, with `on_start` told of each before it starts. No knowledge of bro. |
 | `crates/bro-media` | Decoding for the media sidebar: images (png, jpeg, gif, webp, svg…), video and audio playback (Media Foundation on Windows, ffmpeg elsewhere). |
 | `crates/bro-tui` with the `gui` feature (default) | The desktop app itself, in `src/app/gui/`, plus a `gui` child module next to each overlay and view it draws natively. |
 
@@ -46,6 +46,7 @@ Every overlay and view is drawn by a module next to its terminal-UI drawing:
 | File preview, agent files | `file_view/gui.rs`, `agent_files/gui.rs` | `FileView`, `AgentFilesView` |
 | Watchdog card, watchdog prompt editor | `watchdog/view/gui.rs`, `watchdog/prompt_editor/gui.rs` | `WatchdogView`, `PromptEditor` |
 | Settings, stats, usage, profiles, proxy, bridge, quick install, setup | `views/<name>/gui.rs` | the view's own struct |
+| Storyboard (a Create Slop project's film, beside its session) | `views/storyboard/gui.rs` | `StoryboardView`; it draws pictures from the window's media cache, so its dispatcher is `views::draw_storyboard` |
 
 The contract (`app/gui/surface.rs`):
 
@@ -88,6 +89,11 @@ real logos of the agents, shells and providers as vector paths drawn through the
   window. Use Windows-style paths (`F:/…`) for shots: the exe doesn't understand `/f/…`.
 - Look at the PNGs (the Read tool shows images).
 - `--gui-child` keeps it from detaching from the shell. Never run without `--demo` in automated checks.
+- Without `--gui-child`, `bro gui` is the launcher (`app/gui/startup.rs`): it starts the window as a copy of
+  itself with `--window-status <file>`, where the window writes the graphics API it's starting, then `ready`
+  after its first frame (or `failed` and why). The launcher stays until then; a window that crashes while
+  starting a graphics API gets that API written to `~/.bro/v2-gpu.json` (skipped from then on) and is started
+  once more.
 
 ## Rules
 

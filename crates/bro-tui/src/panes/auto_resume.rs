@@ -470,6 +470,20 @@ mod tests {
     }
 
     #[test]
+    fn enabling_after_a_turn_stalls_retries_work_seen_while_disabled() {
+        let (mut r, cfg, t0) = (AutoResume::default(), cfg(), at("2026-11-03 22:00:00"));
+        let off = AutoResumeSettings { enabled: false, ..cfg.clone() };
+        let error = "API Error: Connection lost mid-response. The response above may be incomplete.";
+        let stall = Some(Stall { key: "t:connection-failed".into(), text: error.into(), cause: Cause::Transient, below: None });
+        r.step(t0, &working(), &off);
+        assert!(r.step(t0, &idle(stall.clone()), &off).is_empty());
+        assert!(r.note(t0).is_none());
+        r.step(t0, &idle(stall.clone()), &cfg);
+        assert_eq!(r.note(t0).as_deref(), Some("↻ retry 1 in 5s"));
+        assert_eq!(sends(&r.step(t0 + chrono::Duration::seconds(5), &idle(stall), &cfg)), 1);
+    }
+
+    #[test]
     fn a_retry_that_fails_again_backs_off_then_gives_up() {
         let (mut r, cfg, mut t) = (AutoResume::default(), cfg(), at("2026-10-07 12:00:00"));
         r.step(t, &working(), &cfg);

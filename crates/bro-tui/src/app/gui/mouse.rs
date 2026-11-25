@@ -60,22 +60,14 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
     g.app.clipboard_request = None;
     g.link_press = None;
     let hit = hit_at(g, p);
-    let m = mods(g);
-    if let Some(menu) = g.clipboard_menu.take() {
-        if cb == CButton::Left {
-            if let Some(Action::Clipboard(copy)) = hit {
-                focus(&mut g.app, menu.pane);
-                if copy {
-                    if let Some(text) = menu.selection {
-                        super::window::set_clipboard(&text);
-                    }
-                } else {
-                    g.key(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('v'), KeyModifiers::CONTROL));
-                }
-            }
-            return;
+    if g.app.theme_editor.is_some() && !g.app.overlay.is_open() {
+        if let Some(Action::ThemeEditor(n))=&hit {
+            if cb==CButton::Left {super::theme_editor::click(&mut g.app,*n,p);} return;
         }
+        if super::theme_editor::inspect_click(&mut g.app,p) {return;}
+        if let Some(e)=&mut g.app.theme_editor {e.field=crate::theme::editor::Field::None;}
     }
+    let m = mods(g);
     if g.app.prefix_armed && cb == CButton::Right {
         g.app.prefix_armed = false;
         return;
@@ -84,12 +76,57 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
         if cb == CButton::Left {
             g.app.prefix_armed = false;
             if let Some(Action::Menu(index)) = hit {
-                if let Some((_, act)) = g.app.keymap.prefix_actions().get(index) {
-                    g.app.run_act(*act);
+                if let Some((_, act)) = g.app.menu_actions().get(index) {
+                    g.app.run_menu_act(*act);
                 }
             }
         }
         return;
+    }
+    // a line runs, anywhere else closes the open context menu
+    if g.context_menu.is_some() {
+        match hit {
+            Some(Action::SideMenu(n)) if cb == CButton::Left => super::side_menu::run(g, n),
+            Some(Action::SideMenu(super::side_menu::OUTSIDE)) | None => g.context_menu = None,
+            Some(Action::SideMenu(_)) => {}
+            _ => g.context_menu = None,
+        }
+        return;
+    }
+    // a right-click on a project, a session, or voice opens its menu
+    if cb == CButton::Right && !g.app.overlay.is_open() {
+        match &hit {
+            Some(Action::Side(SideHit::Row(i))) => {
+                match g.app.rows().get(*i).cloned() {
+                    Some(crate::sidebar::Row::Project { key, name, root, live, .. }) => {
+                        g.context_menu = Some(super::side_menu::Menu::project(key, name, root, live, p, &mut g.icons));
+                        return;
+                    }
+                    Some(crate::sidebar::Row::Live { info, .. }) => {
+                        g.context_menu = Some(super::side_menu::Menu::session(info.pane, p));
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            Some(Action::Side(SideHit::Strip(crate::app::project_tabs::StripHit::Session(id)))) => {
+                g.context_menu = Some(super::side_menu::Menu::session(*id, p));
+                return;
+            }
+            // the session tabs' heading: its project's menu, as on its row
+            Some(Action::Side(SideHit::Scope(crate::app::project_tabs::StripTab::Project(want)))) => {
+                let row = g.app.rows().into_iter().find(|r| matches!(r, crate::sidebar::Row::Project { key, .. } if key == want));
+                if let Some(crate::sidebar::Row::Project { key, name, root, live, .. }) = row {
+                    g.context_menu = Some(super::side_menu::Menu::project(key, name, root, live, p, &mut g.icons));
+                    return;
+                }
+            }
+            Some(Action::Voice(_)) => {
+                g.context_menu = Some(super::side_menu::Menu::voice(p));
+                return;
+            }
+            _ => {}
+        }
     }
     // the media panel's open menu: its lines run (below), its card between them does nothing, anywhere else (what's
     // drawn over its scrim: toasts, the window's buttons) only closes it
@@ -107,7 +144,7 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
         g.drag = None;
         g.media.focus = false;
         clear_selections(g, None);
-        g.app.open_menu(Some((p.x, p.y)));
+        g.context_menu = Some(super::side_menu::Menu::session(*id, p));
         return;
     }
     // clicks (and double clicks) are counted per spot
@@ -132,7 +169,7 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
     }
     // anywhere on the sidebar (its blank spots too) is the sidebar; the project tabs aren't
     let on_side = on_sidebar(g, p);
-    let side_hit = matches!(hit, Some(Action::Side(_) | Action::SideFilter | Action::SideList | Action::SideResize | Action::SideScroll | Action::MediaToggle | Action::OrbitVoice(_)));
+    let side_hit = matches!(hit, Some(Action::Side(_) | Action::SideFilter | Action::SideList | Action::SideResize | Action::SideScroll | Action::MediaToggle | Action::Voice(_) | Action::OpenProject));
     let on_strip = matches!(hit, Some(Action::Side(SideHit::Strip(_))));
     let in_sidebar = (on_side || side_hit) && !on_strip;
     if !matches!(hit, Some(Action::Media(_) | Action::MediaResize)) {
@@ -141,9 +178,13 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
     if !in_sidebar {
         g.app.leave_sidebar();
     }
-    // a click anywhere else ends a selection
+    // a click anywhere else ends a selection (a shift+click in a focus view grows its own)
     if cb == CButton::Left {
-        clear_selections(g, None);
+        let keep = match hit {
+            Some(Action::Focus(id, _)) if m.contains(KeyModifiers::SHIFT) => Some(id),
+            _ => None,
+        };
+        clear_selections(g, keep);
     }
     // the launcher fills the body: the sidebar and the tabs beside it keep working (not while its project
     // picker is open)
@@ -173,12 +214,19 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
     }
     match hit {
         Some(Action::Toast(i)) => dismiss_toast(g, i),
-        Some(Action::OrbitVoice(which)) if cb == CButton::Left => match which {
-            0 => g.app.svc.toggle_orbit_voice(),
-            1 => g.app.svc.mute_orbit_voice(),
-            2 => g.app.svc.open_orbit_voice(),
+        Some(Action::Voice(which)) if cb == CButton::Left => match which {
+            0 => {
+                let mut settings = g.app.svc.settings();
+                settings.voice.enabled = !settings.voice.enabled;
+                g.app.svc.save_settings(settings);
+                g.app.svc.restart_voice();
+            }
+            2 => g.app.show_voice_settings(),
+            3 => g.app.svc.open_voice_page(),
+            4 => g.app.svc.hangup_live_voice(),
             _ => {},
         },
+        Some(Action::OpenProject) if cb == CButton::Left => g.app.open_project_folder(),
         Some(Action::MediaToggle) if cb == CButton::Left => {
             g.prefs.media_open = !g.prefs.media_open;
             g.prefs.save(g.app.persist);
@@ -221,6 +269,13 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
             }
         }
         Some(Action::Welcome(n)) if cb == CButton::Left => super::welcome::click(&mut g.app, n),
+        Some(Action::BrowserHandoff { tab_id, id, finish }) if cb == CButton::Left => {
+            if finish { g.app.svc.return_browser_handoff(tab_id, id); }
+            else { g.app.svc.open_browser_handoff(tab_id, &id); }
+        }
+        Some(Action::BrowserHandoffNext) if cb == CButton::Left => {
+            g.app.browser_handoffs.selected = g.app.browser_handoffs.selected.wrapping_add(1);
+        }
         Some(Action::View(id, n)) if cb == CButton::Left => {
             focus(&mut g.app, id);
             super::views::click(&mut g.app, id, n, p, m, count);
@@ -231,6 +286,14 @@ pub fn pressed(g: &mut Gui, p: Point, button: MouseButton) {
             super::views::context(&mut g.app, id, n, p);
         }
         Some(Action::Focus(id, n)) if cb == CButton::Left => super::focus::click(g, id, n, p, count),
+        // a right-click opens the conversation menu, as in a terminal
+        Some(Action::Focus(id, _)) if cb == CButton::Right => {
+            focus(&mut g.app, id);
+            let selection = super::focus::selection_text(g, id);
+            g.drag = None;
+            let can_fork = g.app.supports_conversation_fork(id) && !g.app.focus.subagent.contains_key(&id);
+            g.context_menu = Some(super::side_menu::Menu::conversation(id, selection, can_fork, p));
+        }
         Some(Action::Focus(id, _)) => focus(&mut g.app, id),
         Some(Action::Pane(id, act)) => {
             if matches!(act, PaneAct::Body) && g.app.focus.drafts.get(&id).is_some_and(|d| d.terminal_quips.query.is_some()) {
@@ -261,7 +324,7 @@ fn on_sidebar(g: &Gui, p: Point) -> bool {
 
 /// The launcher is open and the sidebar and tabs beside it take clicks (not while its project picker is up).
 fn beside_launcher(g: &Gui) -> bool {
-    matches!(&g.app.overlay, Overlay::Launcher(l) if l.project_picker.is_none())
+    matches!(&g.app.overlay, Overlay::Launcher(l) if l.project_picker.is_none() && !l.fills_window())
 }
 
 fn dismiss_toast(g: &mut Gui, i: usize) {
@@ -321,6 +384,8 @@ fn side_click(g: &mut Gui, hit: SideHit, cb: CButton, m: KeyModifiers) {
         SideHit::Continue => app.open_continue(),
         SideHit::TileAll => app.run_act(crate::keymap::Act::TileAll),
         SideHit::Minimized => app.toggle_minimized_visibility(),
+        SideHit::Recent => app.toggle_recent(),
+        SideHit::Scope(tab) => app.show_tab(tab),
         SideHit::Strip(h) => app.strip_click(h, false),
     }
     if app.overlay.is_open() {
@@ -401,7 +466,8 @@ fn body_press(g: &mut Gui, id: PaneId, p: Point, cb: CButton, m: KeyModifiers, c
         let selection = with_screen(g, id, |s| s.term.selection_to_string()).flatten().map(|text| tidy_copy(&text)).filter(|text| !text.is_empty());
         focus(&mut g.app, id);
         g.drag = None;
-        g.clipboard_menu = Some(super::menu::ClipboardMenu { pane: id, anchor: p, selection });
+        let can_fork = g.app.supports_conversation_fork(id);
+        g.context_menu = Some(super::side_menu::Menu::conversation(id, selection, can_fork, p));
         return;
     }
     // links on the back of a turned card open on press
@@ -494,6 +560,8 @@ pub fn clear_selections(g: &mut Gui, keep: Option<PaneId>) {
     for id in ids {
         with_screen(g, id, |s| s.term.selection = None);
     }
+    // and the focus views' conversations (their reply boxes keep theirs, as text fields do)
+    super::focus::clear(g, keep);
 }
 
 /// The tile edge in the gutter at `p` (the workspace keeps its geometry in cells). With shared borders the line
@@ -580,6 +648,7 @@ pub fn divider_near(app: &crate::app::App, layout: &super::layout::Layout, p: Po
 }
 
 pub fn released(g: &mut Gui, p: Point, button: MouseButton) {
+    if super::theme_editor::release(&mut g.app,p) {g.dirty=true;return;}
     let Some(cb) = cbutton(button) else { return };
     g.app.touched();
     g.sidebar.bar_drag = None;
@@ -601,6 +670,7 @@ pub fn released(g: &mut Gui, p: Point, button: MouseButton) {
                 with_screen(g, pane, |s| s.term.selection = None);
             }
         }
+        Some(Drag::FocusText { pane }) => super::focus::release_text(g, pane, p),
         Some(Drag::Program { pane }) => {
             let drawn = g.panes.get(&pane).map(|s| s.drawn).unwrap_or_default();
             let (pt, _) = drawn.point_at(p);
@@ -631,11 +701,47 @@ pub fn open_link(g: &mut Gui, id: PaneId, uri: &str) {
     }
 }
 
+/// Motion inside a button has no visual effect. The editor inspector, audio
+/// scrubber, terminal links and split handles can depend on the exact position.
+pub(super) fn hover_changed(g: &Gui, old: Point, p: Point) -> bool {
+    if old == p { return false; }
+    if g.pressing || g.drag.is_some() || g.app.theme_editor.is_some() || matches!(g.app.overlay, Overlay::Palette(_)) {
+        return true;
+    }
+    let target = |point| g.hits.iter().rposition(|hit| hit.rect.contains(point));
+    let next = target(p);
+    if target(old) != next || g.anim.hover_regions.borrow().iter().any(|r| r.contains(old) != r.contains(p)) {
+        return true;
+    }
+    match next.map(|i| &g.hits[i].action) {
+        Some(Action::Focus(_, n)) if *n >= super::focus::SOUND_AT => true,
+        Some(Action::Pane(id, PaneAct::Body)) => {
+            if g.app.flips.contains_key(id) {
+                return g.painted.card_links.iter().any(|(r, pane, _)| pane == id && r.contains(old) != r.contains(p));
+            }
+            let Some(st) = g.panes.get(id) else { return false };
+            let Some(term) = g.app.panes.get(id).and_then(|pane| pane.as_term_ref()) else { return false };
+            let from = st.drawn.cell_at(old);
+            let to = st.drawn.cell_at(p);
+            if from == to { return false; }
+            let link = |cell: Option<(usize, usize)>| cell.and_then(|(row, col)| {
+                st.links.iter().position(|span| span.row == row + term.view_top() as usize && (span.start..span.end).contains(&col))
+            });
+            let row = |cell: Option<(usize, usize)>| cell.map(|(row, _)| row as u16);
+            link(from) != link(to) || (row(from) != row(to) && !term.wants_mouse() &&
+                [row(from), row(to)].into_iter().flatten().any(|row| term.prompt_option_at(row).is_some()))
+        }
+        None | Some(Action::None) => cursor_at(g, old).is_some() || cursor_at(g, p).is_some(),
+        _ => false,
+    }
+}
+
 pub fn moved(g: &mut Gui, p: Point) {
+    if super::theme_editor::drag(&mut g.app,p) {g.dirty=true;return;}
     let m = mods(g);
     // a move counts as you being here (the summary screensaver turns back), and is still handled
     g.app.touched();
-    if g.clipboard_menu.is_some() {
+    if g.context_menu.is_some() {
         return;
     }
     if g.app.prefix_armed {
@@ -715,6 +821,8 @@ pub fn moved(g: &mut Gui, p: Point) {
                 }
             });
         }
+        Some(Drag::FocusText { pane }) => super::focus::drag_text(g, pane, p),
+        Some(Drag::FocusBox { pane }) => super::focus::drag_box(g, pane, p),
         Some(Drag::Program { pane }) => {
             let drawn = g.panes.get(&pane).map(|s| s.drawn).unwrap_or_default();
             if let Some((r, c)) = drawn.cell_at(p) {
@@ -753,7 +861,15 @@ pub fn wheel(g: &mut Gui, p: Point, delta: super::scroll::Wheel) {
     if g.app.touched() {
         return;
     }
+    // the context menu stays where it opened: a turn of the wheel closes it
+    if g.context_menu.take().is_some() {
+        return;
+    }
     let down = dy < 0.0;
+    if let Some(e)=&mut g.app.theme_editor {
+        let (x,y,w,h)=e.bounds;
+        if Rect::new(x,y,w,h).contains(p) {e.scroll=if down {e.scroll.saturating_add(2)}else{e.scroll.saturating_sub(2)};g.dirty=true;return;}
+    }
     if g.app.prefix_armed {
         g.app.menu_move(if down { 3 } else { -3 });
         return;
@@ -768,7 +884,7 @@ pub fn wheel(g: &mut Gui, p: Point, delta: super::scroll::Wheel) {
         return;
     }
     // nothing drawn over this spot but the sidebar and the tabs themselves (a dialog's scrim is)
-    let bare = matches!(hit, None | Some(Action::None | Action::Side(_) | Action::SideList | Action::SideFilter | Action::SideScroll | Action::SideResize | Action::MediaToggle));
+    let bare = matches!(hit, None | Some(Action::None | Action::Side(_) | Action::SideList | Action::SideFilter | Action::SideScroll | Action::SideResize | Action::MediaToggle | Action::Voice(_) | Action::OpenProject));
     // anywhere over the project tabs scrolls them when they're more than fit, else steps them once per burst (not
     // while something is open over them)
     if bare && g.layout.strip.h > 0.0 && g.layout.strip.contains(p) {
@@ -815,6 +931,10 @@ pub fn wheel(g: &mut Gui, p: Point, delta: super::scroll::Wheel) {
             for _ in 0..(dy.abs().round().max(1.0) as usize).min(5) {
                 super::views::wheel(&mut g.app, id, Some(n), down);
             }
+        }
+        // the welcome screen's tips
+        Some(Action::Welcome(n)) => {
+            super::welcome::wheel(&mut g.app, n, down);
         }
         _ => {}
     }
@@ -873,6 +993,12 @@ fn pane_wheel(g: &mut Gui, id: PaneId, p: Point, delta: super::scroll::Wheel, m:
 pub fn type_text(g: &mut Gui, text: &str) {
     // you're here (the summary screensaver turns back); what you composed still lands, as a paste does
     g.app.touched();
+    if !g.media.expanded && !g.app.overlay.is_open() && !g.app.prefix_armed
+        && mods(g).difference(KeyModifiers::SHIFT).is_empty() && text.chars().any(|c| !c.is_control())
+    {
+        g.media.focus = false;
+        g.media.close_menu();
+    }
     let to_terminal = !g.app.overlay.is_open() && g.app.renaming.is_none() && !g.app.side_focus && !g.app.prefix_armed;
     // a session in focus mode: into its reply box
     if to_terminal
@@ -880,6 +1006,13 @@ pub fn type_text(g: &mut Gui, text: &str) {
         && g.app.focus_view(id)
     {
         g.app.focus_paste(id, text);
+        return;
+    }
+    if to_terminal
+        && let Some(id) = g.app.focused()
+        && g.app.dictation.phase(id).is_some()
+        && g.app.can_dictate(id)
+    {
         return;
     }
     if to_terminal
@@ -919,6 +1052,8 @@ pub fn dropped(g: &mut Gui, path: std::path::PathBuf) {
 /// The pointer shape where it is, when something other than the hit's own shape applies.
 pub fn cursor_at(g: &Gui, p: Point) -> Option<Cursor> {
     match hit_at(g, p) {
+        // a focus view's words: a text cursor (they select)
+        Some(Action::Focus(id, n)) => super::focus::cursor(g, id, n, p),
         // a turned card: its links and files open on click; the program's own links under it don't show
         Some(Action::Pane(id, PaneAct::Body)) if g.app.flips.contains_key(&id) => {
             Some(if g.painted.card_links.iter().any(|(r, pane, _)| *pane == id && r.contains(p)) { Cursor::Pointer } else { Cursor::Default })
@@ -951,9 +1086,11 @@ pub fn cursor_at(g: &Gui, p: Point) -> Option<Cursor> {
 
 pub fn has_selection(g: &Gui) -> bool {
     g.app.panes.keys().any(|id| with_screen(g, *id, |s| s.term.selection.as_ref().is_some_and(|sel| !sel.is_empty())).unwrap_or(false))
+        || super::focus::has_selection(g)
 }
 
-/// Copy the selection (ctrl+shift+c, or ctrl+c while something is selected). True when something was copied.
+/// Copy the selection (ctrl+shift+c, or ctrl+c while something is selected): a terminal's, else a focus
+/// view's. True when something was copied.
 pub fn copy_selection(g: &mut Gui) -> bool {
     let ids: Vec<PaneId> = g.app.panes.keys().copied().collect();
     for id in ids {
@@ -965,7 +1102,7 @@ pub fn copy_selection(g: &mut Gui) -> bool {
             return true;
         }
     }
-    false
+    super::focus::copy(g)
 }
 
 /// What a terminal selection copies as, the terminal UI's way: each line without the blanks the screen pads it

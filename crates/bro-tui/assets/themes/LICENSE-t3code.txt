@@ -1,0 +1,31 @@
+Palette data in t3-default-light.json and t3-default-dark.json is extracted
+without color changes from T3_CHAT_THEME.colors and T3_CHAT_THEME.variants.dark:
+https://github.com/pingdotgg/t3code/blob/5a20d59db38abef8e0b98cfe47fed81d074bcecc/packages/shared/src/themePalettes.ts#L238-L371
+
+These are the defaults used for omitted native T3 theme roles. They are not the
+separate T3_CODE_LIGHT_THEME_COLORS / T3_CODE_DARK_THEME_COLORS palettes.
+
+Upstream license:
+https://github.com/pingdotgg/t3code/blob/5a20d59db38abef8e0b98cfe47fed81d074bcecc/LICENSE
+
+MIT License
+
+Copyright (c) 2026 T3 Tools Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

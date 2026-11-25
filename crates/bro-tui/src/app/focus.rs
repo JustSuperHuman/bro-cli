@@ -1,7 +1,7 @@
 //! Focus mode's keys and pastes (see [`crate::focus`]): what you type goes to the session's reply box, Enter
 //! sends it, Esc stops a working agent, and while the session shows a choice the keys that answer it go to the
-//! session itself, so its own menu moves and picks as it does in the terminal. The box's lists (the commands as
-//! you type `/`, the models and thinking levels in its footer) take the keys that move and pick in them first.
+//! session itself, so its own menu moves and picks as it does in the terminal. A visible choice takes priority
+//! over the reply box and its lists; the draft stays until the choice is answered.
 
 use super::App;
 use crate::alerts::Kind;
@@ -93,7 +93,7 @@ fn model_source(t: &Term, listed: impl Fn(&str) -> bool) -> Option<ModelSource> 
             _ => ModelSource::Provider(id.to_string()),
         },
         // Pi and omp keep their terminal
-        (Harness::Pi | Harness::Omp, None) => return None,
+        (Harness::Pi | Harness::Omp | Harness::Antigravity, None) => return None,
     })
 }
 
@@ -105,10 +105,12 @@ fn provider_choice(r: bro_core::catalogue::ModelRow) -> ModelChoice {
     ModelChoice { name: r.name, detail: (!detail.is_empty()).then_some(detail), levels: vec![], default_level: None, id: r.id }
 }
 
-/// The models Claude Code switches between (`/model <id>`).
-fn claude_models() -> Arc<Vec<ModelChoice>> {
-    static MODELS: OnceLock<Arc<Vec<ModelChoice>>> = OnceLock::new();
-    MODELS.get_or_init(|| Arc::new(bro_core::catalogue::claude_choices())).clone()
+/// Claude prints its selected model in the welcome banner before it writes a transcript.
+fn claude_banner_model(rows: &[String]) -> Option<String> {
+    static MODEL: OnceLock<regex::Regex> = OnceLock::new();
+    let header = rows.iter().position(|row| row.contains("Claude Code v"))?;
+    let pattern = MODEL.get_or_init(|| regex::Regex::new(r"\b(Opus|Sonnet|Fable|Haiku)\s+\d+(?:\.\d+)+\b").unwrap());
+    rows.iter().skip(header + 1).take(3).find_map(|row| pattern.find(row).map(|m| m.as_str().to_string()))
 }
 
 /// Codex takes `/model <model> --reasoning=<level>` from 0.165 on (before that, only its own menu).
@@ -161,7 +163,7 @@ impl App {
     pub(crate) fn focus_view(&self, id: PaneId) -> bool {
         self.focus.on && !self.focus.peek.contains(&id) && self.panes.get(&id).is_some_and(|p| {
             p.as_term_ref().is_some_and(|t| focusable(t)
-                && (p.activity() != Some(Activity::Blocked) || t.limit_warning().is_some() || t.focus_choice().is_some()))
+                && (p.activity() != Some(Activity::Blocked) || t.limit_warning().is_some() || t.browser_waiting().is_some() || t.focus_choice().is_some() || t.focus_queued_questions().is_some()))
         })
     }
 
@@ -199,6 +201,10 @@ impl App {
         self.panes.get_mut(&id).and_then(|p| p.as_term()).is_some_and(|t| t.answer_prompt_option(key, Some(shown)))
     }
 
+    pub(crate) fn focus_open_queued_questions(&mut self, id: PaneId) -> bool {
+        self.panes.get_mut(&id).and_then(|p| p.as_term()).is_some_and(Term::open_queued_questions)
+    }
+
     /// What you've said in `id`, oldest first: the conversation's messages, then those on their way.
     fn your_messages(&self, id: PaneId) -> Vec<String> {
         let mut out: Vec<String> = vec![];
@@ -221,13 +227,38 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-        // a list open over the box moves and picks first
-        if self.focus_quips_key(id, k) || self.focus_menu_key(id, k) || self.focus_commands_key(id, k) {
+        let dictating = self.dictation.phase(id).is_some();
+        if dictating && k.code == KeyCode::Esc && !self.overlay.is_open() {
+            self.dictation.cancel(id);
             return;
         }
-        let blank = self.focus.drafts.get(&id).is_none_or(|d| d.blank());
-        // a choice on screen takes the keys that answer it while the box is empty: its own menu moves and picks
-        if blank && self.focus_choice(id).is_some() {
+        if self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(Term::focus_queued_questions).is_some_and(|q| {
+            use bro_core::terminal_prompt::QuestionShortcut;
+            matches!((q.shortcut, k.code, k.modifiers),
+                (QuestionShortcut::ShiftLeft, KeyCode::Left, KeyModifiers::SHIFT)
+                | (QuestionShortcut::AltUp, KeyCode::Up, KeyModifiers::ALT))
+        }) {
+            self.focus_open_queued_questions(id);
+            return;
+        }
+        // A visible choice owns its answer keys, even with a saved draft or a list over the reply box.
+        // Numbers use the same checked, single-commit path as clicks: not every agent accepts digit shortcuts.
+        if !self.overlay.is_open() && let Some(choice) = self.focus_choice(id) {
+            if k.modifiers.is_empty() {
+                match k.code {
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        self.focus_answer(id, &choice, &c.to_string());
+                        return;
+                    }
+                    KeyCode::Enter => {
+                        if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
+                            t.confirm_prompt(&choice);
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             let answers = matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab | KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' '))
                 || matches!(k.code, KeyCode::Char(c) if c.is_ascii_digit() && !ctrl && !alt);
             if answers {
@@ -235,7 +266,35 @@ impl App {
                 return;
             }
         }
+        if dictating {
+            if k.code == KeyCode::Enter && !shift && !alt && self.focus_choice(id).is_none() {
+                self.dictation.finish(id, true);
+            }
+            return;
+        }
+        // With no answer key to handle, the box's lists move and pick before its text does.
+        if self.focus_quips_key(id, k) || self.focus_menu_key(id, k) || self.focus_commands_key(id, k) {
+            return;
+        }
+        let blank = self.focus.drafts.get(&id).is_none_or(|d| d.blank());
+        // a selection in the box: esc lets go of it (the words stay)
+        if k.code == KeyCode::Esc
+            && let Some(d) = self.focus.drafts.get_mut(&id)
+            && d.area.selection().is_some()
+        {
+            d.area.clear_selection();
+            return;
+        }
+        // a subagent showing: esc goes back to the conversation (it never stops the agent from there)
+        if k.code == KeyCode::Esc && blank && self.focus.subagent.remove(&id).is_some() {
+            return;
+        }
         match k.code {
+            // everything you've written, selected (as any text field does)
+            KeyCode::Char('a' | 'A') if ctrl && !alt => {
+                self.focus.draft(id).area.select_all();
+                return;
+            }
             KeyCode::Enter if !shift && !alt => {
                 // never into a choice: the paste would be dropped and the Enter after it would pick for you
                 if !blank && self.focus_choice(id).is_some() {
@@ -324,6 +383,12 @@ impl App {
     /// A paste into `id`'s reply box: pictures' paths alone (a copied screenshot's file) go with the message as
     /// thumbnails, anything else into the text.
     pub(crate) fn focus_paste(&mut self, id: PaneId, text: &str) {
+        if self.dictation.phase(id).is_some() {
+            if let Some(paths) = crate::focus::only_pictures(text) {
+                self.focus_attach(id, paths);
+            }
+            return;
+        }
         let d = self.focus.draft(id);
         if let Some(e) = &mut d.quips.editor {
             e.fields[e.field].insert(&if e.field < 2 { text.replace(['\n', '\r'], " ") } else { text.to_string() });
@@ -349,6 +414,9 @@ impl App {
     pub(crate) fn focus_attach(&mut self, id: PaneId, paths: Vec<PathBuf>) {
         let (pictures, others): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| crate::focus::is_picture(p));
         let d = self.focus.draft(id);
+        if self.dictation.phase(id).is_some() && let Some(selection) = d.area.selection() {
+            d.area.select(selection.end, selection.end);
+        }
         for p in pictures {
             d.attach(p);
         }
@@ -364,6 +432,7 @@ impl App {
     /// menu takes it, a message with pictures piece by piece (each picture where it was), anything else as one
     /// paste; then Enter. It shows at once, as sent, until the transcript has it.
     pub(crate) fn focus_submit(&mut self, id: PaneId) {
+        self.focus_follow_session(id);
         let after = self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.insights()).and_then(|s| s.conversation).map_or(0, |c| c.items.len());
         let d = self.focus.draft(id);
         let text = visible(d.area.text()).trim().to_string();
@@ -377,6 +446,8 @@ impl App {
             Err(e) => { self.toast(Kind::Info, e); return; }
         };
         let text = visible(&expanded).trim().to_string();
+        // what you send goes to the session: back to its conversation, where it shows
+        self.focus.subagent.remove(&id);
         let d = self.focus.draft(id);
         let parts = d.parts_with_text(&expanded);
         let pictures: Vec<PathBuf> = d.attachments.drain(..).map(|a| a.path).collect();
@@ -389,18 +460,24 @@ impl App {
         let queued = self.panes.get(&id).is_some_and(|p| p.busy());
         let command = pictures.is_empty() && !text.contains('\n') && (text.starts_with('/') || text.starts_with('!'));
         let screen = command && crate::focus::opens_screen(&text);
-        // a command that opens one of the agent's own screens isn't a message: it shows the terminal for it
-        if !screen {
-            self.focus.draft(id).sent.push(Sent { text: text.clone(), at: Instant::now(), after, queued, pictures: pictures.clone() });
+        let reset = command && text == "/clear" && self.panes.get(&id).and_then(|p| p.as_term_ref()).is_some_and(|t| t.meta.harness == Some(Harness::Claude));
+        if reset {
+            let d = self.focus.draft(id);
+            d.sent.clear();
+            d.reset_at = Some(Instant::now());
         }
-        if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
+        let delivery = if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
             if command {
-                t.type_command(&text);
+                t.type_command(&text)
             } else if pictures.is_empty() {
-                t.send_message(&text);
+                t.send_message(&text)
             } else {
-                t.send_parts(&parts);
+                t.send_parts(&parts)
             }
+        } else { return };
+        // A command that opens its own screen isn't a conversation message.
+        if !screen && !reset {
+            self.focus.draft(id).sent.push(Sent { text: text.clone(), delivery, at: Instant::now(), after, queued, pictures: pictures.clone() });
         }
         if screen {
             self.focus.peek.insert(id);
@@ -416,14 +493,14 @@ impl App {
         if text.is_empty() {
             return;
         }
+        self.focus_follow_session(id);
         let after = self.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.insights()).and_then(|s| s.conversation).map_or(0, |c| c.items.len());
         let queued = self.panes.get(&id).is_some_and(|p| p.busy());
+        let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) else { return };
+        let delivery = t.send_message(text);
         let d = self.focus.draft(id);
-        d.sent.push(Sent { text: text.to_string(), at: Instant::now(), after, queued, pictures: vec![] });
+        d.sent.push(Sent { text: text.to_string(), delivery, at: Instant::now(), after, queued, pictures: vec![] });
         d.scroll = Some(Scroll::Bottom);
-        if let Some(t) = self.panes.get_mut(&id).and_then(|p| p.as_term()) {
-            t.send_message(text);
-        }
     }
 
     // ------------------------------------------------------------------------------------- the commands list
@@ -535,7 +612,32 @@ impl App {
     fn focus_said(&self, id: PaneId) -> (Option<String>, Option<String>) {
         let Some(t) = self.panes.get(&id).and_then(|p| p.as_term_ref()) else { return (None, None) };
         let conv = t.insights().and_then(|s| s.conversation);
-        (conv.as_ref().and_then(|c| c.model.clone()).or_else(|| t.meta.model.clone()), conv.and_then(|c| c.effort.clone()))
+        let known = self.focus.drafts.get(&id).filter(|d| d.owner.as_deref() == Some(t.meta.sid.as_str())).map(|d| d.known.clone()).unwrap_or_default();
+        let model = conv.as_ref().and_then(|c| c.model.clone())
+            .or_else(|| {
+                if t.meta.harness != Some(Harness::Claude) { return None; }
+                claude_banner_model(&t.try_live_screen_rows()?)
+            })
+            .or(known.0).or_else(|| t.meta.model.clone());
+        (model, conv.and_then(|c| c.effort.clone()).or(known.1))
+    }
+
+    /// Keep pending messages tied to their conversation, even while the terminal is showing.
+    fn focus_follow_session(&mut self, id: PaneId) {
+        let Some(t) = self.panes.get(&id).and_then(|p| p.as_term_ref()) else { return };
+        let owner = t.meta.sid.clone();
+        let session = t.insights().and_then(|s| s.session_id);
+        let known = self.focus_said(id);
+        let d = self.focus.draft(id);
+        if d.owner.as_deref().is_some_and(|old| old != owner) {
+            d.sent.clear();
+            d.session = None;
+            d.reset_at = None;
+            d.change = None;
+        }
+        d.owner = Some(owner);
+        d.follow_session(session.as_deref());
+        d.known = known;
     }
 
     fn focus_items(&self, id: PaneId) -> usize {
@@ -566,7 +668,7 @@ impl App {
         let t = self.panes.get(&id)?.as_term_ref()?;
         let svc = &self.svc;
         match model_source(t, |p| svc.state().models.contains_key(p))? {
-            ModelSource::Claude => Some(claude_models()),
+            ModelSource::Claude => Some(self.claude_models()),
             ModelSource::Codex(home) => {
                 // the demo and tests touch no login: Codex's usual models
                 let demo = self.svc.is_demo() || cfg!(test);
@@ -612,6 +714,30 @@ impl App {
         }
     }
 
+    /// The models Claude Code switches between (`/model <id>`): the newest of each family in what Anthropic last
+    /// listed (the services keep it as "claude" and refresh it every few hours), else bro's own list. Made again
+    /// only when that list changes.
+    fn claude_models(&self) -> Arc<Vec<ModelChoice>> {
+        let st = self.svc.state();
+        let built_in;
+        let rows = match st.models.get("claude").filter(|r| !r.is_empty()) {
+            Some(r) => r.as_slice(),
+            None => {
+                built_in = bro_core::catalogue::claude_built_in();
+                built_in.as_slice()
+            }
+        };
+        let mut lists = self.focus.lists.lock();
+        if let Some((seen, m)) = &lists.claude
+            && seen.as_slice() == rows
+        {
+            return m.clone();
+        }
+        let m = Arc::new(bro_core::catalogue::claude_choices_from(rows));
+        lists.claude = Some((rows.to_vec(), m.clone()));
+        m
+    }
+
     /// The thinking levels `id` can pick from: its model's, else its agent's usual ones (Claude Code sends its
     /// effort whatever the model, and bro's proxy carries it on; Codex on another family's model gets the levels
     /// every model takes). With the model's own starting level.
@@ -625,7 +751,7 @@ impl App {
             return Some((m.levels.clone(), m.default_level.clone()));
         }
         match harness {
-            Harness::Claude => claude_models().first().map(|m| (m.levels.clone(), None)),
+            Harness::Claude => self.claude_models().first().map(|m| (m.levels.clone(), None)),
             Harness::Codex if model.is_none() => bro_core::catalogue::codex_default_choices().first().map(|m| (m.levels.clone(), m.default_level.clone())),
             _ => model.is_some().then(|| (["low", "medium", "high"].map(|l| Level { id: l.into(), detail: None }).to_vec(), None)),
         }
@@ -827,11 +953,14 @@ impl App {
         }
     }
 
-    /// Every session's waiting change, once a loop.
+    /// Follow conversation resets and settle every session's waiting change, once a loop.
     pub(crate) fn focus_settle_all(&mut self) {
-        let ids: Vec<PaneId> = self.focus.drafts.iter().filter(|(_, d)| d.change.is_some()).map(|(id, _)| *id).collect();
+        let ids: Vec<PaneId> = self.focus.drafts.keys().copied().collect();
         for id in ids {
-            self.focus_settle(id);
+            self.focus_follow_session(id);
+            if self.focus.drafts[&id].change.is_some() {
+                self.focus_settle(id);
+            }
         }
     }
 }

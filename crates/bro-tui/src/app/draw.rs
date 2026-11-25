@@ -14,7 +14,7 @@ use ratatui::{
 };
 
 impl App {
-    /// Where panes go: the whole body (sessions are switched from the sidebar; the project tabs, when on, sit
+    /// Where panes go: the whole body (sessions are switched from the sidebar and the session tabs, which sit
     /// above it).
     pub(super) fn body_panes(&self) -> Rect {
         self.body
@@ -79,15 +79,16 @@ impl App {
         self.body = Rect { x: area.x + side_w, width: area.width - side_w, ..area };
         self.side_area = Rect { width: side_w, ..area };
         self.side_hits.clear();
+        self.follow_scope();
         self.drawn_tab = self.showing_tab();
-        // the project tabs (a setting) take the body's top row (a few, when crowded tabs stack), kept while anything
-        // is open so the sessions don't resize as projects come and go
+        // the session tabs take the body's top row (a few, when crowded tabs stack), kept while anything is open so
+        // the sessions don't resize as sessions come and go
         self.strip = Rect::default();
         if self.strip_on() && self.body.height >= 8 && self.body.width >= 24 {
             let rows = self.strip_rows(Rect { height: 1, ..self.body }, (self.body.height / 6).clamp(1, 3));
             self.strip = Rect { height: rows, ..self.body };
             self.body = Rect { y: self.strip.y + rows, height: self.body.height - rows, ..self.body };
-            self.draw_project_tabs(f, self.strip);
+            self.draw_session_tabs(f, self.strip);
         } else {
             self.strip_sel = None;
         }
@@ -116,6 +117,7 @@ impl App {
         }
         let time = self.start.elapsed().as_secs_f64();
         // the session launcher fills the body the way a view does, with the sidebar still beside it
+        self.launcher_asks();
         if let super::overlays::Overlay::Launcher(l) = &mut self.overlay {
             crate::launcher::view::draw(f, self.body, l, &t, time);
         }

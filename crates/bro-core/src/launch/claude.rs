@@ -52,7 +52,8 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
         let _ = crate::skills::write_bro_open_skill(&config_dir);
     }
     crate::skill_repos::write_cached(&config_dir, &ctx.skill_repos);
-    crate::tool_skills::write_cached(&config_dir);
+    let automation = crate::automation::Active::for_launch(ctx);
+    crate::tool_skills::write_configured(&config_dir, &automation);
     if ctx.justtools_skill {
         let _ = crate::justtools::write_skill(&config_dir);
     }
@@ -172,11 +173,16 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             cmd.set_env(&k, v);
         }
     }
+    if (third_party || proxied_login) && !cmd.env.iter().any(|(set, _)| set == "ENABLE_CLAUDEAI_MCP_SERVERS") {
+        // Claude Code refuses claude.ai connectors when ANTHROPIC_AUTH_TOKEN is set and prints a
+        // startup warning unless ENABLE_CLAUDEAI_MCP_SERVERS=false marks them intentionally off.
+        cmd.set_env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
+    }
     agent_summaries(&mut cmd, ctx.claude_env.skip_agent_summaries());
 
     let mut args = permission_args(spec.permission);
     let wants_browser = !spec.extra_args.iter().any(|a| a == "--chrome" || a == "--no-chrome");
-    if wants_browser {
+    if wants_browser && !automation.managed() {
         let claude_path = super::which("claude").map(|p| p.to_string_lossy().into_owned());
         let bctx = BrowserCtx {
             profile_dir: Some(&config_dir),
@@ -200,7 +206,43 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
             args.push("--fork-session".into());
         }
     }
-    args.extend(spec.extra_args.iter().cloned());
+    // Bro owns UI automation once either integration is enabled. An old saved --chrome
+    // flag cannot reconnect Claude's built-in browser; a literal prompt after -- stays intact.
+    let mut literal = false;
+    // `--effort none` (bro's own spelling, see `effort_args`): Claude Code has no such level, so it
+    // runs at `low` with extended thinking switched off for this process only.
+    let mut after_effort = false;
+    let mut thinking_off = false;
+    args.extend(spec.extra_args.iter().filter_map(|a| {
+        if a.as_str() == "--" { literal = true; }
+        if !(literal || !automation.managed() || !(a.as_str() == "--chrome" || a.starts_with("--chrome="))) {
+            return None;
+        }
+        let none = after_effort && !literal && a == "none";
+        after_effort = !literal && a == "--effort";
+        if none {
+            thinking_off = true;
+            return Some("low".to_string());
+        }
+        Some(a.clone())
+    }));
+    if thinking_off {
+        cmd.set_env("MAX_THINKING_TOKENS", "0");
+    }
+    if automation.managed() {
+        cmd.set_env("CLAUDE_CODE_ENABLE_CFC", "false");
+        for (k, v) in browser::scrub_env() { cmd.set_env(&k, v); }
+        let prompt = automation.prompt_file(Harness::Claude)?;
+        args.splice(0..0, [
+            "--no-chrome".into(),
+            "--append-system-prompt-file".into(), prompt.to_string_lossy().into_owned(),
+        ]);
+    }
+    let mut denied = vec![];
+    if automation.managed() { denied.push(crate::automation::CLAUDE_NATIVE_DENY); }
+    if automation.browser_off { denied.push("mcp__justbrowse"); }
+    if automation.desktop_off { denied.extend(["mcp__cua-driver", "mcp__cua-computer-use"]); }
+    if !denied.is_empty() { crate::automation::claude_denials(&mut args, &denied); }
     // the mod names the login a session runs on; in proxy mode that's all of them
     let (mod_profile, mod_backend) = match r.target {
         Target::Logins(true) => ("", "all logins"),
@@ -212,6 +254,9 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     } else if let (Some(scope), Some(bin)) = (crate::peers::Scope::of(&ctx.claude_env), &ctx.bro_bin) {
         // messages between sessions stay in this one's project; the orchestrator spans them all
         crate::peers::add_hooks(&mut extra_settings, scope, bin, &spec.cwd);
+    }
+    if let Some(kit) = &spec.studio {
+        studio_args(&mut args, kit, &config_dir, ctx, spec)?;
     }
     // PeonPing sounds, unless this login's own settings already play them
     if let Some(bin) = ctx.bro_bin.as_ref().filter(|_| ctx.peon.wires(Harness::Claude))
@@ -235,17 +280,46 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     }
     // Installed browser tools are available to every login without a launcher toggle. Respect
     // strict-MCP isolation, and place the variadic flag after prompts (or before a literal `--`).
-    if !strict_mcp && !spec.extra_args.iter().any(|a| a == "--mcp-config" || a.starts_with("--mcp-config="))
-        && crate::justbrowse::installed().is_some()
+    if !strict_mcp && automation.browser
         && !crate::claude_shared::has_mcp_server(&config_dir, &spec.cwd, crate::justbrowse::SERVER_NAME)
+        && !passes_mcp_server(&args, crate::justbrowse::SERVER_NAME, &spec.cwd)
         && let Ok(file) = crate::justbrowse::mcp_config(&config_dir)
     {
+        let config = ["--mcp-config".to_string(), file.to_string_lossy().into_owned()];
+        if args.iter().any(|a| a == "--") { args.splice(0..0, config); } else { args.extend(config); }
+    }
+    if !strict_mcp && automation.desktop.is_some()
+        && !crate::claude_shared::has_mcp_server(&config_dir, &spec.cwd, crate::cua::SERVER_NAME)
+        && !passes_mcp_server(&args, crate::cua::SERVER_NAME, &spec.cwd)
+    {
+        let file = automation.cua_mcp_config(&config_dir)?;
         let config = ["--mcp-config".to_string(), file.to_string_lossy().into_owned()];
         if args.iter().any(|a| a == "--") { args.splice(0..0, config); } else { args.extend(config); }
     }
     (cmd.program, cmd.args) = super::program_and_args("claude", args);
     cmd.label = label(Harness::Claude, &who, spec.model.as_deref());
     Ok(cmd)
+}
+
+/// An `--mcp-config` bro already added names `server` (the browser launcher's own JustBrowse config, say).
+fn passes_mcp_server(args: &[String], server: &str, cwd: &Path) -> bool {
+    let mut values = false;
+    for arg in args.iter().take_while(|a| a.as_str() != "--") {
+        let value = if let Some(value) = arg.strip_prefix("--mcp-config=") {
+            values = true;
+            Some(value)
+        } else if arg == "--mcp-config" {
+            values = true;
+            None
+        } else if arg.starts_with('-') {
+            values = false;
+            None
+        } else { values.then_some(arg.as_str()) };
+        if let Some(value) = value
+            && let Some(config) = serde_json::from_str::<Value>(value).ok().or_else(|| crate::util::read_json(&cwd.join(value)))
+            && config.get("mcpServers").and_then(|s| s.get(server)).is_some() { return true; }
+    }
+    false
 }
 
 const PROMPT_FILE: &str = "--append-system-prompt-file";
@@ -288,6 +362,49 @@ fn orchestrator_args(args: &mut Vec<String>, config_dir: &Path, ctx: &LaunchCtx,
         args.splice(0..0, tools);
     } else {
         args.extend(tools);
+    }
+    Ok(())
+}
+
+/// Create Slop (see [`crate::studio`]): its brief (merged with any others by [`apply_caveman`]), the kit's
+/// servers, and the cast's read-only ones allowed without asking.
+fn studio_args(args: &mut Vec<String>, kit: &crate::studio::Kit, config_dir: &Path, ctx: &LaunchCtx, spec: &LaunchSpec) -> anyhow::Result<()> {
+    let facts = super::studio_facts(ctx);
+    let strict = spec.extra_args.iter().any(|a| a == "--strict-mcp-config");
+    let own = |name: &str| crate::claude_shared::has_mcp_server(config_dir, &spec.cwd, name);
+    let launch = crate::studio::claude_launch(kit, &facts, &spec.cwd, &own, strict)?;
+    if let Some(prompt) = launch.prompt {
+        let end = options_end(args);
+        args.splice(end..end, [PROMPT_FILE.to_string(), prompt.to_string_lossy().into_owned()]);
+    }
+    // both options are variadic: last, or first when a `--` ends the options
+    let mut tools = vec![];
+    if !launch.allowed.is_empty() {
+        tools.push("--allowedTools".to_string());
+        tools.extend(launch.allowed);
+    }
+    if let Some(mcp) = launch.mcp {
+        tools.extend(["--mcp-config".to_string(), mcp.to_string_lossy().into_owned()]);
+    }
+    if args.iter().any(|a| a == "--") {
+        args.splice(0..0, tools);
+    } else {
+        args.extend(tools);
+    }
+    // The session's id is kept with its kit, so resuming it later brings the kit back: a new conversation (or a
+    // fork) gets an id from bro, one that continues keeps its own. Best effort.
+    let opts = &args[..options_end(args)];
+    let has = |names: &[&str]| opts.iter().any(|a| names.iter().any(|n| a == n || a.starts_with(&format!("{n}="))));
+    let continues = has(&["--resume", "-r", "--continue", "-c"]) && !has(&["--fork-session"]);
+    if continues {
+        if let Some(resume) = &spec.resume {
+            let _ = crate::studio::note_session(&resume.session_id, kit);
+        }
+    } else if !has(&["--session-id"]) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let _ = crate::studio::note_session(&id, kit);
+        let end = options_end(args);
+        args.splice(end..end, ["--session-id".to_string(), id]);
     }
     Ok(())
 }

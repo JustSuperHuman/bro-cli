@@ -152,10 +152,6 @@ impl Apps {
         self.wants.clear();
     }
 
-    /// Stage exclusions cannot safely promise native placement succeeded: suspend while any child is shown.
-    pub fn stage_obscured(&self) -> bool {
-        self.views.values().any(|v| v.shown())
-    }
 
     /// A card on screen this frame (its page goes there once the frame is drawn, see [`Apps::sync`]).
     pub fn want(&mut self, w: Want) {
@@ -226,7 +222,7 @@ impl Apps {
 
     /// When the loop has to come back: a page due to show anyway, an idle view due to go.
     pub fn next_wake(&self) -> Option<Instant> {
-        let showing = self.views.values().filter(|v| !v.sized && !v.shown()).map(|v| v.made + SHOW_ANYWAY).min();
+        let showing = self.views.iter().filter(|(key, v)| !self.away.contains_key(*key) && !v.sized && !v.shown()).map(|(_, v)| v.made + SHOW_ANYWAY).min();
         self.away.values().map(|t| *t + IDLE).chain(showing).min()
     }
 

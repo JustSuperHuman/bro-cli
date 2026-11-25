@@ -170,7 +170,7 @@ pub fn frame(window: Rect, sidebar_w: f32, media_w: f32, strip_h: f32, buttons: 
 
 /// Lay the sessions out in `body` (logical px) with virtual cells of `cell` px, writing the workspace's
 /// geometry back into `app` as the terminal UI's draw pass does.
-pub fn panes(app: &mut App, body: Rect, cell: (f32, f32), overlay_open: bool) -> (Vec<PaneBox>, Vec<GroupBox>, bool, bool, bool) {
+pub fn panes(app: &mut App, body: Rect, cell: (f32, f32), overlay_open: bool, now: Instant) -> (Vec<PaneBox>, Vec<GroupBox>, bool, bool, bool) {
     let vcols = (body.w / cell.0).floor().max(1.0) as u16;
     let vrows = (body.h / cell.1).floor().max(1.0) as u16;
     // spread the virtual grid over the whole body
@@ -274,7 +274,8 @@ pub fn panes(app: &mut App, body: Rect, cell: (f32, f32), overlay_open: bool) ->
 
     // ---- pixels
     let side_focus = app.side_focus;
-    let numbers: Vec<PaneId> = if groups.is_empty() { vec![] } else { crate::sidebar::live_order(&app.live_infos(), &app.past_infos(), &app.open_infos()) };
+    let model = (!groups.is_empty()).then(|| app.sidebar_model_at(Some(now)));
+    let numbers = model.as_ref().map(|m| m.order.as_slice()).unwrap_or_default();
     let mut boxes = vec![];
     let mut inner_cells = vec![];
     let group_boxes: Vec<GroupBox> = groups
@@ -315,6 +316,150 @@ pub fn panes(app: &mut App, body: Rect, cell: (f32, f32), overlay_open: bool) ->
     }
     app.inner = inner_cells;
     (boxes, group_boxes, zoomed, app.grown, all_minimized)
+}
+
+// ---------------------------------------------------------------- flow: things that change place glide
+//
+// Sprung layout for lists of things that come and go (tabs, cards, rows). The window only draws when something
+// changes, so "was it on screen" is answered by frames: each scope remembers which keys it drew in the frame before
+// this one. A key that was there springs from where it was to where it is now (keeping its velocity when the target
+// moves again); one that wasn't arrives from `from`; the very first frame of a scope (or one a window resize or a drag
+// made `snap`) doesn't move anything. Hit-testing follows what is drawn: every rect these return is both painted and
+// registered, so a click lands on what is under the pointer; a PTY is sized from the layout's own (settled) rects,
+// never from a sprung one.
+//
+// Written here (not in the kit) as `Ui` helpers; they're candidates for `kit/motion.rs`.
+
+use super::kit::Ui;
+use super::kit::motion::Spring;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::time::Instant;
+
+/// Whether a thing was drawn in the frame before this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    /// there last frame: it moves from where it was
+    Known,
+    /// not there last frame, though the scope was: it arrives
+    New,
+    /// the scope's first frame (or after a gap): everything starts in place
+    Initial,
+}
+
+#[derive(Default)]
+struct Flow {
+    frame: Option<Instant>,
+    prev: HashSet<u64>,
+    cur: HashSet<u64>,
+    tag: u64,
+    snap: bool,
+}
+
+thread_local! {
+    static FLOWS: RefCell<HashMap<&'static str, Flow>> = RefCell::new(HashMap::new());
+}
+
+thread_local! {
+    /// a panel edge, split divider or tile edge is being dragged: the layout follows the pointer 1:1
+    static RESIZING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Say whether the layout is being dragged (set once a frame by the window).
+pub fn set_resizing(on: bool) {
+    RESIZING.with(|r| r.set(on));
+}
+
+/// The layout is being dragged: nothing glides.
+pub fn resizing() -> bool {
+    RESIZING.with(|r| r.get())
+}
+
+/// A stable key from anything hashable.
+pub fn key_of(v: impl Hash) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
+}
+
+/// Start a frame of `scope`: what was drawn under it last frame becomes "known". `tag` names the setting the
+/// layout is in (a window's size, say): when it changes from one frame to the next, everything snaps rather than
+/// glides, so a drag or a resize stays 1:1 with the pointer. Returns whether this frame snaps. Safe to call more
+/// than once in a frame.
+pub fn flow_begin(scope: &'static str, now: Instant, tag: u64) -> bool {
+    FLOWS.with(|f| {
+        let mut f = f.borrow_mut();
+        let s = f.entry(scope).or_default();
+        if s.frame != Some(now) {
+            s.prev = std::mem::take(&mut s.cur);
+            s.snap = s.frame.is_some() && s.tag != tag;
+            s.tag = tag;
+            s.frame = Some(now);
+        }
+        s.snap
+    })
+}
+
+/// Note that `key` is drawn this frame, and whether it was last frame.
+pub fn flow_enter(scope: &'static str, key: u64) -> Presence {
+    FLOWS.with(|f| {
+        let mut f = f.borrow_mut();
+        let s = f.entry(scope).or_default();
+        s.cur.insert(key);
+        if s.prev.is_empty() {
+            Presence::Initial
+        } else if s.prev.contains(&key) {
+            Presence::Known
+        } else {
+            Presence::New
+        }
+    })
+}
+
+/// Pixels per spring unit (see [`Ui::flow_rect`]).
+const PX: f32 = 64.0;
+
+/// How layout moves: the kit's glide, a little quicker, so a rearrangement is over (and the window quiet) in ~350 ms.
+pub const FLOW: Spring = Spring::new(0.27, 0.0);
+
+impl Ui<'_> {
+    /// `target`, sprung: from its last place (or `from` when it arrives) to where it is now. See [`flow_begin`].
+    pub fn flow_rect(&mut self, scope: &'static str, key: u64, target: Rect, from: Rect, spring: Spring, snap: bool) -> Rect {
+        let p = flow_enter(scope, key);
+        let (t, f) = ([target.x, target.y, target.w, target.h], [from.x, from.y, from.w, from.h]);
+        let mut v = [0.0; 4];
+        for i in 0..4 {
+            let k = (scope, key, i);
+            // springs rest within 1e-3 of their target: in 64ths of a pixel that is a twentieth of a pixel, so a
+            // move is over (and the window quiet) when it stops showing, not a second after
+            if snap || p == Presence::Initial {
+                self.spring_set(k, t[i] / PX);
+            } else if p == Presence::New {
+                self.spring_set(k, f[i] / PX);
+            }
+            v[i] = self.spring(k, t[i] / PX, spring, t[i] / PX) * PX;
+        }
+        Rect::new(v[0], v[1], v[2].max(0.0), v[3].max(0.0))
+    }
+
+    /// A list row's place and how much of it has arrived: its top (in the list's own coordinates, scroll aside)
+    /// springs from where it was, and a row that is new opens from nothing (0 → 1) in the slot it takes while the
+    /// rows below slide down in step. Rows that leave close up the same way.
+    pub fn flow_row(&mut self, scope: &'static str, key: u64, top: f32, snap: bool) -> (f32, f32) {
+        let p = flow_enter(scope, key);
+        let (ky, kr) = ((scope, key, "y"), (scope, key, "reveal"));
+        if snap || p == Presence::Initial {
+            self.spring_set(ky, top / PX);
+            self.spring_set(kr, 1.0);
+        } else if p == Presence::New {
+            self.spring_set(ky, top / PX);
+            self.spring_set(kr, 0.0);
+        }
+        let y = self.spring(ky, top / PX, FLOW, top / PX) * PX;
+        let reveal = self.spring(kr, 1.0, FLOW, 1.0).clamp(0.0, 1.0);
+        (y, reveal)
+    }
 }
 
 /// Shrink by `v` on every side (never below zero).

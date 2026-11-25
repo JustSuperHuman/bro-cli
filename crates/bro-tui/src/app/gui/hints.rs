@@ -81,7 +81,8 @@ pub fn draw(app: &mut App, ui: &mut Ui, layout: &Layout) {
 fn draw_tips(app: &App, ui: &mut Ui, layout: &Layout) {
     let prev = ui.layer();
     let focus = app.focused().filter(|_| !app.side_focus);
-    let order = crate::sidebar::live_order(&app.live_infos(), &app.past_infos(), &app.open_infos());
+    let model = app.sidebar_model_at(Some(ui.now));
+    let order = &model.order;
     let jump = |id| order.iter().position(|p| *p == id).filter(|i| *i < 9).and_then(|i| alt_key(app, Act::Jump(i as u8 + 1)));
     // cards: what alt does to each, centred near the bottom
     for b in &layout.panes {
@@ -111,21 +112,27 @@ fn draw_tips(app: &App, ui: &mut Ui, layout: &Layout) {
     }
     // sidebar and tabs: keys on the things you can click
     let projects: Vec<String> = app.project_tabs().into_iter().map(|t| t.key).collect();
-    let rows = app.rows();
+    let rows = &model.rows;
     let hits: Vec<(Rect, Action)> = ui.hits.iter().map(|h| (h.rect, h.action.clone())).collect();
     let mut shown: Vec<Act> = vec![];
     for (r, action) in hits {
         let Action::Side(hit) = action else { continue };
         let act = match &hit {
-            SideHit::Row(i) => {
-                if let Some(crate::sidebar::Row::Live { info, n: Some(_) }) = rows.get(*i)
-                    && let Some(k) = jump(info.pane)
-                {
-                    // over the session's number, clear of its mark
-                    widgets::keytip(ui, Point::new(r.x + 21.0, r.y + r.h.min(32.0) / 2.0), &k);
+            SideHit::Row(i) => match rows.get(*i) {
+                Some(crate::sidebar::Row::Live { info, n: Some(_) }) => {
+                    if let Some(k) = jump(info.pane) {
+                        // over the session's number, clear of its mark
+                        widgets::keytip(ui, Point::new(r.x + 21.0, r.y + r.h.min(32.0) / 2.0), &k);
+                    }
+                    continue;
                 }
-                continue;
-            }
+                // a project with sessions (as alt+1–9 would number them, when you've bound those)
+                Some(crate::sidebar::Row::Project { key, .. }) if app.side.compact => match projects.iter().position(|p| p == key).filter(|i| *i < 9) {
+                    Some(i) => Act::ShowTab(i as u8 + 1),
+                    None => continue,
+                },
+                _ => continue,
+            },
             SideHit::Usage => Act::Usage,
             SideHit::Stats => Act::Stats,
             SideHit::Sessions => Act::ShowTab(0),
@@ -136,10 +143,11 @@ fn draw_tips(app: &App, ui: &mut Ui, layout: &Layout) {
             SideHit::Continue => Act::Continue,
             SideHit::TileAll => Act::TileAll,
             SideHit::UsageToggle => Act::UsageDetails,
-            SideHit::Strip(StripHit::Tab(StripTab::All)) => Act::ShowTab(0),
-            SideHit::Strip(StripHit::Tab(StripTab::Orchestrator)) => Act::Orchestrator,
-            SideHit::Strip(StripHit::Tab(StripTab::Project(k))) => match projects.iter().position(|p| p == k).filter(|i| *i < 9) {
-                Some(i) => Act::ShowTab(i as u8 + 1),
+            SideHit::Scope(StripTab::All) => Act::ShowTab(0),
+            SideHit::Scope(StripTab::Orchestrator) => Act::Orchestrator,
+            SideHit::Strip(StripHit::Grid) if app.scope == StripTab::All => Act::ShowTab(0),
+            SideHit::Strip(StripHit::Session(id)) => match order.iter().position(|p| p == id).filter(|i| *i < 9) {
+                Some(i) => Act::Jump(i as u8 + 1),
                 None => continue,
             },
             SideHit::Strip(StripHit::New) => Act::NewSession,
@@ -153,6 +161,8 @@ fn draw_tips(app: &App, ui: &mut Ui, layout: &Layout) {
         // where the tip goes: on a button or tab, across its bottom edge (WinUI's key tips); at the end of a row
         let centre = match &hit {
             SideHit::Launcher | SideHit::Continue | SideHit::Settings | SideHit::Strip(_) => Point::new(r.x + r.w / 2.0, r.bottom() - 2.0),
+            // a scope or project row: on its icon, clear of what its sessions are doing at its end
+            SideHit::Scope(_) | SideHit::Row(_) => Point::new(r.x + 18.0, r.y + r.h / 2.0),
             _ => {
                 let w = key_width(ui, &k);
                 Point::new(r.right() - w / 2.0 - 4.0, r.y + r.h / 2.0)
@@ -160,7 +170,7 @@ fn draw_tips(app: &App, ui: &mut Ui, layout: &Layout) {
         };
         widgets::keytip(ui, centre, &k);
     }
-    // the project tabs: after the last tab and its +, the keys that step through them, when there's room for all
+    // the session tabs: after the last tab and its +, the keys that step through the projects, when there's room
     if layout.strip.h > 0.0 {
         let strip: Vec<(Rect, StripHit)> = ui
             .hits
@@ -170,9 +180,9 @@ fn draw_tips(app: &App, ui: &mut Ui, layout: &Layout) {
                 _ => None,
             })
             .collect();
-        let last = strip.iter().filter(|(_, s)| matches!(s, StripHit::Tab(_) | StripHit::More | StripHit::Scroll(_) | StripHit::New)).map(|(r, _)| r.right()).fold(layout.strip.x, f32::max);
+        let last = strip.iter().filter(|(_, s)| matches!(s, StripHit::Grid | StripHit::Session(_) | StripHit::More | StripHit::Scroll(_) | StripHit::New)).map(|(r, _)| r.right()).fold(layout.strip.x, f32::max);
         let end = strip.iter().filter(|(_, s)| matches!(s, StripHit::Minimized)).map(|(r, _)| r.x).fold(layout.strip.right() - 8.0, f32::min);
-        let list: Vec<(String, &str)> = [(Act::PrevProject, "‹ tab"), (Act::NextProject, "tab ›"), (Act::LastTab, "last")]
+        let list: Vec<(String, &str)> = [(Act::PrevProject, "‹ project"), (Act::NextProject, "project ›"), (Act::LastTab, "last")]
             .into_iter()
             .filter_map(|(a, what)| alt_key(app, a).map(|k| (k, what)))
             .collect();

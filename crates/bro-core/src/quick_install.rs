@@ -25,6 +25,8 @@ pub enum Tool {
     JustImagine,
     /// your browser as an MCP server; needs Node.js, and the extension is loaded by hand once
     JustBrowse,
+    /// Cua Driver, wired by Bro through MCP or the CLI.
+    Cua,
     /// Native desktop automation, with Bro-managed main and platform skills (npm + Git).
     AgentDesktop,
     Git,
@@ -73,12 +75,13 @@ impl Group {
 
 impl Tool {
     /// Every tool, in list order, which is install order except for [Tool::install_rank].
-    pub const ALL: [Tool; 25] = [
+    pub const ALL: [Tool; 27] = [
         Tool::JustTools,
         Tool::JustPaste,
         Tool::JustWatch,
         Tool::JustImagine,
         Tool::JustBrowse,
+        Tool::Cua,
         Tool::Git,
         Tool::GitHubCli,
         Tool::Node,
@@ -92,6 +95,7 @@ impl Tool {
         Tool::Agent(Harness::Codex),
         Tool::Agent(Harness::Pi),
         Tool::Agent(Harness::Omp),
+        Tool::Agent(Harness::Antigravity),
         Tool::AgentDesktop,
         Tool::Ripgrep,
         Tool::Ffmpeg,
@@ -109,6 +113,7 @@ impl Tool {
             Tool::JustWatch => "justwatch",
             Tool::JustImagine => "justimagine",
             Tool::JustBrowse => "justbrowse",
+            Tool::Cua => "cua",
             Tool::AgentDesktop => "agent-desktop",
             Tool::Git => "git",
             Tool::GitHubCli => "gh",
@@ -139,6 +144,7 @@ impl Tool {
             "just-imagine" | "imagine" => Some(Tool::JustImagine),
             "just-browse" | "justbrowsemcp" | "browse" | "browser" | "browser-mcp" | "chrome-mcp" | "mcp-chrome" => Some(Tool::JustBrowse),
             "desktop" | "agentdesktop" => Some(Tool::AgentDesktop),
+            "cua-driver" | "computer-use" | "computer" => Some(Tool::Cua),
             "github-cli" | "github" => Some(Tool::GitHubCli),
             "nodejs" | "node.js" | "npm" => Some(Tool::Node),
             "python3" | "py" => Some(Tool::Python),
@@ -149,6 +155,7 @@ impl Tool {
             "claude-code" => Some(Tool::Agent(Harness::Claude)),
             "codex-cli" => Some(Tool::Agent(Harness::Codex)),
             "oh-my-pi" => Some(Tool::Agent(Harness::Omp)),
+            "agy" => Some(Tool::Agent(Harness::Antigravity)),
             _ => None,
         };
         if alias.is_some() {
@@ -174,6 +181,7 @@ impl Tool {
             Tool::JustWatch => "JustWatch",
             Tool::JustImagine => "JustImagine",
             Tool::JustBrowse => "JustBrowseMCP",
+            Tool::Cua => "CUA (Cua Driver)",
             Tool::AgentDesktop => "agent-desktop",
             Tool::Git => "Git",
             Tool::GitHubCli => "GitHub CLI",
@@ -188,6 +196,7 @@ impl Tool {
             Tool::Agent(Harness::Codex) => "Codex CLI",
             Tool::Agent(Harness::Pi) => "Pi",
             Tool::Agent(Harness::Omp) => "omp (oh-my-pi)",
+            Tool::Agent(Harness::Antigravity) => "Antigravity",
             Tool::Ripgrep => "ripgrep",
             Tool::Ffmpeg => "FFmpeg",
             Tool::YtDlp => "yt-dlp",
@@ -204,6 +213,7 @@ impl Tool {
             Tool::JustWatch => "tray app that keeps your dev servers running; agents restart them and read their logs",
             Tool::JustImagine => "your own image, video, song and voice studio, always on in the background; agents generate through its API",
             Tool::JustBrowse => "control your signed-in browser in separate tabs; includes the unpacked extension and a managed skill",
+            Tool::Cua => "control desktop apps with Cua Driver; Bro connects every harness and manages its guides",
             Tool::AgentDesktop => "inspect and control desktop apps; Bro keeps its main skill and your platform guide together",
             Tool::Git => "version control; agents expect it",
             Tool::GitHubCli => "issues, pull requests and releases from the terminal",
@@ -218,6 +228,7 @@ impl Tool {
             Tool::Agent(Harness::Codex) => "OpenAI's coding agent",
             Tool::Agent(Harness::Pi) => "minimal, extensible coding agent",
             Tool::Agent(Harness::Omp) => "Pi with batteries included",
+            Tool::Agent(Harness::Antigravity) => "Google's coding agent",
             Tool::Ripgrep => "fast code search (rg)",
             Tool::Ffmpeg => "audio and video conversion; JustTools' media commands use it",
             Tool::YtDlp => "download video and audio from YouTube and 1000+ sites; pairs with FFmpeg",
@@ -229,7 +240,7 @@ impl Tool {
 
     pub fn group(self) -> Group {
         match self {
-            Tool::JustTools | Tool::JustPaste | Tool::JustWatch | Tool::JustImagine | Tool::JustBrowse => Group::Main,
+            Tool::JustTools | Tool::JustPaste | Tool::JustWatch | Tool::JustImagine | Tool::JustBrowse | Tool::Cua => Group::Main,
             Tool::Git | Tool::GitHubCli => Group::Essentials,
             Tool::Node | Tool::Bun | Tool::Python | Tool::Uv | Tool::Dotnet9 | Tool::Dotnet10 | Tool::Dotnet11 => Group::Runtimes,
             Tool::Agent(_) => Group::Agents,
@@ -242,6 +253,7 @@ impl Tool {
         match self {
             Tool::JustPaste => crate::justpaste::supported(),
             Tool::JustWatch => crate::justwatch::supported(),
+            Tool::Cua => crate::cua::supported(),
             Tool::PowerToys | Tool::ShareX => cfg!(windows),
             _ => true,
         }
@@ -282,6 +294,7 @@ impl Tool {
     fn exes(self) -> &'static [&'static str] {
         match self {
             Tool::AgentDesktop => &["agent-desktop"],
+            Tool::Cua => &["cua-driver"],
             Tool::Git => &["git"],
             Tool::GitHubCli => &["gh"],
             Tool::Node => &["node"],
@@ -293,6 +306,7 @@ impl Tool {
                 Harness::Codex => &["codex"],
                 Harness::Pi => &["pi"],
                 Harness::Omp => &["omp"],
+                Harness::Antigravity => &["agy"],
             },
             Tool::Ripgrep => &["rg"],
             Tool::Ffmpeg => &["ffmpeg"],
@@ -489,6 +503,9 @@ pub fn detect() -> Status {
     if let Some(found) = crate::justbrowse::installed() {
         status.insert(Tool::JustBrowse, found.version.unwrap_or_else(|| "installed".into()));
     }
+    if let Some(binary) = crate::cua::installed() {
+        status.insert(Tool::Cua, binary.display().to_string());
+    }
     let sdks = dotnet_sdks(&dirs);
     for tool in Tool::ALL {
         if let Some(want) = tool.dotnet_major() {
@@ -643,7 +660,7 @@ fn dotnet_script(major: u32) -> Step {
 /// The commands that install `tool` on `os`. JustTools, JustImagine and the agents have their own
 /// installers and get an empty plan.
 pub fn plan(tool: Tool, os: &Os) -> Result<Vec<Step>, String> {
-    if matches!(tool, Tool::JustTools | Tool::JustImagine | Tool::JustBrowse | Tool::AgentDesktop | Tool::Agent(_)) {
+    if matches!(tool, Tool::JustTools | Tool::JustImagine | Tool::JustBrowse | Tool::Cua | Tool::AgentDesktop | Tool::Agent(_)) {
         return Ok(vec![]);
     }
     if tool == Tool::JustPaste {
@@ -783,6 +800,7 @@ pub fn how(tool: Tool, os: &Os) -> String {
         Tool::ShareX if matches!(os, Os::Windows { .. }) => "the newest setup-x64.exe from github.com/JustSuperHuman/ShareX releases, run elevated (/SILENT)".into(),
         Tool::JustImagine => crate::justimagine::how(),
         Tool::JustBrowse => "Bro downloads the release, verifies SHA256SUMS, extracts the extension and registers its bridge (Node.js 20+). Its skill and session MCP configuration stay managed by Bro.".into(),
+        Tool::Cua => "Cua Driver's official installer verifies and installs the desktop driver. Bro supplies session MCP configuration and the matching guides; no global agent MCP registration is added.".into(),
         Tool::AgentDesktop => "npm install -g agent-desktop; Bro downloads and maintains the main skill and this platform's guide (needs Node.js and Git).".into(),
         Tool::Agent(h) => match crate::agent_install::plan(h) {
             Ok(steps) => steps.iter().map(|s| s.display.as_str()).collect::<Vec<_>>().join(" && "),
@@ -806,6 +824,9 @@ pub(crate) fn run(step: &Step) -> Result<(), String> {
 
 /// Install `tool` (not JustTools or an agent) in the current terminal. `say` gets progress lines.
 pub fn install(tool: Tool, mut say: impl FnMut(&str)) -> Result<(), String> {
+    if tool == Tool::Cua {
+        return crate::cua::install(say);
+    }
     if tool == Tool::JustBrowse {
         return crate::justbrowse::install(say).map_err(|e| format!("{e:#}"));
     }
@@ -825,6 +846,9 @@ pub fn install(tool: Tool, mut say: impl FnMut(&str)) -> Result<(), String> {
 
 /// After an install: what to do before the tool can be used, if anything.
 pub fn after_install(tool: Tool) -> Option<String> {
+    if tool == Tool::Cua {
+        return Some(crate::cua::after_install());
+    }
     if tool == Tool::JustBrowse {
         return Some(crate::justbrowse::after_install());
     }
@@ -864,6 +888,8 @@ mod tests {
 
     #[test]
     fn ids_round_trip_and_aliases_resolve() {
+        // after_install looks for the browser's JustBrowse registration
+        let _sb = crate::util::test_env::sandbox();
         for t in Tool::ALL {
             assert_eq!(Tool::from_id(t.id()), Some(t), "{t:?}");
         }

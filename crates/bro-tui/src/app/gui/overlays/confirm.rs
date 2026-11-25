@@ -3,7 +3,7 @@
 
 use super::super::actions::Action;
 use super::super::kit::{Style, Ui, radius, size, weight, widgets};
-use super::palette::{CAP_H, appear, button_band, hints, just_opened};
+use super::palette::{CAP_H, appear, arrive, button_band, hints, just_opened};
 use crate::app::{App, Overlay};
 use bro_gfx::{Point, Rect};
 use crossterm::event::KeyModifiers;
@@ -22,11 +22,12 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     let opened = just_opened(ui);
     let k = appear(ui, "confirm", opened);
     widgets::scrim(ui, window, k, Action::None);
+    let from = ui.group_start();
     let w = 440.0f32.min(window.w - 48.0);
     let text = ui.para(&c.text, Style::new(size::HEADING, weight::SEMIBOLD, t.text), w - 2.0 * PAD, Some(3));
     let detail = ui.para(&c.detail, Style::new(size::BODY, weight::REGULAR, t.muted), w - 2.0 * PAD, Some(4));
     let h = PAD + text.h + 8.0 + detail.h + PAD + BAND_H;
-    let r = Rect::new(window.x + (window.w - w) / 2.0, window.y + window.h * 0.3 - h / 2.0 + (1.0 - k) * 12.0, w, h);
+    let r = Rect::new(window.x + (window.w - w) / 2.0, window.y + window.h * 0.3 - h / 2.0, w, h);
     widgets::card(ui, r, radius::OVERLAY);
     // the question, then what it means
     let mut y = r.y + PAD;
@@ -49,6 +50,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     if room > 40.0 {
         hints(ui, Some(Point::new(r.x + PAD, by + (BUTTON_H - CAP_H) / 2.0)), &[("y", "yes"), ("esc", "no")], room);
     }
+    arrive(ui, from, r, k);
     true
 }
 

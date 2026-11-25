@@ -166,12 +166,16 @@ impl App {
     /// Bro is quitting: hand the sessions to the background bro (phone bridge, proxy, auto-resume, watchdogs carry on
     /// until a window opens again), when it should keep working.
     pub(super) fn leave_to_background(&mut self) {
-        let s = self.svc.settings();
-        let wanted = role() == Role::Window && !self.taken_over && !self.guest && !self.svc.is_demo() && s.server.keep_sessions && s.server.keep_working;
-        if wanted && (self.left_running > 0 || self.svc.host_resident() || self.svc.orbit_background_wanted()) && self.svc.start_background() {
+        if self.background_wanted() && self.svc.start_background() {
             self.left_to_background = true;
-            self.svc.prepare_orbit_handover();
         }
+    }
+
+    /// Whether quitting hands the sessions to a background bro.
+    pub(super) fn background_wanted(&self) -> bool {
+        let s = self.svc.settings();
+        role() == Role::Window && !self.taken_over && !self.guest && !self.svc.is_demo() && s.server.keep_sessions && s.server.keep_working
+            && (self.left_running > 0 || self.svc.host_resident())
     }
 
     pub(super) fn host_event(&mut self, e: HostEvent) {
@@ -181,7 +185,6 @@ impl App {
             HostEvent::TakenOver => {
                 // a window drives the sessions now: this bro steps aside, leaving them running
                 self.taken_over = true;
-                self.svc.prepare_orbit_handover();
                 self.quit = true;
             }
             HostEvent::Restarted(result) => self.restarted(result),
@@ -200,6 +203,24 @@ impl App {
                 }
             }
             HostEvent::Peers(p) => self.svc.update(|st| st.host.peers = p),
+            HostEvent::Slop(report) => self.slop_report(*report),
+        }
+    }
+
+    /// The Slop Collector looked: keep what it found for the settings view, and say what it just cleaned up.
+    fn slop_report(&mut self, report: bro_core::slop::Report) {
+        let seen = self.svc.state().host.slop.as_ref().map(|r| r.ledger.seq);
+        let now = crate::util::now_ms().max(0) as u64;
+        // only cleanups since the last report, and only fresh ones (a window that just opened doesn't replay a day)
+        let fresh: Vec<bro_core::slop::Cleanup> = match seen {
+            Some(seq) => report.ledger.recent.iter().filter(|c| c.seq > seq && now.saturating_sub(c.at_ms) < 120_000).cloned().collect(),
+            None => vec![],
+        };
+        self.svc.update(|st| st.host.slop = Some(report));
+        match fresh.as_slice() {
+            [] => {}
+            [one] => self.toast(Kind::Info, crate::views::settings::slop_toast(one)),
+            many => self.toast(Kind::Info, crate::views::settings::slop_toast_many(many)),
         }
     }
 
@@ -238,7 +259,6 @@ impl App {
     /// A viewer asks this bro (the primary) to launch something: it runs here, with this bro's proxy and phone bridge,
     /// and the viewer sees it arrive.
     fn relayed(&mut self, body: serde_json::Value) {
-        if self.svc.accept_orbit_relay(&body) { return; }
         if let Ok(Relayed { launch: Some(l) }) = serde_json::from_value::<Relayed>(body) {
             self.svc.launch(Self::relayed_request(l));
         }
@@ -421,6 +441,7 @@ impl App {
                     browser: BrowserMode::Off,
                     extra_args: vec![],
                     orchestrator: t.meta.orchestrator,
+                    studio: None,
                 });
                 let session_id = t.agent_session().or_else(|| spec.resume.as_ref().filter(|r| !r.fork).map(|r| r.session_id.clone()));
                 let since = std::time::SystemTime::now() - t.meta.started.elapsed();

@@ -91,28 +91,28 @@ impl App {
             put(f, x, y, r.right().saturating_sub(5), spans);
         }
 
-        // the project tabs: each tab's key over its first cell, then the keys that step through them
+        // the session tabs: each session's jump key over its first cell (every session's All, alt+0), then the keys
+        // that step through the scopes
         if self.strip.height > 0 {
             use super::project_tabs::{StripHit, StripTab};
-            let projects: Vec<String> = self.project_tabs().into_iter().map(|t| t.key).collect();
+            let order = crate::sidebar::live_order(&self.live_infos(), &[], &self.open_infos());
             let mut last = self.strip.x;
             for (r, hit) in &self.side_hits {
                 let SideHit::Strip(hit) = hit else { continue };
                 let act = match hit {
-                    StripHit::Tab(StripTab::All) => Some(Act::ShowTab(0)),
-                    StripHit::Tab(StripTab::Orchestrator) => Some(Act::Orchestrator),
-                    StripHit::Tab(StripTab::Project(k)) => projects.iter().position(|p| p == k).filter(|i| *i < 9).map(|i| Act::ShowTab(i as u8 + 1)),
+                    StripHit::Grid if self.scope == StripTab::All => Some(Act::ShowTab(0)),
+                    StripHit::Session(id) => order.iter().position(|p| p == id).filter(|i| *i < 9).map(|i| Act::Jump(i as u8 + 1)),
                     StripHit::New => Some(Act::NewSession),
                     _ => None,
                 };
-                if matches!(hit, StripHit::Tab(_) | StripHit::More | StripHit::Scroll(_)) {
+                if matches!(hit, StripHit::Grid | StripHit::Session(_) | StripHit::More | StripHit::Scroll(_)) {
                     last = last.max(r.right());
                 }
                 if let Some(k) = act.and_then(|a| self.alt_key(a)) {
                     put(f, r.x, r.y, r.right(), vec![Span::styled(k, key)]);
                 }
             }
-            let tips: Vec<(String, &str)> = [(Act::PrevProject, "‹ tab"), (Act::NextProject, "tab ›"), (Act::LastTab, "last")]
+            let tips: Vec<(String, &str)> = [(Act::PrevProject, "‹ project"), (Act::NextProject, "project ›"), (Act::LastTab, "last")]
                 .into_iter()
                 .filter_map(|(a, what)| self.alt_key(a).map(|k| (k, what)))
                 .collect();

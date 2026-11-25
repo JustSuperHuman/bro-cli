@@ -4,7 +4,9 @@
 //! or panicking dependency degrades to an "unavailable" state. Results are published into [`State`] behind a
 //! lock and the UI is woken with `Event::Services`; the UI thread only ever reads snapshots.
 
+pub mod computers;
 pub mod demo;
+pub mod firewall;
 pub mod guard;
 pub mod host;
 pub mod justimagine;
@@ -12,9 +14,10 @@ pub mod justpaste;
 pub mod justtools;
 pub mod justwatch;
 pub mod skills;
+pub mod studio;
 pub mod updates;
 pub mod launch;
-pub mod orbit_voice;
+pub(crate) mod live_voice;
 mod workers;
 
 pub use guard::{guard, guard_res};
@@ -101,6 +104,10 @@ pub struct BridgeState {
     /// The projects as the phone / web arrange them (by bro project key): the project tabs follow their
     /// order and names.
     pub projects: Vec<ClientProject>,
+    /// Live voice calls (phone app, `/voice` page), as the bridge last reported them.
+    pub voice_calls: Vec<bro_bridge::voice::LiveCall>,
+    /// Whether a live call could start: `Err(why)` without an OpenAI key or with calls turned off.
+    pub voice_ready: Option<Result<(), String>>,
 }
 
 /// A project as the remote clients arrange it.
@@ -124,6 +131,7 @@ pub struct State {
     /// launches; OpenRouter is the live catalogue
     pub models: BTreeMap<String, Vec<bro_core::catalogue::ModelRow>>,
     pub past: Avail<Vec<SessionInfo>>,
+    pub(crate) past_revision: u64,
     pub usage: BTreeMap<String, UsageEntry>,
     pub usage_at: Option<Instant>,
     /// (large-task pick, small-task pick) among Claude profiles
@@ -138,11 +146,18 @@ pub struct State {
     /// Every session's watchdog as the bridge last reported it, by session id.
     pub watchdogs: HashMap<String, bro_bridge::WatchdogSnapshot>,
     pub voice: VoiceState,
-    pub orbit_voice: orbit_voice::OrbitState,
     /// The session server.
     pub host: host::HostState,
     /// Things that didn't work at startup, shown once as toasts and in the views.
     pub issues: Vec<String>,
+    /// Whether Windows Firewall lets phones reach this PC without a prompt.
+    pub firewall: firewall::FirewallState,
+    /// The Just Superhuman sign-in and its credits as last read (signed out until the worker reads it).
+    pub jsh: bro_core::jsh::Snapshot,
+    /// The computers on the Just Superhuman account, as last read (see [`computers`]).
+    pub computers: computers::ComputersState,
+    /// Create Slop: the roster and the media toolkit, once its tab has been opened (see [`studio`]).
+    pub studio: studio::StudioState,
 }
 
 /// Max proxy events kept for the live log.
@@ -172,20 +187,10 @@ struct Inner {
     voice: Mutex<Option<bro_voice::Voice>>,
     /// Bumped on every (re)start, so a slow start that lost the race stops itself.
     voice_gen: std::sync::atomic::AtomicU64,
-    orbit_voice: Mutex<Option<bro_bridge::orbit_voice::Handle>>,
-    orbit_generation: std::sync::atomic::AtomicU64,
     stopping: std::sync::atomic::AtomicBool,
-    orbit_reconcile: Mutex<()>,
-    orbit_observer_generation: std::sync::atomic::AtomicU64,
-    orbit_control_generation: std::sync::atomic::AtomicU64,
-    orbit_handover: std::sync::atomic::AtomicBool,
-    orbit_relay: orbit_voice::relay::RelayState,
     workspace_reconcile: Mutex<()>,
-    orbit_stage: Arc<orbit_voice::StageMailbox>,
     /// Serialize disk writes; workers save the latest cache, never a queued stale snapshot.
     settings_io: Mutex<()>,
-    /// Installed-preview paths are owned by registration, not unrelated settings forms.
-    orbit_preview: RwLock<Option<bro_core::orbit_voice::PreviewInstallation>>,
     /// Bridge id of the session in the focused pane (kept current by the UI loop).
     focused: Mutex<Option<String>>,
     /// Profiles with a login tab open that a watcher is polling until they read signed in.
@@ -320,16 +325,16 @@ pub fn fallback_settings() -> Settings {
         material_tint: bro_core::config::MATERIAL_TINT,
         bridge: BridgeSettings::default(),
         mobile_companion: bro_core::rmm::Settings::default(),
+        automation: bro_core::automation::Settings::default(),
         proxy: ProxySettings::default(),
         voice: bro_core::config::VoiceSettings::default(),
-        orbit_voice: bro_core::config::OrbitSettings::default(),
         insights: bro_core::config::InsightsSettings::default(),
         auto_resume: bro_core::config::AutoResumeSettings::default(),
         auto_approve: false,
         summary_screensaver_secs: 0,
         shared_borders: false,
-        project_tabs: false,
         tab_overflow: Default::default(),
+        draw_project_icons: true,
         permission: Default::default(),
         claude_env: Default::default(),
         caveman: Default::default(),
@@ -341,9 +346,17 @@ pub fn fallback_settings() -> Settings {
         updates: Default::default(),
         server: Default::default(),
         watchdog: Default::default(),
+        slop: Default::default(),
         setup_done: false,
         keys: BTreeMap::new(),
     }
+}
+
+/// What to tell someone whose settings file couldn't be read: the first line of why, and that their file is kept
+/// when a change writes a new one. Shown as "settings: … — using defaults" (see the callers of [`load_settings`]).
+pub(crate) fn unreadable_settings(why: &str) -> String {
+    let first = why.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("it isn't valid TOML");
+    format!("v2.toml couldn't be read ({first}). Your file is untouched, and if you change a setting it is kept beside the new one as v2.toml.unreadable")
 }
 
 /// Load settings (guarded). Returns the settings and a problem to report, if any.
@@ -356,7 +369,9 @@ pub fn load_settings() -> (Settings, Option<String>) {
             if s.prefix.trim().is_empty() {
                 s.prefix = "ctrl+space".into();
             }
-            (s, None)
+            // a file that couldn't be read loaded as the defaults: say so, and that nothing is lost
+            let problem = guard("config::Settings::problem", Settings::problem).ok().flatten().map(|why| unreadable_settings(&why));
+            (s, problem)
         }
         Err(e) => (fallback_settings(), Some(e)),
     }
@@ -385,18 +400,9 @@ impl Services {
                 projects: Mutex::new(HashMap::new()),
                 voice: Mutex::new(None),
                 voice_gen: Default::default(),
-                orbit_voice: Mutex::new(None),
-                orbit_generation: Default::default(),
                 stopping: Default::default(),
-                orbit_reconcile: Mutex::new(()),
-                orbit_observer_generation: Default::default(),
-                orbit_control_generation: Default::default(),
-                orbit_handover: Default::default(),
-                orbit_relay: Default::default(),
                 workspace_reconcile: Mutex::new(()),
-                orbit_stage: Arc::new(orbit_voice::StageMailbox::default()),
                 settings_io: Mutex::new(()),
-                orbit_preview: RwLock::new(None),
                 focused: Mutex::new(None),
                 login_watch: Mutex::new(Default::default()),
                 teams: Mutex::new(vec![]),
@@ -411,7 +417,7 @@ impl Services {
     fn empty_state(settings: Settings) -> State {
         State {
             proxy: ProxyState { status: Avail::Loading, routes: vec![], events: VecDeque::new(), pool: vec![], logins: vec![], enabled: settings.proxy.enabled },
-            bridge: BridgeState { status: Avail::Loading, qr: None, enabled: settings.bridge.enabled, projects: vec![] },
+            bridge: BridgeState { status: Avail::Loading, qr: None, enabled: settings.bridge.enabled, projects: vec![], voice_calls: vec![], voice_ready: None },
             settings,
             justtools: Default::default(),
             justimagine: Default::default(),
@@ -422,14 +428,18 @@ impl Services {
             providers: Avail::Loading,
             models: BTreeMap::new(),
             past: Avail::Loading,
+            past_revision: 0,
             usage: BTreeMap::new(),
             usage_at: None,
             picks: (None, None),
             watchdogs: HashMap::new(),
             voice: VoiceState::default(),
-            orbit_voice: orbit_voice::OrbitState::default(),
             host: Default::default(),
             issues: vec![],
+            firewall: Default::default(),
+            jsh: Default::default(),
+            computers: Default::default(),
+            studio: Default::default(),
         }
     }
 
@@ -466,6 +476,9 @@ impl Services {
     /// `bro --demo`: realistic fake data, a ticking fake proxy log, no real network or accounts.
     pub fn demo(settings: Settings, tx: Sender<Event>) -> Services {
         let svc = Services::offline(settings, tx);
+        // a team account too (not in `offline`: tests count the sidebar's lines and the launcher's groups)
+        svc.update(demo::fill_jsh);
+        svc.update(demo::fill_computers);
         demo::spawn_ticker(&svc);
         svc
     }
@@ -510,17 +523,11 @@ impl Services {
     }
 
     /// Persist settings on a background thread (no-op in demo mode).
-    pub fn save_settings(&self, mut s: Settings) {
-        self.update(|st| {
-            // A form may have captured its settings before a preview registration completed.
-            // It owns its other options, but may not undo the newly validated launch paths.
-            if let Some(preview) = self.inner.orbit_preview.read().as_ref() {
-                preview.apply(&mut s.orbit_voice);
-            }
-            st.settings = s.clone();
-        });
+    pub fn save_settings(&self, s: Settings) {
+        self.update(|st| st.settings = s.clone());
         // the phone's media rule changes at once, without restarting the bridge
         self.with_bridge("bridge::set_media_anywhere", |b| b.set_media_anywhere(!s.bridge.protect_media));
+        self.push_voice_config(&s.voice);
         self.with_bridge("bridge::set_rmm_settings", |b| b.set_rmm_settings(s.mobile_companion.clone()));
         if self.is_demo() {
             return;
@@ -751,9 +758,7 @@ impl Services {
 
     pub(crate) fn set_bridge(&self, b: Option<Bridge>) {
         self.inner.bridge_fuse.reset();
-        let workspace = b.clone();
         *self.inner.bridge.write() = b;
-        if let Some(handle) = self.orbit_handle() { handle.attach_workspace(workspace); }
         self.inner.bridge_announced.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -775,12 +780,16 @@ impl Services {
     }
 
     pub fn rmm_status(&self) -> Option<bro_bridge::rmm::Status> {
+        if self.is_demo() {
+            return Some(demo::rmm_status());
+        }
         let mut status = None;
         self.with_bridge("bridge::rmm_status", |b| status = Some(b.rmm_status()));
         status
     }
 
     pub fn rmm_retry(&self) { self.with_bridge("bridge::rmm_retry", |b| b.rmm_retry()); }
+    pub fn rmm_check_update(&self) { self.with_bridge("bridge::rmm_check_update", |b| b.rmm_check_update()); }
     pub fn rmm_disconnect(&self) { self.with_bridge("bridge::rmm_disconnect", |b| b.rmm_disconnect()); }
 
     /// Loopback URL of the running bridge, for `BRO_BRIDGE_URL` in pane env (`bro open`).
@@ -788,6 +797,46 @@ impl Services {
         let mut url = None;
         self.with_bridge("bridge::local_url", |b| url = b.local_url());
         url
+    }
+
+    pub fn browser_page_url(&self) -> Option<String> {
+        let mut url = None;
+        self.with_bridge("bridge::browser_page_url", |b| url = b.browser_page_url());
+        url
+    }
+
+    pub fn open_browser_page(&self) {
+        match self.browser_page_url() {
+            Some(url) => self.send(crate::pane::Event::OpenLink(url)),
+            None => self.send(crate::pane::Event::Toast(crate::alerts::Kind::Info,
+                "Turn on the phone & web bridge in Settings → Server to open Browser.".into())),
+        }
+    }
+
+    pub fn browser_handoffs(&self) -> Vec<bro_bridge::BrowserHandoff> {
+        let mut pending = Vec::new();
+        self.with_bridge("bridge::browser_handoffs", |b| pending = b.browser_handoffs());
+        pending
+    }
+
+    pub fn open_browser_handoff(&self, tab_id: u32, id: &str) {
+        if let Some(mut url) = self.browser_page_url().and_then(|url| url::Url::parse(&url).ok()) {
+            url.query_pairs_mut().append_pair("tabId", &tab_id.to_string()).append_pair("handoffId", id);
+            self.send(crate::pane::Event::OpenLink(url.into()));
+        } else {
+            self.open_browser_page();
+        }
+    }
+
+    pub fn return_browser_handoff(&self, tab_id: u32, id: String) {
+        let svc = self.clone();
+        self.with_bridge("bridge::return_browser_handoff", |b| b.return_browser_handoff(tab_id, id, Box::new(move |result| {
+            let (kind, message) = match result {
+                Ok(()) => (crate::alerts::Kind::Info, "Control returned to the agent.".into()),
+                Err(error) => (crate::alerts::Kind::Error, error),
+            };
+            svc.send(crate::pane::Event::Toast(kind, message));
+        })));
     }
 
     /// Ask the bro mod in session `session` to do `job` with its harness's own MCP connections (read an MCP app's
@@ -1003,31 +1052,14 @@ impl Services {
 
     /// GPT-Live: Hugh's answer to a delegation, for the voice to speak.
     pub(crate) fn voice_delegation_result(&self, id: &str, text: &str) {
-        if let Some(id) = id.strip_prefix("orbit:") {
-            if let Some(handle) = self.orbit_handle() {
-                handle.outcome(id, text, true);
-            }
-            return;
-        }
         if let Some(voice) = self.inner.voice.lock().as_ref() {
             voice.delegation_result(id, &brief(text));
         }
     }
 
-    /// A durable host-accepted result is not the coordinator's initial reply.
-    pub(crate) fn orbit_task_outcome(&self, origin: &str, task_id: &str, revision: u64, text: &str) {
-        if let Some(id) = origin.strip_prefix("orbit:")
-            && let Some(handle) = self.orbit_handle() { handle.task_outcome(id, task_id, revision, text); }
-    }
 
     /// GPT-Live: what Hugh is doing for a delegation (the voice knows, doesn't read it out).
     pub(crate) fn voice_delegation_progress(&self, id: &str, text: &str) {
-        if let Some(id) = id.strip_prefix("orbit:") {
-            if let Some(handle) = self.orbit_handle() {
-                handle.progress(id, text);
-            }
-            return;
-        }
         if let Some(voice) = self.inner.voice.lock().as_ref() {
             voice.delegation_progress(id, text);
         }
@@ -1036,17 +1068,17 @@ impl Services {
     /// Whether this bro runs push-to-talk: the first bro (a second one leaves it to that), with the phone
     /// bridge on, since the words go to Hugh through it.
     pub(crate) fn runs_voice(&self) -> bool {
-        !self.inner.guest && !self.is_demo() && self.settings().bridge.enabled
+        !self.inner.guest && !self.is_demo() && !self.inner.stopping.load(Ordering::Acquire)
+            && host::role() != bro_host::Role::Background && self.settings().bridge.enabled
     }
 
     /// Voice settings changed: stop the listener and start it again with them (or not, when it's off).
     pub(crate) fn restart_voice(&self) {
-        if !self.runs_voice() {
-            return;
-        }
         self.set_voice(None);
         self.update(|st| st.voice.running = None);
-        workers::spawn_voice(self);
+        if self.runs_voice() {
+            workers::spawn_voice(self);
+        }
     }
 
     /// Start a new listener generation; [`Services::keep_voice`] takes a listener only from the newest.
@@ -1057,7 +1089,7 @@ impl Services {
     /// Keep `voice` if no restart came after generation `gen` (else stop it). Returns whether it was kept.
     pub(super) fn keep_voice(&self, voice: bro_voice::Voice, gen_: u64) -> bool {
         let mut slot = self.inner.voice.lock();
-        if self.inner.voice_gen.load(Ordering::Acquire) != gen_ {
+        if self.inner.voice_gen.load(Ordering::Acquire) != gen_ || !self.settings().voice.enabled || !self.runs_voice() {
             voice.stop();
             return false;
         }
@@ -1075,6 +1107,9 @@ impl Services {
         }
         let started = Instant::now();
         self.update(|st| st.voice.capturing = Some(started));
+        if self.is_demo() {
+            return;
+        }
         let svc = self.clone();
         std::thread::spawn(move || {
             let got = guard_res("voice::capture_hotkey", || bro_voice::Voice::capture_hotkey(CAPTURE_FOR));
@@ -1155,6 +1190,7 @@ impl Services {
 
     /// Keep the push-to-talk listener alive (None stops it).
     pub(crate) fn set_voice(&self, voice: Option<bro_voice::Voice>) {
+        self.inner.voice_gen.fetch_add(1, Ordering::AcqRel);
         if let Some(old) = std::mem::replace(&mut *self.inner.voice.lock(), voice) {
             old.stop();
         }
@@ -1306,7 +1342,8 @@ impl Services {
         if self.is_demo() {
             return;
         }
-        if on || self.settings().orbit_voice.enabled {
+        self.restart_voice();
+        if on || bro_core::justconnect::load().enabled {
             workers::spawn_bridge(self); // replace transport off-thread, keeping one canonical service
         } else {
             let svc = self.clone();
@@ -1322,14 +1359,7 @@ impl Services {
     /// Stop the proxy and bridge (on quit).
     pub fn shutdown(&self) {
         self.inner.stopping.store(true, Ordering::Release);
-        self.inner.orbit_control_generation.fetch_add(1, Ordering::AcqRel);
-        let _orbit_lane = self.inner.orbit_reconcile.lock();
-        self.inner.orbit_stage.stop();
-        self.inner.orbit_generation.fetch_add(1, Ordering::AcqRel);
-        let orbit = { self.inner.orbit_voice.lock().take() };
-        if let Some(handle) = orbit {
-            self.stop_owned_orbit(&handle);
-        }
+        self.set_voice(None);
         if let Some(p) = self.inner.proxy.lock().take() {
             let _ = guard("proxy::shutdown", || p.shutdown());
         }

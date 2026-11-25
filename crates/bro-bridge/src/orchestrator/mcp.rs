@@ -4,7 +4,7 @@
 //! executes in this process against the live session registry. Any other MCP
 //! client on this machine (or with the bridge token) can use it too.
 
-use super::tools;
+use super::{storyboard, tools};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -27,13 +27,26 @@ fn error(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// Which tools an endpoint offers: every one (`/mcp`), or only the storyboard's (`/mcp/studio`, for Create Slop sessions).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    All,
+    Studio,
+}
+
 /// Answers one JSON-RPC message; `None` for notifications.
 #[cfg(test)]
 pub(crate) async fn handle_message(app: &AppState, message: &Value) -> Option<Value> {
-    handle_message_for_session(app, message, None).await
+    handle_message_for_session(app, message, None, Scope::All).await
 }
 
-async fn handle_message_for_session(app: &AppState, message: &Value, caller: Option<&str>) -> Option<Value> {
+/// [`handle_message`] on one of the endpoints.
+#[cfg(test)]
+pub(crate) async fn handle_message_for_scope(app: &AppState, message: &Value, scope: Scope) -> Option<Value> {
+    handle_message_for_session(app, message, None, scope).await
+}
+
+async fn handle_message_for_session(app: &AppState, message: &Value, caller: Option<&str>, scope: Scope) -> Option<Value> {
     let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -54,12 +67,15 @@ async fn handle_message_for_session(app: &AppState, message: &Value, caller: Opt
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Tools over the user's live bro terminal sessions."
+                    "instructions": match scope {
+                        Scope::All => "Tools over the user's live bro terminal sessions.",
+                        Scope::Studio => "The storyboard of this Create Slop project: the plan the user sees beside the session. Write it with storyboard_plan, attach pictures and takes with storyboard_scene, and read the user's changes with storyboard_get.",
+                    }
                 }),
             )
         }
         "ping" => result(&id, json!({})),
-        "tools/list" => result(&id, json!({ "tools": tools::definitions() })),
+        "tools/list" => result(&id, json!({ "tools": if scope == Scope::Studio { storyboard::definitions() } else { tools::definitions() } })),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return Some(error(&id, -32602, "tools/call needs a tool name."));
@@ -69,6 +85,9 @@ async fn handle_message_for_session(app: &AppState, message: &Value, caller: Opt
                 .cloned()
                 .filter(Value::is_object)
                 .unwrap_or_else(|| json!({}));
+            if scope == Scope::Studio && !storyboard::is_tool(name) {
+                return Some(result(&id, json!({ "content": [{ "type": "text", "text": "That tool isn't part of the storyboard server." }], "isError": true })));
+            }
             if let Some(token) = message.get("_broWorkerToken").and_then(Value::as_str) { arguments["workerToken"] = json!(token); }
             let worker_scoped = arguments.get("workerToken").is_some();
             let (text, is_error) = match tools::execute_with_worker_scope(app, name, &arguments, caller, worker_scoped).await {
@@ -87,6 +106,15 @@ async fn handle_message_for_session(app: &AppState, message: &Value, caller: Opt
 }
 
 pub(crate) async fn post(State(app): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    serve(app, headers, body, Scope::All).await
+}
+
+/// `POST /mcp/studio`: the same server, offering only the storyboard tools.
+pub(crate) async fn post_studio(State(app): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    serve(app, headers, body, Scope::Studio).await
+}
+
+async fn serve(app: AppState, headers: HeaderMap, body: Value, scope: Scope) -> Response {
     let caller = headers.get("x-bro-session-id").and_then(|value| value.to_str().ok());
     let token = headers.get("x-bro-task-token").and_then(|value| value.to_str().ok());
     let with_token = |mut message:Value| { if let Some(token)=token { message["_broWorkerToken"] = json!(token); } message };
@@ -94,7 +122,7 @@ pub(crate) async fn post(State(app): State<AppState>, headers: HeaderMap, Json(b
         Value::Array(batch) => {
             let mut answers = Vec::new();
             for message in batch {
-                if let Some(answer) = handle_message_for_session(&app, &with_token(message), caller).await {
+                if let Some(answer) = handle_message_for_session(&app, &with_token(message), caller, scope).await {
                     answers.push(answer);
                 }
             }
@@ -104,7 +132,7 @@ pub(crate) async fn post(State(app): State<AppState>, headers: HeaderMap, Json(b
                 Json(Value::Array(answers)).into_response()
             }
         }
-        message => match handle_message_for_session(&app, &with_token(message), caller).await {
+        message => match handle_message_for_session(&app, &with_token(message), caller, scope).await {
             Some(answer) => Json(answer).into_response(),
             None => StatusCode::ACCEPTED.into_response(),
         },

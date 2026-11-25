@@ -306,7 +306,7 @@ impl Services {
             let name = skill_repos::label(&repo);
             let toast = match (&result, dropped) {
                 (_, true) => None,
-                (Ok(s), _) if announce && s.skills.is_empty() => Some((Kind::Info, format!("{name}: no skills found (a folder with a SKILL.md at its root, one folder down, or under skills/, .claude/skills/ or plugins/*/skills/)"))),
+                (Ok(s), _) if announce && s.skills.is_empty() => Some((Kind::Info, format!("{name}: no skills found (a folder with a SKILL.md at its root, one folder down, anywhere under skills/, or under .claude/skills/ or plugins/*/skills/)"))),
                 (Ok(s), _) if announce && fresh => Some((Kind::Info, format!("watching {name} · {} to pick from on its page: install the ones you want", plural(s.skills.len(), "skill")))),
                 (Ok(s), _) if announce => Some((Kind::Info, format!("{name} is up to date · {} · the ones you installed follow it", plural(s.skills.len(), "skill")))),
                 (Ok(_), _) => None,
@@ -543,8 +543,16 @@ impl Services {
                 // Tool-owned skills are not loose copies left behind by third-party installers.
                 // Local release skills always repair their managed copies; remote updates follow
                 // the same auto-sync setting as watched repositories. Never block the UI thread.
-                let browser = bro_core::justbrowse::installed().is_some().then(|| {
-                    guard("tool_skills::browser", bro_core::tool_skills::refresh_browser).unwrap_or_else(Err)
+                // An install that ships no skill of its own (the upstream bridge) is a GitHub pull.
+                let browser = bro_core::justbrowse::installed().map(|found| {
+                    guard("tool_skills::browser", || {
+                        let cached = bro_core::tool_skills::cache_dir(bro_core::tool_skills::BROWSER).join("SKILL.md").is_file();
+                        if found.skill.is_some() || auto_sync || !cached {
+                            bro_core::tool_skills::refresh_browser()
+                        } else {
+                            bro_core::tool_skills::publish(bro_core::tool_skills::BROWSER)
+                        }
+                    }).unwrap_or_else(Err)
                 });
                 let desktop = bro_core::agent_desktop::installed().is_some().then(|| {
                     guard("tool_skills::desktop", || {

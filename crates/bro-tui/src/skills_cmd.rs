@@ -48,8 +48,11 @@ usage
                                 install a skill from Skill Issue (bro watches it from its repo)
 
 A skill is a folder holding a SKILL.md: the repo's root, a folder at its root, or a folder
-under its skills/ (in a repo with none there: under .claude/skills/, .agents/skills/ or
-plugins/*/skills/). A skill of yours with the same name is never replaced. In bro, the Skills
+anywhere under its skills/, families of them in folders of their own (skills/dcc/blender/<name>);
+in a repo with none there, under .claude/skills/, .agents/skills/ or plugins/*/skills/, else
+wherever they are. A GitHub link to a folder watches that folder's skills
+(https://github.com/scenario-labs/skills/tree/main/skills/dcc/blender), as does owner/repo#dcc or
+owner/repo#blender. A skill of yours with the same name is never replaced. In bro, the Skills
 view (`skills` in the palette, or settings → Skills → Manage skills) shows them all, by source
 and by project, watches repos and browses the marketplace.
 ";

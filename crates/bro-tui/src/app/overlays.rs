@@ -246,7 +246,7 @@ fn draw_confirm(f: &mut Frame, area: Rect, c: &Confirm, hover: ratatui::layout::
 
 /// Build launcher data from services + app state (dirs: the preferred cwd first).
 pub(super) fn launcher_data(app: &App) -> launcher::Data {
-    let installed = bro_core::Harness::ALL.iter().map(|h| (*h, app.svc.is_demo() || cfg!(test) || bro_core::launch::which(h.label()).is_some())).collect();
+    let installed = bro_core::Harness::ALL.iter().map(|h| (*h, app.svc.is_demo() || cfg!(test) || bro_core::agent_install::installed(*h).is_some())).collect();
     launcher_data_with_installed(app, installed)
 }
 
@@ -286,15 +286,20 @@ pub(super) fn launcher_data_with_installed(app: &App, installed: Vec<(bro_core::
         models: st.models.clone(),
         orchestrator_running: app.orchestrator_panes().into_iter().filter_map(|id| app.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| (t.meta.project.key.clone(), t.meta.label.clone()))).collect(),
         shared: st.settings.proxy.shared,
+        jsh: st.jsh.account.clone().filter(|_| st.jsh.signed_in),
+        studio: st.studio.clone(),
         keyed: {
             let cfg = st.config.clone().unwrap_or_default();
             // a Google sign-in is one small file: cheap enough to look at when the launcher opens
             let google = st.providers.ready().is_some_and(|ps| ps.iter().any(|p| p.is_google_login())) && bro_core::gemini::signed_in(&bro_core::gemini::creds_path());
+            // the demo has a key for every provider, but for the ones named in BRO_DEMO_UNKEYED ("deepseek,zai"):
+            // captures of the launcher's "other providers" fold
+            let unkeyed: Vec<String> = std::env::var("BRO_DEMO_UNKEYED").ok().filter(|_| app.svc.is_demo()).map(|v| v.split(',').map(|id| id.trim().to_string()).collect()).unwrap_or_default();
             st.providers
                 .ready()
                 .map(|ps| {
                     ps.iter()
-                        .filter(|p| app.svc.is_demo() || p.no_key || if p.is_google_login() { google } else { cfg.key_for(&p.id, p.key_env.as_deref()).is_some() })
+                        .filter(|p| if app.svc.is_demo() { !unkeyed.contains(&p.id) } else { p.no_key || if p.is_google_login() { google } else { cfg.key_for(&p.id, p.key_env.as_deref()).is_some() } })
                         .map(|p| p.id.clone())
                         .collect()
                 })

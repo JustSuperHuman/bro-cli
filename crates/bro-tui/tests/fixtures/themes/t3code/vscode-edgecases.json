@@ -1,0 +1,36 @@
+{
+  "translucent-accent": {
+    "name": "Translucent accent",
+    "colors": {
+      "editor.background": "#203040",
+      "editor.foreground": "#ffffff",
+      "focusBorder": "#ff336680",
+      "button.background": "#48c78e60",
+      "sideBar.background": "#00000040",
+      "terminal.selectionBackground": "#00ffff40"
+    }
+  },
+  "display-p3": {
+    "name": "Display P3",
+    "colors": {
+      "editor.background": "color(display-p3 .123 .456 .789)",
+      "editor.foreground": "color(srgb 100% 100% 100%)",
+      "focusBorder": "color(display-p3 1 0 .5 / .6)",
+      "editorWidget.background": "color(srgb .1 .2 .3 / .7)",
+      "editorWarning.foreground": "color(display-p3 1 .7 0)",
+      "terminal.background": "color(display-p3 0 .1 .2)"
+    }
+  },
+  "fractional-srgb-explicit-appearance": {
+    "name": "Fractional sRGB",
+    "type": "hc-light",
+    "colors": {
+      "editor.background": "color(srgb .151 .199 .231)",
+      "editor.foreground": "#000000",
+      "focusBorder": "#ff000000",
+      "input.background": "#ffffff20",
+      "input.border": "#00000000",
+      "button.background": "#00000000"
+    }
+  }
+}

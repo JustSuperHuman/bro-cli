@@ -4,33 +4,68 @@ use std::io::{self, Write};
 use std::sync::mpsc::{self, Sender};
 
 pub struct Writer {
-    tx: Sender<Vec<u8>>,
+    tx: Sender<Request>,
+    #[cfg(test)]
+    direct: Option<Box<dyn Write + Send>>,
 }
+
+struct Request {
+    bytes: Vec<u8>,
+    receipt: Option<Sender<io::Result<()>>>,
+}
+
+pub type Receipt = mpsc::Receiver<io::Result<()>>;
 
 impl Writer {
     pub fn new(mut pipe: Box<dyn Write + Send>) -> io::Result<Self> {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = mpsc::channel::<Request>();
         std::thread::Builder::new().name("bro-pty-input".into()).spawn(move || {
-            while let Ok(bytes) = rx.recv() {
-                if pipe.write_all(&bytes).and_then(|_| pipe.flush()).is_err() {
-                    break;
+            while let Ok(request) = rx.recv() {
+                let result = pipe.write_all(&request.bytes).and_then(|_| pipe.flush());
+                let failed = result.is_err();
+                if let Some(receipt) = request.receipt {
+                    let _ = receipt.send(result);
                 }
+                if failed { break; }
             }
         })?;
-        Ok(Writer { tx })
+        Ok(Writer { tx, #[cfg(test)] direct: None })
+    }
+
+    /// A paste's settle timer starts once the worker has actually written and flushed it.
+    pub fn write_receipt(&mut self, bytes: &[u8]) -> io::Result<Receipt> {
+        let (tx, rx) = mpsc::channel();
+        #[cfg(test)]
+        if let Some(pipe) = &mut self.direct {
+            let _ = tx.send(pipe.write_all(bytes).and_then(|_| pipe.flush()));
+            return Ok(rx);
+        }
+        self.tx.send(Request { bytes: bytes.to_vec(), receipt: Some(tx) })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input closed"))?;
+        Ok(rx)
+    }
+
+    #[cfg(test)]
+    pub fn direct(pipe: Box<dyn Write + Send>) -> Self {
+        let (tx, _rx) = mpsc::channel();
+        Self { tx, direct: Some(pipe) }
     }
 }
 
 impl Write for Writer {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        if let Some(pipe) = &mut self.direct { return pipe.write(bytes); }
         if bytes.is_empty() {
             return Ok(0);
         }
-        self.tx.send(bytes.to_vec()).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input closed"))?;
+        self.tx.send(Request { bytes: bytes.to_vec(), receipt: None }).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input closed"))?;
         Ok(bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(pipe) = &mut self.direct { return pipe.flush(); }
         // The worker flushes each write in order; the UI never waits for the pipe.
         Ok(())
     }
@@ -102,5 +137,20 @@ mod tests {
         let _ = release_tx.send(());
         assert_eq!(written_rx.recv_timeout(Duration::from_secs(2)).unwrap(), (true, b"first".to_vec()));
         assert_eq!(written_rx.recv_timeout(Duration::from_secs(2)).unwrap(), (true, b"second".to_vec()));
+    }
+
+    #[test]
+    fn a_write_receipt_waits_until_the_pipe_has_finished() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (written_tx, written_rx) = mpsc::channel();
+        let pipe = Blocked { entered: Some(entered_tx), release: release_rx, written: written_tx };
+        let mut writer = Writer::new(Box::new(pipe)).unwrap();
+        let receipt = writer.write_receipt(b"paste").unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        release_tx.send(()).unwrap();
+        assert_eq!(written_rx.recv_timeout(Duration::from_secs(2)).unwrap(), (true, b"paste".to_vec()));
+        receipt.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
     }
 }

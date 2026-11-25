@@ -4,10 +4,12 @@
 //! The project the session starts in is an address bar across the top, as File Explorer's: a folder, the path as
 //! breadcrumbs, the key that changes it and a chevron; the project picker hangs from it (`folder/gui.rs`). Under
 //! it, the New / Continue switch on the left and profiles on the right; close sits in the top corner. The New tab
-//! shows the agents as tiles (★ orchestrator set apart in gold; on its tab, the harness it runs on), then the
-//! "run on" list beside what launches and its options, and the launch button bottom-right with the keys beside
-//! it. Narrow bodies stack the options under the list (the terminal UI's breakpoints). The Continue tab is
-//! `continue_picker/gui.rs`.
+//! is two choices under their titles. **Harness**: the agents as tiles (★ orchestrator set apart in gold; on its
+//! tab, the harness it runs on). **Providers**: one list, the main ones first (your logins, or one row a family
+//! in proxy mode), then the connected ones, then the rest folded under "Other providers". Beside the list, the
+//! model when one is needed, else what launches, and the options; the launch button sits bottom-right with the
+//! keys beside it. Narrow bodies stack the options under the list (the terminal UI's breakpoints). The Continue
+//! tab is `continue_picker/gui.rs`, the Create Slop tab `studio_gui.rs`.
 //!
 //! Keys never come here: they reach [`Launcher::key`]. This draws that state machine's state and maps each
 //! click to what [`Launcher::click`] does for the same target.
@@ -15,6 +17,7 @@
 use super::{AccountKind, Focus, Item, Launcher, Outcome, SessionTab};
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::brand::{self, Mark};
+use crate::app::gui::kit::breadcrumbs::{crumb_plan, path_parts};
 use crate::app::gui::kit::{self, Cursor, Style, Tokens, Ui, radius, size, weight, widgets};
 use crate::app::gui::surface::Cx;
 use crate::continue_picker::gui as cont;
@@ -39,14 +42,14 @@ const TAB_CONTINUE: usize = 5;
 const LAUNCH: usize = 6;
 const INSTALL: usize = 7;
 const ORCHESTRATOR: usize = 8;
-const LIST_FIELD: usize = 9;
 const MODEL_FIELD: usize = 10;
 /// the run-on list's background (the wheel there moves in it)
 const LIST_AREA: usize = 11;
 const MODEL_AREA: usize = 12;
 const NO_PROJECT: usize = 13;
+const TAB_SLOP: usize = 14;
 /// + the agent's index in `Harness::ALL`
-const HARNESS: usize = 20;
+pub(crate) const HARNESS: usize = 20;
 /// + the index in `Harness::ALL` of the harness the orchestrator runs on
 const BRAIN: usize = 30;
 /// + the index in [`PERMS`]
@@ -61,6 +64,8 @@ const MODEL: usize = 2 * SPAN;
 const CONTINUE: usize = 3 * SPAN;
 /// + the project picker's own targets (`folder::gui`)
 const PICKER: usize = 4 * SPAN;
+/// + the Create Slop tab's own targets (`studio_gui`)
+pub(crate) const STUDIO: usize = 5 * SPAN;
 
 const PERMS: [(Permission, &str); 3] = [(Permission::Default, "Ask"), (Permission::Auto, "Auto"), (Permission::Skip, "Skip all")];
 
@@ -73,8 +78,15 @@ const BAR_H: f32 = 36.0;
 /// The row under it: New / Continue and profiles.
 const TABS_H: f32 = 32.0;
 const TILE_H: f32 = 40.0;
+/// A title over a part of the page ("Harness", "Providers"), and the room under it.
+const TITLE_H: f32 = 20.0;
+const TITLE_GAP: f32 = 8.0;
+/// Below this the page drops its titles: the lists need the rows more.
+const TITLES_MIN_H: f32 = 430.0;
 /// a run-on row
 const ROW_H: f32 = 36.0;
+/// The room over the "Other providers" fold, setting it off from the rows above.
+const FOLD_GAP: f32 = 10.0;
 /// a model row
 const MODEL_H: f32 = 32.0;
 pub(crate) const FIELD_H: f32 = 32.0;
@@ -102,6 +114,8 @@ const I_HOME: &str = "\u{F06A1}";
 const I_ACCOUNT: &str = "\u{F0004}";
 pub(crate) const I_SEARCH: &str = "\u{F0349}";
 const I_STAR: &str = "\u{F04CE}";
+/// Create Slop: a clapperboard
+const I_SLOP: &str = "\u{F0FCE}";
 pub(crate) const I_ALERT: &str = "\u{F0026}";
 const I_DOWNLOAD: &str = "\u{F01DA}";
 const I_RETURN: &str = "\u{F0311}";
@@ -170,8 +184,15 @@ pub(crate) fn click(l: &mut Launcher, n: usize, _p: Point, mods: KeyModifiers, _
     if let Some(k) = within(n, CONTINUE) {
         return Launcher::continue_outcome(cont::click(&mut l.continue_picker, k, mods));
     }
+    if let Some(k) = within(n, STUDIO) {
+        return super::studio_gui::click(l, k);
+    }
     if let Some(i) = within(n, ROW) {
         if i >= Launcher::selectable(&l.items()).len() {
+            return Outcome::None;
+        }
+        // the fold opens and closes on one click
+        if l.pick_fold(i) {
             return Outcome::None;
         }
         // the selected row again acts like Enter
@@ -201,8 +222,9 @@ pub(crate) fn click(l: &mut Launcher, n: usize, _p: Point, mods: KeyModifiers, _
         PROFILES => return Outcome::Profiles,
         PROJECT => l.open_project_picker(),
         NO_PROJECT if l.orchestrator => l.select_no_project(),
-        TAB_NEW => l.tab = SessionTab::New,
-        TAB_CONTINUE => l.tab = SessionTab::Continue,
+        TAB_NEW => l.set_tab(SessionTab::New),
+        TAB_CONTINUE => l.set_tab(SessionTab::Continue),
+        TAB_SLOP => l.set_tab(SessionTab::Slop),
         LAUNCH => return l.key(key(KeyCode::Enter)),
         INSTALL => return Outcome::Install(l.harness),
         ORCHESTRATOR => {
@@ -211,7 +233,6 @@ pub(crate) fn click(l: &mut Launcher, n: usize, _p: Point, mods: KeyModifiers, _
             }
         }
         // a field takes the keyboard to its list (as tab / esc do)
-        LIST_FIELD => l.focus = Focus::List,
         MODEL_FIELD => {
             if l.needs_model() {
                 l.focus = Focus::Models;
@@ -252,9 +273,12 @@ pub(crate) fn wheel(l: &mut Launcher, n: Option<usize>, down: bool) {
         }
         return;
     }
+    if l.tab == SessionTab::Slop {
+        return super::studio_gui::wheel(l, down);
+    }
     match n {
         Some(n) if n == MODEL_AREA || n == MODEL_FIELD || within(n, MODEL).is_some() => l.focus = Focus::Models,
-        Some(n) if n == LIST_AREA || n == LIST_FIELD || within(n, ROW).is_some() => l.focus = Focus::List,
+        Some(n) if n == LIST_AREA || within(n, ROW).is_some() => l.focus = Focus::List,
         _ => {}
     }
     l.move_sel(if down { 3 } else { -3 });
@@ -265,9 +289,9 @@ pub(crate) fn wheel(l: &mut Launcher, n: Option<usize>, down: bool) {
 /// Draw the launcher over `area` (the body, right of the sidebar and below the project tabs).
 pub(crate) fn draw(l: &mut Launcher, ui: &mut Ui, area: Rect, cx: &Cx) -> bool {
     let t = ui.t;
-    // A page on the content layer: the card colour, 8px corners, and a hairline edge. Its nearly opaque fill
-    // keeps the launcher readable over session output and the desktop, including on a glass window.
-    ui.panel(area, radius::OVERLAY, t.surface.with_alpha(0.97), t.hairline);
+    // A page on the content layer: the card colour, 8px corners, and a hairline edge. It covers the sessions
+    // under it and is as see-through as the window, so Acrylic shows through the page as it does around it.
+    ui.sheet(area, radius::OVERLAY, t.surface, t.hairline);
     ui.block(area);
     let inner = area.inset(PAD);
     let (mut bar, close, tabs) = head(inner);
@@ -296,6 +320,7 @@ pub(crate) fn draw(l: &mut Launcher, ui: &mut Ui, area: Rect, cx: &Cx) -> bool {
     match l.tab {
         SessionTab::Continue => cont::draw(&mut l.continue_picker, ui, body, CONTINUE, &page_cx),
         SessionTab::New => draw_new(l, ui, body, &page_cx),
+        SessionTab::Slop => super::studio_gui::draw(l, ui, body, &page_cx),
     }
     // the project picker hangs from the address bar over everything; the bar stays lit above the dimmed page
     match &mut l.project_picker {
@@ -378,35 +403,6 @@ pub(crate) fn address_bar(ui: &mut Ui, dir: &Path, no_project: bool, r: Rect, op
     }
 }
 
-/// A path as the parts an address bar shows: "~" for your home, then each folder ("F:\code\bro" → F:, code,
-/// bro; "/opt/x" → /, opt, x).
-fn path_parts(p: &Path) -> Vec<String> {
-    use std::path::Component;
-    let parts = |p: &Path| -> Vec<String> {
-        p.components()
-            .filter_map(|c| match c {
-                Component::Prefix(x) => Some(x.as_os_str().to_string_lossy().into_owned()),
-                Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                Component::ParentDir => Some("..".into()),
-                Component::RootDir | Component::CurDir => None,
-            })
-            .collect()
-    };
-    let all = parts(p);
-    let same = |a: &String, b: &String| if cfg!(windows) { a.eq_ignore_ascii_case(b) } else { a == b };
-    if let Some(home) = dirs::home_dir() {
-        let h = parts(&home);
-        if !h.is_empty() && all.len() >= h.len() && all.iter().zip(&h).all(|(a, b)| same(a, b)) {
-            return std::iter::once("~".to_string()).chain(all[h.len()..].iter().cloned()).collect();
-        }
-    }
-    // a Unix root shows as "/"
-    if p.has_root() && !matches!(p.components().next(), Some(Component::Prefix(_))) {
-        return std::iter::once("/".to_string()).chain(all).collect();
-    }
-    all
-}
-
 /// `parts` as breadcrumbs in `r` ("F:  ›  code  ›  bro-cli-v2"): the earlier ones muted, the last semibold in
 /// `last`. When they don't fit, the middle gives way to "…" (then the first part too; then the last is cut short).
 fn crumbs(ui: &mut Ui, r: Rect, parts: &[String], last: Color) {
@@ -422,7 +418,7 @@ fn crumbs(ui: &mut Ui, r: Rect, parts: &[String], last: Color) {
     let home = |i: usize| parts[i] == "~";
     let widths: Vec<f32> = parts.iter().enumerate().map(|(i, s)| if home(i) { HOME_W } else { ui.measure(s, style(i)) }).collect();
     let ell = ui.measure("…", head);
-    let plan = crumb_plan(&widths, ell, r.w);
+    let plan = crumb_plan(&widths, ell, CRUMB_SEP, r.w);
     let mut x = r.x;
     for (j, part) in plan.iter().enumerate() {
         if j > 0 {
@@ -444,35 +440,23 @@ fn crumbs(ui: &mut Ui, r: Rect, parts: &[String], last: Color) {
     }
 }
 
-/// Which breadcrumbs fit `room` (each part `widths[i]` wide, the "…" `ell`, a separator between each): the parts
-/// to show in order, None for the "…". All of them when they fit; else the first, "…" and as many of the last
-/// ones as fit; else "…" and the last; else the last alone (cut short as it's drawn).
-fn crumb_plan(widths: &[f32], ell: f32, room: f32) -> Vec<Option<usize>> {
-    let n = widths.len();
-    if n == 0 {
-        return vec![];
-    }
-    let width = |plan: &[Option<usize>]| plan.iter().map(|p| p.map(|i| widths[i]).unwrap_or(ell)).sum::<f32>() + CRUMB_SEP * plan.len().saturating_sub(1) as f32;
-    let mut plans: Vec<Vec<Option<usize>>> = vec![(0..n).map(Some).collect()];
-    for k in (1..n.saturating_sub(1)).rev() {
-        plans.push([Some(0), None].into_iter().chain((n - k..n).map(Some)).collect());
-    }
-    if n > 1 {
-        plans.push(vec![None, Some(n - 1)]);
-    }
-    plans.into_iter().find(|p| width(p) <= room).unwrap_or_else(|| vec![Some(n - 1)])
-}
-
-/// Under the address bar: New / Continue on the left, profiles on the right.
-/// The New session / Continue switch and Profiles; returns where their alt keys reach (for key tips).
+/// Under the address bar: New / Continue / Create Slop on the left, profiles on the right.
+/// The switch and Profiles; returns where their alt keys reach (for key tips).
 fn draw_tabs(l: &Launcher, ui: &mut Ui, r: Rect) -> Vec<(Rect, &'static str)> {
-    let segs = [Seg::new("New session").icon(I_PLUS), Seg::new("Continue").icon(I_HISTORY)];
-    let on = if l.tab == SessionTab::New { 0 } else { 1 };
-    let sw = segmented(ui, Point::new(r.x, r.y), r.h, &segs, Some(on), size::BODY, "launcher-tab", |i| Action::Overlay(if i == 0 { TAB_NEW } else { TAB_CONTINUE }));
+    // Create Slop wears its own colour once chosen
+    let slop = Seg { label: "Create Slop", icon: Some(I_SLOP), ink: Some(super::studio_gui::tone(ui.t)) };
+    let segs = [Seg::new("New session").icon(I_PLUS), Seg::new("Continue").icon(I_HISTORY), slop];
+    let on = match l.tab {
+        SessionTab::New => 0,
+        SessionTab::Continue => 1,
+        SessionTab::Slop => 2,
+    };
+    let sw = segmented(ui, Point::new(r.x, r.y), r.h, &segs, Some(on), size::BODY, "launcher-tab", |i| Action::Overlay([TAB_NEW, TAB_CONTINUE, TAB_SLOP][i.min(2)]));
     let w0 = seg_one(ui, &segs[0], size::BODY);
     let w1 = seg_one(ui, &segs[1], size::BODY);
+    let w2 = seg_one(ui, &segs[2], size::BODY);
     let profiles = profiles_button(ui, r, r.w - sw - 16.0);
-    vec![(Rect::new(r.x + 2.0, r.y, w0, r.h), "n"), (Rect::new(r.x + 2.0 + w0, r.y, w1, r.h), "r"), (profiles, "o")]
+    vec![(Rect::new(r.x + 2.0, r.y, w0, r.h), "n"), (Rect::new(r.x + 2.0 + w0, r.y, w1, r.h), "r"), (Rect::new(r.x + 2.0 + w0 + w1, r.y, w2, r.h), "s"), (profiles, "o")]
 }
 
 /// "Profiles alt+o" at the right end of `r` as a subtle button (a fill only under the pointer), shrinking to its
@@ -561,9 +545,19 @@ impl<'a> Shown<'a> {
     }
 }
 
+/// A title over a part of the page: its name in full strength, a size up from a group's heading in a list.
+fn title(ui: &mut Ui, r: Rect, text: &str) {
+    ui.label_in(r, text, Style::new(size::BODY, weight::SEMIBOLD, ui.t.text), Align::Left);
+}
+
 fn draw_new(l: &Launcher, ui: &mut Ui, r: Rect, cx: &Cx) {
     let s = Shown::of(l);
+    let titled = r.h >= TITLES_MIN_H;
     let mut y = r.y;
+    if titled {
+        title(ui, Rect::new(r.x, y, r.w, TITLE_H), "Harness");
+        y += TITLE_H + TITLE_GAP;
+    }
     y += draw_agents(l, ui, Rect::new(r.x, y, r.w, TILE_H));
     if l.orchestrator {
         y += 12.0;
@@ -578,9 +572,9 @@ fn draw_new(l: &Launcher, ui: &mut Ui, r: Rect, cx: &Cx) {
     let footer = Rect::new(r.x, r.bottom() - FOOTER_H, r.w, FOOTER_H);
     let body = Rect::new(r.x, y, r.w, (footer.y - 22.0 - y).max(0.0));
     if body.w >= SIDE_MIN_W && body.h >= SIDE_MIN_H {
-        draw_side(&s, ui, body, cx);
+        draw_side(&s, ui, body, titled, cx);
     } else {
-        draw_stacked(&s, ui, body, cx);
+        draw_stacked(&s, ui, body, titled, cx);
     }
     draw_footer(&s, ui, footer);
 }
@@ -707,7 +701,7 @@ fn draw_brains(l: &Launcher, ui: &mut Ui, r: Rect) -> f32 {
     }
     let note = match l.harness {
         Harness::Claude | Harness::Codex => "tools built in",
-        Harness::Pi | Harness::Omp => "tools through bro ctl",
+        Harness::Pi | Harness::Omp | Harness::Antigravity => "tools through bro ctl",
     };
     let ns = Style::new(size::SMALL, weight::REGULAR, t.muted);
     let nw = ui.measure(note, ns);
@@ -732,31 +726,30 @@ fn draw_install(l: &Launcher, ui: &mut Ui, r: Rect) {
     ui.hit(c, Action::Overlay(INSTALL));
 }
 
-/// Wide pages: the run-on list on the left; what launches (or the models) and the options on the right.
-fn draw_side(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
+/// Wide pages: the providers on the left; the model when one is needed, else what launches, and the options on
+/// the right. Both columns start under a title on the same line.
+fn draw_side(s: &Shown, ui: &mut Ui, r: Rect, titled: bool, cx: &Cx) {
     let t = ui.t;
-    // a model list wants the room more than the run-on list does
+    // a model list wants the room more than the providers do
     let panel_w = if s.needs { (r.w * 0.52).clamp(400.0, 580.0) } else { (r.w * 0.38).clamp(340.0, 440.0) };
     let gap = 40.0;
     let list = Rect::new(r.x, r.y, r.w - panel_w - gap, r.h);
     let panel = Rect::new(list.right() + gap, r.y, panel_w, r.h);
     ui.vline(list.right() + gap / 2.0, r.y, r.h, t.hairline);
-    draw_run_on(s, ui, list, cx);
+    draw_run_on(s, ui, list, titled);
     if s.needs {
         let models = Rect::new(panel.x, panel.y, panel.w, (panel.h - OPTIONS_H - 28.0).max(0.0));
-        draw_models(s, ui, models, cx);
+        draw_models(s, ui, models, titled, cx);
         draw_options(s.l, ui, Rect::new(panel.x, models.bottom() + 28.0, panel.w, OPTIONS_H));
     } else {
-        // the heading sits level with the run-on field
-        let top = panel.y + (FIELD_H - 20.0) / 2.0;
-        let used = draw_summary(s, ui, Rect { y: top, h: panel.bottom() - top, ..panel });
-        let y = (top + used + 30.0).min(panel.bottom() - OPTIONS_H).max(panel.y);
+        let used = draw_summary(s, ui, panel);
+        let y = (panel.y + used + 30.0).min(panel.bottom() - OPTIONS_H).max(panel.y);
         draw_options(s.l, ui, Rect::new(panel.x, y, panel.w, OPTIONS_H));
     }
 }
 
 /// Narrow pages: the list (with the models beside it when needed), then what launches and the options.
-fn draw_stacked(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
+fn draw_stacked(s: &Shown, ui: &mut Ui, r: Rect, titled: bool, cx: &Cx) {
     let t = ui.t;
     let rows = r.h >= 440.0;
     let opts_h = if rows { OPTIONS_H } else { options_flow_h(s.l, ui, r.w) };
@@ -764,10 +757,10 @@ fn draw_stacked(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
     if lists.h > 0.0 {
         if s.needs {
             let lw = (lists.w * 0.45).floor();
-            draw_run_on(s, ui, Rect { w: lw, ..lists }, cx);
-            draw_models(s, ui, Rect::new(lists.x + lw + 20.0, lists.y, lists.w - lw - 20.0, lists.h), cx);
+            draw_run_on(s, ui, Rect { w: lw, ..lists }, titled);
+            draw_models(s, ui, Rect::new(lists.x + lw + 20.0, lists.y, lists.w - lw - 20.0, lists.h), titled, cx);
         } else {
-            draw_run_on(s, ui, lists, cx);
+            draw_run_on(s, ui, lists, titled);
         }
     }
     // what Enter runs, in one line
@@ -786,7 +779,7 @@ fn draw_stacked(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
             ui.label_in(line, "→ pick a model", Style::new(size::BODY, weight::MEDIUM, t.shine), Align::Left);
         }
         None => {
-            ui.label_in(line, "→ pick where to run", Style::new(size::BODY, weight::MEDIUM, t.muted), Align::Left);
+            ui.label_in(line, "→ pick a provider", Style::new(size::BODY, weight::MEDIUM, t.muted), Align::Left);
         }
     }
     let opts = Rect::new(r.x, line.bottom() + 12.0, r.w, opts_h);
@@ -831,32 +824,37 @@ fn account_mark(kind: &AccountKind, harness: Harness, ui: &Ui) -> Mark {
     }
 }
 
-/// The "run on" list: recent combos, your logins, other logins through the proxy, providers.
-fn draw_run_on(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
+/// The providers: the main ones (your logins, or one row a family in proxy mode; the Just Superhuman account;
+/// Gemini), then the connected ones under their heading, then the fold over the ones with no key yet.
+fn draw_run_on(s: &Shown, ui: &mut Ui, r: Rect, titled: bool) {
     let t = ui.t;
     let l = s.l;
     let focused = l.focus == Focus::List;
-    let field = Rect::new(r.x, r.y, r.w, FIELD_H);
-    input(ui, field, I_SEARCH, &l.list_filter, "run on… ↑↓ to pick · type a project", focused, cx.focused, false, Action::Overlay(LIST_FIELD));
-    let view = Rect::new(r.x, field.bottom() + 10.0, r.w, (r.bottom() - field.bottom() - 10.0).max(0.0));
+    let mut top = r.y;
+    if titled {
+        title(ui, Rect::new(r.x, r.y, r.w, TITLE_H), "Providers");
+        top += TITLE_H + TITLE_GAP;
+    }
+    let view = Rect::new(r.x, top, r.w, (r.bottom() - top).max(0.0));
     ui.hit_with(view, Action::Overlay(LIST_AREA), Cursor::Default);
     let items = &s.items;
     if items.is_empty() {
-        ui.label(Point::new(view.x + 12.0, view.y + 10.0), "nothing matches · esc clears the filter", Style::new(size::BODY, weight::REGULAR, t.muted));
+        ui.label(Point::new(view.x + MARK_X, view.y + 10.0), "Nothing to run on yet. Add a login in Profiles.", Style::new(size::BODY, weight::REGULAR, t.muted));
         return;
     }
     let cursor = s.cursor;
-    // where each row goes: headers are a heading with room above, rows a line each
+    // where each row goes: a heading has room above it, the fold a little, rows a line each
     let mut tops = Vec::with_capacity(items.len());
     let mut y = 0.0;
     for (k, it) in items.iter().enumerate() {
-        let h = match it {
-            Item::Header(_) if k == 0 => 26.0,
-            Item::Header(_) => 38.0,
-            _ => ROW_H,
+        let (lead, h) = match it {
+            Item::Header(_) if k == 0 => (0.0, 26.0),
+            Item::Header(_) => (0.0, 38.0),
+            Item::Others { .. } if k > 0 => (FOLD_GAP, ROW_H),
+            _ => (0.0, ROW_H),
         };
-        tops.push((y, h));
-        y += h;
+        tops.push((y + lead, h));
+        y += lead + h;
     }
     let content = y;
     let off = scroll(ui, "run-on", cursor.map(|k| tops[k]), content, view.h);
@@ -870,7 +868,7 @@ fn draw_run_on(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
     } else {
         0.0
     };
-    let now = crate::util::now_secs();
+    let quiet = Style::new(size::SMALL, weight::REGULAR, t.faint);
     ui.clip(view, 0.0);
     let mut idx = 0;
     for (k, it) in items.iter().enumerate() {
@@ -886,36 +884,25 @@ fn draw_run_on(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
         let on = cursor == Some(k);
         let mark = Rect::new(rr.x + MARK_X, rr.y, 18.0, rr.h);
         match it {
-            Item::Header(name) => widgets::section(ui, Rect::new(rr.x + 12.0, rr.bottom() - 22.0, rr.w - 24.0, 18.0), &sentence(name)),
-            Item::Recent(i) => {
-                let Some(rc) = l.data.recents.get(*i) else { continue };
-                row_fill(ui, rr, ("run-on", this), on, focused);
+            Item::Header(name) => widgets::section(ui, Rect::new(rr.x + MARK_X, rr.bottom() - 22.0, rr.w - 2.0 * MARK_X, 18.0), &sentence(name)),
+            // the fold: a chevron that points down once it's open, and how many it holds
+            Item::Others { count, open } => {
+                let hot = row_fill(ui, rr, ("run-on", this), on, focused);
                 ui.hit(rr, Action::Overlay(ROW + this));
-                let (kind, who) = l.recent_row(rc);
-                let model = rc.model.as_deref().map(|m| crate::services::launch::short_model(m.rsplit('/').next().unwrap_or(m)));
-                ui.mark(account_mark(&kind, l.harness, ui), mark, 15.0, None);
-                let age = format!("{} ago", crate::util::short_dur((now - rc.at).max(0) as u64));
-                let ast = Style::new(size::SMALL, weight::REGULAR, t.faint);
-                let aw = ui.measure(&age, ast);
-                ui.label_in(Rect::new(rr.right() - 12.0 - aw, rr.y, aw + 1.0, rr.h), &age, ast, Align::Left);
-                let ls = Style::new(size::BODY, if on { weight::SEMIBOLD } else { weight::MEDIUM }, t.text);
-                let room = rr.right() - 12.0 - aw - 16.0 - (rr.x + TEXT_X);
-                let lb = ui.line(&who, ls, Some(room.max(10.0)));
-                ui.draw(&lb, Point::new(rr.x + TEXT_X, rr.y + (rr.h - lb.h) / 2.0));
-                if let Some(m) = model {
-                    let ms = Style::mono(size::SMALL, t.muted);
-                    let left = room - lb.w - 10.0;
-                    if left > 24.0 {
-                        let mb = ui.line(&m, ms, Some(left));
-                        ui.draw(&mb, Point::new(rr.x + TEXT_X + lb.w + 10.0, rr.y + (rr.h - mb.h) / 2.0));
-                    }
-                }
+                let lit = if on { 1.0 } else { hot };
+                let ink = t.muted.mix(t.text, 0.75 * lit);
+                ui.icon(mark, if *open { I_CHEVRON_DOWN } else { I_CHEVRON_RIGHT }, size::TITLE + 2.0, ink);
+                let n = count.to_string();
+                let pw = widgets::pill_width(ui, &n);
+                widgets::pill(ui, Point::new(rr.right() - 12.0 - pw, rr.y + (rr.h - 18.0) / 2.0), 18.0, &n, t.muted, t.text.with_alpha(0.07));
+                let ls = Style::new(size::BODY, if on { weight::SEMIBOLD } else { weight::MEDIUM }, ink);
+                ui.label_in(Rect::new(rr.x + TEXT_X, rr.y, (rr.w - TEXT_X - pw - 24.0).max(10.0), rr.h), "Other providers", ls, Align::Left);
             }
             Item::Account(a) => {
                 row_fill(ui, rr, ("run-on", this), on, focused);
                 ui.hit(rr, Action::Overlay(ROW + this));
-                ui.mark(account_mark(&a.kind, l.harness, ui), mark, 15.0, (!a.ready).then_some(t.faint));
-                // what's left on the right, its segments beside it
+                ui.mark(account_mark(&a.kind, l.harness, ui), mark, 16.0, (!a.ready).then_some(t.faint));
+                // on the right: what's left with its segments beside it, or why it can't run yet
                 let mut right = rr.right() - 12.0;
                 if let Some(left) = a.left {
                     let s = format!("{left:.0}% left");
@@ -928,10 +915,10 @@ fn draw_run_on(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
                         widgets::segments(ui, bar, (left / 100.0) as f32, widgets::segment_count(seg_w, 7.0), col);
                         right -= seg_w + 14.0;
                     }
-                } else if !a.ready {
-                    let ns = Style::new(size::SMALL, weight::REGULAR, t.faint);
-                    let w = ui.measure("not signed in", ns);
-                    ui.label_in(Rect::new(right - w, rr.y, w + 1.0, rr.h), "not signed in", ns, Align::Left);
+                } else if let Some(why) = a.blocked {
+                    let why = sentence(why);
+                    let w = ui.measure(&why, quiet);
+                    ui.label_in(Rect::new(right - w, rr.y, w + 1.0, rr.h), &why, quiet, Align::Left);
                     right -= w + 14.0;
                 }
                 let ls = Style::new(size::BODY, if on { weight::SEMIBOLD } else { weight::MEDIUM }, if a.ready || on { t.text } else { t.muted });
@@ -940,7 +927,7 @@ fn draw_run_on(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
                 ui.draw(&lb, Point::new(rr.x + TEXT_X, rr.y + (rr.h - lb.h) / 2.0));
                 let left = room - lb.w - 10.0;
                 if !a.detail.is_empty() && left > 24.0 {
-                    let db = ui.line(&a.detail, Style::new(size::SMALL, weight::REGULAR, t.muted), Some(left));
+                    let db = ui.line(&a.detail, Style::new(size::SMALL, weight::REGULAR, if a.ready { t.muted } else { t.faint }), Some(left));
                     ui.draw(&db, Point::new(rr.x + TEXT_X + lb.w + 10.0, rr.y + (rr.h - db.h) / 2.0));
                 }
             }
@@ -963,14 +950,19 @@ fn short_price(p: f64) -> String {
 }
 
 /// The models the chosen login or provider can run: filterable, with context size and $ per million in / out.
-fn draw_models(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
+fn draw_models(s: &Shown, ui: &mut Ui, r: Rect, titled: bool, cx: &Cx) {
     let t = ui.t;
     let l = s.l;
     let focused = l.focus == Focus::Models;
     let models = s.models;
     let idx = &s.view;
-    let field = Rect::new(r.x, r.y, r.w, FIELD_H);
-    let prompt = format!("model… {} to pick from", models.len());
+    let mut top = r.y;
+    if titled {
+        title(ui, Rect::new(r.x, r.y, r.w, TITLE_H), "Model");
+        top += TITLE_H + TITLE_GAP;
+    }
+    let field = Rect::new(r.x, top, r.w, FIELD_H);
+    let prompt = format!("Search {} models", models.len());
     input(ui, field, I_SEARCH, &l.model_filter, &prompt, focused, cx.focused, false, Action::Overlay(MODEL_FIELD));
     let view = Rect::new(r.x, field.bottom() + 10.0, r.w, (r.bottom() - field.bottom() - 10.0).max(0.0));
     ui.hit_with(view, Action::Overlay(MODEL_AREA), Cursor::Default);
@@ -1034,8 +1026,8 @@ fn draw_models(s: &Shown, ui: &mut Ui, r: Rect, cx: &Cx) {
 fn draw_summary(s: &Shown, ui: &mut Ui, r: Rect) -> f32 {
     let t = ui.t;
     let l = s.l;
-    widgets::section(ui, Rect::new(r.x, r.y, r.w, 20.0), &sentence("launches"));
-    let mut y = r.y + 36.0;
+    title(ui, Rect::new(r.x, r.y, r.w, TITLE_H), "Launches");
+    let mut y = r.y + TITLE_H + TITLE_GAP + 6.0;
     let chosen = s.chosen();
     // what's left: the terminal UI's ▰▰▱ segments and the figure
     let usage = |ui: &mut Ui, x: f32, y: f32, w: f32, left: f64| {
@@ -1077,7 +1069,12 @@ fn draw_summary(s: &Shown, ui: &mut Ui, r: Rect) -> f32 {
         return y - r.y;
     }
     let Some(spec) = &s.spec else {
-        let msg = if s.installed { "pick where it runs on the left" } else { "install it first" };
+        let msg = match s.chosen() {
+            _ if !s.installed => "Install it first.",
+            Some(Item::Others { open: false, .. }) => "Providers that still need an API key. ⏎ shows them.",
+            Some(Item::Others { open: true, .. }) => "Providers that still need an API key. ⏎ folds them away.",
+            _ => "Pick a provider on the left.",
+        };
         ui.label_in(Rect::new(r.x, y, r.w, 22.0), msg, Style::new(size::BODY, weight::REGULAR, t.muted), Align::Left);
         return y + 22.0 - r.y;
     };
@@ -1096,10 +1093,6 @@ fn draw_summary(s: &Shown, ui: &mut Ui, r: Rect) -> f32 {
                 y += 24.0;
             }
         }
-        Some(Item::Recent(_)) => {
-            ui.label_in(Rect::new(r.x + 30.0, y, w, 20.0), "the way you last ran it here", Style::new(size::SMALL, weight::REGULAR, t.muted), Align::Left);
-            y += 24.0;
-        }
         _ => {}
     }
     y - r.y
@@ -1115,7 +1108,7 @@ fn permission_choices(l: &Launcher, t: &Tokens) -> (Vec<Seg<'static>>, Option<us
 
 fn draw_options(l: &Launcher, ui: &mut Ui, r: Rect) {
     let t = ui.t;
-    widgets::section(ui, Rect::new(r.x, r.y, r.w, 20.0), "Options");
+    title(ui, Rect::new(r.x, r.y, r.w, TITLE_H), "Options");
     let row = Rect::new(r.x, r.y + 30.0, r.w, 32.0);
     let x = row.x + 104.0;
     ui.label_in(Rect::new(row.x, row.y, 96.0, row.h), "Permissions", Style::new(size::SMALL, weight::MEDIUM, t.muted), Align::Left);
@@ -1129,6 +1122,11 @@ fn draw_options(l: &Launcher, ui: &mut Ui, r: Rect) {
 
 fn options_flow_h(_l: &Launcher, _ui: &mut Ui, _w: f32) -> f32 {
     32.0
+}
+
+/// The permission choices on one line, for the Create Slop tab's side panel.
+pub(crate) fn permission_row(l: &Launcher, ui: &mut Ui, r: Rect) {
+    draw_options_flow(l, ui, r);
 }
 
 fn draw_options_flow(l: &Launcher, ui: &mut Ui, r: Rect) {
@@ -1159,7 +1157,7 @@ fn main_action(s: &Shown, t: &Tokens) -> Main {
     }
     // Enter installs first (the terminal UI's button says "Launch …" there while it installs)
     if !s.installed {
-        return go(format!("Install {}", l.harness.label()), t.danger, t.ink_on(t.danger), INSTALL);
+        return go(format!("Install {}", l.harness.label()), t.bold_fill(t.danger), t.on_bold(), INSTALL);
     }
     // ... and signs in to Google before anything runs on a signed-out Gemini (the row says "enter signs in with Google")
     if s.sign_in {
@@ -1169,7 +1167,7 @@ fn main_action(s: &Shown, t: &Tokens) -> Main {
         Some(spec) if l.orchestrator => go(format!("Start it on {}", crate::services::launch::label_for(spec).trim_start_matches("orchestrator · ")), t.gold, t.ink_on(t.gold), LAUNCH),
         Some(spec) => go(format!("Launch {}", crate::services::launch::label_for(spec)), t.accent, t.on_accent, LAUNCH),
         None => {
-            let label = if s.needs { "pick a model to launch" } else { "pick where it runs" };
+            let label = if s.needs { "pick a model to launch" } else { "pick a provider" };
             Main { label: label.into(), fill: t.control, ink: t.muted, go: false, target: LAUNCH }
         }
     }
@@ -1185,8 +1183,15 @@ fn draw_footer(s: &Shown, ui: &mut Ui, r: Rect) {
         _ => "launch",
     };
     let enter = if l.orchestrator && l.running_orchestrator().is_some() { "go to it" } else { enter };
+    // on the fold, Enter opens and closes it
+    let fold = match s.chosen() {
+        Some(Item::Others { open, .. }) if l.focus == Focus::List => Some(if *open { "hide" } else { "show" }),
+        _ => None,
+    };
     // Enter installs or signs in first, as the button says
-    let enter = if !s.installed {
+    let enter = if let Some(fold) = fold {
+        fold
+    } else if !s.installed {
         "install"
     } else if s.sign_in {
         "sign in"
@@ -1411,6 +1416,8 @@ mod tests {
             keyed: vec!["openrouter".into(), "openai".into()],
             orchestrator_running: BTreeMap::new(),
             shared: false,
+            jsh: None,
+            studio: Default::default(),
         };
         Launcher::new(data, Some(PathBuf::from("/code/bro")), Place::Tab)
     }
@@ -1466,6 +1473,14 @@ mod tests {
         assert_eq!(l.tab, SessionTab::Continue);
         tap(&mut l, TAB_NEW);
         assert_eq!(l.tab, SessionTab::New);
+        // Create Slop asks for its roster the first time it opens, and takes its own clicks
+        tap(&mut l, TAB_SLOP);
+        assert_eq!((l.tab, l.studio.ask.take()), (SessionTab::Slop, Some(false)));
+        tap(&mut l, STUDIO + super::super::studio_gui::FIELD);
+        tap(&mut l, TAB_NEW);
+        tap(&mut l, TAB_SLOP);
+        assert_eq!(l.studio.ask, None, "once a launcher");
+        tap(&mut l, TAB_NEW);
         assert!(matches!(tap(&mut l, CLOSE), Outcome::Close));
         assert!(matches!(tap(&mut l, PROFILES), Outcome::Profiles));
         assert!(matches!(tap(&mut l, INSTALL), Outcome::Install(Harness::Claude)));
@@ -1494,14 +1509,19 @@ mod tests {
     }
 
     #[test]
-    fn gemini_survives_clicking_each_tool_tile() {
+    fn gemini_survives_compatible_tool_tiles_and_antigravity_uses_its_account() {
         let mut l = launcher().with_profile("gemini:work").unwrap();
         for (i, harness) in Harness::ALL.iter().enumerate() {
             tap(&mut l, HARNESS + i);
             let spec = l.spec().unwrap();
             assert_eq!(spec.harness, *harness);
-            assert_eq!(spec.profile_id.as_deref(), Some("gemini:work"));
-            assert_eq!(spec.model.as_deref(), Some("gemini-3.8-flash"));
+            if *harness == Harness::Antigravity {
+                assert_eq!(spec.profile_id, None);
+                assert_eq!(spec.model, None);
+            } else {
+                assert_eq!(spec.profile_id.as_deref(), Some("gemini:work"));
+                assert_eq!(spec.model.as_deref(), Some("gemini-3.8-flash"));
+            }
         }
     }
 
@@ -1544,16 +1564,16 @@ mod tests {
     fn the_address_bar_elides_the_middle_first() {
         let w = [20.0, 40.0, 30.0, 60.0];
         let all = 150.0 + 3.0 * CRUMB_SEP;
-        assert_eq!(crumb_plan(&w, 10.0, all), [Some(0), Some(1), Some(2), Some(3)]);
+        assert_eq!(crumb_plan(&w, 10.0, CRUMB_SEP, all), [Some(0), Some(1), Some(2), Some(3)]);
         // first, "…", the last two
-        assert_eq!(crumb_plan(&w, 10.0, all - 1.0), [Some(0), None, Some(2), Some(3)]);
+        assert_eq!(crumb_plan(&w, 10.0, CRUMB_SEP, all - 1.0), [Some(0), None, Some(2), Some(3)]);
         // first, "…", the last
-        assert_eq!(crumb_plan(&w, 10.0, 90.0 + 2.0 * CRUMB_SEP), [Some(0), None, Some(3)]);
+        assert_eq!(crumb_plan(&w, 10.0, CRUMB_SEP, 90.0 + 2.0 * CRUMB_SEP), [Some(0), None, Some(3)]);
         // "…" and the last, then the last alone
-        assert_eq!(crumb_plan(&w, 10.0, 70.0 + CRUMB_SEP), [None, Some(3)]);
-        assert_eq!(crumb_plan(&w, 10.0, 30.0), [Some(3)]);
-        assert_eq!(crumb_plan(&[50.0], 10.0, 10.0), [Some(0)]);
-        assert!(crumb_plan(&[], 10.0, 100.0).is_empty());
+        assert_eq!(crumb_plan(&w, 10.0, CRUMB_SEP, 70.0 + CRUMB_SEP), [None, Some(3)]);
+        assert_eq!(crumb_plan(&w, 10.0, CRUMB_SEP, 30.0), [Some(3)]);
+        assert_eq!(crumb_plan(&[50.0], 10.0, CRUMB_SEP, 10.0), [Some(0)]);
+        assert!(crumb_plan(&[], 10.0, CRUMB_SEP, 100.0).is_empty());
     }
 
     #[test]

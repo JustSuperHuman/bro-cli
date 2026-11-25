@@ -24,11 +24,15 @@ pub enum Drawn {
 
 pub fn draw(app: &mut App, ui: &mut Ui, canvas: &mut TuiCanvas, window: Rect, body: Rect, focused: bool) -> Option<Drawn> {
     if !app.overlay.is_open() {
+        // just closed: what was on screen fades out where it was (it takes no clicks)
+        ui.ghost_leave("overlay", Point::new(0.0, 6.0), 1.0, window.center());
         return None;
     }
     let time = app.start.elapsed().as_secs_f64();
     app.refresh_team_view();
+    app.launcher_asks();
     let prev = ui.layer();
+    let start = ui.group_start();
     let native = match &app.overlay {
         Overlay::Palette(_) => palette::draw(app, ui, window, time),
         Overlay::Help(_) => help::draw(app, ui, window, time),
@@ -39,7 +43,13 @@ pub fn draw(app: &mut App, ui: &mut Ui, canvas: &mut TuiCanvas, window: Rect, bo
             let alt = app.alt_down.is_some_and(|t| t.elapsed() >= crate::app::alt_hints::HOLD);
             let cx = Cx { svc: &app.svc, keymap: &app.keymap, time, focused, alt };
             match &mut app.overlay {
-                Overlay::Launcher(l) => crate::launcher::gui::draw(l, ui, body, &cx),
+                Overlay::Launcher(l) => {
+                    // Create Slop is a studio: its page takes the window's width, over the sidebar (the row of
+                    // tabs and the window's buttons stay above it)
+                    let m = crate::app::gui::layout::MARGIN;
+                    let area = if l.fills_window() { Rect::new(window.x + m, body.y, (body.right() - window.x - m).max(0.0), body.h) } else { body };
+                    crate::launcher::gui::draw(l, ui, area, &cx)
+                }
                 Overlay::File(v) => crate::file_view::gui::draw(v, ui, window, &cx),
                 Overlay::AgentFiles(v) => crate::agent_files::gui::draw(v, ui, window, &cx),
                 Overlay::Team(v) => crate::team_board::gui::draw(v, ui, window, &cx),
@@ -52,6 +62,11 @@ pub fn draw(app: &mut App, ui: &mut Ui, canvas: &mut TuiCanvas, window: Rect, bo
             }
         }
     };
+    if native {
+        ui.ghost_keep("overlay", start);
+    } else {
+        ui.ghost_drop("overlay");
+    }
     ui.set_layer(prev);
     if native {
         return Some(Drawn::Native);
@@ -164,5 +179,10 @@ pub fn apply_launcher(app: &mut App, o: crate::launcher::Outcome) {
             app.overlay = Overlay::None;
             app.sign_in_gemini();
         }
+        Outcome::InstallTool(tool, again) => {
+            app.overlay = Overlay::None;
+            app.install_tool(tool, again);
+        }
+        Outcome::SaveKey(tool, key) => app.svc.save_studio_key(tool, key),
     }
 }

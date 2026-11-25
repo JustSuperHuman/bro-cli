@@ -1,6 +1,6 @@
 //! A small colon picker in either session view, and a plain library/editor in Settings.
 
-use super::{Gui, View, advance};
+use super::{Gui, View, advance, range_rects};
 use crate::app::{App, Overlay};
 use crate::app::gui::actions::Action;
 use crate::app::gui::kit::{Cursor, Style, Ui, size, weight, widgets};
@@ -14,13 +14,114 @@ const NEW: usize = 602;
 const EDIT: usize = 603;
 const DELETE: usize = 604;
 const INSERT: usize = 605;
+/// "New…" at the foot of the colon picker.
+const CREATE: usize = 606;
 const SAVE: usize = 607;
 const BACK: usize = 608;
+const PREVIEW: usize = 609;
 const FIELD: usize = 610;
 const ROW: usize = 700;
 const REMOVE: usize = 2000;
 const TRUNCATE: usize = 3000;
 const ROW_H: f32 = 36.0;
+
+/// The definition belongs to this message, rather than the current library entry.
+#[derive(Clone)]
+pub(super) struct Preview {
+    anchor: Rect,
+    token: String,
+    instructions: String,
+}
+
+#[derive(Default)]
+pub(super) struct PreviewState {
+    pub hovered: Option<Preview>,
+    shown: Option<Preview>,
+    rect: Option<Rect>,
+    scroll: f32,
+    max_scroll: f32,
+}
+
+/// Strong enough to read in pending messages and in both light and dark themes.
+pub(super) fn badge_ink(ui: &Ui) -> bro_gfx::Color {
+    ui.t.shine.mix(ui.t.text, if ui.t.light { 0.45 } else { 0.12 })
+}
+
+/// Paint a token without changing its text, caret positions, wrapping, or copied content.
+pub(super) fn badge(ui: &mut Ui, text: &super::TextBox, at: Point, range: &std::ops::Range<usize>, token: &str, instructions: &str, size: f32) -> Option<Preview> {
+    let mut hovered = None;
+    for glyphs in range_rects(text, at, range, ui.scale) {
+        let height = (size * 1.35).round().min(glyphs.h + 2.0);
+        let rect = Rect::new(glyphs.x - 3.0, glyphs.y + (glyphs.h - height) / 2.0, glyphs.w + 6.0, height);
+        let hot = ui.hovered(rect);
+        let tint = ui.t.shine;
+        ui.panel(rect, 6.0, tint.with_alpha(if ui.t.light { if hot { 0.14 } else { 0.09 } } else if hot { 0.23 } else { 0.16 }), tint.with_alpha(if hot { 0.48 } else { 0.26 }));
+        // Preserve full-contrast badge text even when the pending bubble's body is faded.
+        ui.clip(glyphs, 0.0);
+        ui.draw_color(text, at, badge_ink(ui));
+        ui.unclip();
+        if hot {
+            hovered = Some(Preview { anchor: rect, token: token.into(), instructions: instructions.into() });
+        }
+    }
+    hovered
+}
+
+impl PreviewState {
+    pub(super) fn wheel(&mut self, pointer: Option<Point>, pixels: f32) -> bool {
+        if !self.rect.is_some_and(|r| pointer.is_some_and(|p| r.contains(p))) { return false; }
+        self.scroll = (self.scroll - pixels).clamp(0.0, self.max_scroll);
+        true
+    }
+
+    /// Draw after the conversation and composer have released their text clips.
+    pub(super) fn draw(&mut self, ui: &mut Ui, id: PaneId) -> bool {
+        if let Some(next) = self.hovered.take() {
+            if self.shown.as_ref().is_none_or(|old| old.token != next.token || old.instructions != next.instructions) { self.scroll = 0.0; }
+            self.shown = Some(next);
+        } else if !self.rect.is_some_and(|r| ui.hovered(r.outset(10.0))) {
+            self.shown = None;
+        }
+        self.rect = None;
+        let Some(preview) = self.shown.as_ref() else { return false };
+        let bounds = ui.screen.intersect(&ui.scene.clip().rect.scale(1.0 / ui.scale));
+        if bounds.w < 100.0 || bounds.h < 100.0 { return false; }
+        let width = 440.0_f32.min(bounds.w - 16.0);
+        let header = ui.line(&preview.token, Style::mono(size::BODY, badge_ink(ui)).weight(weight::SEMIBOLD), Some(width - 32.0));
+        let body = ui.para(&preview.instructions, Style::new(size::BODY, weight::REGULAR, ui.t.text), width - 32.0, None);
+        let top = header.h + 12.0;
+        let max_h = 440.0_f32.min(bounds.h - 16.0);
+        if max_h < top + 80.0 { return false; }
+        let scrolling = body.h + top + 32.0 > max_h;
+        let footer = if scrolling { 24.0 } else { 0.0 };
+        let height = (body.h + top + 32.0 + footer).min(max_h);
+        let x = (preview.anchor.x + (preview.anchor.w - width) / 2.0).clamp(bounds.x + 8.0, bounds.right() - width - 8.0);
+        let above = preview.anchor.y - height - 8.0;
+        let y = (if above >= bounds.y + 8.0 { above } else { preview.anchor.bottom() + 8.0 }).clamp(bounds.y + 8.0, bounds.bottom() - height - 8.0);
+        let rect = Rect::new(x, y, width, height);
+        let inner = Rect::new(x + 16.0, y + 16.0 + top, width - 32.0, height - top - 32.0 - footer);
+        self.max_scroll = (body.h - inner.h).max(0.0);
+        self.scroll = self.scroll.clamp(0.0, self.max_scroll);
+        let layer = ui.layer();
+        ui.shadow(rect, 12.0, 18.0, 4.0, ui.t.shadow);
+        ui.round(rect, 12.0, ui.t.raised);
+        ui.hit_with(rect, Action::Focus(id, PREVIEW), Cursor::Default);
+        ui.draw(&header, Point::new(x + 16.0, y + 16.0));
+        ui.clip(inner, 0.0);
+        ui.draw(&body, Point::new(inner.x, inner.y - self.scroll));
+        ui.unclip();
+        if scrolling {
+            let hint = ui.line("Scroll to read more", Style::new(size::CAPTION, weight::REGULAR, ui.t.muted), None);
+            ui.draw(&hint, Point::new(x + 16.0, rect.bottom() - 12.0 - hint.h));
+            let thumb = (inner.h * inner.h / body.h).max(18.0);
+            let offset = (inner.h - thumb) * self.scroll / self.max_scroll.max(1.0);
+            ui.round(Rect::new(rect.right() - 7.0, inner.y + offset, 2.0, thumb), 1.0, ui.t.muted.with_alpha(0.5));
+        }
+        ui.set_layer(layer);
+        self.rect = Some(rect);
+        true
+    }
+}
 
 thread_local! {
     static MANAGER: std::cell::RefCell<View> = std::cell::RefCell::new(View::default());
@@ -66,10 +167,14 @@ fn picker(app: &mut App, ui: &mut Ui, id: PaneId, over: Rect, rows: &[usize]) {
     let t = ui.t;
     let native = app.terminal_quips_enabled(id);
     let d = app.focus.draft(id);
-    let selected = if native { d.terminal_quips.selected } else { d.quips.selected }.min(rows.len().saturating_sub(1));
+    // The matches, then "New…" (at `rows.len()`).
+    let count = rows.len() + 1;
+    let selected = if native { d.terminal_quips.selected } else { d.quips.selected }.min(rows.len());
+    // With nothing matching, "New…" waits for a click: the keys keep their usual jobs.
+    let chosen = (!rows.is_empty()).then_some(selected);
     let query = if native { d.terminal_quips.query.clone().unwrap_or_default() } else { crate::quips::query(d.area.text(), d.area.cursor()).map_or(String::new(), |(_, q)| q) };
-    let shown = rows.len().clamp(1, 6);
-    let first = selected.saturating_sub(shown - 1).min(rows.len().saturating_sub(shown));
+    let shown = count.min(6);
+    let first = selected.saturating_sub(shown - 1).min(count - shown);
     let w = 420.0_f32.min(ui.screen.w - 32.0);
     let h = 30.0 + shown as f32 * ROW_H + 56.0;
     let x = over.x.min(ui.screen.right() - w - 12.0).max(ui.screen.x + 12.0);
@@ -80,18 +185,29 @@ fn picker(app: &mut App, ui: &mut Ui, id: PaneId, over: Rect, rows: &[usize]) {
     ui.block(r);
     label(ui, "Quips", Rect::new(x + 12.0, y + 5.0, 100.0, 20.0), Style::new(size::SMALL, weight::MEDIUM, t.muted));
     ui.label_in(Rect::new(x + 120.0, y + 5.0, w - 132.0, 20.0), &format!(":{query}"), Style::mono(size::SMALL, t.faint), Align::Right);
-    if rows.is_empty() { label(ui, "No matching Quips", Rect::new(x + 12.0, y + 30.0, w - 24.0, ROW_H), Style::new(size::SMALL, weight::REGULAR, t.muted)); }
-    for (n, &index) in rows.iter().enumerate().skip(first).take(shown) {
-        let q = &app.focus.quips.items[index];
+    for n in first..first + shown {
         let rr = Rect::new(x + 5.0, y + 30.0 + (n - first) as f32 * ROW_H, w - 10.0, ROW_H - 2.0);
-        widgets::row(ui, rr, ("quip-pick", id, n), n == selected, Action::Focus(id, ROW + n));
+        let Some(q) = rows.get(n).and_then(|i| app.focus.quips.items.get(*i)) else {
+            widgets::row(ui, rr, ("quip-pick", id, n), chosen == Some(n), Action::Focus(id, CREATE));
+            ui.icon(Rect::new(rr.x + 6.0, rr.y, 18.0, rr.h), "\u{F0415}", size::BODY, t.accent);
+            label(ui, "New…", Rect::new(rr.x + 28.0, rr.y, rr.w * 0.5, rr.h), Style::new(size::BODY, weight::MEDIUM, t.text));
+            if !query.is_empty() {
+                ui.label_in(Rect::new(rr.x + rr.w * 0.5, rr.y, rr.w * 0.5 - 9.0, rr.h), &format!(":{query}"), Style::mono(size::CAPTION, t.faint), Align::Right);
+            }
+            continue;
+        };
+        widgets::row(ui, rr, ("quip-pick", id, n), chosen == Some(n), Action::Focus(id, ROW + n));
         label(ui, &q.name, Rect::new(rr.x + 9.0, rr.y, rr.w * 0.5, rr.h), Style::new(size::BODY, weight::MEDIUM, t.text));
         ui.label_in(Rect::new(rr.x + rr.w * 0.5, rr.y, rr.w * 0.5 - 9.0, rr.h), &q.token(), Style::mono(size::CAPTION, t.accent), Align::Right);
     }
-    if let Some(q) = rows.get(selected).and_then(|i| app.focus.quips.items.get(*i)) {
-        label(ui, crate::quips::summary(&q.trigger), Rect::new(x + 12.0, r.bottom() - 52.0, w - 24.0, 24.0), Style::new(size::CAPTION, weight::REGULAR, t.muted));
-    }
-    label(ui, "↑ ↓ choose · tab insert · esc close", Rect::new(x + 12.0, r.bottom() - 26.0, w - 24.0, 20.0), Style::new(size::CAPTION, weight::REGULAR, t.faint));
+    let (note, keys) = match rows.get(selected).and_then(|i| app.focus.quips.items.get(*i)) {
+        Some(q) => (crate::quips::summary(&q.trigger).to_string(), "↑ ↓ choose · tab insert · esc close"),
+        None if rows.is_empty() && !query.is_empty() => (format!("Nothing is saved as :{query} yet."), "click New… to make it · esc close"),
+        None if rows.is_empty() => ("Your library is empty.".into(), "click New… to write one · esc close"),
+        None => ("Save your own instructions under a new shortcut.".into(), "↑ ↓ choose · tab create · esc close"),
+    };
+    label(ui, &note, Rect::new(x + 12.0, r.bottom() - 52.0, w - 24.0, 24.0), Style::new(size::CAPTION, weight::REGULAR, t.muted));
+    label(ui, keys, Rect::new(x + 12.0, r.bottom() - 26.0, w - 24.0, 20.0), Style::new(size::CAPTION, weight::REGULAR, t.faint));
 }
 
 fn manager(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, rows: &[usize], view: &mut View) {
@@ -199,7 +315,8 @@ fn editor(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, v: &mut View) {
     if let Some(error) = &p.error {
         label(ui, error, Rect::new(x, r.bottom() - 71.0, w, 20.0), Style::new(size::CAPTION, weight::REGULAR, t.danger));
     } else {
-        label(ui, "Saved on this computer · tab switches fields · ctrl+s saves", Rect::new(x, r.bottom() - 71.0, w, 20.0), Style::new(size::CAPTION, weight::REGULAR, t.faint));
+        let hint = if e.insert { "Saving adds it to your message · tab switches fields · ctrl+s saves" } else { "Saved on this computer · tab switches fields · ctrl+s saves" };
+        label(ui, hint, Rect::new(x, r.bottom() - 71.0, w, 20.0), Style::new(size::CAPTION, weight::REGULAR, t.faint));
     }
     widgets::button(ui, Rect::new(r.right() - 130.0, r.bottom() - 47.0, 110.0, 31.0), "Save", widgets::Kind::Primary, target(id, SAVE, manager));
     widgets::button(ui, Rect::new(r.right() - 216.0, r.bottom() - 47.0, 78.0, 31.0), "Cancel", widgets::Kind::Secondary, target(id, BACK, manager));
@@ -254,8 +371,10 @@ pub(super) fn click(g: &mut Gui, id: PaneId, n: usize, point: Point, count: u32)
     match n {
         CLOSE => g.app.close_quips(id),
         NEW => g.app.focus_edit_quip(id, None),
+        CREATE => g.app.quip_create(id),
         SAVE => g.app.focus_save_quip(id),
-        BACK => { let p = &mut g.app.focus.draft(id).quips; p.editor = None; p.error = None; }
+        BACK => g.app.focus_close_quip_editor(id),
+        PREVIEW => {}
         EDIT | INSERT => {
             let rows = g.app.focus_quip_rows(id);
             let sel = g.app.focus.draft(id).quips.selected.min(rows.len().saturating_sub(1));
@@ -300,14 +419,16 @@ pub(super) fn wheel(g: &mut Gui, id: PaneId, dy: f32) -> bool {
         let rows = g.app.terminal_quip_rows(id);
         let state = &mut g.app.focus.draft(id).terminal_quips;
         if state.query.is_none() { return false; }
-        state.selected = (state.selected as isize - dy.round() as isize).clamp(0, rows.len().saturating_sub(1) as isize) as usize;
+        // down to "New…" past the matches (and nowhere when nothing matches)
+        state.selected = (state.selected as isize - dy.round() as isize).clamp(0, rows.len() as isize) as usize;
         return true;
     }
     let rows = g.app.focus_quip_rows(id);
+    let last = if matches!(g.app.overlay, Overlay::Quips(_)) { rows.len().saturating_sub(1) } else { rows.len() };
     let p = &mut g.app.focus.draft(id).quips;
     if p.editor.is_some() { return true; }
     if !p.open && rows.is_empty() { return false; }
-    p.selected = (p.selected as isize - dy.round() as isize).clamp(0, rows.len().saturating_sub(1) as isize) as usize;
+    p.selected = (p.selected as isize - dy.round() as isize).clamp(0, last as isize) as usize;
     p.delete_armed = false;
     true
 }

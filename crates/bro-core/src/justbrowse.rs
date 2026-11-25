@@ -6,7 +6,10 @@
 //! `~/.local/share/justbrowse-mcp`), registers the native host and supplies the complete `justbrowse-browser`
 //! skill and session-scoped MCP config to Claude Code and Codex. Loading the unpacked extension is the one step
 //! left to you: browsers only take one by hand.
-use crate::util::{env_path, home_dir, read_json};
+//!
+//! A bridge registered some other way (a source checkout, the upstream installer, hangwin/mcp-chrome) counts
+//! too: [`installed`] follows the browser's native-host manifest to it, so its sessions are wired the same way.
+use crate::util::{env_path, home_dir, read_json, same_path};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -47,27 +50,101 @@ pub fn installer_command() -> String {
     }
 }
 
-/// An installed JustBrowseMCP, from the installer's `installed.json`.
+/// The native-messaging host the extension starts (JustBrowseMCP keeps hangwin/mcp-chrome's name).
+pub const HOST_NAME: &str = "com.chromemcp.nativehost";
+
+/// An installed JustBrowseMCP: bro's Quick Install, or a bridge the browser was pointed at some other way.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Installed {
     pub version: Option<String>,
+    /// [`install_dir`] for Quick Install; otherwise the root of the checkout the bridge runs from (the
+    /// folder holding its `skills/`), or the bridge's own folder when it ships no skill.
+    pub dir: PathBuf,
+    /// The `justbrowse-browser` skill it ships, if any.
+    pub skill: Option<PathBuf>,
 }
 
-/// What's installed (a file read; no network).
+impl Installed {
+    /// Bro's own Quick Install, rather than a bridge registered some other way.
+    pub fn quick_install(&self) -> bool {
+        same_path(&self.dir, &install_dir())
+    }
+}
+
+/// What's installed: Quick Install first, then any bridge registered with the browser. File reads only,
+/// cheap enough for every launch; no network.
 pub fn installed() -> Option<Installed> {
+    quick_installed().or_else(registered)
+}
+
+fn shipped_skill(root: &Path) -> Option<PathBuf> {
+    Some(root.join("skills").join(crate::tool_skills::BROWSER)).filter(|s| s.join("SKILL.md").is_file())
+}
+
+fn quick_installed() -> Option<Installed> {
     let dir = install_dir();
-    let info = read_json(&dir.join("installed.json"));
     if !dir.join("extension/manifest.json").is_file() || !dir.join("bridge/dist/cli.js").is_file() {
         return None;
     }
-    let version = info.as_ref().and_then(|v| v.get("version")).and_then(|v| v.as_str()).map(str::to_string);
-    Some(Installed { version })
+    let version = read_json(&dir.join("installed.json")).and_then(|v| v.get("version")?.as_str().map(str::to_string));
+    Some(Installed { version, skill: shipped_skill(&dir), dir })
+}
+
+/// Where the bridge's `register` command writes the per-user host manifest. On Windows the browsers find
+/// it through the registry (Edge and Brave share Chrome's); elsewhere each browser looks in its own folder.
+fn host_manifests() -> Vec<PathBuf> {
+    let home = home_dir();
+    let browsers: Vec<PathBuf> = if cfg!(windows) {
+        let roaming = env_path("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming"));
+        ["Google/Chrome", "Chromium", "Microsoft/Edge", "BraveSoftware/Brave-Browser"].iter().map(|b| roaming.join(b)).collect()
+    } else if cfg!(target_os = "macos") {
+        let support = home.join("Library").join("Application Support");
+        ["Google/Chrome", "Chromium", "Microsoft Edge", "BraveSoftware/Brave-Browser"].iter().map(|b| support.join(b)).collect()
+    } else {
+        let config = home.join(".config");
+        ["google-chrome", "chromium", "microsoft-edge", "BraveSoftware/Brave-Browser"].iter().map(|b| config.join(b)).collect()
+    };
+    browsers.into_iter().map(|b| b.join("NativeMessagingHosts").join(format!("{HOST_NAME}.json"))).collect()
+}
+
+/// A bridge registered outside Quick Install, found through its host manifest. A manifest whose
+/// host script is gone is a leftover registration and doesn't count.
+fn registered() -> Option<Installed> {
+    host_manifests().into_iter().find_map(|manifest| {
+        let host = PathBuf::from(read_json(&manifest)?.get("path")?.as_str()?);
+        let host = if host.is_relative() { manifest.parent()?.join(host) } else { host };
+        if !host.is_file() {
+            return None;
+        }
+        // run_host.{bat,sh} lives in the bridge's dist/, beside its package.json.
+        let bridge = host.parent()?.parent()?;
+        let version = read_json(&bridge.join("package.json")).and_then(|v| v.get("version")?.as_str().map(str::to_string));
+        // A checkout keeps the skill at its root, a few folders above the bridge.
+        let root = host.ancestors().skip(1).take(5).find(|d| shipped_skill(d).is_some());
+        Some(Installed { version, skill: root.and_then(shipped_skill), dir: root.unwrap_or(bridge).to_path_buf() })
+    })
+}
+
+/// The folder Quick Install's "Open extension folder" shows: the extracted extension, or the checkout
+/// a bridge registered some other way runs from.
+pub fn shown_folder() -> PathBuf {
+    match installed() {
+        Some(found) if !found.quick_install() => found.dir,
+        _ => extension_dir(),
+    }
 }
 
 /// The one manual browser step, kept visible in Quick Install even after installation.
 pub fn after_install() -> String {
+    let wired = "Bro manages its skill and connects new Claude and Codex sessions automatically.";
+    if let Some(found) = installed().filter(|f| !f.quick_install()) {
+        return format!(
+            "Your browser already runs the JustBrowse bridge from:\n{}\nKeep the extension you loaded from there, then open it and click Connect.\n{wired}\nInstalling from here registers Bro's release copy in place of that bridge.",
+            found.dir.display()
+        );
+    }
     format!(
-        "1. Open chrome://extensions or edge://extensions.\n2. Turn on Developer mode, choose Load unpacked, and select:\n{}\n3. Open the JustBrowseMCP extension and click Connect. After an update, click Reload first.\nBro manages its skill and connects new Claude and Codex sessions automatically.",
+        "1. Open chrome://extensions or edge://extensions.\n2. Turn on Developer mode, choose Load unpacked, and select:\n{}\n3. Open the JustBrowseMCP extension and click Connect. After an update, click Reload first.\n{wired}",
         extension_dir().display()
     )
 }
@@ -84,7 +161,8 @@ pub fn connected() -> Result<bool, String> {
 /// A launch-scoped MCP configuration: no global settings are overwritten and pooled logins work too.
 pub fn mcp_config(home: &Path) -> std::io::Result<PathBuf> {
     let file = home.join("bro-browser/justbrowse-mcp.json");
-    let body = serde_json::json!({"mcpServers": {SERVER_NAME: {"type": "http", "url": MCP_URL}}});
+    let body = serde_json::json!({"mcpServers": {SERVER_NAME: {"type": "http", "url": MCP_URL,
+        "headers": {"x-bro-session-id": "${BRO_SESSION_ID}"}}}});
     crate::util::write_json_pretty(&file, &body)?;
     Ok(file)
 }
@@ -175,7 +253,7 @@ pub fn install(mut say: impl FnMut(&str)) -> anyhow::Result<()> {
         // Older bridges register Chrome's manifest but omit the Chromium-family registry aliases.
         #[cfg(windows)]
         for browser in ["Microsoft\\Edge", "BraveSoftware\\Brave-Browser"] {
-            let manifest = env_path("APPDATA").context("APPDATA is not set")?.join("Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json");
+            let manifest = env_path("APPDATA").context("APPDATA is not set")?.join(format!("Google/Chrome/NativeMessagingHosts/{HOST_NAME}.json"));
             run("reg", vec!["add".into(), format!("HKCU\\Software\\{browser}\\NativeMessagingHosts\\com.chromemcp.nativehost"), "/ve".into(), "/t".into(), "REG_SZ".into(), "/d".into(), manifest.to_string_lossy().into_owned(), "/f".into()])?;
         }
         crate::skill_repos::mirror(&bundle.join("extension"), &extension_dir(), true)?;
@@ -205,12 +283,66 @@ mod tests {
         assert_eq!(installed(), None, "a stale installer record does not count as an extracted extension");
         crate::util::atomic_write(&extension_dir().join("manifest.json"), b"{}").unwrap();
         crate::util::atomic_write(&install_dir().join("bridge/dist/cli.js"), b"// bridge").unwrap();
-        assert_eq!(installed(), Some(Installed { version: Some("1.1.0".into()) }));
+        assert_eq!(installed(), Some(Installed { version: Some("1.1.0".into()), dir: install_dir(), skill: None }));
+        assert!(installed().unwrap().quick_install());
         let config = mcp_config(&sb.home().join("profile")).unwrap();
         assert_eq!(read_json(&config).unwrap()["mcpServers"][SERVER_NAME]["url"], MCP_URL);
         assert!(["../escape", "/absolute", "C:/drive", "dir/../escape", "dir\\\\file"].into_iter().all(|p| !safe_entry(p)));
         assert!(safe_entry("justbrowse-1.1.0/extension/manifest.json"));
         assert!(after_install().contains("Load unpacked") && extension_dir().ends_with("extension"));
         assert!(installer_command().contains(REPO));
+    }
+
+    /// A checkout laid out like JustBrowseMCP's repo, registered the way its bridge's `register` does it.
+    fn register_checkout(root: &Path, host: &Path) {
+        crate::util::atomic_write(&root.join("skills/justbrowse-browser/SKILL.md"), b"---\nname: justbrowse-browser\n---\nfrom the checkout").unwrap();
+        crate::util::atomic_write(&root.join("app/native-server/package.json"), br#"{"name":"justbrowse-bridge","version":"1.1.2"}"#).unwrap();
+        crate::util::atomic_write(&root.join("app/native-server/dist/run_host.bat"), b"@echo off").unwrap();
+        let manifest = serde_json::json!({"name": HOST_NAME, "path": host, "type": "stdio"});
+        crate::util::write_json_pretty(&host_manifests()[0], &manifest).unwrap();
+    }
+
+    #[test]
+    fn a_bridge_registered_outside_quick_install_counts() {
+        let sb = sandbox();
+        let root = sb.home().join("src/JustBrowseMCP");
+        let host = root.join("app/native-server/dist/run_host.bat");
+        register_checkout(&root, &host);
+        let found = installed().expect("a registered checkout is installed");
+        assert_eq!(found, Installed { version: Some("1.1.2".into()), dir: root.clone(), skill: Some(root.join("skills/justbrowse-browser")) });
+        assert!(!found.quick_install());
+        assert_eq!(shown_folder(), root);
+        assert!(after_install().contains(&root.display().to_string()) && after_install().contains("in place of that bridge"));
+
+        // The upstream bridge from npm ships no skill: its own package folder stands in for the root.
+        let npm = sb.home().join("npm/node_modules/mcp-chrome-bridge");
+        crate::util::atomic_write(&npm.join("package.json"), br#"{"version":"1.0.31"}"#).unwrap();
+        crate::util::atomic_write(&npm.join("dist/run_host.bat"), b"@echo off").unwrap();
+        crate::util::write_json_pretty(&host_manifests()[0], &serde_json::json!({"path": npm.join("dist/run_host.bat")})).unwrap();
+        assert_eq!(installed(), Some(Installed { version: Some("1.0.31".into()), dir: npm.clone(), skill: None }));
+
+        // A registration whose host script was deleted is a leftover.
+        std::fs::remove_file(npm.join("dist/run_host.bat")).unwrap();
+        assert_eq!(installed(), None);
+
+        // Quick Install wins over another registration.
+        register_checkout(&root, &host);
+        crate::util::atomic_write(&extension_dir().join("manifest.json"), b"{}").unwrap();
+        crate::util::atomic_write(&install_dir().join("bridge/dist/cli.js"), b"// bridge").unwrap();
+        assert!(installed().unwrap().quick_install());
+        assert_eq!(shown_folder(), extension_dir());
+    }
+
+    #[test]
+    fn the_browser_skill_comes_from_the_checkout_it_runs() {
+        let sb = sandbox();
+        let root = sb.home().join("src/JustBrowseMCP");
+        register_checkout(&root, &root.join("app/native-server/dist/run_host.bat"));
+        let codex = crate::paths::codex_local_dir();
+        std::fs::create_dir_all(&codex).unwrap();
+        crate::tool_skills::refresh_browser().expect("no network needed for a shipped skill");
+        let copy = codex.join("skills/justbrowse-browser");
+        assert_eq!(std::fs::read_to_string(copy.join("SKILL.md")).unwrap(), "---\nname: justbrowse-browser\n---\nfrom the checkout");
+        assert!(copy.join(".bro-managed").is_file());
     }
 }

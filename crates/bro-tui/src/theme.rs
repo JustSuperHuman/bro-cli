@@ -27,8 +27,12 @@
 //! borders = "double"  # optional: rounded, plain, double, thick, dashed, heavy-dashed, ascii, block
 //! ```
 
+pub mod import;
+pub mod editor;
+
 use ratatui::style::Color;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The colours every surface draws with.
 #[derive(Clone, Debug)]
@@ -64,6 +68,8 @@ pub struct Theme {
     pub cursor: Option<Color>,
     /// Borders, titles, backdrop and screen effects.
     pub skin: crate::skin::Skin,
+    /// Portable T3/VS Code palette. Keep all roles and metadata for lossless re-export.
+    pub imported: Option<Arc<import::Imported>>,
 }
 
 // name, accent, shine, frame, muted, user, inline, good, danger
@@ -523,7 +529,7 @@ pub fn names() -> Vec<String> {
 
 /// The themes that come with bro.
 pub fn builtin_names() -> Vec<String> {
-    let mut v: Vec<String> = vec![PALETTES[0].0.to_string(), "paper".into()];
+    let mut v: Vec<String> = vec![PALETTES[0].0.to_string(), "paper".into(), "aurora-studio".into(), "aurora-studio@light".into()];
     v.extend(PAINTED.iter().map(|p| p.name.to_string()));
     v.extend(PALETTES[1..].iter().map(|p| p.0.to_string()));
     v.push("terminal".into());
@@ -559,16 +565,13 @@ pub fn project_color(key: &str, t: &Theme) -> Color {
     if t.name == "mono" || t.name == "terminal" {
         return t.accent;
     }
-    let name = key.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(key).to_lowercase();
-    // FNV-1a, explicitly fixed instead of a platform-dependent/randomized hasher.
-    let hash = name.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
     // blue, magenta, cyan, yellow, green, bright blue, bright magenta, bright cyan
     if let Some(a) = t.ansi {
-        return a[[4, 5, 6, 3, 2, 12, 13, 14][(hash % 8) as usize]];
+        return a[[4, 5, 6, 3, 2, 12, 13, 14][(bro_core::projects::color_hash(key) % 8) as usize]];
     }
-    let hue = 20.0 + (hash % 3200) as f32 / 10.0;
+    // the phone's letter tiles use the same hue, at the dark theme's saturation and lightness
     let (saturation, lightness) = if t.is_light() { (0.55, 0.38) } else { (0.7, 0.72) };
-    hsl(hue, saturation, lightness)
+    hsl(bro_core::projects::hue(key), saturation, lightness)
 }
 
 /// The orchestrator's color: gold, so its window and sidebar row stand out from every project.
@@ -616,6 +619,9 @@ fn get_depth(name: &str, depth: usize) -> Theme {
 }
 
 fn builtin(name: &str) -> Theme {
+    if matches!(name,"aurora-studio"|"aurora-studio@light") {
+        return import::parse(include_str!("../assets/themes/aurora-studio.json"),"aurora-studio",name.ends_with("@light").then_some("light")).expect("bundled Aurora is valid").theme(name);
+    }
     if name == "terminal" {
         return terminal();
     }
@@ -646,6 +652,7 @@ fn builtin(name: &str) -> Theme {
         panel: None,
         cursor: None,
         skin: Default::default(),
+        imported: None,
     }
 }
 
@@ -668,6 +675,7 @@ fn painted(p: &Painted) -> Theme {
         panel: p.panel.map(c),
         cursor: p.cursor.map(c),
         skin: crate::skin::for_theme(p.name),
+        imported: None,
     }
 }
 
@@ -691,12 +699,19 @@ fn paper() -> Theme {
         panel: None,
         cursor: None,
         skin: Default::default(),
+        imported: None,
     }
 }
 
 impl Theme {
+    /// The bundled CSS demo has a hand-written native counterpart. Arbitrary CSS is never executed.
+    pub fn aurora(&self) -> bool {
+        self.imported.as_ref().is_some_and(|p| p.aurora)
+    }
+
     /// A light theme (dark text on a painted light background).
     pub fn is_light(&self) -> bool {
+        if let Some(imported) = &self.imported { return imported.light; }
         match self.bg {
             Color::Rgb(r, g, b) => (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000 > 140,
             _ => false,
@@ -738,6 +753,7 @@ fn terminal() -> Theme {
         panel: None,
         cursor: None,
         skin: Default::default(),
+        imported: None,
     }
 }
 
@@ -776,28 +792,178 @@ pub fn themes_dir() -> PathBuf {
     crate::util::bro_dir().join("themes")
 }
 
-fn file_of(name: &str) -> PathBuf {
-    themes_dir().join(format!("{name}.toml"))
+fn safe_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':', '\0'])
 }
 
-/// Names of the theme files in the themes dir, sorted.
+fn source(name: &str) -> Option<(PathBuf, Option<&str>)> {
+    if !safe_name(name) { return None; }
+    let dir = themes_dir();
+    // Existing TOML names keep priority. A variant is explicit and never changes with the OS appearance.
+    for ext in ["toml", "json", "jsonc"] {
+        let path = dir.join(format!("{name}.{ext}"));
+        if path.is_file() { return Some((path, None)); }
+    }
+    let (stem, variant) = name.rsplit_once('@')?;
+    if !matches!(variant, "light" | "dark") { return None; }
+    for ext in ["json", "jsonc"] {
+        let path = dir.join(format!("{stem}.{ext}"));
+        if path.is_file() { return Some((path, Some(variant))); }
+    }
+    None
+}
+
+/// Bounded reads, including files supplied through a native file chooser.
+fn read_theme(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    const LIMIT: u64 = 2 * 1024 * 1024;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    file.take(LIMIT + 1).read_to_string(&mut text).map_err(|e| e.to_string())?;
+    if text.len() as u64 > LIMIT { return Err("Theme files must be 2 MB or smaller.".into()); }
+    Ok(text)
+}
+
+type ImportedCacheEntry = (PathBuf, Option<String>, Option<std::time::SystemTime>, u64, Result<import::Imported, String>);
+static IMPORTED_CACHE: parking_lot::Mutex<Vec<ImportedCacheEntry>> = parking_lot::Mutex::new(Vec::new());
+
+fn load_imported(path: &Path, stem: &str, variant: Option<&str>) -> Result<import::Imported, String> {
+    let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    let modified = metadata.modified().ok();
+    let cache = IMPORTED_CACHE.lock();
+    if let Some((_, _, _, _, result)) = cache.iter().find(|(p,v,m,l,_)| p == path && v.as_deref() == variant && *m == modified && *l == metadata.len()) {
+        return result.clone();
+    }
+    drop(cache);
+    let result = read_theme(path).and_then(|text| import::parse(&text, stem, variant));
+    let mut cache = IMPORTED_CACHE.lock();
+    cache.retain(|(p,v,_,_,_)| p != path || v.as_deref() != variant);
+    if cache.len() >= 64 { let _ = cache.remove(0); }
+    cache.push((path.to_path_buf(), variant.map(str::to_string), modified, metadata.len(), result.clone()));
+    result
+}
+
+/// Names of the theme files and their optional opposite-appearance variants, sorted.
 pub fn custom_names() -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(themes_dir())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            (p.extension()? == "toml").then(|| p.file_stem().map(|s| s.to_string_lossy().to_string()))?
-        })
-        .collect();
-    v.sort();
-    v
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(themes_dir()).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else { continue };
+        if !matches!(ext, "toml" | "json" | "jsonc") { continue; }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).filter(|s| safe_name(s)) else { continue };
+        names.push(stem.to_string());
+        if ext != "toml" && source(stem).is_some_and(|(p, _)| p == path)
+            && let Ok(imported) = load_imported(&path, stem, None) {
+                names.extend(imported.variants().map(|v| format!("{stem}@{v}")));
+            }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
-/// True for a theme that comes from a file.
+/// True for a theme that comes from a file. Built-in names still win.
 pub fn is_custom(name: &str) -> bool {
-    !builtin_names().iter().any(|b| b == name) && file_of(name).is_file()
+    !builtin_names().iter().any(|b| b == name) && source(name).is_some()
+}
+
+static FILE_WRITES: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Publish a complete file without replacing a theme, even when two windows import at once.
+fn write_new(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut temp = tempfile::NamedTempFile::new_in(path.parent().ok_or(std::io::ErrorKind::InvalidInput)?)?;
+    temp.write_all(data)?;
+    temp.persist_noclobber(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// The creator's label; the picker adds the selected appearance separately.
+pub fn label(t: &Theme) -> String {
+    t.imported.as_ref().map(|i| i.label.clone()).unwrap_or_else(|| t.name.clone())
+}
+
+/// Validate before installing. Existing files and built-ins are never overwritten.
+pub fn import_file(path: &Path) -> Result<(String, bool), String> {
+    let _write = FILE_WRITES.lock();
+    let text = read_theme(path)?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("custom-theme");
+    let imported = import::parse(&text, stem, None)?;
+    install_text(&text, &imported)
+}
+
+/// Install an editor draft as a separate portable theme, never replacing its source.
+pub fn install_document(file: &serde_json::Value) -> Result<(String, bool), String> {
+    let _write = FILE_WRITES.lock();
+    let imported = import::parse(&file.to_string(), "custom-theme", None)?;
+    let text = format!("{}\n", serde_json::to_string_pretty(&imported.file).map_err(|e| e.to_string())?);
+    install_text(&text, &imported)
+}
+
+fn install_text(text: &str, imported: &import::Imported) -> Result<(String, bool), String> {
+    let has_css = imported.has_css();
+    let base = import::id_from_name(&imported.label);
+    let dir = themes_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut name = base.clone();
+    let mut suffix = 2;
+    // A consistent extension also prevents concurrent JSON/JSONC imports from sharing a picker name.
+    // Original data (ANSI colors, comments and token colors) is retained; native export is separate.
+    let destination = loop {
+        if builtin_names().iter().any(|b| b == &name) || source(&name).is_some() {
+            name = format!("{base}-{suffix}"); suffix += 1; continue;
+        }
+        let destination = dir.join(format!("{name}.json"));
+        match write_new(&destination, text.as_bytes()) {
+            Ok(()) => break destination,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => { name = format!("{base}-{suffix}"); suffix += 1; }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let _ = load_imported(&destination, &name, None);
+    for variant in imported.variants() { let _ = load_imported(&destination, &name, Some(variant)); }
+    Ok((name, has_css))
+}
+
+/// Export a standalone native T3 file; exports are not themselves added to the theme picker.
+pub fn document(theme: &Theme) -> serde_json::Value {
+    if let Some(imported) = &theme.imported { imported.file.clone() } else {
+        let mut colors = import::defaults(theme.is_light());
+        let fallback = builtin(if theme.is_light() { "github-light" } else { "github-dark" });
+        let literal = |color: Color, fallback: Color| {
+            let Color::Rgb(r,g,b) = (if matches!(color, Color::Rgb(..)) { color } else { fallback }) else { unreachable!() };
+            serde_json::Value::String(format!("#{r:02x}{g:02x}{b:02x}"))
+        };
+        for (role, color, backup) in [
+            ("canvas", theme.panel.unwrap_or(theme.bg), fallback.bg), ("chrome", theme.panel.unwrap_or(theme.bg), fallback.bg),
+            ("sidebar", theme.panel.unwrap_or(theme.bg), fallback.panel.unwrap_or(fallback.bg)),
+            ("text", theme.fg, fallback.fg), ("textMuted", theme.muted, fallback.muted), ("accent", theme.accent, fallback.accent),
+            ("focus", theme.shine, fallback.shine), ("border", theme.frame, fallback.frame), ("accentSurface", theme.user, fallback.user),
+            ("warningForeground", theme.inline, fallback.inline), ("errorForeground", theme.danger, fallback.danger), ("updateForeground", theme.good, fallback.good),
+            ("terminalBackground", theme.bg, fallback.bg), ("terminalForeground", theme.fg, fallback.fg),
+            ("terminalCursor", theme.cursor.unwrap_or(theme.accent), fallback.cursor.unwrap_or(fallback.accent)),
+        ] { colors.insert(role.into(), literal(color, backup)); }
+        serde_json::json!({"version":1,"id":format!("{}-bro", import::id_from_name(&theme.name).chars().take(44).collect::<String>()),"name":theme.name,"appearance":if theme.is_light() {"light"} else {"dark"},"colors":colors})
+    }
+}
+
+pub fn export_file(theme: &Theme) -> Result<PathBuf, String> {
+    let _write = FILE_WRITES.lock();
+    let file = document(theme);
+    let dir = themes_dir().join("exports");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let base = import::id_from_name(file["name"].as_str().unwrap_or("custom-theme"));
+    let mut path = dir.join(format!("{base}.json"));
+    let mut suffix = 2;
+    let text = format!("{}\n", serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?);
+    loop {
+        match write_new(&path, text.as_bytes()) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => { path = dir.join(format!("{base}-{suffix}.json")); suffix += 1; }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
 }
 
 const KEYS: &[&str] = &["accent", "shine", "good", "danger", "inline", "muted", "frame", "user", "text", "fg", "background", "bg", "panel", "sidebar", "cursor"];
@@ -860,17 +1026,28 @@ pub fn color(s: &str) -> Option<Color> {
 }
 
 /// The last version of each theme file that parsed, so a typo mid-edit doesn't flash another theme.
-static LAST_GOOD: parking_lot::Mutex<Vec<(String, Theme)>> = parking_lot::Mutex::new(Vec::new());
+static LAST_GOOD: parking_lot::Mutex<Vec<(PathBuf, String, Theme)>> = parking_lot::Mutex::new(Vec::new());
 
 fn custom(name: &str, depth: usize) -> Option<Theme> {
-    let text = std::fs::read_to_string(file_of(name)).ok()?;
-    let Ok(tbl) = text.parse::<toml::Table>() else {
-        let last = LAST_GOOD.lock().iter().find(|(n, _)| n == name).map(|(_, t)| t.clone());
-        return Some(last.unwrap_or_else(|| Theme { name: name.to_string(), ..builtin(DEFAULT) }));
-    };
+    let (path, variant) = source(name)?;
+    let last = || LAST_GOOD.lock().iter().find(|(p, n, _)| p == &path && n == name).map(|(_, _, t)| t.clone())
+        .unwrap_or_else(|| Theme { name: name.to_string(), ..builtin(DEFAULT) });
+    if path.extension().is_some_and(|e| e != "toml") {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+        let Ok(imported) = load_imported(&path, stem, variant) else { return Some(last()) };
+        let t = imported.theme(name);
+        let mut good = LAST_GOOD.lock();
+        good.retain(|(p, n, _)| p != &path || n != name);
+        good.push((path, name.to_string(), t.clone()));
+        return Some(t);
+    }
+    let Ok(text) = read_theme(&path) else { return Some(last()) };
+    let Ok(tbl) = text.parse::<toml::Table>() else { return Some(last()) };
     let base = tbl.get("base").and_then(|v| v.as_str()).unwrap_or(DEFAULT);
     let mut t = if base == name || depth >= 4 { builtin(base) } else { get_depth(base, depth + 1) };
     t.name = name.to_string();
+    // TOML uses Bro's compact palette semantics, even when its base is an imported file.
+    t.imported = None;
     for (k, v) in &tbl {
         if let Some(c) = v.as_str().and_then(color) {
             set_field(&mut t, k, c);
@@ -890,8 +1067,8 @@ fn custom(name: &str, depth: usize) -> Option<Theme> {
         t.skin.focus = b;
     }
     let mut last = LAST_GOOD.lock();
-    last.retain(|(n, _)| n != name);
-    last.push((name.to_string(), t.clone()));
+    last.retain(|(p, n, _)| p != &path || n != name);
+    last.push((path, name.to_string(), t.clone()));
     Some(t)
 }
 
@@ -904,8 +1081,13 @@ fn ansi_of(v: &toml::Value) -> Option<[Color; 16]> {
 
 /// Anything wrong with a theme file, in words ("mine.toml: 'acent' isn't a setting").
 pub fn problems(name: &str) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(file_of(name)) else { return vec![] };
-    let file = format!("{name}.toml");
+    let Some((path, variant)) = source(name) else { return vec![] };
+    let file = path.file_name().unwrap_or_default().to_string_lossy();
+    if path.extension().is_some_and(|e| e != "toml") {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+        return load_imported(&path, stem, variant).err().map(|e| vec![format!("{file}: {e}")]).unwrap_or_default();
+    }
+    let text = match read_theme(&path) { Ok(text) => text, Err(e) => return vec![format!("{file}: {e}")] };
     match text.parse::<toml::Table>() {
         Err(e) => vec![format!("{file}: {}", e.to_string().lines().next().unwrap_or("can't read it"))],
         Ok(tbl) => tbl
@@ -932,7 +1114,9 @@ pub fn watch(on_change: impl Fn() + Send + 'static) -> Option<notify::Recommende
     let dir = themes_dir();
     std::fs::create_dir_all(&dir).ok()?;
     let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if res.is_ok_and(|e| e.kind.is_modify() || e.kind.is_create()) {
+        if res.is_ok_and(|e| e.kind.is_modify() || e.kind.is_create() || e.kind.is_remove()) {
+            // Parsing a large VS Code file and solving its palette belongs on the watcher thread.
+            for name in custom_names() { let _ = get(&name); }
             on_change();
         }
     })
@@ -991,6 +1175,66 @@ mod tests {
         // Dracula is the whole official palette now, not just its accents
         assert_eq!(get("dracula").bg, Color::Rgb(0x28, 0x2a, 0x36));
         assert_eq!(get("github-dark").panel, Some(Color::Rgb(0x01, 0x04, 0x09)), "VS Code's side bar");
+    }
+
+    #[test]
+    fn portable_files_are_discovered_reloaded_and_exported() {
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { TEST_DIR.with(|d| *d.borrow_mut() = None); } }
+        let dir = tempfile::tempdir().unwrap();
+        TEST_DIR.with(|d| *d.borrow_mut() = Some(dir.path().to_path_buf()));
+        let _reset = Reset;
+        let kept = dir.path().join("never-replace.data");
+        write_new(&kept, b"original").unwrap();
+        assert_eq!(write_new(&kept, b"replacement").unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&kept).unwrap(), b"original");
+        let file = dir.path().join("portable.json");
+        let input = r##"{"version":1,"name":"Portable palette","appearance":"light","colors":{"canvas":"#ffffff","terminalBackground":"#101010","terminalForeground":"#ffffff","accent":"#123456"},"variants":{"dark":{"canvas":"#111111","accent":"#abcdef"}},"css":".x { border-radius: 8px; }"}"##;
+        std::fs::write(&file, input).unwrap();
+        assert!(custom_names().contains(&"portable@dark".into()));
+        assert!(is_custom("portable") && is_custom("portable@dark"));
+        let base = get("portable");
+        assert!(base.is_light(), "explicit appearance is independent of terminal background");
+        assert_eq!(base.accent, Color::Rgb(0x12,0x34,0x56));
+        assert!(!get("portable@dark").is_light());
+        assert!(problems("portable").is_empty());
+        let exported = export_file(&base).unwrap();
+        assert!(exported.parent().unwrap().ends_with("exports"));
+        let round = import::parse(&std::fs::read_to_string(&exported).unwrap(), "round", Some("dark")).unwrap();
+        assert!(round.has_css());
+        assert_eq!(round.file["name"], "Portable palette");
+        assert_ne!(export_file(&base).unwrap(), exported, "an export never replaces the previous one");
+        std::fs::write(&file, "{broken json").unwrap();
+        assert_eq!(get("portable").accent, base.accent, "a mid-edit typo retains the last good palette");
+        assert!(!problems("portable").is_empty());
+        let input_path = dir.path().join("source.jsonc");
+        let jsonc = "// actual VS Code format\n{\"name\":\"Dracula\",\"colors\":{\"editor.background\":\"#282a36\",},}";
+        std::fs::write(&input_path, jsonc).unwrap();
+        let (installed, css) = import_file(&input_path).unwrap();
+        assert!(!css && installed != "dracula", "built-ins cannot be shadowed");
+        assert_eq!(std::fs::read_to_string(dir.path().join(format!("{installed}.json"))).unwrap(), jsonc);
+        assert!(get(&installed).imported.is_some());
+        let (second, _) = import_file(&input_path).unwrap();
+        assert_ne!(installed, second);
+        assert!(source("../escape").is_none() && source("C:\\escape").is_none());
+        let another = tempfile::tempdir().unwrap();
+        TEST_DIR.with(|d| *d.borrow_mut() = Some(another.path().to_path_buf()));
+        std::fs::write(another.path().join("portable.json"), "{broken").unwrap();
+        assert_ne!(get("portable").accent, base.accent, "cache is scoped to its directory");
+    }
+
+    #[test]
+    fn every_builtin_exports_a_valid_t3_file() {
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { TEST_DIR.with(|d| *d.borrow_mut() = None); } }
+        let dir = tempfile::tempdir().unwrap();
+        TEST_DIR.with(|d| *d.borrow_mut() = Some(dir.path().to_path_buf()));
+        let _reset = Reset;
+        for name in builtin_names() {
+            let path = export_file(&get(&name)).unwrap();
+            let file = std::fs::read_to_string(path).unwrap();
+            assert!(import::parse(&file, &name, None).is_ok(), "{name}");
+        }
     }
 
     #[test]

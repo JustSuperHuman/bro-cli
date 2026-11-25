@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// The provider id Just Superhuman's Claude has in the launcher.
 pub const PROVIDER_ID: &str = "justsuperhuman";
@@ -75,6 +75,8 @@ fn whole_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
 #[serde(rename_all = "camelCase")]
 pub struct User {
     #[serde(default)]
+    pub id: String,
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub email: String,
@@ -83,6 +85,8 @@ pub struct User {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Organization {
+    #[serde(default)]
+    pub id: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -103,6 +107,37 @@ pub struct Credits {
     /// When the monthly allowance renews, ms since the epoch.
     #[serde(default, deserialize_with = "whole_opt")]
     pub resets_at: Option<i64>,
+    /// Spent from this month's allowance so far (servers before it was sent: see [`Credits::used_this_month`]).
+    #[serde(default, deserialize_with = "whole_opt", skip_serializing_if = "Option::is_none")]
+    pub used: Option<i64>,
+    /// Held for replies still being written; charged or handed back when they finish.
+    #[serde(default, deserialize_with = "whole")]
+    pub reserved: i64,
+    /// How many credits make a US dollar (100 unless the server says otherwise).
+    #[serde(default, deserialize_with = "whole_opt", skip_serializing_if = "Option::is_none")]
+    pub credits_per_usd: Option<i64>,
+}
+
+impl Credits {
+    /// This month's allowance spent so far: the server's figure, else what's gone from the allowance (less what's
+    /// held for replies still running).
+    pub fn used_this_month(&self) -> i64 {
+        self.used.unwrap_or(self.monthly_allowance + self.granted - self.available - self.reserved).clamp(0, self.monthly_allowance.max(0))
+    }
+
+    /// How much of this month's allowance is spent, 0–100. None when the organization has no allowance (only
+    /// one-time credits).
+    pub fn month_used_pct(&self) -> Option<f32> {
+        (self.monthly_allowance > 0).then(|| (self.used_this_month() as f32 / self.monthly_allowance as f32 * 100.0).clamp(0.0, 100.0))
+    }
+
+    /// `n` credits in dollars: "$29.92".
+    pub fn dollars(&self, n: i64) -> String {
+        let per = self.credits_per_usd.filter(|p| *p > 0).unwrap_or(100);
+        let cents = (n as f64 * 100.0 / per as f64).round() as i64;
+        let sign = if cents < 0 { "-" } else { "" };
+        format!("{sign}${}.{:02}", grouped(cents.abs() / 100), cents.abs() % 100)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -162,6 +197,17 @@ impl Account {
         format!("{} credit{}", grouped(n), if n == 1 { "" } else { "s" })
     }
 
+    /// Less than a tenth of the credits left, or Claude unavailable: the credits read as a warning.
+    pub fn running_low(&self) -> bool {
+        let total = (self.credits.granted + self.credits.monthly_allowance).max(self.credits.available).max(1);
+        !self.claude.available || (self.credits.available as f32 / total as f32) < 0.1
+    }
+
+    /// Why Claude can't run on the account (out of credits, AI paused), when it can't.
+    pub fn paused_reason(&self) -> Option<&str> {
+        Some(self.claude.reason.trim()).filter(|r| !self.claude.available && !r.is_empty())
+    }
+
     /// One line for pickers: "1,840 credits · Rivera Studio".
     pub fn summary(&self) -> String {
         let mut parts = vec![self.credits_text()];
@@ -177,7 +223,7 @@ pub fn grouped(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -349,6 +395,10 @@ fn save_account(account: &Account) -> anyhow::Result<()> {
 }
 
 fn forget() {
+    let mut connection = crate::justconnect::load();
+    connection.enabled = false;
+    connection.selected = None;
+    let _ = crate::justconnect::save(&connection);
     let _ = std::fs::remove_file(token_path());
     let _ = std::fs::remove_file(account_path());
 }
@@ -360,7 +410,12 @@ fn forget() {
 pub fn provider() -> Option<Provider> {
     let stored = stored()?;
     let account = cached_account().map(|(a, _)| a).unwrap_or_default();
-    let base = Some(account.claude.base_url.trim().to_string()).filter(|b| !b.is_empty()).unwrap_or_else(|| format!("{}/api/claude", stored.origin.trim_end_matches('/')));
+    Some(provider_for(&account, &stored.origin))
+}
+
+/// The provider for `account`, signed in at `origin` (its Claude base URL when the account names none).
+pub fn provider_for(account: &Account, origin: &str) -> Provider {
+    let base = Some(account.claude.base_url.trim().to_string()).filter(|b| !b.is_empty()).unwrap_or_else(|| format!("{}/api/claude", origin.trim_end_matches('/')));
     let models = account
         .claude
         .models
@@ -370,7 +425,7 @@ pub fn provider() -> Option<Provider> {
         .collect();
     let mut extra = serde_json::Map::new();
     extra.insert("section".into(), json!("main"));
-    Some(Provider {
+    Provider {
         id: PROVIDER_ID.into(),
         name: PROVIDER_NAME.into(),
         mode: ProviderMode::Anthropic,
@@ -383,7 +438,7 @@ pub fn provider() -> Option<Provider> {
         env: Default::default(),
         models,
         extra,
-    })
+    }
 }
 
 /// The model a launch without a pick uses: the account's first.
@@ -477,12 +532,16 @@ struct Inner {
 pub struct Login {
     inner: Mutex<Inner>,
     notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// bumped by every change, so a view that keeps a snapshot knows when it's out of date
+    generation: AtomicU64,
+    /// the last [`Login::snapshot_recent`]: when it was read and at which generation
+    recent: Mutex<Option<(Instant, u64, Snapshot)>>,
 }
 
 /// The process-wide [`Login`].
 pub fn login() -> &'static Login {
     static LOGIN: OnceLock<Login> = OnceLock::new();
-    LOGIN.get_or_init(|| Login { inner: Mutex::new(Inner::default()), notify: Mutex::new(None) })
+    LOGIN.get_or_init(|| Login { inner: Mutex::new(Inner::default()), notify: Mutex::new(None), generation: AtomicU64::new(0), recent: Mutex::new(None) })
 }
 
 /// What `sign_out` did.
@@ -501,10 +560,16 @@ impl Login {
     }
 
     fn changed(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
         let f = self.notify.lock().clone();
         if let Some(f) = f {
             f();
         }
+    }
+
+    /// Counts this process's changes: a view that keeps a [`Snapshot`] takes a fresh one when this moves.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -512,6 +577,22 @@ impl Login {
         let (account, fetched_at) = if signed_in { cached_account().map(|(a, t)| (Some(a), t)).unwrap_or((None, 0)) } else { (None, 0) };
         let inner = self.inner.lock();
         Snapshot { signed_in, account, fetched_at, pending: inner.pending.clone(), error: inner.error.clone(), refreshing: inner.refreshing }
+    }
+
+    /// [`Login::snapshot`] for something drawn every frame: the two small files are read again only when the
+    /// sign-in changed in this process or a second has passed (another bro or `bro jsh` may have changed them).
+    pub fn snapshot_recent(&self) -> Snapshot {
+        let generation = self.generation();
+        let mut recent = self.recent.lock();
+        if let Some((at, g, snap)) = recent.as_ref()
+            && *g == generation
+            && at.elapsed() < Duration::from_secs(1)
+        {
+            return snap.clone();
+        }
+        let snap = self.snapshot();
+        *recent = Some((Instant::now(), generation, snap.clone()));
+        snap
     }
 
     /// Start signing in, or return the sign-in already waiting (the second element is true for a new one).

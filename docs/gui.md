@@ -54,6 +54,59 @@ until it is ready. This also handles launches made while the proxy is starting.
   closes. Web links open in your browser. Linux shows the source.
 - **The mouse everywhere.** Every row, tab, button and option the terminal UI has is clickable, with hover states;
   drag the sidebar's edge, split dividers and tile edges; scroll anything with the wheel.
+- **Session tabs on top, what they list on the left.** Pick a project (or the **Orchestrators**, while one runs)
+  in the sidebar and the strip over the sessions lists its sessions: the project's icon and name first, then
+  **All**, then a tab for each session. Every sidebar row says what its sessions are doing: how many run (a spinner
+  while one works), how many wait on you and how many finished while you were away. A session's tab leads with its
+  agent's mark (with the orchestrators listed, its project's icon too) and ends in what it's doing; click it to
+  show that session on its own. **All** tiles the project's sessions, and a second click goes back to the one you
+  were on. **All sessions** tiles every session you run, with no strip over them; open one on its own and the
+  tabs list its project again. Go to a session outside the list (a key, a question in Needs you) and the tabs
+  follow it to its project.
+  **Needs you**, at the top of the sidebar, lists every session waiting on you, newest first: what it asks (a
+  command to approve, a file to edit, a question its turn ended on, a plan), its project and since when. Click
+  one to go answer it. Projects lists the ones with sessions running; the rest wait folded under **Recent**, the
+  last used first, with a peek at their icons. Click Recent to open it (or press ↓ past the last project), and
+  again to fold it. **+** beside Projects opens another folder; the search box finds projects by name, folded
+  ones too, and questions by what they ask. When there are more tabs than fit, Settings → Appearance → Crowded session tabs
+  picks between one row that scrolls and up to three stacked rows.
+- **Project icons.** Each project wears an icon in the sidebar and on its sessions' tabs. bro finds one by itself: first an
+  icon in the nearest `.bro` folder inside the project, then the nearest favicon or app icon (`favicon.svg`,
+  `apple-touch-icon.png`, `icon.png`…, in `public/`, `app/`, `assets/` or wherever it is), then the nearest logo,
+  and failing those the project's letter on a tile of its colour. Right-click a project to choose another: a
+  picture from a file, one of the icons found in the project, its letter, or back to automatic. What you choose
+  is kept in the project itself (`.bro/icon.<ext>`, and `.bro/project.json` for the letter), so it stays after you
+  close the project and comes along with the repository. Found icons are cached in `~/.bro/project-icons/`, so
+  they show at once on the next start. Each one is trimmed to fill its tile: clear margins are cut away, and an
+  app icon whose symbol sits small on a plain background is brought in closer. App icons get a faint edge, so a
+  dark one keeps its shape on a dark sidebar. Dark logos get a light tile behind them on a dark theme, and white
+  ones a dark tile on a light theme.
+- **Drawn icons.** A project with no icon of its own gets one drawn instead of its letter, quietly, while
+  **Draw missing icons** is on (settings → Appearance; on by default). The login you last launched Claude Code or
+  Codex on takes a quick read-only look at the project (its README, its manifest) and draws one symbol for what it
+  is. bro draws that symbol in white on a tile in the project's own colour (the colour of its name and its letter,
+  deepened so the white reads), so every drawn icon looks like part of one set and changes with your theme. A
+  drive or your home folder is too broad to look through, so it gets a drive or a house without asking an agent.
+  It runs in the background once the window has settled, one
+  project at a time and once per project. It takes 15 to 45 seconds and spends a little of that login's usage.
+  It doesn't save a session, and it runs none of your hooks or tool servers. The icon appears as soon as it's
+  done. Drawn icons are kept in `~/.bro/project-icons/made/`, not in the project, so the repository stays as it
+  was. A found favicon, a picture you choose or the letter you ask for always wins over a drawn icon. Right-click
+  a project for **Draw an icon for it** or **Draw a new icon**. A failed draw isn't tried again by itself for
+  three days.
+- **Icons on the phone.** The phone app shows each project with the icon the window shows: beside its name in the
+  chats list, and on bro's projects when you start a session. The bridge reads the icons the window keeps in
+  `~/.bro/project-icons/` and never looks in the projects itself. It lists each project's `icon` (a versioned
+  `/api/project-icons/<file>` address), `iconTone` (`symbol` for a drawn icon, set on a tile of the project's hue)
+  and `hue`, and sends the list again within a few seconds of the
+  window keeping a new icon. The phone shows the letter, in the same colour as the window's, straight away. It
+  loads the picture only when nothing else is waiting, and gives up after 8 seconds. If the picture is missing,
+  slow or broken, the project keeps its letter, and the phone doesn't ask for that picture again for a minute.
+  With an older bro the chats list looks as it did before.
+- **Voice in the header.** The microphone beside the pictures button opens Settings → Voice. Set your
+  push-to-talk key there and hold it in any app to talk with Hugh. Right-click the microphone to switch
+  push-to-talk, start a browser call, or end active calls.
+
 - **No title bar** (Windows). The sidebar runs to the top; minimise, maximise and close sit at the end of the tab
   row. Drag the window by the sidebar's header or any empty part of that row; Snap Layouts still open over maximise.
 - **Themes in full.** A VS Code theme looks like itself: its side bar colour around your sessions, its editor
@@ -61,8 +114,9 @@ until it is ready. This also handles launches made while the proxy is starting.
   nebula.
 - **A see-through window.** Settings → Appearance → **Window**: Acrylic frosts the desktop behind bro (Windows 11),
   Glass leaves it clear. **Window tint** (shown once the window isn't solid) sets how much of the theme
-  covers it, the same everywhere: sidebar, tabs and sessions are one sheet of glass, while text, buttons and popups stay solid. The palette has
-  them too (`window acrylic`). On macOS and KDE the desktop behind is blurred.
+  covers it, the same everywhere: sidebar, tabs and sessions are one sheet of glass, while text, buttons and popups stay solid. The
+  New session page is part of that sheet: it covers the sessions under it and lets the desktop through as the rest
+  of the window does. The palette has them too (`window acrylic`). On macOS and KDE the desktop behind is blurred.
 
 ## Focus mode
 
@@ -87,7 +141,12 @@ solid, and the glow under them while they move tints the glass without making it
 - **Replying.** Type in the box under the conversation and press Enter (shift+Enter for a new line). Your message
   shows at once, marked as sending, until the agent has it. Sent while it works, it's queued and keeps its place
   in the conversation; Claude Code reads a queued message at its next step, and it shows where Claude read it.
+  Codex sometimes takes the Enter after a paste for a line break and keeps your message in its box; bro checks
+  Codex's box after every message it sends (from here, your phone, the web or `bro ctl`), and when the message is
+  still sitting there over a fresh line break, takes the line break back out and presses Enter again, up to three
+  times. A brand-new Codex playing its welcome animation reads as ready, not as working.
   Up on an empty box brings back what you sent before. Pastes and dropped files land in the box.
+- **Dictation.** Click the reply box microphone or press Ctrl+Shift+D (Command+Shift+D on Mac). Review the transcript in your draft before sending. Pi, omp, and Antigravity show the microphone in the session header. [Voice settings](voice.md#composer-dictation)
 - **Pictures.** Paste a picture (ctrl+v or alt+v, a screenshot or a copied file) or drop one on the window: it
   waits in the box as a thumbnail the moment you paste it, and goes with your message where you pasted it, held
   there by a mark you don't see. Delete the text around it and the picture stays (it moves to the end); hover
@@ -126,6 +185,28 @@ solid, and the glow under them while they move tints the glass without making it
 - **Links.** Web addresses and file paths in the conversation open as they do in the terminal: a file in the
   preview (a picture in the media panel), at its line when it says one, the rest in your browser. A step about a
   file, and the folder at the top, open the same way.
+- **Subagents.** When the agent hands work to subagents (Claude Code's Agent tool, forks and background agents
+  included; Codex's spawned agents), each one gets a card where it was started. While it works, the card shows
+  what it's doing right now and for how long; once it's done, the first line of what it reported. A quiet line
+  marks where the agent heard back ("Map every route registration finished"). Subagents still at work also sit
+  in a strip over the reply box, so they stay in sight however far the conversation has moved on. When the
+  agent's own turn is over but its subagents work on, the header says so ("2 subagents working"). Click a card, a
+  chip in the strip or a "finished" line to open that subagent's own conversation in place of the session's: the
+  brief it was given (marked "From Claude"), its steps and words as it goes, its report, and how long it took.
+  Subagents it started in turn show as cards there too. **Conversation** at the top, or Esc, goes back to where
+  you were; anything you send goes to the session and takes you back to its conversation. Codex sends its
+  subagents their tasks encrypted, so a Codex subagent opens on its work rather than its brief, and goes by its
+  nickname ("Kepler"). bro reads each subagent's own transcript: Claude Code's from the session's `subagents`
+  folder, Codex's from its own rollout.
+- **Background tasks.** What Claude Code leaves running in the background sits in the same strip: a command it
+  started with `run_in_background` (or one that ran past its timeout, or that you sent to the background), a
+  Monitor watching a command's output, a workflow. Each chip says what the task is and how long it's been going;
+  a Monitor's says what it saw last. Hover one for the command it runs; click it to read its output in the
+  preview. When the turn is over and only background work is left, the header says what's still going ("Start
+  the proxy on :8080 · 4m 10s", "2 background tasks running", "1 subagent and 2 tasks working"). A task leaves
+  the strip when Claude Code says it finished or failed, when it's stopped, when a Monitor's time runs out, and
+  when the session's process ends (background tasks don't outlive it). The session's row in the sidebar keeps
+  its working spinner instead of a done check meanwhile; hover the spinner for what's still going.
 - **Questions and permissions.** When the agent asks (a permission prompt, a question with options), the choice
   shows above the box with its options as buttons. Click one, press its number, or move with the arrows and press
   Enter, as in the terminal; Esc cancels. What you've written in the box never goes into a choice.
@@ -169,14 +250,39 @@ hide the treatment just on that phone. Neither switch resets checked events. Mob
 acknowledges the same event on the desktop, with its identity included so a delayed receipt cannot clear a
 newer question or finish.
 
+The bottom of the section list holds your Just Superhuman account: **Sign in** on an ink button while signed out,
+your name, credits and **Sign out** after (see [Just Superhuman](using.md#just-superhuman)). A window too short for
+it gets one row there, and a window too narrow for the section list gets that row under the page.
+
 The window keeps its size, place, panel widths and font size in `~/.bro/v2-gui.json`. Everything else, from the
 theme to the terminal font (Settings → Appearance → Font), is shared with the terminal UI in `~/.bro/v2.toml`, so
 both look and behave the same; the window's material (`material`, `material_tint`) lives there too. Custom themes
-in `~/.bro/themes/` restyle the window too, live, and can set its side bar (`panel`) and cursor (`cursor`).
+in `~/.bro/themes/` restyle the window too, live, and can set its side bar (`panel`) and cursor (`cursor`). The
+Appearance's **Create a custom theme** opens a floating live editor: two seed colors, advanced color families,
+semantic app-area inspection and separate Light/Dark palettes. **Aurora studio demo** opens the bundled example.
+The editor can be moved, resized or minimized; Cancel restores the previous theme. The
+picker's **Import** accepts T3 Code v1 JSON and VS Code JSON/JSONC palettes; **Export** saves a portable T3 file.
+Imported palettes keep separate window, sidebar and terminal colors, including transparency. Browser-only CSS
+is kept for export but is not applied to the native window. See [Themes](using.md#themes) for format details.
 
 Text follows your system: on Windows with ClearType on it's smoothed for LCD screens, as other Windows apps are.
 Set `BRO_TEXT_AA=grayscale` (or `rgb`, `bgr`) to choose yourself. Over a see-through window text is always
 greyscale: colour fringes would show against what's behind.
+
+## When the window won't open
+
+The window draws on the GPU. On Windows bro starts DX12 first, then Vulkan, then OpenGL, each on its own, so a
+driver bro doesn't use is never loaded. Elsewhere wgpu picks (Vulkan or OpenGL on Linux, Metal on macOS).
+
+A graphics driver can crash the window as it starts, with no error to catch: Intel's Vulkan driver does over
+Remote Desktop. So `bro` stays until the window's first frame is on screen. If the window dies with a crash's
+exit code (an access violation, `0xC0000005`, say) while it was starting a graphics API, bro writes that API
+down in `~/.bro/v2-gpu.json`, says so on the terminal, and opens the window again without it. Every start from
+then on skips it. Started from the Start menu (bro-app) there's no terminal, so a window that still can't open
+says why in a message box. Delete `v2-gpu.json` to have every API tried again, after a driver update say.
+
+`WGPU_BACKEND=dx12` (or `vulkan`, `gl`) picks the graphics API yourself and turns the skipping off. `bro-cli`
+opens the terminal UI, which needs no GPU at all.
 
 ## For contributors
 
@@ -191,5 +297,13 @@ BRO_GUI_SCRIPT="wait:2500;key:alt+n;wait:600;shot:F:/tmp/launcher.png;exit" bro 
 
 Steps: `wait:<ms>`, `key:<chord>`, `type:<text>`, `paste:<text>`, `drop:<file>`, `alt:down|up`, `move:x,y`, `click:x,y`, `dclick:x,y`,
 `rclick:x,y`, `wheel:x,y,lines`, `theme:<name>`, `material:<solid|acrylic|glass>[,<tint %>]`,
-`shot:<file.png>`, `exit`. Themes and materials set this way aren't saved. A shot of a see-through window keeps
-its alpha; what the system draws behind it isn't in the picture.
+`tabs:<scroll|stack>`, `icon:<project>=<picture>` (a picture for a demo project in place of its symbol),
+`project:<folder>` (a project in the sidebar with no session in it, for Recent), `shot:<file.png>`, `exit`.
+Themes and materials set this way aren't saved. A shot of a see-through window keeps its alpha; what the system
+draws behind it isn't in the picture. `python scripts/desk-shot.py shot.png out.png` puts the desktop wallpaper
+behind such a shot, frosted as Acrylic frosts it, with the window's corners and shadow.
+
+Every demo project has an icon. Their folders aren't on disk, so each gets a symbol drawn the way bro draws one
+for a project with no picture: white line art on a tile in the project's colour (`app/gui/demo_icons.rs`). A real
+folder opened in the demo with no picture of its own shows a folder. `BRO_DEMO_UNKEYED=deepseek,zai` leaves those
+providers without a key, for the New session page's Other providers.

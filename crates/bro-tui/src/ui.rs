@@ -41,6 +41,7 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("proxy", "\u{F04E1}", "⇄"),
     ("bridge", "\u{F05A9}", "⌁"),
     ("rocket", "\u{F0463}", "»"),
+    ("film", "\u{F0FCE}", "▦"),
     ("mod", "\u{F0431}", "◆"),
     ("skills", "\u{F0335}", "✦"),
     ("help", "\u{F02D7}", "?"),
@@ -52,7 +53,13 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("team", "\u{F0849}", "⚑"),
     ("history", "\u{F02DA}", "↺"),
     ("server", "\u{F048B}", "▣"),
+    ("broom", "\u{F00E2}", "≈"),
     ("branch", "\u{E725}", "⎇"),
+    ("remote", "\u{F0989}", "▣"),
+    ("phone", "\u{F011C}", "▯"),
+    ("tablet", "\u{F04F6}", "▭"),
+    ("web", "\u{F059F}", "◍"),
+    ("tip", "\u{F06E8}", "✦"),
 ];
 
 /// The icon for `name` (Nerd Font glyph or its fallback, per [`NERD`]).
@@ -74,6 +81,7 @@ pub fn harness_color(h: Option<Harness>, t: &Theme) -> Color {
         Some(Harness::Codex) => Color::Rgb(0x2E, 0xC4, 0x9A),
         Some(Harness::Pi) => Color::Rgb(0xA7, 0x8B, 0xFA),
         Some(Harness::Omp) => Color::Rgb(0x60, 0xA5, 0xFA),
+        Some(Harness::Antigravity) => Color::Rgb(0x42, 0x85, 0xF4),
         None => t.muted,
     }
 }
@@ -89,6 +97,7 @@ pub fn harness_glyph(h: Option<Harness>) -> &'static str {
         Some(Harness::Codex) => "codex",
         Some(Harness::Pi) => "pi",
         Some(Harness::Omp) => "omp",
+        Some(Harness::Antigravity) => "agy",
         None => "term",
     })
 }
@@ -539,6 +548,72 @@ pub fn logo(f: &mut Frame, area: Rect, t: &Theme, time: f64) -> u16 {
         line(f, Rect { x, y: area.y + r as u16, width: w, height: 1 }, spans);
     }
     LOGO.len() as u16
+}
+
+/// The theme's inks for a Rune scene ([`crate::rune`]); colours a theme leaves to the terminal take neutral stand-ins.
+pub fn rune_inks(t: &Theme) -> crate::rune::Inks {
+    use crate::rune::Rgb;
+    let light = t.is_light();
+    let rgb = |c: Color, stand_in: u32| match c {
+        Color::Rgb(r, g, b) => Rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0),
+        _ => Rgb::hex(stand_in),
+    };
+    crate::rune::Inks {
+        accent: rgb(t.accent, 0x9fb4cc),
+        shine: rgb(t.shine, 0x8fb8de),
+        good: rgb(t.good, 0x8fcf9c),
+        warm: rgb(t.inline, 0xe3c27d),
+        hot: rgb(t.danger, 0xef7b7b),
+        text: rgb(t.fg, if light { 0x2b2f36 } else { 0xe6e8ec }),
+        bg: rgb(t.bg, if light { 0xf6f7f9 } else { 0x121317 }),
+    }
+}
+
+/// A fire in `h`'s brand colour when it has a colourful one, else in the theme's warm.
+pub fn kindle_inks(h: Option<Harness>, t: &Theme) -> crate::rune::Inks {
+    let mut inks = rune_inks(t);
+    if let (Some(_), Color::Rgb(r, g, b)) = (h, harness_color(h, t)) {
+        let own = crate::rune::Rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+        if own.chroma() > 0.18 {
+            inks.hot = own.mix(inks.hot, 0.45);
+            inks.warm = own;
+        }
+    }
+    inks
+}
+
+/// Draw a Rune scene in `area` at its natural width, centred. A terminal has no alpha: faint ink blends into the
+/// background instead. Returns where it landed.
+pub fn rune(f: &mut Frame, area: Rect, scene: crate::rune::Scene, time: f64, t: &Theme) -> Rect {
+    rune_inked(f, area, scene, time, &rune_inks(t))
+}
+
+/// [`rune`] in inks of your own (a fire in an agent's colour).
+pub fn rune_inked(f: &mut Frame, area: Rect, scene: crate::rune::Scene, time: f64, inks: &crate::rune::Inks) -> Rect {
+    // a terminal cell is about twice as tall as it is wide
+    const ASPECT: f32 = 2.0;
+    let rows = area.height as usize;
+    let cols = crate::rune::cols_for(scene, rows, ASPECT).min(area.width as usize);
+    if rows == 0 || cols == 0 {
+        return Rect { width: 0, height: 0, ..area };
+    }
+    let frame = crate::rune::render(scene, cols, rows, ASPECT, time, inks);
+    let x0 = area.x + (area.width - cols as u16) / 2;
+    let buf = f.buffer_mut();
+    for r in 0..rows {
+        for c in 0..cols {
+            let cell = frame.at(c, r);
+            if cell.ch == b' ' {
+                continue;
+            }
+            let (r8, g8, b8) = inks.bg.mix(cell.color, 0.55 + 0.45 * cell.ink).to8();
+            let pos = Position::new(x0 + c as u16, area.y + r as u16);
+            if let Some(bc) = buf.cell_mut(pos) {
+                bc.set_char(cell.ch as char).set_fg(Color::Rgb(r8, g8, b8));
+            }
+        }
+    }
+    Rect { x: x0, y: area.y, width: cols as u16, height: rows as u16 }
 }
 
 /// Title text in the accent colour (the rainbow is kept for the welcome logo only).

@@ -9,10 +9,13 @@
 mod cache;
 pub mod conversation;
 pub mod describe;
+pub mod holders;
 pub mod live;
 pub mod limits;
 mod messages;
 mod stage;
+pub mod subagents;
+pub mod tasks;
 
 pub use messages::{ChatMessage, read_messages};
 pub use stage::{cleanup_staged, stage_for_profile};
@@ -180,6 +183,7 @@ fn stat_source(src: &Source) -> Vec<Stat> {
             walk_jsonl(&src.root, depth, &mut files);
             out.extend(files.into_iter().filter_map(|p| stat_file(src, p, None)));
         }
+        Harness::Antigravity => {}
     }
     out
 }
@@ -190,6 +194,7 @@ fn cache_file(h: Harness) -> PathBuf {
         Harness::Codex => "codex-sessions-v2.cache.json",
         Harness::Pi => "pi-sessions-v2.cache.json",
         Harness::Omp => "omp-sessions-v2.cache.json",
+        Harness::Antigravity => "antigravity-sessions-v2.cache.json",
     };
     paths::bro_dir().join(name)
 }
@@ -200,6 +205,7 @@ pub fn describe_file(harness: Harness, path: &Path) -> Described {
         Harness::Claude => describe::describe_transcript(&read_head(path, CLAUDE_HEAD)),
         Harness::Codex => describe::describe_rollout(&read_head(path, CODEX_HEAD)),
         Harness::Pi | Harness::Omp => describe::describe_pi(&read_head(path, PI_HEAD)),
+        Harness::Antigravity => Described::default(),
     }
 }
 
@@ -225,6 +231,7 @@ fn file_stem(p: &Path) -> String {
 fn session_id(harness: Harness, stat_path: &Path, d: &Described) -> String {
     match harness {
         Harness::Claude => file_stem(stat_path),
+        Harness::Antigravity => file_stem(stat_path),
         Harness::Codex => d.id.clone(),
         // Pi names files `<timestamp>_<id>.jsonl`; the header id is authoritative.
         Harness::Pi | Harness::Omp if !d.id.is_empty() => d.id.clone(),
@@ -317,6 +324,16 @@ pub fn latest_for(harness: Harness, profile_id: Option<&str>, cwd: &Path, since:
 
 /// [`latest_for`], passing over the sessions `keep` turns down (another running agent's, one older than the pane).
 pub fn latest_for_where(harness: Harness, profile_id: Option<&str>, cwd: &Path, since: SystemTime, keep: impl Fn(&SessionInfo) -> bool) -> Option<SessionInfo> {
+    touched_for(harness, profile_id, cwd, since, 80).into_iter().find(|s| keep(s))
+}
+
+/// Every session of `harness` in `profile_id` (None = the machine's own login) for `cwd` touched at or after
+/// `since`, newest first, among the newest [`DEFAULT_LIMIT`] of its kind.
+pub fn recent_for(harness: Harness, profile_id: Option<&str>, cwd: &Path, since: SystemTime) -> Vec<SessionInfo> {
+    touched_for(harness, profile_id, cwd, since, DEFAULT_LIMIT)
+}
+
+fn touched_for(harness: Harness, profile_id: Option<&str>, cwd: &Path, since: SystemTime, limit: usize) -> Vec<SessionInfo> {
     let own = match harness {
         Harness::Claude => Some("claude:local"),
         Harness::Codex => Some("codex:local"),
@@ -325,12 +342,10 @@ pub fn latest_for_where(harness: Harness, profile_id: Option<&str>, cwd: &Path, 
     let want = profile_id.or(own);
     // a second of slack: filesystems round mtimes
     let since = since.checked_sub(std::time::Duration::from_secs(1)).unwrap_or(since);
-    list(&ListOpts { limit: 80, harnesses: vec![harness] }).into_iter().find(|s| {
-        s.modified >= since
-            && s.profile_id.as_deref() == want
-            && s.cwd.as_deref().is_some_and(|c| crate::util::same_path(c, cwd))
-            && keep(s)
-    })
+    list(&ListOpts { limit, harnesses: vec![harness] })
+        .into_iter()
+        .filter(|s| s.modified >= since && s.profile_id.as_deref() == want && s.cwd.as_deref().is_some_and(|c| crate::util::same_path(c, cwd)))
+        .collect()
 }
 
 /// Locate one session by id without listing everything (checks each login's session

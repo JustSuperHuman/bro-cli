@@ -26,6 +26,9 @@ pub(crate) const RELAY: u8 = 13;
 pub(crate) const FORGET_LOST: u8 = 14;
 /// Stop watching a session (it keeps running).
 pub(crate) const DETACH: u8 = 15;
+/// Have the Slop Collector look now (after a settings change), or end every leftover it lists ("Collect now").
+/// An older server ignores it.
+pub(crate) const SLOP_ACT: u8 = 16;
 
 /// Server → client.
 pub(crate) const WELCOME: u8 = 101;
@@ -55,6 +58,8 @@ pub(crate) const PING: u8 = 115;
 pub(crate) const PEERS: u8 = 116;
 /// The server was asked to stop (`bro host stop`, a restart): its sessions end, and it isn't coming back.
 pub(crate) const STOPPING: u8 = 117;
+/// What the Slop Collector found on its last look ([`bro_core::slop::Report`]). An older client ignores it.
+pub(crate) const SLOP: u8 = 118;
 
 /// A frame larger than this is a broken peer, not a message.
 const MAX_FRAME: usize = 256 << 20;
@@ -194,6 +199,13 @@ pub(crate) struct Ids {
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub(crate) struct Added {
     pub session: SessionInfo,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
+pub(crate) struct SlopAct {
+    /// End every leftover listed now, waited or not (false: only look).
+    #[serde(default)]
+    pub collect: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]

@@ -522,6 +522,19 @@ impl App {
             };
             UsageLine { harness: Some(bro_core::Harness::Claude), profile: Some(p.id.clone()), label, h5: None, wk: None, approx: false, note: Some(note), resets_at: None, fable: None }
         }).collect();
+        // the Just Superhuman account: its credits left (a click starts a session on it)
+        let jsh: Option<UsageLine> = Some(&st.jsh).filter(|j| j.signed_in).map(|j| {
+            let note = match &j.account {
+                Some(a) if a.credits.available <= 0 => "out of credits".to_string(),
+                Some(a) if !a.claude.available => "unavailable".to_string(),
+                Some(a) => a.credits_text(),
+                None => "…".to_string(),
+            };
+            let resets_at = j.account.as_ref().and_then(|a| a.credits.resets_at).map(|ms| ms / 1000);
+            UsageLine { harness: Some(bro_core::Harness::Claude), profile: Some(bro_core::jsh::PROVIDER_ID.into()), label: bro_core::jsh::PROVIDER_NAME.into(), h5: None, wk: None, approx: false, note: Some(note), resets_at, fable: None }
+        });
+        // after the logins: the team account, then Gemini's
+        let others: Vec<UsageLine> = jsh.into_iter().chain(gemini).collect();
         let signed_in: Vec<_> = profiles.iter().filter(|p| p.authenticated && !p.is_gemini()).collect();
         // proxy mode runs each family on its subscription logins together (the launcher's one row for them)
         let shared = st.settings.proxy.shared;
@@ -585,7 +598,7 @@ impl App {
                     v.insert(1, UsageLine { harness: None, profile: None, label: "fable".into(), h5: s.fable_5h, wk: s.fable_wk, approx: false, note: None, resets_at: None, fable: None });
                 }
             }
-            v.extend(gemini);
+            v.extend(others);
             return v;
         }
         if shared {
@@ -594,10 +607,10 @@ impl App {
             return [true, false]
                 .into_iter()
                 .flat_map(|claude| total(claude).into_iter().chain(family(claude).into_iter().map(|p| UsageLine { harness: None, ..login(p) })))
-                .chain(gemini)
+                .chain(others)
                 .collect();
         }
-        signed_in.iter().map(|p| login(p)).chain(gemini).collect()
+        signed_in.iter().map(|p| login(p)).chain(others).collect()
     }
 
     fn draw_footer(&mut self, f: &mut Frame, area: Rect, usage: &[UsageLine], t: &Theme) {
@@ -644,7 +657,13 @@ impl App {
                     None if u.harness.is_none() => format!(" {}", u.label),
                     None => u.label.clone(),
                 };
-                let mut left = vec![Span::styled(format!("{glyph} "), fg(brand)), Span::styled(ui::pad(&label, name_w + 2), name_style), Span::raw(" ")];
+                // a row with its figure in words (a Gemini login, the Just Superhuman account) gives its name the room
+                // the meter would take
+                let label_w = match &u.note {
+                    Some(n) if u.h5.is_none() && u.wk.is_none() => (area.width as usize).saturating_sub(ui::width(glyph) + 3 + ui::width(n) + 1).max(name_w + 2),
+                    _ => name_w + 2,
+                };
+                let mut left = vec![Span::styled(format!("{glyph} "), fg(brand)), Span::styled(ui::pad(&label, label_w), name_style), Span::raw(" ")];
                 let mut right = vec![];
                 match &u.note {
                     Some(n) if u.h5.is_none() && u.wk.is_none() => right.push(Span::styled(format!("{n} "), muted(t))),

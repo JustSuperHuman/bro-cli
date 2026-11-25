@@ -58,6 +58,64 @@ fn window_row(f: &mut Frame, r: Rect, name: &str, w: Option<&Window>, t: &Theme)
     ui::line(f, r, spans);
 }
 
+/// The Just Superhuman account's block: the credits left and what they're worth, this month's allowance, what's
+/// been spent, granted and held, and anything stopping Claude. Returns rows used.
+fn jsh_block(f: &mut Frame, area: Rect, y: u16, j: &bro_core::jsh::Snapshot, t: &Theme) -> u16 {
+    use bro_core::jsh::grouped;
+    let row = |k: u16| Rect { y: y + k, height: 1, ..area };
+    if y >= area.bottom() {
+        return 0;
+    }
+    let mut head = vec![Span::styled(" △ Just Superhuman", ui::bold_accent(t))];
+    let Some(a) = &j.account else {
+        ui::line_lr(f, row(0), head, vec![Span::styled(" + session ", ui::accent(t))]);
+        let (text, c) = match j.error.as_deref() {
+            Some(e) => (e.to_string(), t.danger),
+            None => ("reading your credits…".to_string(), t.muted),
+        };
+        ui::line(f, row(1), vec![Span::styled(format!("   {text}"), fg(c))]);
+        return 3;
+    };
+    let c = &a.credits;
+    let org = a.organization.name.trim();
+    head.push(Span::styled(format!("   {}", if org.is_empty() { "your team" } else { org }), fg(t.shine)));
+    if !a.user.email.trim().is_empty() {
+        head.push(Span::styled(format!(" · {}", a.user.email.trim()), muted(t)));
+    }
+    let mut right = vec![Span::styled(" + session ", ui::accent(t))];
+    if j.refreshing {
+        right.push(Span::styled("  ↻ ", ui::accent(t)));
+    }
+    ui::line_lr(f, row(0), head, right);
+    let figure = if a.running_low() { fg(t.danger) } else { fg(t.fg) };
+    ui::line(f, row(1), vec![Span::styled(format!("   {} ", grouped(c.available)), figure.add_modifier(Modifier::BOLD)), Span::styled(if c.available == 1 { "credit left" } else { "credits left" }, muted(t)), Span::styled(format!(" · {}", c.dollars(c.available)), fg(t.fg))]);
+    let mut next = 2;
+    let mut spent = vec![];
+    match c.month_used_pct() {
+        Some(pct) => {
+            window_row(f, row(next), "month", Some(&Window { used_pct: pct, resets_at: c.resets_at.map(|ms| ms / 1000), window_mins: None }), t);
+            next += 1;
+            spent.push(Span::styled("   this month ", muted(t)));
+            spent.push(Span::styled(format!("{} spent", grouped(c.used_this_month())), fg(ui::pct_color(pct, t)).add_modifier(Modifier::BOLD)));
+            spent.push(Span::styled(format!(" · {} a month", grouped(c.monthly_allowance)), muted(t)));
+            if c.granted > 0 {
+                spent.push(Span::styled(format!(" · includes {} one-time", grouped(c.granted)), muted(t)));
+            }
+        }
+        None => spent.push(Span::styled("   one-time credits · they never expire", muted(t))),
+    }
+    if c.reserved > 0 {
+        spent.push(Span::styled(format!(" · {} held for replies still being written", grouped(c.reserved)), muted(t)));
+    }
+    ui::line(f, row(next), spent);
+    next += 1;
+    for problem in a.paused_reason().map(str::to_string).into_iter().chain(j.error.as_deref().map(|e| format!("last refresh failed: {e}"))) {
+        ui::line(f, row(next), vec![Span::styled(format!("   {problem}"), fg(t.danger))]);
+        next += 1;
+    }
+    next + 1
+}
+
 /// Draw one profile's block (5 rows). Returns rows used.
 fn block(f: &mut Frame, area: Rect, y: u16, p: &Profile, e: Option<&UsageEntry>, picks: &(Option<String>, Option<String>), t: &Theme) -> u16 {
     let row = |k: u16| Rect { y: y + k, height: 1, ..area };
@@ -166,7 +224,18 @@ impl Pane for UsageView {
         };
         let body = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
         let mut y = body.y;
-        let shown: Vec<&Profile> = profiles.iter().skip(self.scroll).collect();
+        // the Just Superhuman account first, scrolled past like a login
+        let mut skip = self.scroll;
+        if st.jsh.signed_in {
+            if skip == 0 {
+                let height = jsh_block(f, body, y, &st.jsh, t);
+                self.hits.push((Rect { y, height: height.min(body.bottom().saturating_sub(y)), ..body }, bro_core::Harness::Claude, bro_core::jsh::PROVIDER_ID.to_string()));
+                y += height;
+            } else {
+                skip -= 1;
+            }
+        }
+        let shown: Vec<&Profile> = profiles.iter().skip(skip).collect();
         for p in shown {
             if y + 3 > body.bottom() {
                 break;
@@ -178,7 +247,7 @@ impl Pane for UsageView {
             }
             y += height;
         }
-        if profiles.is_empty() {
+        if profiles.is_empty() && !st.jsh.signed_in {
             ui::line(f, Rect { y, height: 1, ..body }, vec![Span::styled("  no profiles yet — alt+o to add a Claude account or Codex profile", muted(t))]);
         }
     }
@@ -195,7 +264,8 @@ impl Pane for UsageView {
             KeyCode::Char('k') | KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
             _ => return false,
         }
-        let n = cx.svc.state().profiles.ready().map(|p| p.len()).unwrap_or(0);
+        let st = cx.svc.state();
+        let n = st.profiles.ready().map(|p| p.len()).unwrap_or(0) + usize::from(st.jsh.signed_in);
         self.scroll = self.scroll.min(n.saturating_sub(1));
         true
     }

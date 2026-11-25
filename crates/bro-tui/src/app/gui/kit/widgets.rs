@@ -3,6 +3,7 @@
 //! hairline edge; floating things (cards, dialogs, menus) 8px corners and a soft shadow. Each draws itself,
 //! registers its hit and returns what the caller needs to lay out the next thing.
 
+use super::motion::Spring;
 use super::{Cursor, Style, Ui, radius, size, weight};
 use crate::app::gui::actions::Action;
 use bro_gfx::text::Align;
@@ -39,6 +40,10 @@ pub fn button(ui: &mut Ui, r: Rect, label: &str, kind: Kind, action: Action) -> 
     let hot = ui.hover_amount(("button", label, r.x as i32, r.y as i32), r);
     let down = ui.pressing && hot > 0.5;
     let t = ui.t;
+    let hit = r;
+    // it gives under the press and springs back when let go
+    let press = ui.spring(("button-press", label, r.x as i32, r.y as i32), if down { 1.0 } else { 0.0 }, Spring::PRESS, 0.0);
+    let r = r.inset(1.6 * press);
     let ink = match kind {
         Kind::Primary => {
             let fill = if down { t.accent.fade(0.8) } else { t.accent.fade(1.0 - 0.1 * hot) };
@@ -48,9 +53,9 @@ pub fn button(ui: &mut Ui, r: Rect, label: &str, kind: Kind, action: Action) -> 
             if down { t.on_accent.fade(0.8) } else { t.on_accent }
         }
         Kind::Danger => {
-            let fill = if down { t.danger.fade(0.8) } else { t.danger.fade(1.0 - 0.1 * hot) };
+            let fill = if down { t.bold_fill(t.danger).fade(0.8) } else { t.bold_fill(t.danger).fade(1.0 - 0.1 * hot) };
             ui.round(r, radius::CONTROL, fill);
-            t.ink_on(t.danger)
+            t.on_bold()
         }
         Kind::Secondary => {
             let fill = if down { t.control_pressed } else { t.control.mix(t.control_hover, hot) };
@@ -65,7 +70,8 @@ pub fn button(ui: &mut Ui, r: Rect, label: &str, kind: Kind, action: Action) -> 
         }
     };
     ui.label_in(r, label, Style::new(size::BODY, weight::MEDIUM, ink), Align::Center);
-    ui.hit(r, action);
+    if !matches!(&action,Action::ThemeEditor(_)) {ui.theme_region(hit,match kind {Kind::Primary=>"accent",Kind::Danger=>"error",_=>"secondary"});}
+    ui.hit(hit, action);
     hot > 0.5
 }
 
@@ -77,11 +83,13 @@ pub fn button_width(ui: &mut Ui, label: &str) -> f32 {
 /// A square icon button (no fill until hovered). `color` = the icon's resting colour.
 pub fn icon_button(ui: &mut Ui, r: Rect, glyph: &str, color: Color, action: Action) -> bool {
     let hot = ui.hover_amount(("icon", glyph, r.x as i32, r.y as i32), r);
+    let down = ui.pressing && hot > 0.5;
+    let press = ui.spring(("icon-press", glyph, r.x as i32, r.y as i32), if down { 1.0 } else { 0.0 }, Spring::PRESS, 0.0);
+    let shown = r.inset(1.5 * press);
     if hot > 0.0 {
-        let down = ui.pressing && hot > 0.5;
-        ui.round(r, radius::CONTROL, ui.t.text.with_alpha(if down { 0.04 } else { 0.07 * hot }));
+        ui.round(shown, radius::CONTROL, ui.t.text.with_alpha(if down { 0.04 } else { 0.07 * hot }));
     }
-    ui.icon(r, glyph, size::TITLE, color.mix(ui.t.text, 0.5 * hot));
+    ui.icon(shown, glyph, size::TITLE * (1.0 - 0.08 * press), color.mix(ui.t.text, 0.5 * hot));
     ui.hit(r, action);
     hot > 0.5
 }
@@ -192,16 +200,25 @@ pub const SWITCH_H: f32 = 20.0;
 pub fn switch(ui: &mut Ui, at: Point, on: bool, action: Action) -> Rect {
     let t = ui.t;
     let r = Rect::new(at.x, at.y, SWITCH_W, SWITCH_H);
-    let k = ui.ease(("switch", at.x as i32, at.y as i32), if on { 1.0 } else { 0.0 }, 140.0);
+    // the knob flips on a spring (Rune's `hello`): it overshoots a touch, stretches as it travels and widens
+    // under a press
+    let target = if on { 1.0 } else { 0.0 };
+    let k = ui.spring(("switch", at.x as i32, at.y as i32), target, Spring::ARRIVE, target);
+    let kc = k.clamp(0.0, 1.0);
     let hot = ui.hover_amount(("switch-hover", at.x as i32, at.y as i32), r.outset(3.0));
+    let down = ui.pressing && hot > 0.5;
+    let press = ui.spring(("switch-press", at.x as i32, at.y as i32), if down { 1.0 } else { 0.0 }, Spring::PRESS, 0.0);
     let off_fill = t.text.with_alpha(0.04 * hot);
-    ui.round(r, r.h / 2.0, off_fill.mix(t.accent, k));
-    if k < 1.0 {
-        ui.outline(r, r.h / 2.0, 1.0, t.muted.fade(1.0 - k));
+    ui.round(r, r.h / 2.0, off_fill.mix(t.accent, kc));
+    if kc < 1.0 {
+        ui.outline(r, r.h / 2.0, 1.0, t.muted.fade(1.0 - kc));
     }
     let knob_r = 6.0 + 1.0 * hot;
-    let knob = Point::new(r.x + 10.0 + 20.0 * k, r.y + r.h / 2.0);
-    ui.circle(knob, knob_r, t.muted.mix(t.on_accent, k));
+    let stretch = 1.0 - (2.0 * kc - 1.0).abs();
+    let kw = 2.0 * knob_r + 7.0 * stretch + 4.0 * press.max(0.0);
+    let cx = (r.x + 10.0 + 20.0 * k).clamp(r.x + 4.0 + kw / 2.0, r.right() - 4.0 - kw / 2.0);
+    let knob = Rect::new(cx - kw / 2.0, r.y + r.h / 2.0 - knob_r, kw, 2.0 * knob_r);
+    ui.round(knob, knob_r, t.muted.mix(t.on_accent, kc));
     ui.hit(r.outset(3.0), action);
     r
 }
@@ -214,12 +231,16 @@ pub fn segmented(ui: &mut Ui, r: Rect, options: &[&str], selected: usize, act: i
     control(ui, r, if t.light { t.text.with_alpha(0.045) } else { t.control });
     let n = options.len().max(1) as f32;
     let w = (r.w - 4.0) / n;
+    // the chosen one's plate glides over to a new choice
+    if selected < options.len() {
+        let c = Rect::new(r.x + 2.0 + selected as f32 * w, r.y + 2.0, w, r.h - 4.0);
+        let g = ui.glide(("segmented", r.x as i32, r.y as i32), selected, c, Spring::new(0.34, 0.14));
+        ui.panel(g, radius::CONTROL - 1.0, if t.light { Color::WHITE } else { t.text.with_alpha(0.09) }, t.stroke);
+    }
     for (i, o) in options.iter().enumerate() {
         let c = Rect::new(r.x + 2.0 + i as f32 * w, r.y + 2.0, w, r.h - 4.0);
         let sel = i == selected;
-        if sel {
-            ui.panel(c, radius::CONTROL - 1.0, if t.light { Color::WHITE } else { t.text.with_alpha(0.09) }, t.stroke);
-        } else if ui.hovered(c) {
+        if !sel && ui.hovered(c) {
             ui.round(c, radius::CONTROL - 1.0, t.text.with_alpha(0.04));
         }
         let ink = if sel { t.text } else { t.muted };
@@ -263,16 +284,30 @@ pub fn segment_count(w: f32, per: f32) -> usize {
 /// A text field (single line): the text, a caret at byte `cursor` when focused, the placeholder when empty.
 /// Clicking it runs `action`.
 pub fn field(ui: &mut Ui, r: Rect, value: &str, cursor: Option<usize>, placeholder: &str, focused: bool, action: Action) {
+    field_with(ui, r, None, value, cursor, placeholder, focused, action);
+}
+
+/// A [`field`] led by an icon (a search field's magnifier), the text after it.
+#[allow(clippy::too_many_arguments)]
+pub fn field_with(ui: &mut Ui, r: Rect, lead: Option<&str>, value: &str, cursor: Option<usize>, placeholder: &str, focused: bool, action: Action) {
     let t = ui.t;
-    if focused {
-        ui.panel(r, radius::CONTROL, t.field_focus, t.accent.with_alpha(0.8));
-    } else {
-        let hot = ui.hover_amount(("field", r.x as i32, r.y as i32), r);
-        ui.panel(r, radius::CONTROL, t.control.mix(t.control_hover, hot), t.stroke);
+    // the keyboard's outline and fill fade in and out rather than switching
+    let key = (r.x as i32, r.y as i32);
+    let fk = ui.ease(("field-focus", key), if focused { 1.0 } else { 0.0 }, 140.0);
+    let hot = if focused { 0.0 } else { ui.hover_amount(("field", r.x as i32, r.y as i32), r) };
+    ui.panel(r, radius::CONTROL, t.control.mix(t.control_hover, hot).mix(t.field_focus, fk), t.stroke.mix(t.accent.with_alpha(0.8), fk));
+    if fk < 1.0 {
         let inner = Rect::new(r.x + radius::CONTROL, r.y, (r.w - 2.0 * radius::CONTROL).max(0.0), r.h);
-        ui.hline(inner.x, r.bottom() - ui.hair(), inner.w, t.muted.with_alpha(0.45));
+        ui.hline(inner.x, r.bottom() - ui.hair(), inner.w, t.muted.with_alpha(0.45 * (1.0 - fk)));
     }
-    let inner = Rect::new(r.x + 10.0, r.y, r.w - 20.0, r.h);
+    let pad = match lead {
+        Some(glyph) => {
+            ui.icon(Rect::new(r.x + 8.0, r.y, 18.0, r.h), glyph, size::TITLE, if focused { t.text } else { t.muted });
+            30.0
+        }
+        None => 10.0,
+    };
+    let inner = Rect::new(r.x + pad, r.y, r.w - pad - 10.0, r.h);
     let st = Style::new(size::BODY, weight::REGULAR, t.text);
     ui.clip(inner, 0.0);
     if value.is_empty() {
@@ -284,22 +319,45 @@ pub fn field(ui: &mut Ui, r: Rect, value: &str, cursor: Option<usize>, placehold
         let shift = (caret_x - inner.w + 4.0).max(0.0);
         ui.draw(&b, Point::new(inner.x - shift, r.y + (r.h - b.h) / 2.0));
         if focused && cursor.is_some() {
-            draw_caret(ui, Point::new(inner.x - shift + caret_x, r.y + (r.h - 16.0) / 2.0), 16.0);
+            caret(ui, key, Point::new(inner.x - shift + caret_x, r.y + (r.h - 16.0) / 2.0), 16.0);
         }
     }
     if value.is_empty() && focused {
-        draw_caret(ui, Point::new(inner.x, r.y + (r.h - 16.0) / 2.0), 16.0);
+        caret(ui, key, Point::new(inner.x, r.y + (r.h - 16.0) / 2.0), 16.0);
     }
     ui.unclip();
+    if !matches!(&action,Action::ThemeEditor(_)){ui.theme_region(r,"input");}
     ui.hit_with(r, action, Cursor::Text);
 }
 
-/// A blinking text caret.
+/// How opaque a caret is `phase` (0..1) into its blink: on, a quick fade out, off, a quick fade in.
+fn blink(phase: f32) -> f32 {
+    match phase {
+        p if p < 0.55 => 1.0,
+        p if p < 0.7 => 1.0 - (p - 0.55) / 0.15,
+        p if p < 0.85 => 0.0,
+        p => (p - 0.85) / 0.15,
+    }
+}
+
+/// A text caret that fades as it blinks.
 pub fn draw_caret(ui: &mut Ui, at: Point, h: f32) {
     ui.ticking = true;
-    let on = (ui.time * 1.8).fract() < 0.6;
-    if on {
-        ui.top_fill(Rect::new(at.x, at.y, 1.5, h), 0.75, ui.t.text);
+    let a = blink((ui.time * 1.8).fract() as f32);
+    if a > 0.0 {
+        ui.top_fill(Rect::new(at.x, at.y, 1.5, h), 0.75, ui.t.text.fade(a));
+    }
+}
+
+/// A caret for the field `key`: it glides to where typing puts it (quick, no bounce) and stays solid while it
+/// moves and a moment after, blinking again once it rests.
+pub fn caret(ui: &mut Ui, key: impl std::hash::Hash, at: Point, h: f32) {
+    ui.ticking = true;
+    let x = ui.spring(("caret", &key), at.x, Spring::new(0.1, 0.0), at.x);
+    let hold = ui.ease(("caret-hold", &key), if (x - at.x).abs() > 0.05 { 1.0 } else { 0.0 }, 500.0);
+    let a = blink((ui.time * 1.8).fract() as f32).max(hold.min(1.0));
+    if a > 0.0 {
+        ui.top_fill(Rect::new(x, at.y, 1.5, h), 0.75, ui.t.text.fade(a));
     }
 }
 
@@ -341,9 +399,12 @@ pub fn scrim(ui: &mut Ui, r: Rect, amount: f32, action: Action) {
 /// A selectable list row background: selected, hovered or plain (4px corners, no side marker). Returns the
 /// hover amount.
 pub fn row(ui: &mut Ui, r: Rect, key: impl std::hash::Hash, selected: bool, action: Action) -> f32 {
+    let which = super::id(&key);
     let hot = ui.hover_amount(("row", key), r);
     if selected {
-        ui.round(r, radius::CONTROL, ui.t.selected);
+        // the selection glides from row to row: rows in one column are one list
+        let g = ui.glide(("row-sel", r.x.round() as i32, r.w.round() as i32), which, r, Spring::new(0.26, 0.08));
+        ui.round(g, radius::CONTROL, ui.t.selected);
     } else if hot > 0.0 {
         ui.round(r, radius::CONTROL, ui.t.hover.fade(hot));
     }
@@ -465,17 +526,36 @@ pub fn menu(ui: &mut Ui, at: Point, bounds: Rect, title: Option<&str>, lines: &[
 
 /// A tooltip above (or below, near the top) `anchor`, on its own layer.
 pub fn tooltip(ui: &mut Ui, anchor: Rect, text: &str) {
+    tooltip_wrapped(ui, anchor, text, 320.0);
+}
+
+/// [`tooltip`] wrapped at `max_w`: one that has to stay over a narrow column (a pane clips what's drawn past it).
+pub fn tooltip_wrapped(ui: &mut Ui, anchor: Rect, text: &str, max_w: f32) {
+    tooltip_at(ui, anchor, text, max_w, false);
+}
+
+/// [`tooltip_wrapped`] under `anchor` rather than above it (above only when there is no room under): for something
+/// whose top edge sits against controls a tooltip shouldn't cover.
+pub fn tooltip_under(ui: &mut Ui, anchor: Rect, text: &str, max_w: f32) {
+    tooltip_at(ui, anchor, text, max_w, true);
+}
+
+fn tooltip_at(ui: &mut Ui, anchor: Rect, text: &str, max_w: f32, under: bool) {
     let screen = ui.screen;
     let prev = ui.layer();
     let st = Style::new(size::SMALL, weight::REGULAR, ui.t.text);
-    let b = ui.para(text, st, 320.0, Some(6));
+    let b = ui.para(text, st, max_w.max(40.0), Some(6));
     let w = b.w + 16.0;
     let h = b.h + 10.0;
     let mut x = anchor.x + (anchor.w - w) / 2.0;
     x = x.clamp(screen.x + 6.0, screen.right() - w - 6.0);
-    let mut y = anchor.y - h - 6.0;
+    let (above, below) = (anchor.y - h - 6.0, anchor.bottom() + 6.0);
+    let mut y = if under { below } else { above };
+    if under && y + h > screen.bottom() - 4.0 {
+        y = above;
+    }
     if y < screen.y + 4.0 {
-        y = anchor.bottom() + 6.0;
+        y = below;
     }
     let r = Rect::new(x, y, w, h);
     ui.shadow(r, radius::CONTROL, 12.0, 4.0, ui.t.shadow.fade(0.8));

@@ -16,10 +16,11 @@
 use crate::answer::Profile;
 use crate::screen::Screen;
 use crate::store::{self, Kept, Store};
-use crate::wire::{self, Added, Blob, Control, Exit, Hello, Id, Ids, PeersMsg, Refused, Relay, Resize, Set, Spawned};
+use crate::wire::{self, Added, Blob, Control, Exit, Hello, Id, Ids, PeersMsg, Refused, Relay, Resize, Set, SlopAct, Spawned};
 use crate::{HostInfo, PROTOCOL, Peer, Peers, Role, SessionInfo, SpawnRequest, now_ms, record};
 use anyhow::Context;
 use bro_core::proc_tree::ProcessTree;
+use bro_core::slop::{Collector, Report, Target};
 use parking_lot::Mutex;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde_json::Value;
@@ -28,7 +29,7 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -77,6 +78,15 @@ struct Host {
     next_conn: AtomicU64,
     /// The last moment the server had a client or a session.
     busy_at: Mutex<Instant>,
+    /// The Slop Collector's last report, and the way to ask it to look.
+    slop: Mutex<Option<Report>>,
+    slop_tx: Mutex<Option<Sender<SlopAsk>>>,
+}
+
+/// Someone asks the Slop Collector to look now (and to end every leftover, `collect`); `reply` hears the report.
+struct SlopAsk {
+    collect: bool,
+    reply: Option<SyncSender<Vec<u8>>>,
 }
 
 impl Host {
@@ -281,6 +291,11 @@ pub fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let port = listener.local_addr()?.port();
     // what the last server left running (it stopped without being asked to)
     let lost = store::take_over(&opts.dir);
+    let mut collector = Collector::new(Some(opts.dir.join("v2-slop.json")));
+    if let Some(temp) = slop_temp() {
+        collector = collector.with_temp(temp);
+    }
+    let first = collector.idle_report(&slop_settings(&opts.dir));
     let host = Arc::new(Host {
         token: uuid::Uuid::new_v4().simple().to_string(),
         pid: std::process::id(),
@@ -295,6 +310,8 @@ pub fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         stopping: AtomicBool::new(false),
         next_conn: AtomicU64::new(1),
         busy_at: Mutex::new(Instant::now()),
+        slop: Mutex::new(Some(first)),
+        slop_tx: Mutex::new(None),
         opts,
     });
     {
@@ -309,6 +326,12 @@ pub fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     {
         let weak = Arc::downgrade(&host);
         std::thread::Builder::new().name("bro-host-beat".into()).spawn(move || heartbeat(weak))?;
+    }
+    {
+        let (tx, rx) = mpsc::channel();
+        *host.slop_tx.lock() = Some(tx);
+        let weak = Arc::downgrade(&host);
+        std::thread::Builder::new().name("bro-host-slop".into()).spawn(move || slop_watch(weak, rx, collector))?;
     }
     for conn in listener.incoming() {
         if host.stopping.load(Ordering::SeqCst) {
@@ -372,6 +395,73 @@ fn heartbeat(host: std::sync::Weak<Host>) {
         let conns: Vec<Arc<Conn>> = host.conns.lock().values().cloned().collect();
         for c in conns {
             let _ = c.tx.try_send(wire::frame(wire::PING, b""));
+        }
+    }
+}
+
+/// `[slop]` in the server's own `v2.toml` (not `BRO_DIR`'s: the folder it was started for).
+fn slop_settings(dir: &Path) -> bro_core::slop::SlopSettings {
+    bro_core::config::Settings::load_from(&dir.join("v2.toml")).slop
+}
+
+/// The temp folder the Slop Collector clears what tools leave in: the one this server's sessions use
+/// (`BRO_SLOP_TEMP` stands in for it). None in this crate's tests: they never touch the real one.
+fn slop_temp() -> Option<PathBuf> {
+    if cfg!(test) {
+        return std::env::var_os("BRO_SLOP_TEMP").map(PathBuf::from);
+    }
+    Some(std::env::var_os("BRO_SLOP_TEMP").map_or_else(std::env::temp_dir, PathBuf::from))
+}
+
+/// What a session is called, from what its window keeps with it.
+fn session_label(blob: &Value) -> String {
+    let text = |k: &str| blob.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    text("name")
+        .or_else(|| text("label"))
+        .or_else(|| text("project"))
+        .or_else(|| text("cwd").and_then(|c| Path::new(&c).file_name().map(|n| n.to_string_lossy().into_owned())))
+        .unwrap_or_else(|| "a session".into())
+}
+
+/// The Slop Collector: every [`bro_core::slop::EVERY`] while it's on (and whenever a client asks), look through the
+/// running sessions' process trees, end what's due and tell the clients.
+fn slop_watch(host: std::sync::Weak<Host>, rx: mpsc::Receiver<SlopAsk>, mut collector: Collector) {
+    let mut next = Instant::now();
+    loop {
+        let asked = match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
+            Ok(a) => Some(a),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let Some(host) = host.upgrade() else { return };
+        if host.stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        let settings = slop_settings(&host.opts.dir);
+        let collect = asked.as_ref().is_some_and(|a| a.collect);
+        let report = if settings.on || collect {
+            let all: Vec<Arc<Session>> = host.sessions.lock().values().cloned().collect();
+            let targets: Vec<Target> = all
+                .iter()
+                .filter(|s| s.running())
+                .filter_map(|s| {
+                    let scope = s.tree.lock().as_ref()?.scope();
+                    Some(Target { session: s.id.clone(), label: session_label(&s.blob.lock()), scope })
+                })
+                .collect();
+            collector.look(&targets, &settings, now_ms(), collect)
+        } else {
+            collector.idle_report(&settings)
+        };
+        // partway through clearing a backlog of temp folders: carry on soon
+        next = Instant::now() + if collector.clearing() { bro_core::slop::SOON } else { bro_core::slop::EVERY };
+        let frame = wire::json(wire::SLOP, &report);
+        let changed = host.slop.lock().replace(report.clone()).as_ref() != Some(&report);
+        if changed {
+            host.broadcast(&frame, 0);
+        }
+        if let Some(reply) = asked.and_then(|a| a.reply) {
+            let _ = reply.try_send(frame);
         }
     }
 }
@@ -507,6 +597,7 @@ fn welcome(host: &Host, me: &Conn) -> HostInfo {
         lost: host.lost.lock().clone(),
         peers,
         role: me.role,
+        slop: host.slop.lock().clone(),
     }
 }
 
@@ -532,6 +623,14 @@ fn handle(host: &Arc<Host>, me: &Arc<Conn>, kind: u8, body: &[u8]) -> bool {
         wire::SHUTDOWN => {
             stop(host);
             return false;
+        }
+        // `bro slop` asks too: it hears the report back
+        wire::SLOP_ACT => {
+            let act = serde_json::from_slice::<SlopAct>(body).unwrap_or_default();
+            if let Some(tx) = host.slop_tx.lock().as_ref() {
+                let _ = tx.send(SlopAsk { collect: act.collect, reply: Some(me.tx.clone()) });
+            }
+            return true;
         }
         _ if me.role == Role::Query => return true,
         // a client that was taken over may still be sending while it leaves: it only lets go of sessions
@@ -647,9 +746,6 @@ fn handle(host: &Arc<Host>, me: &Arc<Conn>, kind: u8, body: &[u8]) -> bool {
         }
         wire::SET => {
             if let Ok(s) = serde_json::from_slice::<Set>(body) {
-                // Native companion status is authoritative only from the current driver.
-                if s.key == "bro.native.orbit-status.v1"
-                    && (host.primary.load(Ordering::SeqCst) != me.id || s.value.len() > 16 * 1024) { return true; }
                 host.values.lock().insert(s.key, s.value);
             }
         }

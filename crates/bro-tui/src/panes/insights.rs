@@ -5,6 +5,8 @@
 //! session's agent team ([`bro_core::agent_teams`]) is read alongside, once a second. The same lines build the
 //! conversation the desktop app's focus mode shows ([`Conversation`]), each parsed once for both; a long
 //! transcript's conversation is read from its start when bound ([`Conversation::history`]), not only its last lines.
+//! The subagents the session starts are followed through their own transcripts on the same beat
+//! ([`bro_core::sessions::subagents::Follower`]).
 
 use crate::pane::Waker;
 use bro_core::Harness;
@@ -12,6 +14,7 @@ use bro_core::agent_teams::{self, Team};
 use bro_core::recap::CachedRecap;
 use bro_core::sessions::conversation::Conversation;
 use bro_core::sessions::live::{AgentFacts, BindSpec, Binder, Tail};
+use bro_core::sessions::subagents::{Follower, Subagent};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,6 +42,9 @@ pub struct Snapshot {
     /// The agent team this Claude session leads, as Claude Code last wrote it (None: agent teams off, or no
     /// session id yet). A team of the lead alone is still Some: see [`Team::is_empty`].
     pub team: Option<Arc<Team>>,
+    /// The subagents the session started (nested ones too), the oldest first, each with its own conversation as
+    /// far as it's read (None until the transcript is bound)
+    pub subagents: Option<Arc<Vec<Arc<Subagent>>>>,
     /// Bumped on every change
     pub rev: u64,
 }
@@ -82,6 +88,13 @@ impl Insights {
         s.rev += 1;
     }
 
+    /// Give a fixed pane its subagents (tests, the demo).
+    pub fn set_subagents(&self, subagents: Vec<Subagent>) {
+        let mut s = self.inner.snap.lock();
+        s.subagents = Some(Arc::new(subagents.into_iter().map(Arc::new).collect()));
+        s.rev += 1;
+    }
+
     /// Tests: facts from a whole transcript, read now on this thread (no worker, no binding).
     #[cfg(test)]
     pub fn from_transcript(harness: Harness, path: &Path, session_id: Option<&str>) -> Insights {
@@ -111,6 +124,7 @@ impl Insights {
         {
             let mut s = me.inner.snap.lock();
             s.session_id = facts.session_id.clone();
+            s.busy = facts.turn_open;
             s.facts = Some(Arc::new(facts));
             s.conversation = Some(Arc::new(conversation));
             s.rev = 1;
@@ -135,6 +149,13 @@ impl Insights {
     /// [`Snapshot::busy`] without cloning the rest.
     pub fn busy(&self) -> Option<bool> {
         self.inner.snap.lock().busy
+    }
+
+    /// [`Snapshot::conversation`] and [`Snapshot::subagents`] without cloning the rest (what's at work in the
+    /// background, read every frame).
+    pub fn work(&self) -> (Option<Arc<Conversation>>, Option<Arc<Vec<Arc<Subagent>>>>) {
+        let s = self.inner.snap.lock();
+        (s.conversation.clone(), s.subagents.clone())
     }
 
     #[cfg(test)]
@@ -171,6 +192,7 @@ impl Insights {
         let mut conversation: Option<Conversation> = None;
         let mut busy = None;
         let mut team: Option<Arc<Team>> = None;
+        let mut follower: Option<Follower> = None;
         while !self.inner.stop.load(Ordering::SeqCst) {
             let step = crate::services::guard("insights::step", || step(harness, &mut binder, &mut tail, &mut facts, &mut conversation));
             match step {
@@ -183,10 +205,26 @@ impl Insights {
                     conversation = None;
                 }
             }
+            // the subagents of the transcript it's bound to (a new binding starts afresh)
+            let bound = tail.as_ref().map(|t| t.path().to_path_buf());
+            if follower.as_ref().map(|f| f.parent().to_path_buf()) != bound {
+                let since = Some(binder.spec().started);
+                follower = bound.map(|path| Follower::new(harness, path, since));
+                self.set_followed(follower.as_ref().map(Follower::subagents));
+            }
+            if let Some(f) = follower.as_mut() {
+                let spawned = conversation.as_ref().map(|c| c.subagents.clone()).unwrap_or_default();
+                let polled = crate::services::guard("insights::subagents", || f.poll(&spawned, Instant::now()));
+                match polled {
+                    Ok(true) => self.set_followed(Some(f.subagents())),
+                    Ok(false) => {}
+                    Err(_) => follower = None,
+                }
+            }
             let now = match harness {
                 Harness::Claude => binder.claude_busy(),
                 Harness::Codex => facts.as_ref().and_then(|f| f.turn_open),
-                Harness::Pi | Harness::Omp => None,
+                Harness::Pi | Harness::Omp | Harness::Antigravity => None,
             };
             if now != busy {
                 busy = now;
@@ -218,6 +256,20 @@ impl Insights {
         }
     }
 
+    /// The subagents followed now (None: no transcript to follow them from).
+    fn set_followed(&self, subagents: Option<Arc<Vec<Arc<Subagent>>>>) {
+        {
+            let mut s = self.inner.snap.lock();
+            if s.subagents.is_none() && subagents.as_ref().is_none_or(|l| l.is_empty()) {
+                s.subagents = subagents;
+                return;
+            }
+            s.subagents = subagents;
+            s.rev += 1;
+        }
+        self.wake();
+    }
+
     fn publish(&self, u: Update) {
         {
             let mut s = self.inner.snap.lock();
@@ -243,10 +295,14 @@ struct Update {
 
 /// One poll: re-bind when due, read new lines, and say what changed (None = nothing).
 fn step(harness: Harness, binder: &mut Binder, tail: &mut Option<Tail>, facts: &mut Option<AgentFacts>, conversation: &mut Option<Conversation>) -> Option<Update> {
+    step_at(harness, binder, tail, facts, conversation, Instant::now())
+}
+
+fn step_at(harness: Harness, binder: &mut Binder, tail: &mut Option<Tail>, facts: &mut Option<AgentFacts>, conversation: &mut Option<Conversation>, now: Instant) -> Option<Update> {
     let mut changed = false;
-    if binder.poll(Instant::now()) {
+    if binder.poll(now) {
         let Some(path) = binder.path() else {
-            // it was another session's: show none until this one writes its own
+            // A reset or a corrected binding: show none until this session writes its own transcript.
             (*tail, *facts, *conversation) = (None, None, None);
             let session_id = binder.session_id().map(str::to_string);
             return Some(Update { facts: None, conversation: None, transcript: None, session_id, generated: None });
@@ -306,13 +362,22 @@ fn generated_for(harness: Harness, session_id: Option<&str>, transcript: &Path) 
     bro_core::recap::load_fresh(session_id?, transcript)
 }
 
-/// `--resume <id>` (Claude) or `resume|fork <id>` (Codex) in a launch's arguments.
-pub fn resume_id(harness: Harness, args: &[String]) -> Option<String> {
+/// The ID the pane will use (if known) and the source ID it must avoid following when forking.
+pub fn launch_session_ids(harness: Harness, args: &[String]) -> (Option<String>, Option<String>) {
+    let args = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
     let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).filter(|v| !v.starts_with('-')).cloned();
     match harness {
-        Harness::Claude => after("--resume").or_else(|| after("-r")),
-        Harness::Codex => after("resume").or_else(|| after("fork")),
-        Harness::Pi | Harness::Omp => None,
+        Harness::Claude => {
+            let resume = after("--resume").or_else(|| after("-r"));
+            if args.iter().any(|a| a == "--fork-session") {
+                (after("--session-id"), resume)
+            } else {
+                (resume.or_else(|| after("--session-id")), None)
+            }
+        }
+        Harness::Codex if args.first().is_some_and(|a| a == "fork") => (None, after("fork")),
+        Harness::Codex => (after("resume"), None),
+        Harness::Pi | Harness::Omp | Harness::Antigravity => (None, None),
     }
 }
 
@@ -321,13 +386,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resume_ids_come_from_the_launch_args() {
+    fn clearing_claude_publishes_an_empty_conversation_before_the_next_prompt() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        let projects = dir.path().join("projects").join(bro_core::sessions::live::claude_project_slug(&cwd));
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::create_dir_all(&sessions).unwrap();
+        let old = "11111111-1111-4111-8111-111111111111";
+        let fresh = "22222222-2222-4222-8222-222222222222";
+        let status = sessions.join("4242.json");
+        let write_status = |id| std::fs::write(&status, json!({"pid":4242,"sessionId":id,"cwd":cwd}).to_string()).unwrap();
+        write_status(old);
+        std::fs::write(projects.join(format!("{old}.jsonl")), format!("{}\n", json!({"type":"user","sessionId":old,"message":{"content":"Old conversation"}}))).unwrap();
+        let mut binder = Binder::new(BindSpec {
+            harness: Harness::Claude, profile_id: None, config_dir: Some(dir.path().into()), pid: Some(4242),
+            cwd: cwd.clone(), started: std::time::SystemTime::now(), resume_id: None, fork_source: None,
+        });
+        let (mut tail, mut facts, mut conversation) = (None, None, None);
+        let insights = Insights::empty(None);
+        let now = Instant::now();
+        insights.publish(step_at(Harness::Claude, &mut binder, &mut tail, &mut facts, &mut conversation, now).unwrap());
+        assert_eq!(insights.snapshot().conversation.unwrap().items.len(), 1);
+        write_status(fresh);
+        insights.publish(step_at(Harness::Claude, &mut binder, &mut tail, &mut facts, &mut conversation, now + Duration::from_secs(6)).expect("a new session clears the snapshot without a transcript"));
+        let cleared = insights.snapshot();
+        assert_eq!(cleared.session_id.as_deref(), Some(fresh));
+        assert!(cleared.conversation.is_none() && cleared.facts.is_none() && cleared.transcript.is_none());
+        assert!(tail.is_none() && facts.is_none() && conversation.is_none());
+        assert!(step_at(Harness::Claude, &mut binder, &mut tail, &mut facts, &mut conversation, now + Duration::from_secs(12)).is_none());
+        std::fs::write(projects.join(format!("{fresh}.jsonl")), format!("{}\n", json!({"type":"user","sessionId":fresh,"message":{"content":"Fresh prompt"}}))).unwrap();
+        let update = step_at(Harness::Claude, &mut binder, &mut tail, &mut facts, &mut conversation, now + Duration::from_secs(18)).unwrap();
+        let items = update.conversation.unwrap().items;
+        assert_eq!(items.len(), 1);
+        assert!(matches!(items[0].as_ref(), bro_core::sessions::conversation::Item::You {text, ..} if text == "Fresh prompt"));
+    }
+
+    #[test]
+    fn fork_sources_are_distinct_from_the_new_sessions_ids() {
         let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
-        assert_eq!(resume_id(Harness::Claude, &s(&["--resume", "abc", "--fork-session"])).as_deref(), Some("abc"));
-        assert_eq!(resume_id(Harness::Claude, &s(&["--dangerously-skip-permissions"])), None);
-        assert_eq!(resume_id(Harness::Codex, &s(&["resume", "019a"])).as_deref(), Some("019a"));
-        assert_eq!(resume_id(Harness::Codex, &s(&["fork", "019b"])).as_deref(), Some("019b"));
-        assert_eq!(resume_id(Harness::Codex, &s(&["resume", "--last"])), None);
+        assert_eq!(launch_session_ids(Harness::Claude, &s(&["--resume", "abc", "--fork-session"])), (None, Some("abc".into())));
+        assert_eq!(launch_session_ids(Harness::Claude, &s(&["--resume", "abc", "--fork-session", "--session-id", "def"])), (Some("def".into()), Some("abc".into())));
+        assert_eq!(launch_session_ids(Harness::Claude, &s(&["--resume", "abc", "--", "--fork-session"])), (Some("abc".into()), None));
+        assert_eq!(launch_session_ids(Harness::Codex, &s(&["resume", "019a"])), (Some("019a".into()), None));
+        assert_eq!(launch_session_ids(Harness::Codex, &s(&["fork", "019b"])), (None, Some("019b".into())));
+        assert_eq!(launch_session_ids(Harness::Codex, &s(&["resume", "--last"])), (None, None));
     }
 
     #[test]
@@ -353,7 +457,7 @@ mod tests {
         let mut tail = Some(Tail::new(&path));
         let mut facts = Some(AgentFacts::new(Harness::Claude));
         let mut conversation = None;
-        let mut binder = Binder::new(BindSpec { harness: Harness::Pi, profile_id: None, config_dir: None, pid: None, cwd: dir.path().into(), started: std::time::SystemTime::now(), resume_id: None });
+        let mut binder = Binder::new(BindSpec { harness: Harness::Pi, profile_id: None, config_dir: None, pid: None, cwd: dir.path().into(), started: std::time::SystemTime::now(), resume_id: None, fork_source: None });
         assert!(step(Harness::Claude, &mut binder, &mut tail, &mut facts, &mut conversation).is_none(), "nothing yet");
         let line = serde_json::json!({"type":"assistant","timestamp":"2026-10-02T10:00:00Z","message":{"id":"m1","content":[{"type":"text","text":"All done. Want me to ship it?"}]}});
         std::fs::write(&path, format!("{line}\n")).unwrap();
@@ -377,7 +481,7 @@ mod tests {
         let mut tail = Some(Tail::new(&path));
         let mut facts = Some(AgentFacts::new(Harness::Claude));
         let mut conversation = None;
-        let mut binder = Binder::new(BindSpec { harness: Harness::Pi, profile_id: None, config_dir: None, pid: None, cwd: dir.path().into(), started: std::time::SystemTime::now(), resume_id: None });
+        let mut binder = Binder::new(BindSpec { harness: Harness::Pi, profile_id: None, config_dir: None, pid: None, cwd: dir.path().into(), started: std::time::SystemTime::now(), resume_id: None, fork_source: None });
         let u = step(Harness::Claude, &mut binder, &mut tail, &mut facts, &mut conversation).expect("the transcript was read");
         assert_eq!(u.conversation.unwrap().items.len(), 2, "what you said and what it said");
     }

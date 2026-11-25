@@ -175,7 +175,7 @@ fn account_uuid(config_dir: &Path) -> String {
 
 /// v1 `scrubBridgeEnv`: drop bro's dedicated-browser pipe namespace inherited from a
 /// parent bro session.
-fn scrub_env() -> Vec<(String, String)> {
+pub(crate) fn scrub_env() -> Vec<(String, String)> {
     let options: Vec<String> = std::env::var("BUN_OPTIONS")
         .unwrap_or_default()
         .split_whitespace()
@@ -205,6 +205,9 @@ pub fn launch_additions_with(mode: BrowserMode, harness: Harness, ctx: &BrowserC
         return (Vec::new(), Vec::new());
     }
     let st = state();
+    if st.backend == Backend::McpChrome && !crate::config::Settings::load().automation.justbrowse {
+        return (Vec::new(), Vec::new());
+    }
     if mode == BrowserMode::Auto && !st.enabled {
         return (Vec::new(), Vec::new());
     }

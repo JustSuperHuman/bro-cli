@@ -50,6 +50,8 @@ impl Harness {
             let seen = seen.clone();
             let slot = slot.clone();
             move |command: BridgeCommand| match command {
+                BridgeCommand::BrowserHandoffsChanged => {}
+                BridgeCommand::BrowserResume { reply, .. } => { let _ = reply.send(Ok(false)); }
                 BridgeCommand::CoordinationWake { .. } => {},
                 BridgeCommand::FocusControls { id, change, reply } => {
                     let _ = reply.send(Ok(json!({ "sessionId": id, "change": change, "model": null, "effort": null, "models": [], "levels": [{"id":"high"}], "pending": false })));
@@ -73,6 +75,14 @@ impl Harness {
                     seen.lock().push(Seen::Input(id, String::from_utf8_lossy(&data).into_owned()));
                     let _ = reply.send(Ok(()));
                 }
+                // s1 was typed into a second and a half ago, s2 not yet; bro has no other session
+                BridgeCommand::TypedAgo { id, reply } => {
+                    let _ = reply.send(match id.as_str() {
+                        "s1" => Ok(Some(Duration::from_millis(1_500))),
+                        "s2" => Ok(None),
+                        _ => Err("bro has no such session".into()),
+                    });
+                }
                 BridgeCommand::Resize { id, cols, rows } => {
                     seen.lock().push(Seen::Resize(id, cols, rows))
                 }
@@ -81,6 +91,7 @@ impl Harness {
                 BridgeCommand::Focus { id } => seen.lock().push(Seen::Focus(id)),
                 BridgeCommand::Orchestrator(c) => seen.lock().push(Seen::Orchestrator(c)),
                 BridgeCommand::Tile { project } => seen.lock().push(Seen::Tile(project)),
+                BridgeCommand::Storyboard { .. } => {}
                 BridgeCommand::OpenFile { id, path, line, column } => {
                     seen.lock().push(Seen::OpenFile(id, path, line, column))
                 }
@@ -2147,6 +2158,14 @@ async fn folders_suggest_bro_projects_and_complete_typed_paths() {
     assert_eq!(paths(&typed), [code.join("JustGains").to_string_lossy(), code.join("JustGains-Mobile").to_string_lossy()]);
     let children = get(format!("{}{sep}", code.to_string_lossy())).await;
     assert_eq!(paths(&children).len(), 3);
+    // A folder's listing says which folder it is, where up goes, and how many it holds; every answer has roots.
+    assert_eq!(children["in"]["path"], code.to_string_lossy().as_ref());
+    assert_eq!(children["in"]["name"], "code");
+    assert_eq!(children["parent"], harness.root.path().to_string_lossy().as_ref());
+    assert_eq!(children["total"], 3);
+    assert!(children["roots"].as_array().is_some_and(|roots| !roots.is_empty()), "{children}");
+    assert!(suggested["roots"].as_array().is_some_and(|roots| !roots.is_empty()));
+    assert!(suggested.get("in").is_none());
 
     // A name: the spoken-name search over everything bro knows.
     let named = get("bro cli".into()).await;
@@ -2307,6 +2326,20 @@ async fn mod_jobs_fail_when_no_mod_takes_or_answers_them() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_mod_hears_how_long_since_the_person_typed() {
+    let harness = Harness::start();
+    let client = reqwest::Client::new();
+    let typed = |session: &'static str| client.get(harness.url(&format!("/api/mod/{session}/typed"))).send();
+
+    let s1 = typed("s1").await.unwrap();
+    assert_eq!(s1.status(), 200);
+    assert_eq!(s1.json::<Value>().await.unwrap(), json!({ "idleMs": 1500 }));
+    let s2 = typed("s2").await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(s2, json!({ "idleMs": null }), "not typed into yet");
+    assert_eq!(typed("gone").await.unwrap().status(), 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mod_jobs_refuse_callers_from_other_machines() {
     use axum::extract::connect_info::MockConnectInfo;
     let harness = Harness::start();
@@ -2331,6 +2364,8 @@ async fn mod_jobs_refuse_callers_from_other_machines() {
         .await
         .unwrap();
     assert_eq!(answered.status(), 403);
+    let typed = client.get(url("/api/mod/s1/typed")).header("x-terminal-web-token", &token).send().await.unwrap();
+    assert_eq!(typed.status(), 403);
     assert!(!harness.bridge.mod_listening("s1"), "a refused poll doesn't count as listening");
     let health = client.get(url("/api/health")).header("x-terminal-web-token", &token).send().await.unwrap();
     assert_eq!(health.status(), 200);
@@ -2664,4 +2699,462 @@ async fn jsh_routes_report_sign_in_state_and_never_the_token() {
     assert!(out["warning"].is_string());
     let after: Value = client.get(harness.url("/api/jsh")).send().await.unwrap().json().await.unwrap();
     assert_eq!(after["signedIn"], false);
+}
+
+/// A phone out of range or frozen in the background never says goodbye. It must stop counting as a viewer (the
+/// desktop sizes watched sessions for their viewers, and lists who is connected) while a client that answers
+/// stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_goes_silent_stops_counting_as_a_viewer() {
+    let harness = Harness::start();
+    crate::ws::test_liveness(harness.port, Duration::from_millis(100), Duration::from_millis(700));
+    harness.register("s1", None, None);
+    let mut alive = harness.socket().await;
+    recv_type(&mut alive, "hello").await;
+    let mut mute = harness.socket().await;
+    recv_type(&mut mute, "hello").await;
+    send(&mut mute, json!({ "type": "subscribe", "sessionId": "s1" })).await;
+    recv_type(&mut mute, "snapshot").await;
+    assert_eq!(harness.bridge.remote_viewers("s1"), 1);
+    assert_eq!(harness.bridge.status().clients, 2);
+
+    // `mute` is never read again, so it answers no ping; `alive` keeps reading, which answers them
+    let until = std::time::Instant::now() + Duration::from_secs(8);
+    while harness.bridge.status().clients != 1 {
+        let _ = tokio::time::timeout(Duration::from_millis(40), alive.next()).await;
+        assert!(std::time::Instant::now() < until, "the silent client was never dropped");
+    }
+    assert_eq!(harness.bridge.remote_viewers("s1"), 0, "its subscription went with it");
+    // the client that answers is still served, well past the silence limit
+    for _ in 0..25 {
+        let _ = tokio::time::timeout(Duration::from_millis(40), alive.next()).await;
+    }
+    assert_eq!(harness.bridge.status().clients, 1);
+    send(&mut alive, json!({ "type": "ping" })).await;
+    assert_eq!(recv_type(&mut alive, "pong").await["type"], "pong");
+    drop(mute);
+}
+
+// ----- JustConnect worker (justconnect.rs) -------------------------------------
+
+/// A stand-in for the account server's two worker routes: a poll that is kept open until there is work (when
+/// the worker asks to wait), and the results that come back.
+#[derive(Default)]
+struct StandIn {
+    queue: Mutex<std::collections::VecDeque<Value>>,
+    arrived: tokio::sync::Notify,
+    results: Mutex<Vec<(String, Value)>>,
+    polls: std::sync::atomic::AtomicUsize,
+    /// whether a poll that asks to wait is kept open (false: an account server that answers at once)
+    holds: std::sync::atomic::AtomicBool,
+}
+
+impl StandIn {
+    async fn serve(self: &Arc<Self>) -> u16 {
+        use axum::extract::{Path, State};
+        use axum::routing::post;
+        use std::sync::atomic::Ordering;
+        async fn poll(State(s): State<Arc<StandIn>>, Path(_): Path<String>, axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+            s.polls.fetch_add(1, Ordering::SeqCst);
+            let holds = s.holds.load(Ordering::SeqCst);
+            let wait = if holds { body["wait"].as_u64().unwrap_or(0) } else { 0 };
+            let take = |s: &StandIn| s.queue.lock().pop_front();
+            let mut job = take(&s);
+            if job.is_none() && wait > 0 {
+                let _ = tokio::time::timeout(Duration::from_secs(wait), s.arrived.notified()).await;
+                job = take(&s);
+            }
+            let mut answer = json!({ "job": job });
+            if holds {
+                answer["waited"] = json!(true);
+            }
+            axum::Json(answer)
+        }
+        async fn result(State(s): State<Arc<StandIn>>, Path((_, job)): Path<(String, String)>, axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+            s.results.lock().push((job, body));
+            axum::Json(json!({}))
+        }
+        let app = axum::Router::new()
+            .route("/api/justconnect/v1/computers/{id}/poll", post(poll))
+            .route("/api/justconnect/v1/computers/{id}/results/{job}", post(result))
+            .with_state(self.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        port
+    }
+
+    fn ask(&self, id: &str, tool: &str, arguments: Value) {
+        self.queue.lock().push_back(json!({ "id": id, "lease": format!("lease-{id}"), "tool": tool, "arguments": arguments }));
+        self.arrived.notify_waiters();
+    }
+
+    async fn answer(&self, id: &str) -> Value {
+        for _ in 0..600 {
+            if let Some((_, body)) = self.results.lock().iter().find(|(job, _)| job == id) {
+                return body.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no result for job {id}");
+    }
+}
+
+fn worker_identity(port: u16, dir: &std::path::Path) -> crate::justconnect::Identity {
+    let origin = format!("http://127.0.0.1:{port}");
+    let connection = bro_core::justconnect::Connection { computer_id: "dbb88f69-0da5-444f-a10c-9c17afcd48e0".into(), origin: origin.clone(), enabled: true, ..Default::default() };
+    let stored = bro_core::jsh::Stored { token: "jsh_user_test".into(), origin, saved_at: 0 };
+    crate::justconnect::Identity { config: Arc::new(move || connection.clone()), sign_in: Arc::new(move || Some(stored.clone())), lock_dir: dir.to_path_buf() }
+}
+
+/// Work asked of this computer starts the moment it is asked: the worker's poll is being held, so it doesn't
+/// wait for a clock. Reads come back, a tool that isn't allowed is refused here too, and an idle worker holds
+/// one request instead of asking over and over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_starts_work_the_moment_it_is_asked_when_the_server_holds_its_poll() {
+    use std::sync::atomic::Ordering;
+    let harness = Harness::start();
+    harness.register("s1", Some(PathBuf::from("C:\\work")), None);
+    let server = Arc::new(StandIn::default());
+    server.holds.store(true, Ordering::SeqCst);
+    let port = server.serve().await;
+    let locks = tempfile::tempdir().unwrap();
+    tokio::spawn(crate::justconnect::work(harness.bridge.state().clone(), worker_identity(port, locks.path())));
+
+    // the first job waits for the worker's first ask (a second after it starts)
+    let job1 = "11111111-1111-4111-8111-111111111111";
+    server.ask(job1, "list_sessions", json!({}));
+    let first = server.answer(job1).await;
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["lease"], format!("lease-{job1}"));
+    let listed: Vec<Value> = serde_json::from_str(first["output"].as_str().unwrap()).unwrap();
+    assert_eq!(listed[0]["id"], "s1");
+
+    // from then on the poll is held: the next job starts at once
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let job2 = "22222222-2222-4222-8222-222222222222";
+    let asked = std::time::Instant::now();
+    server.ask(job2, "read_session", json!({ "sessionId": "s1" }));
+    let second = server.answer(job2).await;
+    assert!(asked.elapsed() < Duration::from_millis(900), "took {:?}: the worker was on a clock, not a held poll", asked.elapsed());
+    assert_eq!(second["ok"], true, "{second}");
+
+    // a tool the cloud may not run here is refused by the worker itself
+    let job3 = "33333333-3333-4333-8333-333333333333";
+    server.ask(job3, "set_settings", json!({}));
+    let third = server.answer(job3).await;
+    assert_eq!(third["ok"], false);
+    assert_eq!(third["output"], "Unsupported remote Bro tool.");
+
+    // idle: one held request, not a stream of them
+    let before = server.polls.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(server.polls.load(Ordering::SeqCst) - before <= 1, "an idle worker kept asking");
+    let link = crate::justconnect::link();
+    assert_eq!(link.phase, crate::justconnect::LinkPhase::Connected);
+    assert!(link.held);
+}
+
+/// An account server that answers at once (one that doesn't hold requests yet) still works: the worker asks on
+/// a clock that is quick right after work arrived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_falls_back_to_a_clock_when_the_server_answers_at_once() {
+    let harness = Harness::start();
+    harness.register("s1", None, None);
+    let server = Arc::new(StandIn::default());
+    let port = server.serve().await;
+    let locks = tempfile::tempdir().unwrap();
+    tokio::spawn(crate::justconnect::work(harness.bridge.state().clone(), worker_identity(port, locks.path())));
+    let job1 = "44444444-4444-4444-8444-444444444444";
+    server.ask(job1, "list_projects", json!({}));
+    assert_eq!(server.answer(job1).await["ok"], true);
+    // just used: the next look comes within a fraction of a second, not five
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let job2 = "55555555-5555-4555-8555-555555555555";
+    let asked = std::time::Instant::now();
+    server.ask(job2, "list_sessions", json!({}));
+    assert_eq!(server.answer(job2).await["ok"], true);
+    assert!(asked.elapsed() < Duration::from_millis(1200), "took {:?}: the clock didn't speed up after work", asked.elapsed());
+}
+
+// ----- The account relay (relay.rs) ----------------------------------------------
+
+/// A stand-in for the account server's half of the relay: it takes Bro's tunnel and opens streams on it the way
+/// the server does for a phone's requests. Each stream is handed to the test as a pipe to write HTTP into, so the
+/// test plays the server's HTTP client.
+struct RelayStandIn {
+    tunnel: Mutex<Option<Arc<TestTunnel>>>,
+    /// tunnels that have closed
+    closed: std::sync::atomic::AtomicUsize,
+}
+
+type TestStream = (tokio::sync::mpsc::UnboundedSender<Option<bytes::Bytes>>, Arc<tokio::sync::Semaphore>);
+
+struct TestTunnel {
+    out: tokio::sync::mpsc::UnboundedSender<Message>,
+    streams: Mutex<std::collections::HashMap<u32, TestStream>>,
+    next: std::sync::atomic::AtomicU32,
+}
+
+fn relay_frame(kind: u8, id: u32, payload: &[u8]) -> Message {
+    let mut bytes = vec![kind];
+    bytes.extend_from_slice(&id.to_be_bytes());
+    bytes.extend_from_slice(payload);
+    Message::Binary(bytes.into())
+}
+
+impl TestTunnel {
+    /// Opens a stream as the account server would for `who`, and returns the server's end of it.
+    fn open(self: &Arc<Self>, who: Value) -> tokio::io::DuplexStream {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (ours, inner) = tokio::io::duplex(8 << 20);
+        let (mut read, mut write) = tokio::io::split(inner);
+        let credit = Arc::new(tokio::sync::Semaphore::new(crate::relay::WINDOW));
+        let (down, mut inbox) = tokio::sync::mpsc::unbounded_channel::<Option<bytes::Bytes>>();
+        self.streams.lock().insert(id, (down, credit.clone()));
+        let _ = self.out.send(relay_frame(1, id, who.to_string().as_bytes()));
+        let out = self.out.clone();
+        tokio::spawn(async move {
+            let mut buffer = vec![0u8; 32 * 1024];
+            loop {
+                match read.read(&mut buffer).await {
+                    Ok(0) | Err(_) => {
+                        let _ = out.send(relay_frame(3, id, &[]));
+                        break;
+                    }
+                    Ok(n) => {
+                        credit.acquire_many(n as u32).await.unwrap().forget();
+                        let _ = out.send(relay_frame(2, id, &buffer[..n]));
+                    }
+                }
+            }
+        });
+        let out = self.out.clone();
+        tokio::spawn(async move {
+            let mut taken = 0usize;
+            while let Some(Some(chunk)) = inbox.recv().await {
+                if write.write_all(&chunk).await.is_err() {
+                    break;
+                }
+                taken += chunk.len();
+                if taken >= crate::relay::WINDOW / 4 {
+                    let _ = out.send(relay_frame(5, id, &(taken as u32).to_be_bytes()));
+                    taken = 0;
+                }
+            }
+            let _ = write.shutdown().await;
+        });
+        ours
+    }
+
+    /// One request, as the account server sends it; the status and the body that came back.
+    async fn request(self: &Arc<Self>, who: &Value, method: &str, path: &str) -> (u16, Vec<u8>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = self.open(who.clone());
+        stream.write_all(format!("{method} {path} HTTP/1.1\r\nhost: relay.bro\r\nconnection: close\r\ncontent-length: 0\r\n\r\n").as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(20), stream.read_to_end(&mut raw)).await.expect("the answer never finished").unwrap();
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("no end of headers");
+        let head = String::from_utf8_lossy(&raw[..split]).to_lowercase();
+        let status = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).expect("no status");
+        let mut body = raw[split + 4..].to_vec();
+        if head.contains("transfer-encoding: chunked") {
+            let (mut rest, mut plain) = (body.as_slice(), Vec::new());
+            while let Some(end) = rest.windows(2).position(|w| w == b"\r\n") {
+                let size = usize::from_str_radix(String::from_utf8_lossy(&rest[..end]).trim(), 16).unwrap();
+                if size == 0 {
+                    break;
+                }
+                plain.extend_from_slice(&rest[end + 2..end + 2 + size]);
+                rest = &rest[end + 2 + size + 2..];
+            }
+            body = plain;
+        }
+        (status, body)
+    }
+}
+
+impl RelayStandIn {
+    async fn serve(self: &Arc<Self>) -> u16 {
+        use axum::extract::ws::{Message as Frame, WebSocketUpgrade};
+        use axum::extract::State;
+        use axum::routing::get;
+        use std::sync::atomic::Ordering;
+        async fn tunnel(State(s): State<Arc<RelayStandIn>>, headers: axum::http::HeaderMap, ws: WebSocketUpgrade) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer jsh_user_test") {
+                return axum::http::StatusCode::FORBIDDEN.into_response();
+            }
+            ws.on_upgrade(move |socket| async move {
+                let (mut sink, mut source) = socket.split();
+                let (out, mut outbox) = tokio::sync::mpsc::unbounded_channel::<Message>();
+                let tunnel = Arc::new(TestTunnel { out, streams: Mutex::new(Default::default()), next: 1.into() });
+                *s.tunnel.lock() = Some(tunnel.clone());
+                tokio::spawn(async move {
+                    while let Some(Message::Binary(bytes)) = outbox.recv().await {
+                        if sink.send(Frame::Binary(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                while let Some(Ok(message)) = source.next().await {
+                    let Frame::Binary(data) = message else { continue };
+                    if data.len() < 5 {
+                        continue;
+                    }
+                    let (kind, id, payload) = (data[0], u32::from_be_bytes([data[1], data[2], data[3], data[4]]), data.slice(5..));
+                    let mut streams = tunnel.streams.lock();
+                    match kind {
+                        2 => {
+                            if let Some((down, _)) = streams.get(&id) {
+                                let _ = down.send(Some(payload));
+                            }
+                        }
+                        3 => {
+                            if let Some((down, _)) = streams.get(&id) {
+                                let _ = down.send(None);
+                            }
+                        }
+                        4 => {
+                            streams.remove(&id);
+                        }
+                        5 => {
+                            if let Some((_, credit)) = streams.get(&id) {
+                                credit.add_permits(u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                s.closed.fetch_add(1, Ordering::SeqCst);
+            })
+        }
+        let app = axum::Router::new().route("/api/justconnect/v1/computers/{id}/relay", get(tunnel)).with_state(self.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        port
+    }
+
+    async fn tunnel(&self) -> Arc<TestTunnel> {
+        for _ in 0..800 {
+            if let Some(tunnel) = self.tunnel.lock().clone() {
+                return tunnel;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("Bro never dialed its tunnel");
+    }
+}
+
+/// A phone signed in to the account reaches this Bro through the tunnel it dials: its requests are served
+/// without the pairing token, as someone who is not at this computer, and the things that belong at the
+/// computer are refused. Turning remote access off here hangs the tunnel up. (The tunnel is started here the way
+/// the worker starts it when the server asks; the worker itself keeps a process-wide status the other worker
+/// tests read, so it stays out of this one.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_phone_on_the_account_reaches_bro_through_the_tunnel_it_dials() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let harness = Harness::start();
+    let (_project, cwd) = file_workspace(&harness);
+    let big: Vec<u8> = (0..1_400_000u32).map(|n| (n.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    std::fs::write(cwd.join("big.bin"), &big).unwrap();
+    let server = Arc::new(RelayStandIn { tunnel: Mutex::new(None), closed: 0.into() });
+    let port = server.serve().await;
+    let locks = tempfile::tempdir().unwrap();
+    // remote access can be switched off under the running worker
+    let enabled = Arc::new(AtomicBool::new(true));
+    let mut who = worker_identity(port, locks.path());
+    let (base, switch) = (who.config.clone(), enabled.clone());
+    who.config = Arc::new(move || {
+        let mut connection = base();
+        connection.enabled = switch.load(Ordering::SeqCst);
+        connection
+    });
+    // someone opens this computer from their account: Bro dials
+    let state = harness.bridge.state().clone();
+    let (computer, stored) = ((who.config)().computer_id, (who.sign_in)().unwrap());
+    let carrying = tokio::spawn(crate::justconnect::carry(crate::relay::open_door(&state), who, computer, stored, state.shutdown.subscribe()));
+    let tunnel = server.tunnel().await;
+    let james = json!({ "actor": { "id": "u1", "name": "James Greene", "email": "james@example.com" }, "client": "0123456789abcdef", "staff": false });
+
+    // an ordinary request, with no pairing token anywhere
+    let (status, body) = tunnel.request(&james, "GET", "/api/bootstrap").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let bootstrap: Value = serde_json::from_slice(&body).unwrap();
+    assert!(bootstrap["sessions"].as_array().is_some_and(|sessions| sessions.iter().any(|s| s["id"] == "files")), "{bootstrap}");
+
+    // it is not treated as this computer: the pairing token is never handed over
+    let (status, body) = tunnel.request(&james, "GET", "/api/host").await;
+    assert_eq!(status, 200);
+    let token = harness.bridge.status().token;
+    assert!(!String::from_utf8_lossy(&body).contains(&token), "a relayed request was given the pairing token");
+    let direct = reqwest::get(harness.url("/api/host")).await.unwrap().text().await.unwrap();
+    assert!(direct.contains(&token), "(this computer itself is)");
+
+    // what belongs at the computer stays there
+    for (method, path) in [("POST", "/api/jsh/logout"), ("POST", "/api/jsh/login"), ("POST", "/api/justconnect/disable"), ("POST", "/mcp"), ("GET", "/api/mod/files/jobs")] {
+        let (status, body) = tunnel.request(&james, method, path).await;
+        assert_eq!(status, 403, "{method} {path}");
+        assert!(String::from_utf8_lossy(&body).contains("at the computer itself"), "{method} {path}");
+    }
+
+    // remote desktop's own guard, which wants the pairing token even from this computer, takes the account's word
+    let (status, _) = tunnel.request(&james, "GET", "/api/rmm").await;
+    assert_eq!(status, 200);
+    assert_eq!(reqwest::get(harness.url("/api/rmm")).await.unwrap().status(), 401, "(a request without the token still isn't)");
+
+    // more than a window's worth comes back whole, in order
+    let (status, body) = tunnel.request(&james, "GET", "/api/sessions/files/raw?path=big.bin").await;
+    assert_eq!(status, 200);
+    assert!(body == big, "the file arrived changed: {} of {} bytes", body.len(), big.len());
+
+    // the phone's socket: the same protocol as on the local network, and the Remote Control page names its person
+    let stream = tunnel.open(james.clone());
+    let (mut socket, _) = tokio_tungstenite::client_async("ws://relay.bro/ws?client=app&device=Pixel%209&os=Android%2015", stream).await.unwrap();
+    let hello = loop {
+        match tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap() {
+            Some(Ok(Message::Text(text))) => break serde_json::from_str::<Value>(&text).unwrap(),
+            Some(Ok(_)) => continue,
+            other => panic!("socket ended: {other:?}"),
+        }
+    };
+    assert_eq!(hello["type"], "hello");
+    let devices = harness.bridge.status().devices;
+    assert_eq!(devices.len(), 1, "{devices:?}");
+    assert_eq!(devices[0].name, "Pixel 9");
+    assert_eq!(devices[0].via.as_deref(), Some("James Greene"));
+    assert!(devices[0].address.is_some_and(crate::is_relay_address), "{:?}", devices[0].address);
+    // typing reaches the session
+    socket.send(Message::Text(json!({ "type": "input", "sessionId": "files", "data": "ls\r" }).to_string().into())).await.unwrap();
+    assert!(harness.wait_seen(1).await.contains(&Seen::Input("files".into(), "ls\r".into())));
+
+    // someone from Just Superhuman is shown as that
+    let support = json!({ "actor": { "id": "u2", "name": "Ada", "email": "ada@justsuperhuman.com" }, "client": "ffffffff00000000", "staff": true });
+    let (_second, _) = tokio_tungstenite::client_async("ws://relay.bro/ws", tunnel.open(support)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(harness.bridge.status().devices.iter().any(|d| d.via.as_deref() == Some("Ada (Just Superhuman support)")));
+
+    // remote access is switched off here: the tunnel is hung up, and with it every phone
+    enabled.store(false, Ordering::SeqCst);
+    for _ in 0..500 {
+        if server.closed.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(server.closed.load(Ordering::SeqCst), 1, "turning access off didn't hang the tunnel up");
+    for _ in 0..300 {
+        if harness.bridge.status().devices.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(harness.bridge.status().devices.is_empty(), "a phone outlived the tunnel");
+    tokio::time::timeout(Duration::from_secs(5), carrying).await.expect("the tunnel's task never ended").unwrap();
 }

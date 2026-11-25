@@ -5,9 +5,11 @@
 //!    coordinates the selected project; on its tab a second row picks the harness it runs on
 //!    (shift+←/→), and the list starts on the smartest login for it (your last orchestrator combo unless that
 //!    login is nearly out, else the ready login with the most left).
-//! 3. **Run on** — one list: recent combos for this harness, then its own logins (no model to pick — the CLI
-//!    uses its default and `/model` works inside), then other logins it can use through bro-proxy, then API
-//!    providers (OpenRouter's live catalogue, DeepSeek, …).
+//! 3. **Providers** — one list. The main ones first: the harness's own logins (no model to pick — the CLI uses
+//!    its default and `/model` works inside), the Just Superhuman account, the other family's logins through
+//!    bro-proxy, Gemini. In proxy mode a family is one row, not a row per login. Then **connected**: API providers
+//!    with a key (OpenRouter's live catalogue, …). The ones without a key fold away under **other providers**
+//!    (Enter or a click opens it). The cursor starts on what this harness ran last, its model picked.
 //! 4. **Model** — only when the choice needs one (providers, cross-family logins): a second, filterable list.
 //!
 //! Sessions start in the current project. The project row lets you switch to an open project or enter a new
@@ -15,10 +17,17 @@
 //! (Esc there comes back to the list). Enter on a row that needs a model moves to the model list;
 //! Enter there (or on anything else) launches. This file is the model + keys (pure, testable);
 //! `view.rs` draws it.
+//!
+//! A third tab, **Create Slop** (alt+s), sets a session up for making video and media: a cast and the media
+//! tools the machine has (`studio.rs`).
 
 /// Drawn by the desktop app (`bro gui`).
 #[cfg(feature = "gui")]
 pub(crate) mod gui;
+pub mod studio;
+/// The Create Slop tab in the desktop app.
+#[cfg(feature = "gui")]
+pub(crate) mod studio_gui;
 
 pub mod view;
 
@@ -49,6 +58,8 @@ pub enum Focus {
 pub enum SessionTab {
     New,
     Continue,
+    /// Create Slop: a session cast and tooled up for video and media
+    Slop,
 }
 
 /// Who a session runs as.
@@ -74,6 +85,8 @@ pub struct Account {
     pub detail: String,
     /// logged in / has a key
     pub ready: bool,
+    /// why it can't run yet, in a few words ("no key", "not signed in")
+    pub blocked: Option<&'static str>,
     /// % left of the 5h window (weekly when that's the only reported window)
     pub left: Option<f64>,
 }
@@ -82,9 +95,9 @@ pub struct Account {
 #[derive(Clone, Debug)]
 pub enum Item {
     Header(&'static str),
-    /// index into `Data::recents`
-    Recent(usize),
     Account(Account),
+    /// The fold over the providers with no key yet: how many it holds, and whether it's open.
+    Others { count: usize, open: bool },
 }
 
 /// What the launcher offers, updated as service readings arrive.
@@ -107,6 +120,10 @@ pub struct Data {
     pub orchestrator_running: BTreeMap<String, String>,
     /// Proxy mode: sessions run on all of a family's logins, so the list offers those instead of each login.
     pub shared: bool,
+    /// The Just Superhuman account as last read, while signed in (its row shows the credits).
+    pub jsh: Option<bro_core::jsh::Account>,
+    /// Create Slop: who can be cast and what the machine has for making media (empty until its tab is opened).
+    pub studio: crate::services::studio::StudioState,
 }
 
 /// Something clickable in the launcher (recorded while drawing).
@@ -131,6 +148,14 @@ pub enum Hit {
     Launch,
     /// "install it" under an agent that isn't installed
     Install,
+    /// Create Slop: a character, by its place in the filtered cast
+    Cast(usize),
+    /// Create Slop: a tool, by its place in the toolkit
+    Tool(usize),
+    /// Create Slop: fetch the roster again
+    StudioRefresh,
+    /// Create Slop: where it runs (the New tab is where that's chosen)
+    RunsOn,
     /// the × in the corner
     Close,
 }
@@ -152,10 +177,12 @@ pub enum Outcome {
     Install(Harness),
     /// Sign in to Gemini with Google first (the selected provider has no API key).
     SignIn,
+    /// Create Slop: install a media tool the machine lacks (`true`: it is installed and stopped, start it again).
+    InstallTool(bro_core::quick_install::Tool, bool),
+    /// Create Slop: keep this key for a media tool (its id, the key).
+    SaveKey(&'static str, String),
 }
 
-/// Recent combos shown per harness.
-const RECENTS_SHOWN: usize = 4;
 /// A login with less than this % left isn't the orchestrator's first pick.
 const NEARLY_OUT: f64 = 10.0;
 
@@ -173,6 +200,8 @@ pub struct Launcher {
     pub model_filter: String,
     /// index into the *selectable* rows of the run-on list
     pub list_sel: usize,
+    /// "other providers" is unfolded
+    pub others_open: bool,
     /// index into the filtered models
     pub model_sel: usize,
     pub dir: PathBuf,
@@ -184,6 +213,8 @@ pub struct Launcher {
     pub permission: Permission,
     pub browser: BrowserMode,
     pub place: Place,
+    /// The Create Slop tab: the cast and the tools switched off.
+    pub studio: studio::Studio,
     /// clickable regions from the last draw, and the popup's own rect
     pub hits: Vec<(ratatui::layout::Rect, Hit)>,
     pub area: ratatui::layout::Rect,
@@ -193,17 +224,13 @@ impl Launcher {
     /// Replace service data while keeping the user's account, model and typed filters.
     pub fn set_data(&mut self, data: Data) {
         let current = self.current();
-        let recent = match &current {
-            Some(Item::Recent(i)) => self.data.recents.get(*i).cloned(),
-            _ => None,
-        };
         let model = self.model().map(|m| m.id);
         self.data = data;
         let items = self.items();
         let selectable = Self::selectable(&items);
         let selected = selectable.iter().position(|&i| match (&current, &items[i]) {
             (Some(Item::Account(a)), Item::Account(b)) => a.kind == b.kind,
-            (Some(Item::Recent(_)), Item::Recent(i)) => recent.as_ref().is_some_and(|r| self.data.recents.get(*i).is_some_and(|other| r.same(other))),
+            (Some(Item::Others { .. }), Item::Others { .. }) => true,
             _ => false,
         });
         self.list_sel = selected.unwrap_or(self.list_sel.min(selectable.len().saturating_sub(1)));
@@ -214,6 +241,7 @@ impl Launcher {
             let models = self.models_view();
             self.model_sel = model.and_then(|id| models.iter().position(|&i| self.models()[i].id == id)).unwrap_or(self.model_sel.min(models.len().saturating_sub(1)));
         }
+        self.studio_sync();
         self.hits.clear();
     }
 
@@ -228,7 +256,7 @@ impl Launcher {
         // Browser tools are managed with their installation, not a per-session switch.
         let browser = BrowserMode::Off;
         let permission = Permission::Skip;
-        Launcher {
+        let mut l = Launcher {
             data,
             harness,
             orchestrator: false,
@@ -237,6 +265,7 @@ impl Launcher {
             list_filter: String::new(),
             model_filter: String::new(),
             list_sel: 0,
+            others_open: false,
             model_sel: 0,
             dir,
             projects: vec![],
@@ -246,9 +275,13 @@ impl Launcher {
             permission,
             browser,
             place,
+            studio: studio::Studio::default(),
             hits: vec![],
             area: ratatui::layout::Rect::default(),
-        }
+        };
+        l.list_sel = l.last_sel();
+        l.reset_models();
+        l
     }
 
     pub fn with_projects(mut self, projects: Vec<PathBuf>) -> Launcher {
@@ -281,7 +314,7 @@ impl Launcher {
         }
     }
 
-    fn open_project_picker(&mut self) {
+    pub(crate) fn open_project_picker(&mut self) {
         let dirs = folder::dedup(std::iter::once(self.dir.clone()).chain(self.projects.iter().cloned()));
         self.project_picker = Some(FolderPicker::new(dirs));
     }
@@ -305,6 +338,8 @@ impl Launcher {
         self.dir = dir;
         self.no_project = false;
         self.project_picker = None;
+        // another project: the cast it last cooked with
+        self.studio_sync();
         self.hits.clear();
     }
 
@@ -333,7 +368,7 @@ impl Launcher {
         self.orchestrator = false;
         self.harness = h;
         self.list_filter.clear();
-        self.list_sel = 0;
+        self.list_sel = self.last_sel();
         self.reset_models();
         self
     }
@@ -348,6 +383,25 @@ impl Launcher {
         Some(self)
     }
 
+    /// Select a provider's row (the Just Superhuman account, say). None when the list doesn't offer it.
+    pub fn with_provider(mut self, id: &str) -> Option<Launcher> {
+        self.list_filter.clear();
+        let kind = AccountKind::Provider(id.into());
+        // one with no key yet sits under "other providers": open it
+        if self.row_of(&kind).is_none() {
+            self.others_open = true;
+        }
+        self.list_sel = self.row_of(&kind)?;
+        self.reset_models();
+        Some(self)
+    }
+
+    /// Where an account sits among the selectable rows.
+    fn row_of(&self, kind: &AccountKind) -> Option<usize> {
+        let items = self.items();
+        Self::selectable(&items).iter().position(|&i| matches!(&items[i], Item::Account(a) if a.kind == *kind))
+    }
+
     /// Select proxy mode's row for a family's logins together (None outside proxy mode, or with none signed in).
     pub fn with_shared(mut self, claude: bool) -> Option<Launcher> {
         self.list_filter.clear();
@@ -357,16 +411,45 @@ impl Launcher {
         Some(self)
     }
 
-    /// What a one-click "new claude / codex" should run: the top of `h`'s list (your latest combo for it, else
-    /// its first login). None when that still needs a decision (not installed, nothing to run on, a model to pick).
+    /// What a one-click "new claude / codex" should run: where the cursor starts (your latest combo for the
+    /// harness, else its first login). None when that still needs a decision (not installed, nothing to run on, a
+    /// model to pick that isn't the one you ran last).
     pub fn quick_spec(&self) -> Option<LaunchSpec> {
         if !self.installed(self.harness) {
             return None;
         }
         match self.current()? {
-            Item::Account(a) if !a.ready || self.needs_model() => None,
-            _ => self.spec(),
+            Item::Account(a) if !a.ready => None,
+            Item::Account(_) if self.needs_model() && !self.on_last_run() => None,
+            Item::Account(_) => self.spec(),
+            _ => None,
         }
+    }
+
+    /// The combos this harness ran, newest first (on the orchestrator tab, the orchestrator's).
+    fn runs(&self) -> impl Iterator<Item = &Recent> {
+        self.data.recents.iter().filter(|r| r.harness == self.harness && r.orchestrator == self.orchestrator)
+    }
+
+    /// The newest of them that the list still offers, and its row among the selectable ones. In proxy mode a
+    /// combo naming one login (or the pool) has no row; neither has a provider folded under "other providers".
+    fn last_run(&self) -> Option<(&Recent, usize)> {
+        let items = self.items();
+        let sel = Self::selectable(&items);
+        self.runs().find_map(|r| {
+            let kind = self.recent_kind(r);
+            sel.iter().position(|&i| matches!(&items[i], Item::Account(a) if a.kind == kind)).map(|k| (r, k))
+        })
+    }
+
+    /// Where the cursor starts: on what this harness ran last, else the top of the list.
+    fn last_sel(&self) -> usize {
+        self.last_run().map_or(0, |(_, k)| k)
+    }
+
+    /// The cursor and the model are the combo this harness ran last.
+    fn on_last_run(&self) -> bool {
+        self.last_run().is_some_and(|(r, k)| k == self.list_sel && r.model.is_some() && self.model().map(|m| m.id) == r.model)
     }
 
     /// Open on the ★ orchestrator tab.
@@ -416,12 +499,13 @@ impl Launcher {
         let items = self.items();
         let sel = Self::selectable(&items);
         let fine = |left: Option<f64>| left.is_none_or(|l| l >= NEARLY_OUT);
-        for (k, &i) in sel.iter().enumerate() {
-            if let Item::Recent(r) = &items[i] {
-                let r = &self.data.recents[*r];
-                if fine(self.left_of(r.profile_id.as_deref().or(r.provider_id.as_deref()))) {
-                    return k;
-                }
+        for r in self.runs() {
+            let kind = self.recent_kind(r);
+            let row = sel.iter().position(|&i| matches!(&items[i], Item::Account(a) if a.kind == kind));
+            if let Some(k) = row
+                && fine(self.left_of(r.profile_id.as_deref().or(r.provider_id.as_deref())))
+            {
+                return k;
             }
         }
         let own = |a: &Account| match &a.kind {
@@ -460,32 +544,39 @@ impl Launcher {
     // ------------------------------------------------------------------ the run-on list
 
     fn profile_account(&self, p: &Profile, via_proxy: bool) -> Account {
-        let family = if p.is_gemini_subscription() { "Google AI subscription" } else if p.is_gemini_api() { "Gemini API" } else if p.is_claude() { "claude" } else { "chatgpt" };
         let mut detail = vec![];
-        if via_proxy {
-            detail.push(family.to_string());
-        }
-        if let Some(plan) = &p.plan {
-            detail.push(plan.clone());
-        }
-        if !p.authenticated {
-            detail.push("not logged in".into());
-        }
+        // a Google subscription is the Gemini row; an API key is named for its profile
+        let label = if p.is_gemini_subscription() {
+            detail.push(p.plan.clone().unwrap_or_else(|| "Google AI subscription".into()));
+            "Gemini".to_string()
+        } else if p.is_gemini_api() {
+            detail.push(if p.is_local() { "API key on this computer" } else { "Gemini API key" }.to_string());
+            if p.is_local() { "Gemini API".to_string() } else { p.name.clone() }
+        } else {
+            if via_proxy {
+                detail.push(if p.is_claude() { "Claude" } else { "ChatGPT" }.to_string());
+            }
+            if let Some(plan) = &p.plan {
+                detail.push(plan.clone());
+            }
+            p.name.clone()
+        };
         if let Some(status) = self.data.usage_status.get(&p.id) {
             detail.push(status.clone());
         }
         Account {
             kind: AccountKind::Profile(p.id.clone()),
-            label: if p.is_gemini_subscription() { p.plan.clone().unwrap_or_else(|| "Google subscription".into()) } else if p.is_gemini_api() && p.is_local() { "API key (detected)".into() } else { p.name.clone() },
+            label,
             detail: detail.join(" · "),
             ready: p.authenticated,
+            blocked: (!p.authenticated).then_some("not signed in"),
             left: self.data.usage.get(&p.id).map(|u| (100.0 - *u as f64).clamp(0.0, 100.0)),
         }
     }
 
     fn pool_account(&self) -> Option<Account> {
         let n = self.data.profiles.iter().filter(|p| p.kind == ProfileKind::ClaudeAccount && p.authenticated).count();
-        (n > 0).then(|| Account { kind: AccountKind::Pool, label: "pool".into(), detail: format!("{n} claude accounts · failover"), ready: true, left: None })
+        (n > 0).then(|| Account { kind: AccountKind::Pool, label: "Claude pool".into(), detail: format!("{n} accounts · moves on when one runs out"), ready: true, blocked: None, left: None })
     }
 
     /// The family a harness signs in to itself: Claude (`true`) or Codex; None for Pi and omp.
@@ -493,12 +584,12 @@ impl Launcher {
         match self.harness {
             Harness::Claude => Some(true),
             Harness::Codex => Some(false),
-            Harness::Pi | Harness::Omp => None,
+            Harness::Pi | Harness::Omp | Harness::Antigravity => None,
         }
     }
 
-    /// Proxy mode's row for a family: its logins by name, and the % they have left together (the average over
-    /// them, as the sidebar sums a family up).
+    /// Proxy mode's row for a family, in place of a row per login: how many logins share the work, and the % they
+    /// have left together (the average over them, as the sidebar sums a family up).
     fn shared_account(&self, claude: bool) -> Option<Account> {
         let logins = bro_core::profiles::subscription_logins_in(&self.data.profiles, claude);
         if logins.is_empty() {
@@ -506,60 +597,84 @@ impl Launcher {
         }
         let read: Vec<f64> = logins.iter().filter_map(|p| self.data.usage.get(&p.id)).map(|u| (100.0 - *u as f64).clamp(0.0, 100.0)).collect();
         let left = (!read.is_empty()).then(|| read.iter().sum::<f64>() / read.len() as f64);
-        let shown: Vec<&str> = logins.iter().map(|p| p.name.as_str()).take(3).collect();
-        let mut who = shown.join(", ");
-        if logins.len() > shown.len() {
-            who.push_str(&format!(" +{}", logins.len() - shown.len()));
-        }
-        let family = if claude { "claude" } else { "chatgpt" };
-        let label = if self.own_family() == Some(claude) { "all your logins".to_string() } else { format!("all your {family} logins") };
-        Some(Account { kind: AccountKind::Shared(claude), label, detail: who, ready: true, left })
+        let n = logins.len();
+        let detail = format!("{n} login{} · proxy mode", if n == 1 { "" } else { "s" });
+        Some(Account { kind: AccountKind::Shared(claude), label: if claude { "Claude" } else { "ChatGPT" }.into(), detail, ready: true, blocked: None, left })
     }
 
-    /// How a recent combo reads in the list: the kind its mark comes from, and who it runs as.
-    pub fn recent_row(&self, rc: &Recent) -> (AccountKind, String) {
-        let shared = |claude: bool| {
-            let label = if self.own_family() == Some(claude) { "all your logins".to_string() } else { format!("all your {} logins", if claude { "claude" } else { "chatgpt" }) };
-            (AccountKind::Shared(claude), label)
-        };
+    /// The row a recent combo ran on.
+    pub fn recent_kind(&self, rc: &Recent) -> AccountKind {
         match (rc.provider_id.as_deref(), rc.profile_id.as_deref()) {
-            (Some("pool"), _) => (AccountKind::Pool, "pool".into()),
-            (Some(bro_core::launch::LOGINS_CLAUDE), _) => shared(true),
-            (Some(bro_core::launch::LOGINS_CODEX), _) => shared(false),
-            (Some(p), _) => (AccountKind::Provider(p.into()), p.into()),
-            (None, Some(p)) => (AccountKind::Profile(p.into()), p.split(':').next_back().unwrap_or(p).into()),
+            (Some("pool"), _) => AccountKind::Pool,
+            (Some(bro_core::launch::LOGINS_CLAUDE), _) => AccountKind::Shared(true),
+            (Some(bro_core::launch::LOGINS_CODEX), _) => AccountKind::Shared(false),
+            (Some(p), _) => AccountKind::Provider(p.into()),
+            (None, Some(p)) => AccountKind::Profile(p.into()),
             (None, None) => match self.own_family().filter(|_| self.data.shared) {
-                Some(claude) => shared(claude),
-                None => (AccountKind::Native, "own login".into()),
+                Some(claude) => AccountKind::Shared(claude),
+                None => AccountKind::Native,
             },
         }
     }
 
-    fn provider_account(&self, p: &Provider) -> Account {
-        let n = self.data.models.get(&p.id).map(Vec::len).unwrap_or(p.models.len());
+    /// The Just Superhuman account's row: the organization that pays and its credits (or why Claude can't run
+    /// there), and what's left of the month's allowance as a login's meter.
+    fn jsh_account(&self, p: &Provider) -> Account {
         let keyed = p.no_key || self.data.keyed.iter().any(|k| k == &p.id);
-        let mut detail = format!("{n} model{}", if n == 1 { "" } else { "s" });
-        if p.id == bro_core::jsh::PROVIDER_ID {
-            detail.push_str(" · your credits");
-        } else if p.is_google_login() {
-            detail.push_str(if keyed { " · google ai subscription" } else { " · enter signs in with Google" });
-        } else if !keyed {
-            detail.push_str(" · no key");
-        }
-        Account { kind: AccountKind::Provider(p.id.clone()), label: p.id.clone(), detail, ready: keyed, left: None }
+        let name = bro_core::jsh::PROVIDER_NAME;
+        let (detail, left) = match &self.data.jsh {
+            Some(a) => match a.paused_reason() {
+                Some(why) => (why.to_string(), None),
+                None => {
+                    // an organization named for the service itself would only say the row's name twice
+                    let same = |o: &str| o.replace(' ', "").eq_ignore_ascii_case(&name.replace(' ', ""));
+                    let org = Some(a.organization.name.trim()).filter(|o| !o.is_empty() && !same(o));
+                    let credits = a.credits_text();
+                    (org.map_or(credits.clone(), |o| format!("{o} · {credits}")), a.credits.month_used_pct().map(|used| (100.0 - used as f64).clamp(0.0, 100.0)))
+                }
+            },
+            None => ("your team's credits".into(), None),
+        };
+        Account { kind: AccountKind::Provider(p.id.clone()), label: name.into(), detail, ready: keyed, blocked: (!keyed).then_some("not signed in"), left }
     }
 
-    /// The full run-on list for the current harness (headers included), filtered.
+    /// An API provider's row: its name ("Z.ai (GLM)" reads as Z.ai, then GLM) and how many models it has.
+    fn provider_account(&self, p: &Provider) -> Account {
+        if p.id == bro_core::jsh::PROVIDER_ID {
+            return self.jsh_account(p);
+        }
+        let n = self.data.models.get(&p.id).map(Vec::len).unwrap_or(p.models.len());
+        let keyed = p.no_key || self.data.keyed.iter().any(|k| k == &p.id);
+        let (name, note) = match p.display_name().split_once(" (") {
+            Some((name, note)) if note.ends_with(')') && !name.trim().is_empty() => (name.trim(), Some(note.trim_end_matches(')'))),
+            _ => (p.display_name(), None),
+        };
+        let mut detail: Vec<String> = note.map(str::to_string).into_iter().collect();
+        detail.push(format!("{n} model{}", if n == 1 { "" } else { "s" }));
+        let blocked = if keyed {
+            None
+        } else if p.is_google_login() {
+            Some("sign in with Google")
+        } else {
+            Some("no key")
+        };
+        Account { kind: AccountKind::Provider(p.id.clone()), label: name.to_string(), detail: detail.join(" · "), ready: keyed, blocked, left: None }
+    }
+
+    /// The full run-on list for the current harness (headings and the fold included), filtered.
     pub fn items(&self) -> Vec<Item> {
         let h = self.harness;
         let claude: Vec<&Profile> = self.data.profiles.iter().filter(|p| p.is_claude()).collect();
         let codex: Vec<&Profile> = self.data.profiles.iter().filter(|p| p.is_codex()).collect();
-        let mut groups: Vec<(&'static str, Vec<Item>)> = vec![];
 
-        let recents: Vec<Item> = self.recents_for(h).into_iter().map(Item::Recent).collect();
-        groups.push(("recent", recents));
-
-        let native = || Account { kind: AccountKind::Native, label: format!("{}'s own login", h.label()), detail: "whatever it's configured with".into(), ready: true, left: None };
+        let native = || Account { kind: AccountKind::Native, label: format!("{}'s own login", h.label()), detail: "whatever it's set up with".into(), ready: true, blocked: None, left: None };
+        if h == Harness::Antigravity {
+            return vec![Item::Account(Account {
+                label: "Antigravity account".into(),
+                detail: "Configured in agy".into(),
+                ..native()
+            })];
+        }
         let (own, via): (Vec<Account>, Vec<Account>) = if self.data.shared {
             // proxy mode: no login to pick, each family's logins together
             match self.own_family() {
@@ -576,73 +691,100 @@ impl Launcher {
                 codex.iter().map(|p| self.profile_account(p, false)).collect(),
                 claude.iter().map(|p| self.profile_account(p, true)).chain(self.pool_account()).collect(),
             ),
-            Harness::Pi | Harness::Omp => (
+            Harness::Pi | Harness::Omp | Harness::Antigravity => (
                 vec![native()],
                 claude.iter().chain(codex.iter()).map(|p| self.profile_account(p, true)).chain(self.pool_account()).collect(),
             ),
             }
         };
-        // Pi and omp keep their own login in proxy mode: only Claude and Codex share theirs
-        let own_head = if self.data.shared && self.own_family().is_some() { "proxy mode" } else { "your logins" };
-        groups.push((own_head, own.into_iter().map(Item::Account).collect()));
-        groups.push(("other logins · via proxy", via.into_iter().map(Item::Account).collect()));
-        let providers = self.data.providers.iter().filter(|p| p.mode != ProviderMode::Native && !(p.is_google_login() && self.data.profiles.iter().any(|profile| profile.is_gemini_subscription()))).map(|p| Item::Account(self.provider_account(p))).collect();
-        let gemini = self.data.profiles.iter().filter(|p| p.is_gemini()).map(|p| Item::Account(self.profile_account(p, true))).collect();
-        groups.push(("Gemini profiles", gemini));
-        groups.push(("providers", providers));
+        // The main providers: your own logins first (Pi and omp keep theirs in proxy mode: only Claude and Codex
+        // share), the Just Superhuman account's credits straight after, then the other family through the proxy
+        // and Google's.
+        let mut main = own;
+        main.extend(self.data.providers.iter().filter(|p| p.id == bro_core::jsh::PROVIDER_ID).map(|p| self.jsh_account(p)));
+        main.extend(via);
+        main.extend(self.data.profiles.iter().filter(|p| p.is_gemini()).map(|p| self.profile_account(p, true)));
+        // the API providers: the ones with a key are connected, the rest fold away. Google's sign-in is a main
+        // one (until a subscription is signed in, which has its own row).
+        let subscribed = self.data.profiles.iter().any(|p| p.is_gemini_subscription());
+        let (mut connected, mut other) = (vec![], vec![]);
+        for p in self.data.providers.iter().filter(|p| p.id != bro_core::jsh::PROVIDER_ID && p.mode != ProviderMode::Native) {
+            let a = self.provider_account(p);
+            if p.is_google_login() {
+                if !subscribed {
+                    main.push(a);
+                }
+            } else if a.ready {
+                connected.push(a);
+            } else {
+                other.push(a);
+            }
+        }
 
         let q = self.list_filter.trim();
-        let mut out = vec![];
-        for (name, items) in groups {
-            let keep: Vec<Item> = if q.is_empty() {
-                items
-            } else {
-                let idx = fuzzy::filter(q, &items, |i| self.item_text(i));
-                idx.into_iter().map(|i| items[i].clone()).collect()
-            };
-            if !keep.is_empty() {
-                out.push(Item::Header(name));
-                out.extend(keep);
+        let keep = |rows: Vec<Account>| -> Vec<Item> {
+            if q.is_empty() {
+                return rows.into_iter().map(Item::Account).collect();
+            }
+            fuzzy::filter(q, &rows, |a| self.account_text(a)).into_iter().map(|i| Item::Account(rows[i].clone())).collect()
+        };
+        let mut out = keep(main);
+        let connected = keep(connected);
+        if !connected.is_empty() {
+            out.push(Item::Header("connected"));
+            out.extend(connected);
+        }
+        if q.is_empty() {
+            if !other.is_empty() {
+                out.push(Item::Others { count: other.len(), open: self.others_open });
+                if self.others_open {
+                    out.extend(other.into_iter().map(Item::Account));
+                }
+            }
+        } else {
+            // a filter looks under the fold too
+            let other = keep(other);
+            if !other.is_empty() {
+                out.push(Item::Header("other providers"));
+                out.extend(other);
             }
         }
         out
     }
 
-    fn item_text(&self, i: &Item) -> String {
-        match i {
-            Item::Header(_) => String::new(),
-            Item::Recent(r) => {
-                let r = &self.data.recents[*r];
-                format!("{} {} {}", r.profile_id.clone().unwrap_or_default(), r.provider_id.clone().unwrap_or_default(), r.model.clone().unwrap_or_default())
-            }
-            Item::Account(a) => format!("{} {}", a.label, a.detail),
+    /// What a filter matches a row on: its name and detail, and a provider's id ("openrouter" for OpenRouter).
+    fn account_text(&self, a: &Account) -> String {
+        match &a.kind {
+            AccountKind::Provider(id) => format!("{} {} {id}", a.label, a.detail),
+            _ => format!("{} {}", a.label, a.detail),
         }
     }
 
-    /// Recent combos for a harness, newest first, one per (login/provider, model).
-    fn recents_for(&self, h: Harness) -> Vec<usize> {
-        let mut out: Vec<usize> = vec![];
-        for (i, r) in self.data.recents.iter().enumerate() {
-            if r.harness != h || r.orchestrator != self.orchestrator {
-                continue;
-            }
-            // proxy mode has no logins to pick: a combo naming one (or the pool) isn't offered
-            let names_login = r.profile_id.as_deref().is_some_and(|p| p.starts_with("claude:") || p.starts_with("codex:")) || r.provider_id.as_deref() == Some("pool");
-            if self.data.shared && names_login {
-                continue;
-            }
-            let dup = out.iter().any(|&j| {
-                let o = &self.data.recents[j];
-                o.profile_id == r.profile_id && o.provider_id == r.provider_id && o.model == r.model
-            });
-            if !dup {
-                out.push(i);
-            }
-            if out.len() == RECENTS_SHOWN {
-                break;
-            }
+    /// Fold or unfold "other providers" (the cursor is on it).
+    fn toggle_others(&mut self) {
+        self.others_open = !self.others_open;
+        self.hits.clear();
+    }
+
+    /// The cursor is on the "other providers" fold.
+    pub fn on_others(&self) -> bool {
+        self.focus == Focus::List && matches!(self.current(), Some(Item::Others { .. }))
+    }
+
+    /// A click on selectable row `i`: when that's the fold, the cursor goes to it and it opens or closes (true).
+    pub(crate) fn pick_fold(&mut self, i: usize) -> bool {
+        let items = self.items();
+        let fold = Self::selectable(&items).get(i).is_some_and(|&k| matches!(items[k], Item::Others { .. }));
+        if !fold {
+            return false;
         }
-        out
+        self.focus = Focus::List;
+        if self.list_sel != i {
+            self.list_sel = i;
+            self.reset_models();
+        }
+        self.toggle_others();
+        true
     }
 
     /// Positions (in `items()`) of the rows the cursor can land on.
@@ -717,17 +859,15 @@ impl Launcher {
             browser: self.browser,
             extra_args: vec![],
             orchestrator: self.orchestrator,
+            // the Create Slop tab launches with its kit
+            studio: (self.tab == SessionTab::Slop).then(|| self.studio_kit()),
         };
         // Focusing a running coordinator does not need a new account or model selection.
         if self.orchestrator && self.running_orchestrator().is_some() {
             return Some(base(None, None, None));
         }
         match self.current()? {
-            Item::Header(_) => None,
-            Item::Recent(i) => {
-                let r = &self.data.recents[i];
-                Some(base(r.profile_id.clone(), r.provider_id.clone(), r.model.clone()))
-            }
+            Item::Header(_) | Item::Others { .. } => None,
             Item::Account(a) => {
                 let model = if self.needs_model() { Some(self.model()?.id) } else { None };
                 Some(match a.kind {
@@ -762,7 +902,7 @@ impl Launcher {
         self.orchestrator = false;
         self.harness = all[next];
         self.list_filter.clear();
-        self.list_sel = 0;
+        self.list_sel = self.last_sel();
         let mut chosen_model = None;
         if let Some((p, model)) = pinned {
             chosen_model = model;
@@ -847,6 +987,10 @@ impl Launcher {
             self.continue_picker.paste(s);
             return;
         }
+        if self.tab == SessionTab::Slop {
+            self.studio_paste(s);
+            return;
+        }
         // the run-on list is picked with the arrows; text is a project
         if self.focus == Focus::List {
             self.open_project_picker();
@@ -897,7 +1041,34 @@ impl Launcher {
             Hit::Project => self.open_project_picker(),
             Hit::NoProject if self.orchestrator => self.select_no_project(),
             Hit::NoProject => {},
-            Hit::Tab(tab) => self.tab = tab,
+            Hit::Tab(tab) => self.set_tab(tab),
+            Hit::Cast(i) => {
+                self.studio.focus = studio::StudioFocus::Cast;
+                let cast = self.studio_cast();
+                if let Some(c) = cast.get(i).and_then(|&k| self.data.studio.cast.get(k)).cloned() {
+                    self.studio.sel = i;
+                    self.studio_toggle(c);
+                }
+            }
+            Hit::Tool(i) => {
+                if let Some(t) = bro_core::studio::TOOLS.get(i) {
+                    self.studio.focus = studio::StudioFocus::Tools;
+                    self.studio.key = None;
+                    // a tool that can't be used yet: the click gets it going (the selected one; the first
+                    // click selects)
+                    if self.studio_fix(t.id).is_some() {
+                        if self.studio.tool_sel == i {
+                            return self.studio_act(i);
+                        }
+                        self.studio.tool_sel = i;
+                    } else {
+                        self.studio.tool_sel = i;
+                        self.studio_toggle_tool(t.id);
+                    }
+                }
+            }
+            Hit::StudioRefresh => self.studio.ask = Some(true),
+            Hit::RunsOn => self.set_tab(SessionTab::New),
             Hit::ContinueScope(all) => self.continue_picker.set_all(all),
             Hit::ContinueRow(_) => return Self::continue_outcome(self.continue_picker.click(pos, mods)),
             Hit::Harness(h) => {
@@ -918,6 +1089,9 @@ impl Launcher {
                 }
             }
             Hit::Row(i) => {
+                if self.pick_fold(i) {
+                    return Outcome::None;
+                }
                 if self.focus == Focus::List && self.list_sel == i {
                     return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 }
@@ -956,6 +1130,11 @@ impl Launcher {
             }
             return;
         }
+        if self.tab == SessionTab::Slop {
+            self.studio.focus = studio::StudioFocus::Cast;
+            self.studio_move(0, if down { 1 } else { -1 });
+            return;
+        }
         if let Some(&(_, hit)) = self.hits.iter().find(|(r, _)| r.contains(pos)) {
             match hit {
                 Hit::Model(_) => self.focus = Focus::Models,
@@ -982,13 +1161,17 @@ impl Launcher {
         if k.modifiers.contains(KeyModifiers::ALT) {
             match k.code {
                 KeyCode::Char('g' | 'G') if self.orchestrator => { self.select_no_project(); return Outcome::None; }
-                KeyCode::Char('n' | 'N') => { self.tab = SessionTab::New; return Outcome::None; }
+                KeyCode::Char('n' | 'N') => { self.set_tab(SessionTab::New); return Outcome::None; }
                 KeyCode::Char('r' | 'R') => { self.show_continue(); return Outcome::None; }
+                KeyCode::Char('s' | 'S') => { self.set_tab(SessionTab::Slop); return Outcome::None; }
                 _ => {}
             }
         }
         if self.tab == SessionTab::Continue {
             return Self::continue_outcome(self.continue_picker.key(k));
+        }
+        if self.tab == SessionTab::Slop {
+            return self.studio_key(k);
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
@@ -1002,6 +1185,8 @@ impl Launcher {
                     return Outcome::Close;
                 }
             }
+            // the fold opens and closes under the cursor
+            KeyCode::Enter | KeyCode::Char(' ') if !ctrl && self.on_others() => self.toggle_others(),
             KeyCode::Enter if self.orchestrator && self.running_orchestrator().is_some() => return self.launch(),
             KeyCode::Enter if !self.installed(self.harness) => return Outcome::Install(self.harness),
             KeyCode::Enter => match self.focus {

@@ -109,9 +109,9 @@ mod tests {
     #[test]
     fn view_is_camel_case_and_has_no_token() {
         let account = Account {
-            user: User { name: "Sam Rivera".into(), email: "sam@example.com".into() },
-            organization: Organization { name: "Rivera Studio".into(), slug: "rivera-studio".into() },
-            credits: Credits { available: 1840, granted: 1840, monthly_allowance: 0, resets_at: Some(1795000000000) },
+            user: User { id: "demo-user".into(), name: "Sam Rivera".into(), email: "sam@example.com".into() },
+            organization: Organization { id: "demo-org".into(), name: "Rivera Studio".into(), slug: "rivera-studio".into() },
+            credits: Credits { available: 1840, granted: 1840, monthly_allowance: 0, resets_at: Some(1795000000000), ..Default::default() },
             host: Some(Host { url: "https://rivera-studio.justsuperhuman.com".into(), status: "ready".into() }),
             ..Default::default()
         };

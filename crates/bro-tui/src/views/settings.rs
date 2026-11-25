@@ -1,4 +1,4 @@
-//! Settings view: bro's everyday options, Orbit Voice connection and moving companion, watchdog
+//! Settings view: bro's everyday options, push-to-talk and live voice, watchdog
 //! defaults and the reviewer's prompt, caveman
 //! mode (terse replies in new Claude / Codex / Pi sessions), integrations (JustTools, Quick Install, Smart Paste and JustImagine), skills (bro's
 //! own, JustTools', JustWatch's and JustImagine's, and the git repos bro watches for more), bro's own updates and the Claude Code environment bro sets on every Claude launch — agent teams (on, the
@@ -9,9 +9,19 @@
 /// Drawn by the desktop app (`bro gui`).
 #[cfg(feature = "gui")]
 pub(crate) mod gui;
+/// Slop Collector (beta).
+mod remote;
+mod slop;
+
+pub(crate) use slop::{
+    ago as slop_ago, cleanup_detail as slop_cleanup_detail, due as slop_due, place as slop_place, temp_detail as slop_temp_detail, temp_due as slop_temp_due, toast as slop_toast,
+    toast_many as slop_toast_many, why as slop_why,
+};
+use slop::{SLOP_OPTS, SlopOpt};
+
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum MobileOpt { Access, Remote, ReadOnly, Display, Package, Disconnect }
-const MOBILE_OPTS: [MobileOpt; 6] = [MobileOpt::Access, MobileOpt::Remote, MobileOpt::ReadOnly, MobileOpt::Display, MobileOpt::Package, MobileOpt::Disconnect];
+enum MobileOpt { Access, Firewall, Pair, Remote, Permissions, ReadOnly, Display, Disconnect, Sessions, JustConnect }
+const MOBILE_OPTS: [MobileOpt; 10] = [MobileOpt::Access, MobileOpt::Firewall, MobileOpt::Pair, MobileOpt::Remote, MobileOpt::Permissions, MobileOpt::ReadOnly, MobileOpt::Display, MobileOpt::Disconnect, MobileOpt::Sessions, MobileOpt::JustConnect];
 
 use crate::keymap::Act;
 use crate::alerts::Kind;
@@ -39,6 +49,10 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum BroOpt {
     Theme,
+    CustomTheme,
+    ThemeDemo,
+    ImportTheme,
+    ExportTheme,
     Font,
     /// the desktop app's window: solid, acrylic, glass
     Material,
@@ -47,9 +61,10 @@ enum BroOpt {
     Rain,
     Screensaver,
     SharedBorders,
-    ProjectTabs,
-    /// what crowded project tabs do: scroll or stack
+    /// what crowded session tabs do: scroll or stack
     TabOverflow,
+    /// projects without an icon get one drawn
+    DrawnIcons,
     AutoResume,
     AutoApprove,
     Recaps,
@@ -59,16 +74,20 @@ enum BroOpt {
     Compression,
 }
 
-const BRO_OPTS: [BroOpt; 15] = [
+const BRO_OPTS: [BroOpt; 19] = [
     BroOpt::Theme,
+    BroOpt::CustomTheme,
+    BroOpt::ThemeDemo,
+    BroOpt::ImportTheme,
+    BroOpt::ExportTheme,
     BroOpt::Font,
     BroOpt::Material,
     BroOpt::Tint,
     BroOpt::Rain,
     BroOpt::Screensaver,
     BroOpt::SharedBorders,
-    BroOpt::ProjectTabs,
     BroOpt::TabOverflow,
+    BroOpt::DrawnIcons,
     BroOpt::AutoResume,
     BroOpt::AutoApprove,
     BroOpt::Recaps,
@@ -78,16 +97,16 @@ const BRO_OPTS: [BroOpt; 15] = [
 ];
 
 /// bro's options this window can use: the font only where the terminal can switch it, the window's material only
-/// in the desktop app (a terminal draws its own window), its tint only once something shows through, what crowded
-/// project tabs do only while they're on.
+/// in the desktop app (a terminal draws its own window), its tint only once something shows through, drawn project
+/// icons only where icons show (the desktop app's sidebar and tabs).
 fn bro_opts() -> Vec<BroOpt> {
     BRO_OPTS
         .into_iter()
         .filter(|o| match o {
             BroOpt::Font => crate::fonts::available(),
-            BroOpt::Material => desktop_app(),
+            BroOpt::Material | BroOpt::CustomTheme | BroOpt::ThemeDemo | BroOpt::ImportTheme => desktop_app(),
             BroOpt::Tint => desktop_app() && SEE_THROUGH.with(|s| s.get()),
-            BroOpt::TabOverflow => TABS_ON.with(|s| s.get()),
+            BroOpt::DrawnIcons => desktop_app(),
             _ => true,
         })
         .collect()
@@ -110,14 +129,18 @@ impl BroOpt {
     fn label(self) -> &'static str {
         match self {
             BroOpt::Theme => "Theme",
+            BroOpt::CustomTheme => "Create a custom theme",
+            BroOpt::ThemeDemo => "Aurora studio demo",
+            BroOpt::ImportTheme => "Import a theme",
+            BroOpt::ExportTheme => "Export current theme",
             BroOpt::Font => "Font",
             BroOpt::Material => "Window",
             BroOpt::Tint => "Window tint",
             BroOpt::Rain => "Digital rain",
             BroOpt::Screensaver => "Summary screensaver",
             BroOpt::SharedBorders => "Shared tile borders",
-            BroOpt::ProjectTabs => "Project tabs",
-            BroOpt::TabOverflow => "Crowded tabs",
+            BroOpt::TabOverflow => "Crowded session tabs",
+            BroOpt::DrawnIcons => "Draw missing icons",
             BroOpt::AutoResume => "Auto-resume",
             BroOpt::AutoApprove => "Auto-approve prompts",
             BroOpt::Recaps => "Recaps",
@@ -128,15 +151,19 @@ impl BroOpt {
     }
     fn help(self) -> &'static str {
         match self {
-            BroOpt::Theme => "enter opens the picker with a live preview",
+            BroOpt::Theme => "Choose a palette and preview it across the window.",
+            BroOpt::CustomTheme => "Two colors shape the whole app. Fine-tune linked color families and preview every change live.",
+            BroOpt::ThemeDemo => "A complete light-and-dark studio palette. Try it, inspect an area, then make it yours.",
+            BroOpt::ImportTheme => "Open a T3 Code JSON or VS Code JSON/JSONC palette. Your existing themes stay untouched.",
+            BroOpt::ExportTheme => "Save a portable T3 Code JSON copy, including both appearances and any embedded browser CSS.",
             BroOpt::Font => "this window only, switches as you go: ←/→ to try them",
             BroOpt::Material => "let your desktop show through: acrylic frosts it, glass leaves it clear",
             BroOpt::Tint => "how much theme covers a see-through window, evenly from title bar to sessions · text stays solid",
             BroOpt::Rain => "over any theme: everywhere, or only in sessions whose agent is mid-turn",
             BroOpt::Screensaver => "step away and every session turns over to what it's working on; any touch turns them back",
             BroOpt::SharedBorders => "tiles that sit together share one line instead of two; status and × move up beside the title",
-            BroOpt::ProjectTabs => "a tab strip over your sessions: All tiles every one, a project's tab tiles just its own, in its color",
-            BroOpt::TabOverflow => "more projects than fit across: scroll keeps one row you page through, stack wraps them onto up to three",
+            BroOpt::TabOverflow => "more sessions than fit across the top: scroll keeps one row you page through, stack wraps them onto up to three",
+            BroOpt::DrawnIcons => "a project with no icon of its own gets one, drawn quietly by the agent you used last: one white symbol on a tile in the project's own color, the same style for all",
             BroOpt::AutoResume => "types `continue` when an agent stops on an API error or a limit resets",
             BroOpt::AutoApprove => "answers Yes to Claude's \"Do you want to proceed?\" (bypass mode's rm / path safety checks)",
             BroOpt::Recaps => "asks Claude for a /recap of a pane left waiting unseen (a few cents each)",
@@ -147,14 +174,18 @@ impl BroOpt {
     }
     /// How bro looks (Appearance) rather than what it does (Sessions).
     fn looks(self) -> bool {
-        matches!(self, BroOpt::Theme | BroOpt::Font | BroOpt::Material | BroOpt::Tint | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::ProjectTabs | BroOpt::TabOverflow)
+        matches!(self, BroOpt::Theme | BroOpt::CustomTheme | BroOpt::ThemeDemo | BroOpt::ImportTheme | BroOpt::ExportTheme | BroOpt::Font | BroOpt::Material | BroOpt::Tint | BroOpt::Rain | BroOpt::Screensaver | BroOpt::SharedBorders | BroOpt::TabOverflow | BroOpt::DrawnIcons)
     }
     /// The value as shown.
     fn value(self, cx: &Cx) -> String {
         let s = cx.svc.settings();
         let on = |b: bool| if b { "on" } else { "off" }.to_string();
         match self {
-            BroOpt::Theme => cx.theme.name.clone(),
+            BroOpt::Theme => crate::theme::label(cx.theme),
+            BroOpt::CustomTheme => "Customize…".into(),
+            BroOpt::ThemeDemo => "Try Aurora…".into(),
+            BroOpt::ImportTheme => "Choose file…".into(),
+            BroOpt::ExportTheme => "Export JSON".into(),
             BroOpt::Font => s.font.as_deref().and_then(crate::fonts::get).map_or(if crate::fonts::GUI.load(std::sync::atomic::Ordering::Relaxed) { crate::fonts::FONTS[0].label } else { "terminal's own" }, |f| f.label).to_string(),
             BroOpt::Material => s.material.id().to_string(),
             BroOpt::Tint => format!("{}%", s.material_tint),
@@ -170,8 +201,8 @@ impl BroOpt {
                 n => format!("after {} min", n / 60),
             },
             BroOpt::SharedBorders => on(s.shared_borders),
-            BroOpt::ProjectTabs => on(s.project_tabs),
             BroOpt::TabOverflow => s.tab_overflow.id().to_string(),
+            BroOpt::DrawnIcons => on(s.draw_project_icons),
             BroOpt::AutoResume => on(s.auto_resume.enabled),
             BroOpt::AutoApprove => on(s.auto_approve),
             BroOpt::Recaps => on(s.insights.generate_recaps),
@@ -229,6 +260,10 @@ impl BroOpt {
                 cx.svc.save_settings(s);
             }
             BroOpt::Theme => cx.act(Action::Run(Act::Themes)),
+            BroOpt::CustomTheme => cx.act(Action::ThemeControl(0)),
+            BroOpt::ThemeDemo => cx.act(Action::ThemeControl(3)),
+            BroOpt::ImportTheme => cx.act(Action::ThemeControl(1)),
+            BroOpt::ExportTheme => cx.act(Action::ThemeControl(2)),
             BroOpt::AutoResume => cx.act(Action::Run(Act::ToggleAutoResume)),
             BroOpt::Compression => cx.act(Action::Run(Act::ToggleTrim)),
             BroOpt::ProxyMode => {
@@ -245,9 +280,9 @@ impl BroOpt {
                 s.shared_borders = !s.shared_borders;
                 cx.svc.save_settings(s);
             }
-            BroOpt::ProjectTabs => {
+            BroOpt::DrawnIcons => {
                 let mut s = cx.svc.settings();
-                s.project_tabs = !s.project_tabs;
+                s.draw_project_icons = !s.draw_project_icons;
                 cx.svc.save_settings(s);
             }
             BroOpt::Recaps => {
@@ -264,30 +299,79 @@ impl BroOpt {
     }
 }
 
-fn voice_visible_options(enabled: bool, state: &crate::services::orbit_voice::OrbitState) -> Vec<VoiceOpt> {
-    let ready = enabled && state.connected && state.runtime.as_ref().is_some_and(|r| r.renderer_ready);
-    let credential = ready && state.runtime.as_ref().is_some_and(|r| r.credential_available);
-    let talking = ready && state.runtime.as_ref().is_some_and(|r| r.phase != bro_bridge::orbit_voice::Phase::Off);
-    VOICE_OPTS.into_iter().filter(|option| match option {
-        VoiceOpt::On | VoiceOpt::Upstream => true,
-        VoiceOpt::ReloadPreview => enabled && !ready && !state.checking,
-        VoiceOpt::Provider | VoiceOpt::Source | VoiceOpt::Open | VoiceOpt::Escape | VoiceOpt::Background | VoiceOpt::Quit | VoiceOpt::Updates => ready,
-        VoiceOpt::Talk => ready && (credential || talking || state.starting),
-        VoiceOpt::Model | VoiceOpt::Voice | VoiceOpt::Volume | VoiceOpt::Listen => credential,
-        VoiceOpt::Mute => talking,
-    }).collect()
-}
-
-/// Orbit owns microphone, hotkey and realtime provider settings.
+/// Push-to-talk and live call controls.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum VoiceOpt {
-    On, Talk, Mute, Provider, Model, Voice, Volume, Listen, Source, Open,
-    Escape, Background, Quit, Updates, ReloadPreview, Upstream,
+    LiveTalk, LiveEnd, LiveVoice, LiveAnnounce,
+    Dictation, DictationShortcut, DictationCleanup, DictationFillers,
+    On,
+    /// enter, then press the key (where the platform lets bro listen for it)
+    Key,
+    /// GPT-Live answering out loud, or speech to text
+    Mode,
+    /// GPT-Live's voice
+    Speaker,
+    /// whether the OpenAI key is there
+    ApiKey,
 }
 
-const VOICE_OPTS: [VoiceOpt; 16] = [VoiceOpt::On, VoiceOpt::Talk, VoiceOpt::Mute, VoiceOpt::Provider,
-    VoiceOpt::Model, VoiceOpt::Voice, VoiceOpt::Volume, VoiceOpt::Listen, VoiceOpt::Source, VoiceOpt::Open,
-    VoiceOpt::Escape, VoiceOpt::Background, VoiceOpt::Quit, VoiceOpt::Updates, VoiceOpt::ReloadPreview, VoiceOpt::Upstream];
+const VOICE_OPTS: [VoiceOpt; 13] = [VoiceOpt::On, VoiceOpt::Key, VoiceOpt::Mode, VoiceOpt::Speaker, VoiceOpt::ApiKey,
+    VoiceOpt::LiveTalk, VoiceOpt::LiveEnd, VoiceOpt::LiveVoice, VoiceOpt::LiveAnnounce,
+    VoiceOpt::Dictation, VoiceOpt::DictationShortcut, VoiceOpt::DictationCleanup, VoiceOpt::DictationFillers];
+
+const DICTATION_SHORTCUTS: [(bro_core::config::DictationShortcut, &str); 3] = [
+    (bro_core::config::DictationShortcut::Auto, "Auto"),
+    (bro_core::config::DictationShortcut::Hold, "Hold"),
+    (bro_core::config::DictationShortcut::Toggle, "Toggle"),
+];
+
+fn dictation_shortcut_index(mode: bro_core::config::DictationShortcut) -> usize {
+    DICTATION_SHORTCUTS.iter().position(|(known, _)| *known == mode).unwrap_or(0)
+}
+
+/// GPT-Live's voices.
+const LIVE_VOICES: [&str; 10] = ["cedar", "marin", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"];
+
+/// Keys ←/→ step through where pressing one to set it doesn't work.
+fn key_choices() -> Vec<&'static str> {
+    let mut all = vec![bro_voice::default_hotkey()];
+    all.extend(
+        ["ralt", "rctrl", "rshift", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24", "scrolllock", "pause"]
+            .into_iter()
+            .filter(|k| *k != bro_voice::default_hotkey()),
+    );
+    all
+}
+
+/// The voice key a key that reached bro's window names: function keys (F13–F24 by name) and Insert; keys you
+/// type or move with can't be one.
+fn window_hotkey(code: KeyCode) -> Option<String> {
+    match code {
+        KeyCode::F(n @ 13..=24) => Some(format!("f{n}")),
+        KeyCode::F(n @ 1..=12) => Some(format!("vk:0x{:02X}", 0x6F + u32::from(n))),
+        KeyCode::Insert => Some("insert".into()),
+        _ => None,
+    }
+}
+
+/// The push-to-talk key's name, the platform's default when none is set.
+fn voice_key(v: &bro_core::config::VoiceSettings) -> String {
+    v.hotkey.clone().unwrap_or_else(|| bro_voice::default_hotkey().to_string())
+}
+
+fn live_mode(v: &bro_core::config::VoiceSettings) -> bool {
+    v.mode != "transcribe"
+}
+
+impl VoiceOpt {
+    fn live(self) -> bool {
+        matches!(self, VoiceOpt::LiveTalk | VoiceOpt::LiveEnd | VoiceOpt::LiveVoice | VoiceOpt::LiveAnnounce)
+    }
+}
+
+fn live_visible(option: VoiceOpt, calls: usize) -> bool {
+    option != VoiceOpt::LiveEnd || calls > 0
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum CaveOpt {
@@ -320,6 +404,7 @@ enum ToolOpt {
     Sounds,
     /// PeonPing's site, where the sounds come from
     PeonPing,
+    Automation,
 }
 
 /// The Skills section's own rows. The JustTools and JustWatch skills ([`ToolOpt::Skill`], [`ToolOpt::WatchSkill`])
@@ -339,14 +424,11 @@ enum SkillOpt {
 thread_local! {
     /// Whether the window was see-through as the view last read the settings: the tint row [`rows`] lists.
     static SEE_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Whether the project tabs were on: what crowded ones do is listed only then.
-    static TABS_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Note what of `s` decides which rows there are (a see-through window), for [`rows`].
 fn note_settings(s: &bro_core::config::Settings) {
     SEE_THROUGH.with(|w| w.set(s.material.see_through()));
-    TABS_ON.with(|w| w.set(s.project_tabs));
 }
 
 /// "just now", "4 min ago", "2 h ago".
@@ -452,7 +534,7 @@ impl ModOpt {
         match self {
             ModOpt::On => "new Claude sessions load bro's mod: /bro opens your sessions and limits in a pane · the questions need it",
             ModOpt::Chime => "bro chimes when Claude asks you a question",
-            ModOpt::Timer => "a countdown above Claude's questions; at zero Claude goes with its best judgement",
+            ModOpt::Timer => "a countdown above Claude's questions that pauses while you answer; at zero Claude goes with its best judgement",
             ModOpt::TimerSecs => "how long a question waits for you while the timer is on",
             ModOpt::Ticks => "a tick a second for the timer's last 15 seconds, firmer for the last five",
         }
@@ -507,6 +589,7 @@ enum Row {
     Update(UpdOpt),
     Host(HostOpt),
     Mobile(MobileOpt),
+    Slop(SlopOpt),
     Watch(WatchOpt),
     Mod(ModOpt),
     Preset,
@@ -518,6 +601,7 @@ fn rows() -> Vec<Row> {
         .into_iter()
         .map(Row::Bro)
         .chain([Row::Host(HostOpt::Keep), Row::Host(HostOpt::Working), Row::Host(HostOpt::Restart), Row::Host(HostOpt::Startup), Row::Host(HostOpt::Media)])
+        .chain(SLOP_OPTS.map(Row::Slop))
         .chain(VOICE_OPTS.map(Row::Voice))
         .chain([Row::Cave(CaveOpt::Mode), Row::Cave(CaveOpt::Subagents)])
         .chain(WATCH_OPTS.map(Row::Watch))
@@ -527,7 +611,7 @@ fn rows() -> Vec<Row> {
         .chain(MOD_OPTS.map(Row::Mod))
         .chain([Row::Tool(ToolOpt::Install), Row::Tool(ToolOpt::QuickInstall), Row::Tool(ToolOpt::AutoUpdate)])
         .chain(bro_core::justpaste::supported().then_some(Row::Tool(ToolOpt::SmartPaste)))
-        .chain([Row::Tool(ToolOpt::Imagine), Row::Quips, Row::Skill(SkillOpt::Manage), Row::Skill(SkillOpt::BroOpen), Row::Tool(ToolOpt::Skill)])
+        .chain([Row::Tool(ToolOpt::Imagine), Row::Tool(ToolOpt::Automation), Row::Quips, Row::Skill(SkillOpt::Manage), Row::Skill(SkillOpt::BroOpen), Row::Tool(ToolOpt::Skill)])
         .chain(bro_core::justwatch::supported().then_some(Row::Tool(ToolOpt::WatchSkill)))
         .chain([Row::Skill(SkillOpt::Imagine), Row::Skill(SkillOpt::AutoSync)])
         .chain([Row::Tool(ToolOpt::SoundsOn), Row::Tool(ToolOpt::Sounds), Row::Tool(ToolOpt::PeonPing), Row::Update(UpdOpt::Version), Row::Update(UpdOpt::Check)])
@@ -593,6 +677,7 @@ enum Section {
     Appearance,
     Sessions,
     Server,
+    Slop,
     Voice,
     Caveman,
     Watchdog,
@@ -606,10 +691,11 @@ enum Section {
     Mobile,
 }
 
-const SECTIONS: [Section; 14] = [
+const SECTIONS: [Section; 15] = [
     Section::Appearance,
     Section::Sessions,
     Section::Server,
+    Section::Slop,
     Section::Voice,
     Section::Caveman,
     Section::Watchdog,
@@ -631,6 +717,7 @@ impl Section {
             Row::Bro(_) => Section::Sessions,
             Row::Host(_) => Section::Server,
             Row::Mobile(_) => Section::Mobile,
+            Row::Slop(_) => Section::Slop,
             Row::Voice(_) => Section::Voice,
             Row::Cave(_) => Section::Caveman,
             Row::Watch(_) => Section::Watchdog,
@@ -647,8 +734,9 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Sessions => "Sessions",
             Section::Server => "Session server",
-            Section::Mobile => "Mobile Companion",
-            Section::Voice => "Orbit Voice",
+            Section::Mobile => "Remote Control",
+            Section::Slop => "Slop Collector",
+            Section::Voice => "Voice",
             Section::Caveman => "Caveman",
             Section::Watchdog => "Watchdog",
             Section::Claude => "Claude Code",
@@ -666,7 +754,8 @@ impl Section {
             Section::Appearance => "theme",
             Section::Sessions => "term",
             Section::Server => "server",
-            Section::Mobile => "server",
+            Section::Mobile => "remote",
+            Section::Slop => "broom",
             Section::Voice => "mic",
             Section::Caveman => "caveman",
             Section::Watchdog => "watchdog",
@@ -685,8 +774,9 @@ impl Section {
             Section::Appearance => "How bro looks. Every change shows up as you make it.",
             Section::Sessions => "What bro does on its own while your agents work.",
             Section::Server => "Your sessions run in a background process of bro's, so they keep running when bro closes, crashes or updates, and come back when it opens. The terminal UI and the desktop app both pick them up.",
-            Section::Mobile => "Your sessions and desktop on your paired phone. Remote control downloads its own package when you enable it.",
-            Section::Voice => "Talk with your workspace. You decide when the microphone is on.",
+            Section::Mobile => "Your sessions on your phone, and this desktop too whenever you let it.",
+            Section::Slop => "Renders and tests your agents run can leave programs running and temp files behind when they get cut short. Slop Collector finds them and cleans up, so your memory and disk space come back.",
+            Section::Voice => "Hold the key in any app, speak, and release. Hugh hears you and sends work to your agents.",
             Section::Caveman => "Terse replies with every fact kept, in new Claude, Codex and Pi sessions.",
             Section::Watchdog => "A fresh reviewer reads a session that went quiet and hands it its next task. Prefix w on a session starts one.",
             Section::Claude => "Agent teams, and the environment bro sets on every Claude launch. New sessions pick it up.",
@@ -709,16 +799,78 @@ struct Item {
     value: Vec<Span<'static>>,
     help: String,
     notes: Vec<Vec<Span<'static>>>,
+    /// a second thing the setting does, at the end of its first note (the desktop app's link, `u` in the
+    /// terminal): Remote desktop's "Check for updates"
+    link: Option<String>,
 }
 
 impl Item {
     fn new(row: Row, label: &str, value: Vec<Span<'static>>, help: impl Into<String>) -> Item {
-        Item { row, label: label.into(), tag: None, value, help: help.into(), notes: vec![] }
+        Item { row, label: label.into(), tag: None, value, help: help.into(), notes: vec![], link: None }
     }
     fn note(mut self, spans: Vec<Span<'static>>) -> Item {
         self.notes.push(spans);
         self
     }
+    fn link(mut self, label: impl Into<String>) -> Item {
+        self.link = Some(label.into());
+        self
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FirewallInk { Good, Bad, Busy, Quiet }
+
+/// Settings → Remote Control → Windows Firewall.
+fn firewall_item(cx: &Cx) -> Item {
+    use bro_core::firewall::{self, App, Readiness};
+    let t = cx.theme;
+    let fw = cx.svc.state().firewall.clone();
+    let report = fw.report.as_ref();
+    let (label, ink) = SettingsView::mobile_firewall_label(report, fw.asking);
+    let style = match ink {
+        FirewallInk::Good => fg(t.good),
+        FirewallInk::Bad => fg(t.danger),
+        FirewallInk::Busy => fg(t.inline),
+        FirewallInk::Quiet => muted(t),
+    };
+    let help = match report.map(|r| &r.readiness) {
+        _ if fw.asking => format!("To add bro's rules, {}. It asks once; after that your phone connects on any network.", firewall::asking()),
+        None => format!("Reading the {} rules for bro.", firewall::name()),
+        Some(Readiness::Ready) => "bro's rules let your paired phone connect on any network, with no Allow prompt waiting on this computer.".into(),
+        Some(Readiness::NeedsRules) => format!("{} Choose Allow and {}.", firewall::prompt_risk(), firewall::asking()),
+        Some(Readiness::BlocksAll(profiles)) => firewall::blocks_all_fix(*profiles),
+        Some(Readiness::Managed) => "Your organisation manages Windows Firewall on this PC. Ask its administrator to allow incoming connections for bro.exe and voxl.exe.".into(),
+        Some(Readiness::NotNeeded) => "No firewall on this computer stands between it and your phone.".into(),
+        Some(Readiness::Manual(advice)) => advice.clone(),
+        Some(Readiness::Unknown(error)) => format!("bro couldn't read the {} ({error}). Choose Check again.", firewall::name()),
+    };
+    let mut item = Item::new(Row::Mobile(MobileOpt::Firewall), firewall::name(), shown(label, style), help);
+    if let Some(report) = report.filter(|r| r.readiness == Readiness::NeedsRules) {
+        for app in report.apps.iter().filter(|a| !a.open()) {
+            let what = match app.target.app { App::Bridge => "Phone access", App::RemoteDesktop => "Remote desktop" };
+            item = item.note(vec![Span::styled(format!("{what}: {}", firewall::missing_line(app)), muted(t))]);
+        }
+    }
+    if let Some(problem) = fw.problem.filter(|_| !fw.asking) {
+        item = item.note(vec![Span::styled(problem, fg(t.danger))]);
+    }
+    item
+}
+
+/// Settings → Remote Control → Screen and input (macOS): the two privacy permissions remote desktop needs,
+/// asked for while you're at the Mac.
+fn mac_permissions_item(cx: &Cx) -> Item {
+    let t = cx.theme;
+    let fw = cx.svc.state().firewall.clone();
+    let (label, style, help) = match fw.mac {
+        _ if fw.mac_asking => ("Waiting for you…", fg(t.inline), "Answer macOS's prompts, or turn Bro on in the System Settings page that opens."),
+        None => ("Checking…", muted(t), "Reading Screen Recording and Accessibility for Bro."),
+        Some(p) if p.screen && p.accessibility => ("Allowed", fg(t.good), "Bro may share this Mac's screen and move its pointer and keys for your phone."),
+        Some(p) if !p.screen => ("Screen Recording needed", fg(t.danger), "Without Screen Recording your phone sees only the wallpaper, and macOS would ask on a Mac nobody's at. Choose Allow, turn Bro on, then quit and reopen Bro."),
+        Some(_) => ("Accessibility needed", fg(t.danger), "Without Accessibility your phone can watch but its mouse and keys do nothing. Choose Allow and turn Bro on in System Settings."),
+    };
+    Item::new(Row::Mobile(MobileOpt::Permissions), "Screen and input", shown(label, style), help)
 }
 
 /// What a section is drawn from.
@@ -728,6 +880,57 @@ enum Block {
     Sub(String),
     /// a line that isn't a setting
     Text(Vec<Span<'static>>),
+    /// big numbers side by side (the desktop app draws them as tiles)
+    Stats(Vec<Stat>),
+    /// read-only rows: what, a line about it, and a value with a note at the right
+    Rows(Vec<InfoRow>),
+    /// the phones and browsers connected right now (Remote Control)
+    Devices(Vec<DeviceRow>),
+}
+
+/// A number and what it counts.
+struct Stat {
+    value: Span<'static>,
+    label: String,
+}
+
+/// A row that isn't a setting.
+struct InfoRow {
+    title: String,
+    detail: String,
+    value: Span<'static>,
+    note: Span<'static>,
+}
+
+/// A connected phone or browser (Remote Control → Connected now), or the line standing in for none.
+struct DeviceRow {
+    form: bro_bridge::devices::Form,
+    /// bro's own app: its icon takes the accent
+    app: bool,
+    name: String,
+    /// "bro app · iOS 18.1 · 192.168.1.40"
+    detail: String,
+    /// what it's doing with the desktop ("Controlling desktop", "Watching desktop"), if anything
+    status: Option<Span<'static>>,
+    /// how long it's been connected
+    since: String,
+    /// the stand-in when nothing is connected: no live dot, a quiet icon
+    quiet: bool,
+}
+
+impl DeviceRow {
+    fn placeholder(name: &str, detail: &str) -> DeviceRow {
+        DeviceRow { form: bro_bridge::devices::Form::Phone, app: false, name: name.into(), detail: detail.into(), status: None, since: String::new(), quiet: true }
+    }
+    /// Its [`ui::icon`] name.
+    fn icon(&self) -> &'static str {
+        use bro_bridge::devices::Form;
+        match self.form {
+            Form::Phone => "phone",
+            Form::Tablet => "tablet",
+            Form::Computer | Form::Unknown => "web",
+        }
+    }
 }
 
 /// "● on" / "○ off"; `live` false dims an on that does nothing yet.
@@ -875,15 +1078,16 @@ impl SettingsView {
 
     fn visible(&self, row: Row, cx: &Cx) -> bool {
         if let Row::Mobile(option) = row {
-            return match option {
-                MobileOpt::ReadOnly | MobileOpt::Display => cx.svc.settings().mobile_companion.enabled,
-                MobileOpt::Disconnect => cx.svc.rmm_status().is_some_and(|status| status.active_viewers > 0),
-                _ => true,
-            };
+            return remote::visible(option, cx);
+        }
+        if let Row::Slop(o) = row {
+            return slop::visible(o, cx);
         }
         if let Row::Voice(option) = row {
-            let state = cx.svc.state().orbit_voice.clone();
-            return voice_visible_options(cx.svc.settings().orbit_voice.enabled || state.owned_elsewhere && state.connected, &state).contains(&option);
+            if option.live() {
+                return live_visible(option, cx.svc.state().bridge.voice_calls.len());
+            }
+            return true;
         }
         true
     }
@@ -891,7 +1095,7 @@ impl SettingsView {
     fn normalize_selection(&mut self, cx: &Cx) {
         if !self.visible(self.row(), cx) {
             let home = if matches!(self.row(), Row::Mobile(_)) { Row::Mobile(MobileOpt::Remote) }
-                else { Row::Voice(VoiceOpt::On) };
+                else if matches!(self.row(), Row::Slop(_)) { Row::Slop(SlopOpt::On) } else { Row::Voice(VoiceOpt::On) };
             self.sel = rows().iter().position(|r| *r == home).unwrap_or(0);
         }
     }
@@ -915,6 +1119,15 @@ impl SettingsView {
         self.sel = rows().iter().position(|r| Section::of(*r) == s).unwrap_or(0);
     }
 
+    pub(crate) fn show_voice(&mut self) {
+        self.go(Section::Voice);
+    }
+
+    #[cfg(feature = "gui")]
+    pub(crate) fn show_dictation(&mut self) {
+        self.sel = rows().iter().position(|r| *r == Row::Voice(VoiceOpt::Dictation)).unwrap_or(self.sel);
+    }
+
     /// Select the agent teams switch (the team board's s).
     pub fn show_agent_teams(&mut self) {
         let k = KNOBS.iter().position(|k| k.id == claude_env::AGENT_TEAMS).unwrap_or(0);
@@ -932,6 +1145,7 @@ impl SettingsView {
                 cx.svc.save_settings(s);
             }
             ToolOpt::QuickInstall => cx.act(Action::Run(Act::QuickInstall)),
+            ToolOpt::Automation => cx.act(Action::Open(Box::new(super::automation::AutomationView::new()), crate::pane::Place::Tab)),
             ToolOpt::SoundsOn => {
                 let on = !s.peon.on;
                 s.peon.on = on;
@@ -1016,65 +1230,85 @@ impl SettingsView {
     }
 
     fn voice(&mut self, o: VoiceOpt, dir: isize, cx: &mut Cx) {
-        use bro_bridge::orbit_voice::{VoiceControl, Provider};
         if !self.visible(Row::Voice(o), cx) { self.normalize_selection(cx); return; }
-        if cx.svc.orbit_owned_elsewhere() && matches!(o, VoiceOpt::On | VoiceOpt::Escape | VoiceOpt::Background | VoiceOpt::ReloadPreview) {
-            cx.toast(Kind::Info, "Your primary window owns Orbit Voice. Change the connection or character mode there.");
+        if o.live() {
+            let mut settings = cx.svc.settings();
+            match o {
+                VoiceOpt::LiveTalk => cx.svc.open_voice_page(),
+                VoiceOpt::LiveEnd => cx.svc.hangup_live_voice(),
+                VoiceOpt::LiveVoice => {
+                    let voices = bro_bridge::voice::VOICES;
+                    let current = settings.voice.realtime_voice.clone().unwrap_or_else(|| bro_bridge::voice::DEFAULT_VOICE.into());
+                    let index = voices.iter().position(|v| *v == current).unwrap_or(0) as isize;
+                    settings.voice.realtime_voice = Some(voices[(index + dir).rem_euclid(voices.len() as isize) as usize].into());
+                    cx.svc.save_settings(settings);
+                }
+                VoiceOpt::LiveAnnounce => {
+                    let modes = ["all", "asked", "off"];
+                    let index = modes.iter().position(|m| *m == settings.voice.announce).unwrap_or(0) as isize;
+                    settings.voice.announce = modes[(index + dir).rem_euclid(modes.len() as isize) as usize].into();
+                    cx.svc.save_settings(settings);
+                }
+                _ => {}
+            }
             return;
         }
-        let mut settings = cx.svc.settings();
+        let mut s = cx.svc.settings();
+        let v = &mut s.voice;
         match o {
-            VoiceOpt::On => {
-                settings.orbit_voice.enabled = !settings.orbit_voice.enabled;
-                let enabled = settings.orbit_voice.enabled;
-                cx.svc.save_settings(settings);
-                cx.svc.start_orbit_voice(enabled);
+            VoiceOpt::Dictation => v.dictation.enabled = !v.dictation.enabled,
+            VoiceOpt::DictationCleanup => v.dictation.cleanup = !v.dictation.cleanup,
+            VoiceOpt::DictationFillers => v.dictation.remove_fillers = !v.dictation.remove_fillers,
+            VoiceOpt::DictationShortcut => {
+                let index = dictation_shortcut_index(v.dictation.shortcut) as isize;
+                v.dictation.shortcut = DICTATION_SHORTCUTS[(index + dir).rem_euclid(DICTATION_SHORTCUTS.len() as isize) as usize].0;
             }
-            VoiceOpt::Escape => {
-                settings.orbit_voice.allow_escape = !settings.orbit_voice.allow_escape;
-                settings.orbit_voice.mode = "attached".into();
-                cx.svc.save_settings(settings);
+            _ => return self.push_to_talk(o, dir, cx, s),
+        }
+        cx.svc.save_settings(s);
+    }
+
+    fn push_to_talk(&mut self, o: VoiceOpt, dir: isize, cx: &mut Cx, mut s: bro_core::config::Settings) {
+        let v = &mut s.voice;
+        match o {
+            VoiceOpt::Key => {
+                let all = key_choices();
+                let i = all.iter().position(|k| *k == voice_key(v)).map_or(0, |i| i as isize + dir);
+                v.hotkey = Some(all[i.rem_euclid(all.len() as isize) as usize].to_string());
             }
-            VoiceOpt::Background => {
-                settings.orbit_voice.keep_in_background = !settings.orbit_voice.keep_in_background;
-                cx.svc.save_settings(settings);
+            VoiceOpt::On => v.enabled = !v.enabled,
+            VoiceOpt::Mode => v.mode = if live_mode(v) { "transcribe" } else { "live" }.into(),
+            VoiceOpt::Speaker => {
+                let current = v.live_voice.clone().unwrap_or_else(|| bro_voice::DEFAULT_LIVE_VOICE.into());
+                let i = LIVE_VOICES.iter().position(|x| *x == current).map_or(0, |i| i as isize + dir);
+                v.live_voice = Some(LIVE_VOICES[i.rem_euclid(LIVE_VOICES.len() as isize) as usize].into());
             }
-            VoiceOpt::Talk => cx.svc.toggle_orbit_voice(),
-            VoiceOpt::Mute => cx.svc.mute_orbit_voice(),
-            VoiceOpt::Quit => cx.svc.orbit_control(VoiceControl::Quit {}),
-            VoiceOpt::Source => {},
-            VoiceOpt::Provider | VoiceOpt::Model | VoiceOpt::Voice | VoiceOpt::Volume | VoiceOpt::Listen => {
-                let Some(runtime) = cx.svc.state().orbit_voice.runtime.clone() else {
-                    cx.toast(Kind::Info, "Connect Orbit Voice before changing voice preferences."); return;
-                };
-                let mut preferences = runtime.preferences;
-                let next = |current: &str, choices: &[&str]| -> String {
-                    let index = choices.iter().position(|choice| *choice == current).unwrap_or(0);
-                    choices[(index as isize + dir).rem_euclid(choices.len() as isize) as usize].into()
-                };
-                match o {
-                    VoiceOpt::Provider => {
-                        preferences.provider = if preferences.provider == Provider::Openai { Provider::Grok } else { Provider::Openai };
-                        let (model, voice) = if preferences.provider == Provider::Openai { ("gpt-realtime", "cedar") } else { ("grok-voice-latest", "eve") };
-                        preferences.model = model.into(); preferences.voice = voice.into();
-                    }
-                    VoiceOpt::Model => preferences.model = next(&preferences.model, if preferences.provider == Provider::Openai { &["gpt-realtime", "gpt-realtime-mini"] } else { &["grok-voice-latest"] }),
-                    VoiceOpt::Voice => preferences.voice = next(&preferences.voice, if preferences.provider == Provider::Openai { &["cedar", "marin", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"] } else { &["eve", "ara", "rex", "sal", "leo"] }),
-                    VoiceOpt::Volume => preferences.volume = (isize::from(preferences.volume) + dir * 5).clamp(0, 100) as u8,
-                    VoiceOpt::Listen => preferences.listen_mode = if preferences.listen_mode == "always" { "tap" } else { "always" }.into(),
-                    _ => unreachable!(),
-                }
-                cx.svc.orbit_control(VoiceControl::SetPreferences { preferences });
-            }
-            VoiceOpt::Open => cx.svc.open_orbit_voice(),
-            VoiceOpt::Updates => cx.svc.check_orbit_voice_release(),
-            VoiceOpt::ReloadPreview => cx.svc.reload_installed_orbit_preview(),
-            VoiceOpt::Upstream => cx.svc.orbit_repository(true),
+            // look for the key again
+            VoiceOpt::ApiKey => {}
+            _ => unreachable!(),
+        }
+        if o != VoiceOpt::ApiKey {
+            cx.svc.save_settings(s);
+        }
+        if cx.svc.runs_voice() {
+            cx.svc.restart_voice();
+        } else if o == VoiceOpt::On || o == VoiceOpt::ApiKey {
+            cx.toast(Kind::Info, voice_elsewhere(cx));
         }
     }
 
     fn press(&mut self, cx: &mut Cx) {
+        if self.row() == Row::Voice(VoiceOpt::Key) && bro_voice::Voice::can_capture_hotkey() {
+            return cx.svc.capture_voice_hotkey();
+        }
         self.step(1, cx);
+    }
+
+    /// The selected row's link (`u`): Remote desktop's update check (or the update it found, or a retry).
+    fn follow(&mut self, cx: &mut Cx) {
+        if self.row() == Row::Mobile(MobileOpt::Remote) {
+            remote::follow(cx);
+        }
     }
 
     /// Step the selected row's value by `dir` (+1 / -1).
@@ -1084,20 +1318,45 @@ impl SettingsView {
         match self.row() {
             Row::Quips => return cx.act(Action::Run(Act::Quips)),
             Row::Bro(o) => return o.change(dir, cx),
-            Row::Mobile(MobileOpt::Access) => { cx.svc.set_bridge_enabled(!s.bridge.enabled); return; }
+            // On: the firewall rules first (one UAC prompt), so a phone's first connection never waits on Windows.
+            Row::Mobile(MobileOpt::Access) => {
+                if s.bridge.enabled { cx.svc.set_bridge_enabled(false) } else { cx.svc.turn_on_mobile() }
+                return;
+            }
+            Row::Mobile(MobileOpt::Firewall) => {
+                let ready = cx.svc.state().firewall.report.as_ref().is_some_and(|r| r.ready());
+                if ready { cx.svc.check_firewall(crate::services::firewall::Why::Now) } else { cx.svc.allow_firewall() }
+                return;
+            }
             Row::Mobile(MobileOpt::Remote) => {
                 if !s.mobile_companion.enabled && !bro_core::rmm::supported() { return; }
                 s.mobile_companion.enabled = !s.mobile_companion.enabled;
-                let connect = s.mobile_companion.enabled && !s.bridge.enabled;
+                let on = s.mobile_companion.enabled;
+                let connect = on && !s.bridge.enabled;
                 cx.svc.save_settings(s);
-                if connect { cx.svc.set_bridge_enabled(true); }
+                if connect { cx.svc.turn_on_mobile() } else if on { cx.svc.allow_firewall() }
+                // a Mac's privacy prompts, now while you're here, not when a phone connects
+                if on { cx.svc.request_mac_permissions() }
+                return;
+            }
+            Row::Mobile(MobileOpt::Permissions) => {
+                let all = cx.svc.state().firewall.mac.is_some_and(|p| p.screen && p.accessibility);
+                if all { cx.svc.check_mac_permissions(crate::services::firewall::Why::Now) } else { cx.svc.request_mac_permissions() }
                 return;
             }
             Row::Mobile(MobileOpt::ReadOnly) => s.mobile_companion.read_only = !s.mobile_companion.read_only,
             Row::Mobile(MobileOpt::Display) => s.mobile_companion.display = (s.mobile_companion.display as i64 + dir as i64).rem_euclid(bro_core::rmm::display_count() as i64) as u32,
-            Row::Mobile(MobileOpt::Package) => { cx.svc.rmm_retry(); return; }
+            Row::Mobile(MobileOpt::Pair) => return cx.act(Action::Run(Act::Bridge)),
             Row::Mobile(MobileOpt::Disconnect) => { cx.svc.rmm_disconnect(); return; }
+            Row::Mobile(MobileOpt::Sessions) => { remote::toggle_sessions(cx); return; }
+            Row::Mobile(MobileOpt::JustConnect) => { remote::toggle_justconnect(cx); return; }
             Row::Voice(o) => return self.voice(o, dir, cx),
+            Row::Slop(o) => {
+                if !self.visible(Row::Slop(o), cx) {
+                    return self.normalize_selection(cx);
+                }
+                return slop::step(o, dir, cx);
+            }
             Row::Tool(o) => return self.tool(o, cx),
             Row::Skill(o) => return self.skill(o, cx),
             Row::Update(UpdOpt::Version) => {
@@ -1180,14 +1439,26 @@ impl SettingsView {
         let mut s = cx.svc.settings();
         match self.row() {
             Row::Mod(ModOpt::TimerSecs) => s.claude_mod.timer_secs = bro_core::claude_mod::ClaudeModSettings::default().timer_secs,
-            Row::Quips | Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Skill(_) | Row::Update(_) | Row::Host(_) | Row::Mobile(_) | Row::Mod(_) => return,
-            Row::Voice(VoiceOpt::Escape) => {
-                s.orbit_voice.mode = "attached".into();
-                s.orbit_voice.allow_escape = false;
+            Row::Slop(o) => {
+                if !slop::reset(o, &mut s.slop) {
+                    return;
+                }
                 cx.svc.save_settings(s);
+                cx.svc.slop_settings_changed();
                 return;
             }
-            Row::Voice(_) => return,
+            Row::Quips | Row::Bro(_) | Row::Cave(_) | Row::Tool(_) | Row::Skill(_) | Row::Update(_) | Row::Host(_) | Row::Mobile(_) | Row::Mod(_) => return,
+            Row::Voice(o) => {
+                match o {
+                    VoiceOpt::Key => s.voice.hotkey = None,
+                    VoiceOpt::Mode => s.voice.mode = bro_core::config::VoiceSettings::default().mode,
+                    VoiceOpt::Speaker => s.voice.live_voice = None,
+                    _ => return,
+                }
+                cx.svc.save_settings(s);
+                cx.svc.restart_voice();
+                return;
+            }
             Row::Watch(o) => {
                 let d = bro_core::config::WatchdogSettings::default();
                 match o {
@@ -1208,6 +1479,14 @@ impl SettingsView {
 }
 
 /// "auto", then every signed-in Claude and Codex login.
+fn voice_elsewhere(cx: &Cx) -> &'static str {
+    match () {
+        _ if cx.svc.is_demo() => "the demo doesn't listen for voice",
+        _ if !cx.svc.settings().bridge.enabled => "turn on the phone & web bridge in Bridge (Alt+G) to use push-to-talk",
+        _ => "your other bro runs voice: change it there, or restart it to pick this up",
+    }
+}
+
 fn reviewer_choices(cx: &Cx) -> Vec<String> {
     let mut all = vec!["auto".to_string()];
     if let Some(ps) = cx.svc.state().profiles.ready() {
@@ -1260,7 +1539,11 @@ fn lay_out(s: Section, blocks: Vec<Block>, sel: usize, w: usize, t: &crate::them
                 right.push(Span::raw(" "));
                 let mut block = vec![spread(left, right, w)];
                 block.extend(wrap(&it.help, w.saturating_sub(3)).into_iter().map(|l| vec![bar(), Span::styled(l, muted(t))]));
-                for n in it.notes {
+                let mut notes = it.notes;
+                if let (Some(link), Some(first)) = (it.link.as_deref(), notes.first_mut()) {
+                    first.push(Span::styled(format!("  ·  u: {}", link.to_lowercase()), muted(t)));
+                }
+                for n in notes {
                     match n.as_slice() {
                         // plain text wraps like the help; a progress bar stays on its line
                         [one] => block.extend(wrap(&one.content, w.saturating_sub(3)).into_iter().map(|l| vec![bar(), Span::styled(l, one.style)])),
@@ -1282,6 +1565,38 @@ fn lay_out(s: Section, blocks: Vec<Block>, sel: usize, w: usize, t: &crate::them
                 [one] => lines.extend(wrap(&one.content, w.saturating_sub(2)).into_iter().map(|l| (None, vec![Span::raw("  "), Span::styled(l, one.style)]))),
                 _ => lines.push((None, std::iter::once(Span::raw("  ")).chain(spans).collect())),
             },
+            Block::Stats(stats) => {
+                lines.push((None, vec![]));
+                let wide = stats.iter().map(|s| ui::width(&s.value.content)).max().unwrap_or(0);
+                for s in stats {
+                    let pad = " ".repeat(wide.saturating_sub(ui::width(&s.value.content)));
+                    lines.push((None, vec![Span::raw(format!("  {pad}")), s.value, Span::raw("  "), Span::styled(s.label, muted(t))]));
+                }
+            }
+            Block::Devices(list) => {
+                lines.push((None, vec![]));
+                for d in list {
+                    let glyph = Span::styled(format!("  {}", ui::lead(d.icon())), if d.quiet { muted(t) } else if d.app { fg(t.accent) } else { fg(t.fg) });
+                    let name = Span::styled(d.name.clone(), if d.quiet { muted(t) } else { ui::bold() });
+                    let status = d.status.clone().map_or_else(Vec::new, |s| vec![s, Span::raw(" ")]);
+                    lines.push((None, spread(vec![glyph.clone(), name], status, w)));
+                    let indent = " ".repeat(ui::width(&glyph.content));
+                    let since = if d.since.is_empty() { vec![] } else { vec![Span::styled(d.since.clone(), muted(t)), Span::raw(" ")] };
+                    lines.push((None, spread(vec![Span::raw(indent), Span::styled(d.detail, muted(t))], since, w)));
+                }
+            }
+            Block::Rows(rows) => {
+                for r in rows {
+                    lines.push((None, vec![]));
+                    lines.push((None, spread(vec![Span::raw("  "), Span::styled(r.title, ui::bold())], vec![r.value, Span::raw(" ")], w)));
+                    let note = if r.note.content.is_empty() { vec![] } else { vec![r.note, Span::raw(" ")] };
+                    let detail = wrap(&r.detail, w.saturating_sub(4 + note.iter().map(|s| ui::width(&s.content)).sum::<usize>()));
+                    for (n, d) in detail.into_iter().enumerate() {
+                        let left = vec![Span::raw("  "), Span::styled(d, muted(t))];
+                        lines.push((None, if n == 0 { spread(left, note.clone(), w) } else { left }));
+                    }
+                }
+            }
         }
     }
     lines
@@ -1300,7 +1615,7 @@ impl SettingsView {
                 .map(|o| {
                     let v = o.value(cx);
                     let value = match o {
-                        BroOpt::Theme => shown(format!("{v} ›"), fg(t.inline)),
+                        BroOpt::Theme | BroOpt::CustomTheme | BroOpt::ThemeDemo | BroOpt::ImportTheme | BroOpt::ExportTheme => shown(format!("{v} ›"), fg(t.inline)),
                         BroOpt::Font | BroOpt::Rain | BroOpt::Screensaver | BroOpt::Material | BroOpt::TabOverflow => {
                             let style = if v == "off" || v == "solid" { muted(t) } else { fg(t.inline) };
                             choice(v, style, t)
@@ -1317,7 +1632,8 @@ impl SettingsView {
                 })
                 .collect(),
             Section::Voice => self.voice_blocks(cx),
-            Section::Mobile => self.mobile_blocks(cx),
+            Section::Slop => slop::blocks(cx),
+            Section::Mobile => remote::blocks(cx),
             Section::Caveman => {
                 let cave = &st.caveman;
                 let (value, help) = match cave.active() {
@@ -1517,141 +1833,146 @@ impl SettingsView {
         }
     }
 
-    fn mobile_blocks(&self, cx: &Cx) -> Vec<Block> {
+    /// The bare minimum a phone needs from Windows Firewall, with Allow when something's missing.
+    fn mobile_firewall_label(report: Option<&bro_core::firewall::Report>, asking: bool) -> (&'static str, FirewallInk) {
+        use bro_core::firewall::Readiness;
+        if asking { return ("Waiting for you…", FirewallInk::Busy) }
+        match report.map(|r| &r.readiness) {
+            None => ("Checking…", FirewallInk::Quiet),
+            Some(Readiness::Ready) => ("Phones get in", FirewallInk::Good),
+            Some(Readiness::NeedsRules) => ("Not allowed yet", FirewallInk::Bad),
+            Some(Readiness::BlocksAll(_)) => ("Blocking everything", FirewallInk::Bad),
+            Some(Readiness::Managed) => ("Managed by your organisation", FirewallInk::Quiet),
+            Some(Readiness::NotNeeded) => ("Nothing in the way", FirewallInk::Good),
+            Some(Readiness::Manual(_)) => ("Yours to set", FirewallInk::Quiet),
+            Some(Readiness::Unknown(_)) => ("Couldn't read it", FirewallInk::Bad),
+        }
+    }
+
+    /// bro's own voice calls: talk here in a browser or from the phone app; who is on a call; how chatty it is.
+    fn live_voice_blocks(&self, cx: &Cx) -> Vec<Block> {
+        use crate::services::live_voice::{announce_label, client_label, state_label};
         let t = cx.theme;
         let settings = cx.svc.settings();
-        let config = &settings.mobile_companion;
-        let status = cx.svc.rmm_status();
-        let supported = bro_core::rmm::supported();
-        let enabled = config.enabled;
-        let (package, package_style) = match status.as_ref() {
-            Some(status) => {
-                use bro_bridge::rmm::Phase;
-                let label = match status.phase {
-                    Phase::Disabled if status.version.is_some() => "Installed · off".into(),
-                    Phase::Disabled | Phase::NotInstalled => "Not downloaded".into(),
-                    Phase::Installing => "Downloading…".into(),
-                    Phase::Ready => format!("v{} · ready", status.version.as_deref().unwrap_or(bro_core::rmm::VERSION)),
-                    Phase::Starting => "Starting desktop stream…".into(),
-                    Phase::Running => format!("{} connected", status.active_viewers),
-                    Phase::Error => "Download or connection needs attention".into(),
-                };
-                (label, if status.phase == Phase::Error { fg(t.danger) } else if status.phase == Phase::Ready || status.phase == Phase::Running { fg(t.good) } else { muted(t) })
-            }
-            None => ("Not downloaded".into(), muted(t)),
+        let state = cx.svc.state();
+        let bridge = &state.bridge;
+        let item = |option, label, value, help| Item::new(Row::Voice(option), label, value, help);
+        let mut blocks = vec![Block::Sub("Live voice".into())];
+        let talk = if !bridge.enabled {
+            item(VoiceOpt::LiveTalk, "Talk to bro", shown("Turn on the bridge first", muted(t)),
+                "Live voice runs through bro's phone & web bridge. Turn it on under Server, then talk from your phone or this computer.")
+        } else if let Some(Err(reason)) = &bridge.voice_ready {
+            item(VoiceOpt::LiveTalk, "Talk to bro", shown("Setup needed", fg(t.danger)), "")
+                .note(vec![Span::styled(ui::fit(reason, 240), fg(t.danger))])
+        } else {
+            item(VoiceOpt::LiveTalk, "Talk on this computer", choice("Open in browser", fg(t.inline), t),
+                "Put your headphones on and talk to every agent: ask what they're doing, tell them what's next, start new work. On your phone, tap the voice button in bro's app.")
         };
-        let mut remote = Item::new(Row::Mobile(MobileOpt::Remote), "Remote desktop", switch(enabled, supported, t),
-            if supported { "Download Bro RMM and let paired phones view or control this desktop. Turning this off disconnects every viewer." }
-            else { "The remote-control package is currently available on Windows x64." });
-        if let Some(message) = status.as_ref().and_then(|status| status.message.as_ref()) {
-            remote = remote.note(vec![Span::styled(message.clone(), fg(t.danger))]);
+        blocks.push(Block::Item(talk));
+        if !bridge.voice_calls.is_empty() {
+            let now = chrono::Utc::now();
+            let lines: Vec<String> = bridge
+                .voice_calls
+                .iter()
+                .map(|call| {
+                    let minutes = chrono::DateTime::parse_from_rfc3339(&call.started_at)
+                        .map(|at| (now - at.with_timezone(&chrono::Utc)).num_minutes().max(0))
+                        .unwrap_or(0);
+                    format!("{} · {} · {}", client_label(&call.client), state_label(&call.state), if minutes == 0 { "just started".into() } else { format!("{minutes} min") })
+                })
+                .collect();
+            let count = bridge.voice_calls.len();
+            blocks.push(Block::Item(
+                item(VoiceOpt::LiveEnd, "End live calls", shown(if count == 1 { "1 live".into() } else { format!("{count} live") }, fg(t.good)),
+                    "Hang up now. Agents keep working; anything you asked for still reports back in their sessions.")
+                    .note(vec![Span::styled(lines.join("  ·  "), fg(t.good))]),
+            ));
         }
-        let display = if config.display == 0 { "Primary display".into() } else { format!("Display {}", config.display + 1) };
-        let viewers = status.as_ref().map_or(0, |status| status.active_viewers);
-        let relay = status.as_ref().is_some_and(|status| status.relay_configured);
-        let mut blocks = vec![
-            Block::Item(Item::new(Row::Mobile(MobileOpt::Access), "Mobile Companion", switch(settings.bridge.enabled, true, t),
-                "Connect your phone with the address and pairing code on the Bridge page.")),
-            Block::Sub("Remote viewing and control".into()),
-            Block::Item(remote),
-        ];
-        if enabled {
-            blocks.push(Block::Item(Item::new(Row::Mobile(MobileOpt::ReadOnly), "View only", switch(config.read_only, true, t),
-                "Paired phones can watch the screen. Mouse, keyboard and clipboard writes are blocked. Changing this ends current connections.")));
-            blocks.push(Block::Item(Item::new(Row::Mobile(MobileOpt::Display), "Shared display", choice(display, fg(t.inline), t),
-                "Choose the monitor shown on your phone. Changing it ends current connections; the next viewer opens this display.")));
-        }
-        blocks.push(Block::Item(Item::new(Row::Mobile(MobileOpt::Package), "Bro RMM package", shown(package, package_style),
-            "Maintained separately in JustSuperHuman/voxl. Bro verifies the download and starts it only when a viewer connects.")));
-        if viewers > 0 {
-            blocks.push(Block::Item(Item::new(Row::Mobile(MobileOpt::Disconnect), "Connected viewers", shown(format!("{viewers} connected"), fg(t.good)),
-                "End every remote connection now. A paired phone can reconnect while remote desktop stays enabled.")));
-        }
-        if enabled {
-            blocks.push(Block::Sub("Connection".into()));
-            blocks.push(Block::Text(vec![Span::styled(if relay { "WebRTC tries a direct connection, then the private TURN relay. TCP is available as a fallback." }
-                else { "WebRTC tries a direct connection. TCP is available as a fallback through your paired Bro address." }, muted(t))]));
-            blocks.push(Block::Text(vec![Span::styled("Windows lock screens and UAC prompts require someone at the computer. Bro RMM runs in your Windows session.", muted(t))]));
-        }
+        let voice = settings.voice.realtime_voice.clone().unwrap_or_else(|| bro_bridge::voice::DEFAULT_VOICE.into());
+        blocks.push(Block::Item(item(VoiceOpt::LiveVoice, "Voice", choice(voice, fg(t.inline), t), "How bro sounds on your next call. The phone can pick its own.")));
+        blocks.push(Block::Item(item(VoiceOpt::LiveAnnounce, "Speak up when", choice(announce_label(&settings.voice.announce), fg(t.inline), t),
+            "What bro tells you without being asked. Agents waiting on you always get a mention.")));
         blocks
     }
 
     fn voice_blocks(&self, cx: &Cx) -> Vec<Block> {
-        use bro_bridge::orbit_voice::{CredentialSource, Phase, Provider};
         let t = cx.theme;
-        let settings = cx.svc.settings();
-        let state = cx.svc.state().orbit_voice.clone();
-        let enabled = settings.orbit_voice.enabled || state.owned_elsewhere && state.connected;
-        let runtime = state.runtime.as_ref().filter(|r| enabled && state.connected && r.renderer_ready);
-        let ready = runtime.is_some();
-        let credential = runtime.is_some_and(|r| r.credential_available);
-        let talking = runtime.is_some_and(|r| r.phase != Phase::Off);
-        let visible = voice_visible_options(enabled, &state);
-        let item = |option, label, value, help| Block::Item(Item::new(Row::Voice(option), label, value, help));
-        let heading = |text: &str| Block::Sub(text.into());
-        let mut blocks = vec![heading(if ready { "Connection" } else { "Connect Orbit" })];
-        let connection_help = if state.owned_elsewhere { "Connected through your primary window. Voice controls are shared; no second companion is started." }
-            else if ready { "Your companion is connected. The microphone stays off until you start voice." }
-            else if enabled { "Orbit must be connected before voice and character settings become available." }
-            else { "Enable Orbit to connect your voice companion. Your microphone stays off until you start a conversation." };
-        let mut connection = Item::new(Row::Voice(VoiceOpt::On), "Orbit connection", switch(enabled, ready, t), connection_help);
-        if !ready && enabled {
-            let (message, color) = match &state.error {
-                Some(error) if error.contains("checksum") || error.contains("manifest") => ("The Orbit preview changed after it was verified. Refresh the installed build, then try connecting again.".to_string(), t.danger),
-                Some(error) => (format!("Couldn’t connect. {}", ui::fit(error, 240)), t.danger),
-                None if state.checking => ("Checking the installed preview and preparing the connection…".into(), t.muted),
-                None => (state.status.clone(), t.muted),
-            };
-            if !message.is_empty() { connection = connection.note(vec![Span::styled(message, fg(color))]); }
+        let bold = |c| fg(c).add_modifier(Modifier::BOLD);
+        let st = cx.svc.settings();
+        let v = &st.voice;
+        let vs = cx.svc.state().voice.clone();
+        let here = cx.svc.runs_voice();
+        let label = bro_voice::Voice::hotkey_label(&voice_key(v));
+
+        let help = match () {
+            _ if !v.enabled => "nothing listens and the key stays an ordinary key".to_string(),
+            _ if !here => voice_elsewhere(cx).to_string(),
+            _ if vs.running.is_some() => format!("listening on {label} in every app"),
+            _ if vs.key_found == Some(false) => "waiting for an OpenAI key (below)".into(),
+            _ => "starting…".into(),
+        };
+        let mut on = Item::new(Row::Voice(VoiceOpt::On), "Push-to-talk", switch(v.enabled, vs.running.is_some(), t), help);
+        if let Some(e) = vs.error.as_ref().filter(|_| v.enabled) {
+            on = on.note(vec![Span::styled(format!("✗ {e}"), fg(t.danger))]);
         }
-        blocks.push(Block::Item(connection));
-        if !ready {
-            if visible.contains(&VoiceOpt::ReloadPreview) {
-                blocks.push(item(VoiceOpt::ReloadPreview, "Connect the installed preview", shown("Microphone stays off", muted(t)),
-                    "Validate the selected Orbit build and retry the background connection."));
-            }
-            blocks.push(Block::Text(vec![Span::styled("Next: choose your voice provider and key source. Conversation controls appear when setup is ready.", muted(t))]));
+
+        // bro comes forward on a press (Windows): a modifier only once it's held, so chords like Win+E still work
+        let raise = match () {
+            _ if !cfg!(windows) => "",
+            _ if bro_voice::Voice::hotkey_is_modifier(&voice_key(v)) => " · bro comes forward once you hold it",
+            _ => " · bro comes forward the moment it goes down",
+        };
+        let (value, help) = match vs.capturing {
+            Some(started) => (shown(format!("{} press a key…", spinner(started)), bold(t.shine)), format!("press it now, in any app · esc keeps {label}")),
+            None if bro_voice::Voice::can_capture_hotkey() => (
+                choice(label.clone(), fg(t.inline), t),
+                format!("enter, then press the key you want{raise} · a G-key set to F13–F24 is ideal, as nothing else uses those"),
+            ),
+            None => (choice(label.clone(), fg(t.inline), t), format!("the key you hold to talk · ←/→ for another{raise}")),
+        };
+        let mut key = Item::new(Row::Voice(VoiceOpt::Key), "Voice key", value, help);
+        if v.hotkey.is_some() {
+            key.tag = Some(Span::styled("  changed", fg(t.shine)));
         }
-        if let Some(runtime) = runtime {
-            let preferences = &runtime.preferences;
-            let provider_name = if preferences.provider == Provider::Openai { "OpenAI Realtime" } else { "Grok Voice" };
-            let source = if !credential { "No key selected" } else { match runtime.credential_source {
-                CredentialSource::Saved => "Saved in Orbit", CredentialSource::Process => "System environment",
-                CredentialSource::User => "Windows user environment", CredentialSource::Machine => "Windows machine environment", _ => "Unavailable",
-            } };
-            let preference = |option, label, value: String, help| item(option, label, choice(value, fg(t.inline), t), help);
-            let show_conversation = credential || talking || state.starting;
-            blocks.push(heading(if show_conversation { "Conversation" } else { "Set up your voice" }));
-            if show_conversation {
-                blocks.push(Block::Item(Item::new(Row::Voice(VoiceOpt::Talk), "Talk with Orbit", shown(if state.starting { "Starting voice…".into() } else { state.status.clone() }, fg(if talking || state.starting { t.inline } else { t.good })),
-                    "Start a conversation when you’re ready. Stop releases your microphone.")
-                    .note(vec![Span::styled(format!("{}{} · {source}", if talking { "Next conversation: " } else { "" }, provider_name), muted(t))])));
-                if talking { blocks.push(item(VoiceOpt::Mute, "Mute microphone", switch(runtime.muted, true, t), "Keep hearing replies without sending microphone audio. Stop releases the device.")); }
-                blocks.push(heading(if credential { "Voice preferences" } else { "Set up your next conversation" }));
-            }
-            if !credential {
-                blocks.push(Block::Text(vec![Span::styled("Choose a realtime provider, then select a system key or save a key in Orbit’s secure settings. Nothing is billed during setup.", muted(t))]));
-            }
-            blocks.push(preference(VoiceOpt::Provider, "Provider", provider_name.into(), "Changes apply to your next conversation."));
-            if credential {
-                blocks.push(preference(VoiceOpt::Model, "Model", preferences.model.clone(), ""));
-                blocks.push(preference(VoiceOpt::Voice, "Voice", preferences.voice.clone(), ""));
-                blocks.push(preference(VoiceOpt::Volume, "Reply volume", format!("{}%", preferences.volume), "Adjust playback volume, including during a reply."));
-                blocks.push(preference(VoiceOpt::Listen, "Listening", if preferences.listen_mode == "always" { "Until stopped" } else { "One turn" }.into(), "Keep listening, or stop after one turn."));
-            }
-            blocks.push(item(VoiceOpt::Source, "Key source", shown(source, fg(if credential { t.inline } else { t.muted })), "Manage your key in Orbit’s secure settings."));
-            blocks.push(item(VoiceOpt::Open, if credential { "Advanced settings" } else { "Choose your key" }, shown(if credential { "Open when needed" } else { "Setup required" }, muted(t)),
-                "Manage keys and advanced preferences in Orbit. Closing settings does not end a conversation."));
-            blocks.push(heading("Qubit & background"));
-            blocks.push(item(VoiceOpt::Escape, "Allow Qubit to escape bro", switch(settings.orbit_voice.allow_escape, settings.orbit_voice.allow_escape, t), "Off keeps Qubit inside bro. On allows movement onto the desktop on one display."));
-            blocks.push(item(VoiceOpt::Background, "Keep Orbit in the background", switch(settings.orbit_voice.keep_in_background, settings.server.keep_sessions && settings.server.keep_working, t),
-                "Keep the companion available through bro’s background workspace. This does not start listening."));
-            blocks.push(heading("Companion"));
-            blocks.push(item(VoiceOpt::Quit, "Quit Orbit companion", shown("Sessions stay running", muted(t)), "Stop the managed companion until you explicitly resume it."));
-            blocks.push(item(VoiceOpt::Updates, "Version", shown(state.version.as_deref().unwrap_or("Compatibility preview"), muted(t)), "This compatibility preview is updated separately from bro."));
-        }
-        blocks.push(heading("About Orbit"));
-        blocks.push(item(VoiceOpt::Upstream, "Orbit project", choice("Open GitHub", fg(t.inline), t), "Meet Orbit and follow the original project."));
+
+        let live = live_mode(v);
+        let mode = Item::new(
+            Row::Voice(VoiceOpt::Mode),
+            "Hugh answers",
+            choice(if live { "out loud" } else { "as text" }, fg(t.inline), t),
+            if live { "talk with Hugh through GPT-Live: he answers out loud and hands the work to your orchestrator" } else { "your words go to the orchestrator as text; its answers come back as toasts" },
+        );
+        let speaker_name = v.live_voice.clone().unwrap_or_else(|| bro_voice::DEFAULT_LIVE_VOICE.into());
+        let speaker = Item::new(
+            Row::Voice(VoiceOpt::Speaker),
+            "Hugh's voice",
+            choice(speaker_name, if live { fg(t.inline) } else { muted(t) }, t),
+            if live { "the voice GPT-Live speaks with" } else { "only when Hugh answers out loud" },
+        );
+
+        let env = &v.api_key_env;
+        let (value, help) = match vs.key_found {
+            Some(true) => (shown("found", fg(t.good)), format!("read from {env} · enter looks again")),
+            Some(false) => (shown("not set", fg(t.danger)), format!("set {env} to an OpenAI API key (your environment, or Windows' user variables), then enter looks again")),
+            None if here && v.enabled => (shown("checking…", muted(t)), format!("looking for {env}")),
+            None => (shown("not checked", muted(t)), format!("voice reads its OpenAI key from {env}")),
+        };
+        let api = Item::new(Row::Voice(VoiceOpt::ApiKey), "OpenAI key", value, help);
+        let mut blocks = vec![Block::Sub("Push-to-talk".into()), Block::Item(on), Block::Item(key), Block::Item(mode), Block::Item(speaker), Block::Item(api)];
+        blocks.extend(self.live_voice_blocks(cx));
+        let dictation = &v.dictation;
+        let shortcut = DICTATION_SHORTCUTS[dictation_shortcut_index(dictation.shortcut)].1;
+        blocks.extend([
+            Block::Sub("Composer dictation".into()),
+            Block::Item(Item::new(Row::Voice(VoiceOpt::Dictation), "Transcribe with OpenAI",
+                switch(dictation.enabled, dictation.enabled, t), format!("Send microphone audio to OpenAI using {env}. Review the text in your draft."))),
+            Block::Item(Item::new(Row::Voice(VoiceOpt::DictationShortcut), "Dictation shortcut",
+                choice(shortcut, fg(t.inline), t), "Auto toggles on a tap and finishes on release when held.")),
+            Block::Item(Item::new(Row::Voice(VoiceOpt::DictationCleanup), "Transcript cleanup",
+                switch(dictation.cleanup, dictation.cleanup, t), "Send the transcript and nearby draft text to OpenAI to fix punctuation and spoken corrections.")),
+            Block::Item(Item::new(Row::Voice(VoiceOpt::DictationFillers), "Remove filler words",
+                switch(dictation.remove_fillers, dictation.remove_fillers, t), "Drop hesitation sounds such as “uh” and “umm” from the transcript.")),
+        ]);
         blocks
     }
 
@@ -1718,6 +2039,7 @@ impl SettingsView {
             None => {}
         }
         out.push(Block::Item(imagine));
+        out.push(Block::Item(Item::new(Row::Tool(ToolOpt::Automation), "Browser and computer", shown("set up ›", fg(t.inline)), "Install and configure JustBrowse and CUA for every harness.")));
         out
     }
 
@@ -1815,19 +2137,23 @@ impl SettingsView {
         let t = cx.theme;
         let st = cx.svc.settings();
         match s {
-            Section::Appearance => Span::styled(t.name.clone(), muted(t)),
+            Section::Appearance => Span::styled(crate::theme::label(t), muted(t)),
             Section::Sessions => {
                 let opts: Vec<BroOpt> = bro_opts().into_iter().filter(|o| !o.looks()).collect();
                 let on = opts.iter().filter(|o| o.value(cx) == "on").count();
                 Span::styled(format!("{on} of {} on", opts.len()), muted(t))
             }
             Section::Voice => {
-                let state = cx.svc.state().orbit_voice.clone();
-                let (text, style) = if state.connected { ("connected", fg(t.good)) }
-                    else if state.checking { ("checking…", fg(t.shine)) }
-                    else if st.orbit_voice.enabled { ("waiting", muted(t)) }
-                    else { ("off", muted(t)) };
-                Span::styled(text, style)
+                if !cx.svc.state().bridge.voice_calls.is_empty() {
+                    return Span::styled("on a call", fg(t.good));
+                }
+                let vs = cx.svc.state().voice.clone();
+                match (&vs.capturing, &vs.running) {
+                    (Some(started), _) => Span::styled(spinner(*started), fg(t.shine)),
+                    (None, Some(key)) => Span::styled(bro_voice::Voice::hotkey_label(key), fg(t.inline)),
+                    (None, None) if st.voice.enabled => Span::styled(bro_voice::Voice::hotkey_label(&voice_key(&st.voice)), muted(t)),
+                    (None, None) => Span::styled("off", muted(t)),
+                }
             }
             Section::Caveman => match st.caveman.active() {
                 Some(l) => Span::styled(l.id(), fg(t.shine)),
@@ -1869,21 +2195,8 @@ impl SettingsView {
                 }
             }
             Section::Quips => Span::styled("local", muted(t)),
-            Section::Mobile => {
-                let on = st.mobile_companion.enabled;
-                let status = cx.svc.rmm_status();
-                let text = if !st.bridge.enabled { "off" } else if !on { "chats" } else { match status.as_ref().map(|s| s.phase) {
-                    Some(bro_bridge::rmm::Phase::Installing) => "downloading…",
-                    Some(bro_bridge::rmm::Phase::Running) => "connected",
-                    Some(bro_bridge::rmm::Phase::Ready) => "ready",
-                    Some(bro_bridge::rmm::Phase::Starting) => "starting…",
-                    Some(bro_bridge::rmm::Phase::NotInstalled) => "not downloaded",
-                    Some(bro_bridge::rmm::Phase::Disabled) => "off",
-                    Some(bro_bridge::rmm::Phase::Error) => "needs attention",
-                    None => "waiting for Bro",
-                }};
-                Span::styled(text, if on { fg(t.inline) } else { muted(t) })
-            }
+            Section::Mobile => remote::summary(cx),
+            Section::Slop => slop::summary(cx),
             Section::Sounds => match st.peon.on {
                 true => Span::styled("on", fg(t.good)),
                 false => Span::styled("off", muted(t)),
@@ -1956,18 +2269,25 @@ impl Pane for SettingsView {
         self.tools_busy = { let jt = &cx.svc.state().justtools; jt.job.is_some() || jt.paste_busy.is_some() };
         let u = cx.svc.state().updates.clone();
         self.update_busy = u.job.is_some() || u.checking;
-        self.voice_busy = cx.svc.state().orbit_voice.checking;
+        self.voice_busy = cx.svc.state().voice.capturing.is_some() || remote::busy(cx);
 
         let row = self.row();
         let mut hints = vec![("j/k", "move"), ("tab", "next section"), ("enter/→", "change"), ("←", "back")];
+        if self.row() == Row::Voice(VoiceOpt::Key) && bro_voice::Voice::can_capture_hotkey() {
+            hints.truncate(2);
+            hints.extend([("enter", "press the key"), ("←/→", "pick one")]);
+        }
         match row {
             r if team_knob(r) => hints.push(("r", "bro's default")),
             Row::Preset | Row::Knob(_) => hints.push(("r", "reset to preset")),
-            Row::Watch(_) | Row::Voice(VoiceOpt::Escape) => hints.push(("r", "bro's default")),
+            Row::Watch(_) | Row::Voice(VoiceOpt::Key | VoiceOpt::Mode | VoiceOpt::Speaker) => hints.push(("r", "bro's default")),
             _ => {}
         }
         if source_link(row).is_some() {
             hints.push(("o", "original post"));
+        }
+        if row == Row::Mobile(MobileOpt::Remote) && remote::update_link(cx).is_some() {
+            hints.push(("u", "check for updates"));
         }
         let area = ui::hint_line(f, area, &hints, t);
         let section = Section::of(row);
@@ -2057,6 +2377,19 @@ impl Pane for SettingsView {
     }
     fn key(&mut self, key: KeyEvent, cx: &mut Cx) -> bool {
         note_settings(&cx.svc.settings());
+        // "press the key you want" swallows keys before any window sees them: one that arrives here got past
+        // it, so it's the answer (or esc, no change); the rest wait with it
+        if cx.svc.state().voice.capturing.is_some() {
+            match key.code {
+                KeyCode::Esc => cx.svc.voice_key_pressed_here(None),
+                code => {
+                    if let Some(name) = window_hotkey(code) {
+                        cx.svc.voice_key_pressed_here(Some(name));
+                    }
+                }
+            }
+            return true;
+        }
         let last = rows().len() - 1;
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.move_visible(1, cx),
@@ -2072,6 +2405,7 @@ impl Pane for SettingsView {
             KeyCode::Char('h') | KeyCode::Left => self.step(-1, cx),
             KeyCode::Char('r') => self.reset(cx),
             KeyCode::Char('o') if source_link(self.row()).is_some() => open_source(self.row(), cx),
+            KeyCode::Char('u') if self.row() == Row::Mobile(MobileOpt::Remote) && remote::update_link(cx).is_some() => self.follow(cx),
             _ => return false,
         }
         true
@@ -2103,48 +2437,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn orbit_settings_keep_provider_controls_in_orbit() {
-        assert_eq!(Section::Voice.label(), "Orbit Voice");
-        assert_eq!(VOICE_OPTS.len(), 16);
-        assert_eq!(VOICE_OPTS.iter().filter(|option| **option == VoiceOpt::Upstream).count(), 1);
-        assert!(VOICE_OPTS.contains(&VoiceOpt::ReloadPreview));
-        let settings = bro_core::config::OrbitSettings::default();
-        assert!(!settings.enabled);
-        assert_eq!(settings.mode, "attached");
-        assert!(!settings.allow_escape);
-        assert!(VOICE_OPTS.contains(&VoiceOpt::Escape));
-        assert!(VOICE_OPTS.contains(&VoiceOpt::Background));
+    fn keys_reaching_the_window_name_voice_keys() {
+        for (code, label) in [(KeyCode::F(13), "F13"), (KeyCode::F(24), "F24"), (KeyCode::F(5), "F5"), (KeyCode::Insert, "Insert")] {
+            let name = window_hotkey(code).expect("a voice key");
+            assert!(bro_voice::Voice::parse_hotkey(&name).is_some(), "{name}");
+            assert_eq!(bro_voice::Voice::hotkey_label(&name), label);
+        }
+        assert_eq!(window_hotkey(KeyCode::Char('a')), None);
+        assert_eq!(window_hotkey(KeyCode::Enter), None);
     }
 
-    #[test]
-    fn voice_setup_reveals_only_controls_that_are_available() {
-        use crate::services::orbit_voice::OrbitState;
-        let mut state = OrbitState::default();
-        assert_eq!(voice_visible_options(false, &state), vec![VoiceOpt::On, VoiceOpt::Upstream]);
-        state.error = Some("preview checksum failed".into());
-        assert_eq!(voice_visible_options(true, &state), vec![VoiceOpt::On, VoiceOpt::ReloadPreview, VoiceOpt::Upstream]);
-        state.checking = true;
-        assert!(!voice_visible_options(true, &state).contains(&VoiceOpt::ReloadPreview));
-        state.checking = false; state.connected = true;
-        state.runtime = Some(serde_json::from_value(serde_json::json!({"runtimeId":"fixture","pid":42,"buildId":"a".repeat(64),
-            "rendererReady":true,"preferences":{"provider":"openai","model":"gpt-realtime","voice":"cedar","volume":75,"listenMode":"always"},
-            "credentialAvailable":false,"credentialSource":"none","microphone":"off","phase":"off","muted":false})).unwrap());
-        let setup = voice_visible_options(true, &state);
-        assert!(setup.contains(&VoiceOpt::Provider) && setup.contains(&VoiceOpt::Open));
-        assert!(!setup.contains(&VoiceOpt::Talk) && !setup.contains(&VoiceOpt::Model) && !setup.contains(&VoiceOpt::Mute));
-        state.runtime.as_mut().unwrap().credential_available = true;
-        let available = voice_visible_options(true, &state);
-        assert!(available.contains(&VoiceOpt::Talk) && available.contains(&VoiceOpt::Model));
-        assert!(!available.contains(&VoiceOpt::Mute));
-        state.runtime.as_mut().unwrap().phase = bro_bridge::orbit_voice::Phase::Listening;
-        assert!(voice_visible_options(true, &state).contains(&VoiceOpt::Mute));
-        state.runtime.as_mut().unwrap().credential_available = false;
-        let active_without_next_key = voice_visible_options(true, &state);
-        assert!(active_without_next_key.contains(&VoiceOpt::Talk) && active_without_next_key.contains(&VoiceOpt::Mute), "Stop and Mute remain available when the next provider has no key");
-        assert_eq!(voice_visible_options(false, &state), vec![VoiceOpt::On, VoiceOpt::Upstream], "disabling hides cached controls immediately");
-        state.connected = false;
-        assert!(!voice_visible_options(true, &state).contains(&VoiceOpt::Talk), "a stale cached runtime must not reveal controls");
-    }
+
+
 
     #[test]
     fn preview_lists_vars_and_settings() {
@@ -2177,7 +2481,10 @@ mod tests {
         assert_eq!(r[n + 3], Row::Host(HostOpt::Startup));
         assert_eq!(r[n + 4], Row::Host(HostOpt::Media));
         let n = n + 5;
+        assert_eq!(r[n], Row::Slop(SlopOpt::On), "Slop Collector follows the session server it runs in");
+        let n = n + SLOP_OPTS.len();
         assert_eq!(r[n], Row::Voice(VoiceOpt::On));
+        assert_eq!(r[n + 5], Row::Voice(VoiceOpt::LiveTalk));
         let n = n + VOICE_OPTS.len();
         assert_eq!(r[n], Row::Cave(CaveOpt::Mode));
         assert_eq!(r[n + 2], Row::Watch(WatchOpt::Prompt));
@@ -2192,8 +2499,9 @@ mod tests {
         let (paste, watch) = (usize::from(bro_core::justpaste::supported()), usize::from(bro_core::justwatch::supported()));
         assert_eq!(r[tools + 3 + paste], Row::Tool(ToolOpt::Imagine));
         // the skills: the Skills view, bro's, JustTools', JustWatch's, JustImagine's, keeping the repos in sync
-        assert_eq!(r[tools + 4 + paste], Row::Quips);
-        let skills = tools + 5 + paste;
+        assert_eq!(r[tools + 4 + paste], Row::Tool(ToolOpt::Automation));
+        assert_eq!(r[tools + 5 + paste], Row::Quips);
+        let skills = tools + 6 + paste;
         assert_eq!(r[skills], Row::Skill(SkillOpt::Manage));
         assert_eq!(r[skills + 1], Row::Skill(SkillOpt::BroOpen));
         assert_eq!(r[skills + 2], Row::Tool(ToolOpt::Skill));
@@ -2251,6 +2559,54 @@ mod tests {
         assert_eq!(wrap("one two three four", 9), ["one two", "three", "four"]);
         assert_eq!(wrap("abcdefghijkl x", 8), ["abcdefgh", "ijkl x"]);
         assert!(wrap("", 20).is_empty());
+    }
+
+    /// The terminal UI's Slop Collector page, from the demo's report: everything the desktop app shows, as lines.
+    #[test]
+    fn the_slop_page_reads_well_in_the_terminal() {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::demo(bro_core::config::Settings::default(), tx.clone());
+        svc.slop_demo_fixture("leftovers");
+        let t = crate::theme::get("graphite");
+        let mut v = SettingsView::default();
+        v.go(Section::Slop);
+        let mut actions = vec![];
+        let cx = Cx { id: 1, theme: &t, svc: &svc, tx: &tx, actions: &mut actions, focused: true };
+        let lines: Vec<String> = lay_out(Section::Slop, v.blocks(Section::Slop, &cx), v.sel, 96, &t).into_iter().map(|(_, l)| l.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string()).collect();
+        let page = lines.join("
+");
+        println!("{page}");
+        for want in [
+            "Slop Collector  beta",
+            "Clean up",
+            "‹ after 10 min ›",
+            "‹ renders & tests ›",
+            "7.7 GB · 14.6 GB on disk",
+            "closes 2 programs and clears 547 temp folders right away",
+            "LEFT BEHIND",
+            "Chrome from Remotion",
+            "Remotion's headless",
+            "21 processes",
+            "6.5 GB",
+            "closes in 5 min",
+            "film in Night Before Closing",
+            "547 folders from Remotion, Puppeteer and Playwright",
+            "RECENTLY CLEANED UP",
+            "61.2 GB",
+            "vite and esbuild",
+            "Never closed",
+        ] {
+            assert!(page.contains(want), "missing {want:?} in
+{page}");
+        }
+        assert!(lines.iter().all(|l| ui::width(l) <= 96), "nothing runs past the width");
+        // off: what it ends and what it never touches
+        svc.slop_demo_fixture("off");
+        let off: String = lay_out(Section::Slop, v.blocks(Section::Slop, &cx), v.sel, 96, &t).into_iter().flat_map(|(_, l)| l.into_iter().map(|s| s.content.to_string())).collect();
+        assert!(off.contains("WHAT IT LEAVES ALONE") && off.contains("Anything you're using") && off.contains("freed while it was on"), "{off}");
+        assert!(!off.contains("Clean up now"), "the choices wait until it's on");
+        assert!(!v.visible(Row::Slop(SlopOpt::Wait), &cx), "the choices wait until it's on");
     }
 
     #[test]

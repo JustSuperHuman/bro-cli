@@ -16,6 +16,8 @@ use axum::response::{IntoResponse, Response};
 use bro_core::Harness;
 use bro_core::sessions::conversation::{Conversation, Item, NoteKind, Step, StepKind, StepState};
 use bro_core::sessions::live::Tail;
+use bro_core::sessions::subagents::{Follower, Subagent, SubagentState};
+use bro_core::sessions::tasks::{Task, TaskKind};
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -23,6 +25,7 @@ use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Items sent when the client doesn't say.
 pub(crate) const LIMIT: usize = 150;
@@ -55,6 +58,13 @@ struct Feed {
     generation: u64,
     /// The media the conversation names, as [`bro_core::util::path_key`]s, and the rev they're from ([`Feeds::names`]).
     named: Option<(String, std::collections::HashSet<String>)>,
+    work: Option<FollowedWork>,
+}
+
+struct FollowedWork {
+    since_ms: Option<i64>,
+    follower: Follower,
+    revision: u64,
 }
 
 impl Feeds {
@@ -69,7 +79,7 @@ impl Feeds {
             match map.get(session_id) {
                 Some(slot) if slot.path == path && slot.harness == harness => slot.feed.clone(),
                 _ => {
-                    let feed = Feed { tail: Tail::new(path), conversation: Conversation::new(harness), generation: self.next_generation(), named: None };
+                    let feed = Feed { tail: Tail::new(path), conversation: Conversation::new(harness), generation: self.next_generation(), named: None, work: None };
                     let feed = Arc::new(Mutex::new(feed));
                     map.insert(session_id.to_owned(), Slot { path: path.to_owned(), harness, feed: feed.clone() });
                     feed
@@ -81,6 +91,7 @@ impl Feeds {
             if read.reset {
                 feed.conversation = Conversation::new(harness);
                 feed.generation = self.next_generation();
+                feed.work = None;
             }
             // a long transcript's first read holds only its latest lines: the conversation is read from its start
             let whole = read.began.filter(|b| *b > 0).map(|_| Conversation::history(harness, path, feed.tail.lines_end()));
@@ -92,6 +103,43 @@ impl Feeds {
             }
         }
         (format!("{}.{}", feed.generation, feed.conversation.revision), feed.conversation.clone())
+    }
+
+    /// Follow the same child transcripts as desktop. Child-only changes must move the phone's revision even
+    /// when the parent's turn has ended and its transcript hasn't changed.
+    fn read_work(&self, session_id: &str, path: &FsPath, harness: Harness, since_ms: Option<i64>, running: bool) -> (String, Conversation) {
+        let (rev, mut conversation) = self.read(session_id, path, harness);
+        let Some(feed) = self.map.lock().get(session_id).map(|slot| slot.feed.clone()) else {
+            return (rev, conversation);
+        };
+        let mut feed = feed.lock();
+        if feed.work.as_ref().is_none_or(|w| w.since_ms != since_ms) {
+            let since = since_ms.and_then(|ms| u64::try_from(ms).ok()).map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms));
+            feed.work = Some(FollowedWork { since_ms, follower: Follower::new(harness, path, since), revision: self.next_generation() });
+        }
+        let work = feed.work.as_mut().unwrap();
+        if work.follower.poll(&conversation.subagents, Instant::now()) {
+            work.revision += 1;
+        }
+        conversation.subagents = work.follower.subagents().iter().map(|s| s.as_ref().clone()).collect();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if !running {
+            for sub in &mut conversation.subagents {
+                if sub.state.running() {
+                    sub.state = SubagentState::Stopped;
+                    sub.ended_ms.get_or_insert(now_ms);
+                }
+            }
+        }
+        for task in &mut conversation.tasks {
+            if task.state.running() && (!running || !task.live(now_ms, since_ms)) {
+                let expired = running && task.expires_ms.is_some_and(|at| at <= now_ms);
+                task.state = if expired { SubagentState::Done } else { SubagentState::Stopped };
+                task.ended_ms = if expired { task.expires_ms } else { Some(now_ms) };
+            }
+        }
+        let tasks = conversation.tasks.iter().filter(|t| t.state.running()).count();
+        (format!("{rev}.{}.{}.{tasks}", work.revision, u8::from(running)), conversation)
     }
 
     /// Whether the conversation in `path` names the file `key` (a [`bro_core::util::path_key`]): a picture sent
@@ -135,11 +183,17 @@ pub(crate) async fn conversation(
         return Json(json!({ "rev": "0", "ready": false, "total": 0, "items": [] })).into_response();
     };
     let harness = harness_of(agent.as_deref(), &transcript);
+    let (since_ms, running) = {
+        let inner = state.inner.lock();
+        let session = inner.sessions.get(&id);
+        (session.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.summary.created_at).ok()).map(|t| t.timestamp_millis()),
+            session.is_some_and(|s| s.summary.status == "running"))
+    };
     let feeds = state.conversations.clone();
     let limit = query.limit.unwrap_or(LIMIT).clamp(1, bro_core::sessions::conversation::ITEMS_MAX);
     let since = query.since;
     let body = tokio::task::spawn_blocking(move || {
-        let (rev, conversation) = feeds.read(&id, &transcript, harness);
+        let (rev, conversation) = feeds.read_work(&id, &transcript, harness, since_ms, running);
         if since.as_deref() == Some(rev.as_str()) {
             return json!({ "rev": rev, "unchanged": true });
         }
@@ -171,6 +225,7 @@ fn harness_id(h: Harness) -> &'static str {
         Harness::Codex => "codex",
         Harness::Pi => "pi",
         Harness::Omp => "omp",
+        Harness::Antigravity => "antigravity",
     }
 }
 
@@ -206,6 +261,23 @@ fn note_kind(k: NoteKind) -> &'static str {
         NoteKind::Compacted => "compacted",
         NoteKind::Error => "error",
         NoteKind::Worked => "worked",
+        NoteKind::Subagent => "subagent",
+    }
+}
+
+/// What the phone is sent: everything but the notes about subagents reporting back (the apps don't know them yet
+/// and would show them as something else).
+fn served(item: &Item) -> bool {
+    !matches!(item, Item::Note { kind: NoteKind::Subagent, .. })
+}
+
+/// What sort of "other" step it is, for apps that know: a skill it used, an MCP server's tool (`detail` names the
+/// server). Older apps go on reading `kind: "other"`.
+fn step_family(k: StepKind) -> Option<&'static str> {
+    match k {
+        StepKind::Skill => Some("skill"),
+        StepKind::Mcp => Some("mcp"),
+        _ => None,
     }
 }
 
@@ -213,6 +285,7 @@ fn step_json(s: &Step) -> Value {
     json!({
         "id": s.id,
         "kind": step_kind(s.kind),
+        "family": step_family(s.kind),
         "label": s.label,
         "detail": s.detail,
         "state": step_state(s.state),
@@ -262,12 +335,45 @@ fn item_json(item: &Item, key: String) -> Value {
     }
 }
 
+fn subagent_activity(s: &Subagent) -> String {
+    let first_line = |text: &str| text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
+    if !s.state.running() {
+        return s.result.as_deref().map(first_line).filter(|s| !s.is_empty()).unwrap_or_else(|| match s.state {
+            SubagentState::Done => "Finished", SubagentState::Failed => "Stopped on an error", _ => "Stopped before it finished",
+        }.to_string());
+    }
+    let c = s.conversation.as_deref();
+    if let Some(step) = c.and_then(Conversation::running) { return step.label.clone(); }
+    if let Some(thought) = c.and_then(|c| c.thought.as_ref()) { return thought.text.clone(); }
+    c.and_then(|c| c.items.iter().rev().find_map(|item| match item.as_ref() {
+        Item::Did { steps } => steps.last().map(|s| s.label.clone()),
+        Item::Said { text, .. } => Some(first_line(text)).filter(|s| !s.is_empty()),
+        _ => None,
+    })).unwrap_or_else(|| "Getting started".to_string())
+}
+
+fn subagent_json(s: &Subagent) -> Value {
+    json!({ "call": s.call, "id": s.id, "parent": s.parent, "depth": s.depth,
+        "title": s.title, "name": s.name, "kind": s.kind, "model": s.model, "effort": s.effort,
+        "state": s.state.word(), "startedAt": s.started_ms, "endedAt": s.ended_ms,
+        "activity": subagent_activity(s) })
+}
+
+fn task_json(t: &Task) -> Value {
+    let kind = match t.kind { TaskKind::Command => "command", TaskKind::Watch => "watch", TaskKind::Workflow => "workflow" };
+    json!({ "id": t.id, "call": t.call, "kind": kind, "title": t.title, "detail": t.detail,
+        "state": t.state.word(), "startedAt": t.started_ms, "endedAt": t.ended_ms,
+        "expiresAt": t.expires_ms, "news": t.news })
+}
+
 fn to_json(rev: &str, c: &Conversation, limit: usize) -> Value {
-    let skip = c.items.len().saturating_sub(limit);
+    let all: Vec<&Item> = c.items.iter().map(|i| i.as_ref()).filter(|i| served(i)).collect();
+    let total = all.len();
+    let skip = total.saturating_sub(limit);
     // keys repeat only for items without a time: number the repeats
     let mut seen: HashMap<String, usize> = HashMap::new();
-    let mut items = Vec::with_capacity(c.items.len() - skip);
-    for (i, item) in c.items.iter().enumerate() {
+    let mut items = Vec::with_capacity(all.len() - skip);
+    for (i, item) in all.into_iter().enumerate() {
         let base = key_of(item);
         let n = seen.entry(base.clone()).or_default();
         *n += 1;
@@ -287,8 +393,10 @@ fn to_json(rev: &str, c: &Conversation, limit: usize) -> Value {
         "branch": c.branch,
         "version": c.version,
         "thought": c.thought.as_ref().map(|t| json!({ "text": t.text, "at": t.at_ms })),
-        "total": c.items.len(),
+        "total": total,
         "items": items,
+        "subagents": c.subagents.iter().map(subagent_json).collect::<Vec<_>>(),
+        "tasks": c.tasks.iter().map(task_json).collect::<Vec<_>>(),
     })
 }
 
@@ -393,9 +501,74 @@ mod tests {
     }
 
     #[test]
+    fn skills_and_mcp_tools_say_what_they_are_and_stay_other_for_old_apps() {
+        let step = |kind| Step { id: "t1".into(), kind, label: "Navigate · figma.com".into(), detail: Some("JustBrowse".into()), state: StepState::Done, added: 0, removed: 0, line: None, at_ms: None, app: None };
+        let mcp = step_json(&step(StepKind::Mcp));
+        assert_eq!((mcp["kind"].as_str(), mcp["family"].as_str(), mcp["detail"].as_str()), (Some("other"), Some("mcp"), Some("JustBrowse")));
+        assert_eq!(step_json(&step(StepKind::Skill))["family"], "skill");
+        assert!(step_json(&step(StepKind::Run))["family"].is_null());
+    }
+
+    #[test]
     fn codex_transcripts_are_known_by_their_name() {
         assert_eq!(harness_of(None, FsPath::new("/x/rollout-2026-10-28.jsonl")), Harness::Codex);
         assert_eq!(harness_of(None, FsPath::new("/x/abc.jsonl")), Harness::Claude);
         assert_eq!(harness_of(Some("codex"), FsPath::new("/x/abc.jsonl")), Harness::Codex);
+    }
+
+    #[test]
+    fn phones_follow_child_only_activity_and_completion_without_new_parent_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("session.jsonl");
+        write(&parent, &[you("Check the tests", "2026-11-08T10:00:00Z")]);
+        let folder = bro_core::sessions::subagents::claude_dir(&parent);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("agent-a1.meta.json"), json!({
+            "description": "Check the tests", "name": "test-worker", "toolUseId": "spawn-1", "spawnDepth": 1,
+        }).to_string()).unwrap();
+        let child = folder.join("agent-a1.jsonl");
+        write(&child, &[
+            json!({"type":"user","isSidechain":true,"message":{"content":"Check the tests"}}),
+            json!({"type":"assistant","isSidechain":true,"timestamp":"2026-11-08T10:00:01Z","message":{"id":"c1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"F:\\app\\tests.ts"}}]}}),
+        ]);
+        let feeds = Feeds::default();
+        let (rev, c) = feeds.read_work("s1", &parent, Harness::Claude, None, true);
+        let body = to_json(&rev, &c, 1);
+        assert_eq!(body["subagents"][0]["state"], "running");
+        assert_eq!(body["subagents"][0]["activity"], "Read tests.ts");
+        assert_eq!(body["subagents"][0]["name"], "test-worker");
+        assert_eq!(feeds.read_work("s1", &parent, Harness::Claude, None, true).0, rev);
+        write(&child, &[json!({"type":"assistant","isSidechain":true,"timestamp":"2026-11-08T10:01:00Z","message":{"id":"c2","stop_reason":"end_turn","content":[{"type":"text","text":"All tests pass."}]}})]);
+        let (next, c) = feeds.read_work("s1", &parent, Harness::Claude, None, true);
+        assert_ne!(next, rev, "the parent hasn't written anything, but the phone must receive its child's completion");
+        let body = to_json(&next, &c, 1);
+        assert_eq!(body["subagents"][0]["state"], "done");
+        assert_eq!(body["subagents"][0]["activity"], "All tests pass.");
+        assert_eq!(body["total"], 1);
+    }
+
+    #[test]
+    fn background_work_is_in_the_payload_and_cannot_outlive_the_process_or_its_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write(&path, &[you("Build", "2026-11-08T10:00:00Z")]);
+        let feeds = Feeds::default();
+        feeds.read("s1", &path, Harness::Claude);
+        let feed = feeds.map.lock().get("s1").unwrap().feed.clone();
+        let now = chrono::Utc::now().timestamp_millis();
+        feed.lock().conversation.tasks = vec![
+            Task { id: "build".into(), call: "c1".into(), title: "Build the release".into(), started_ms: Some(now), ..Task::default() },
+            Task { id: "expired".into(), call: "c2".into(), kind: TaskKind::Watch, title: "Watch logs".into(), expires_ms: Some(now - 1), ..Task::default() },
+            Task { id: "previous-process".into(), call: "c3".into(), title: "Old command".into(), started_ms: Some(now - 60_000), ..Task::default() },
+        ];
+        let (rev, c) = feeds.read_work("s1", &path, Harness::Claude, Some(now - 1000), true);
+        let body = to_json(&rev, &c, 1);
+        assert_eq!(body["tasks"][0]["state"], "running");
+        assert_eq!(body["tasks"][1]["state"], "done");
+        assert_eq!(body["tasks"][2]["state"], "stopped");
+        let (stopped, c) = feeds.read_work("s1", &path, Harness::Claude, Some(now - 1000), false);
+        assert_ne!(stopped, rev);
+        assert!(c.tasks.iter().all(|t| !t.state.running()));
+        assert!(to_json(&stopped, &c, 1)["subagents"].is_array());
     }
 }

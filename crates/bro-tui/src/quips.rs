@@ -19,13 +19,15 @@ pub struct Editor {
     pub fields: [TextArea; 3], // name, shortcut, instructions
     pub field: usize,
     pub cols: usize,
+    /// Opened from "New…" in the colon picker: saving puts the Quip into that message, and leaving goes back to it.
+    pub insert: bool,
 }
 
 impl Editor {
     pub fn new(original: Option<usize>, q: Option<&Quip>) -> Self {
         let mut fields = [TextArea::new(q.map_or("", |q| &q.name)), TextArea::new(q.map_or("", |q| &q.trigger)), TextArea::new(q.map_or("", |q| &q.instructions))];
         fields[2].newline_on_enter = true;
-        Self { original, fields, field: 0, cols: 60 }
+        Self { original, fields, field: 0, cols: 60, insert: false }
     }
     pub fn value(&self) -> Quip {
         Quip { name: self.fields[0].text().trim().into(), trigger: self.fields[1].text().trim().trim_start_matches(':').into(), instructions: self.fields[2].text().trim().into() }

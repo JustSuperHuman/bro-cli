@@ -20,10 +20,13 @@ pub mod creds;
 pub mod gemini;
 pub mod gemini_api;
 pub mod jsh;
+pub mod justconnect;
 pub mod sessions;
 pub mod terminal_prompt;
 pub mod recap;
 pub mod projects;
+pub mod project_icon;
+pub mod icon_maker;
 pub mod usage;
 pub mod launch;
 pub mod browser;
@@ -49,14 +52,20 @@ pub mod justwatch;
 pub mod justpaste;
 pub mod justimagine;
 pub mod justbrowse;
-pub mod orbit_voice;
+pub mod cua;
+pub mod automation;
+pub mod browse;
 pub mod agent_desktop;
 pub mod tool_skills;
 pub mod envfile;
 pub mod managed_skill;
 pub mod self_update;
 pub mod rmm;
+pub mod firewall;
 pub mod proc_tree;
+pub mod slop;
+pub mod studio;
+pub mod storyboard;
 pub mod orchestrator;
 pub mod coordination;
 pub mod peon;
@@ -72,16 +81,25 @@ pub enum Harness {
     Codex,
     Pi,
     Omp,
+    Antigravity,
 }
 
 impl Harness {
-    pub const ALL: [Harness; 4] = [Harness::Claude, Harness::Codex, Harness::Pi, Harness::Omp];
+    pub const ALL: [Harness; 5] = [Harness::Claude, Harness::Codex, Harness::Pi, Harness::Omp, Harness::Antigravity];
     pub fn label(self) -> &'static str {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
             Harness::Pi => "pi",
             Harness::Omp => "omp",
+            Harness::Antigravity => "antigravity",
+        }
+    }
+
+    pub fn program(self) -> &'static str {
+        match self {
+            Harness::Antigravity => "agy",
+            other => other.label(),
         }
     }
 }

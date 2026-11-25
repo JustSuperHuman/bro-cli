@@ -19,6 +19,14 @@ fn corner(vi: u32) -> vec2<f32> {
     return vec2<f32>(f32(vi & 1u), f32((vi >> 1u) & 1u));
 }
 
+// A vertex at `p` pulled inside the clip rect `clip` (x, y, w, h), with a pixel of room. Nothing outside the clip
+// shows, so a big shape clipped to a small area (a glow under one card, a long list scrolled out of view) only
+// rasterises the part that can show instead of every pixel it would cover.
+fn clip_point(p: vec2<f32>, clip: vec4<f32>) -> vec2<f32> {
+    let lo = clip.xy - vec2<f32>(1.0, 1.0);
+    return clamp(p, lo, max(clip.xy + clip.zw + vec2<f32>(1.0, 1.0), lo));
+}
+
 // Signed distance to a rounded box centred on the origin (negative inside). `r` = radii tl, tr, br, bl.
 fn sd_rounded_box(p: vec2<f32>, half: vec2<f32>, r: vec4<f32>) -> f32 {
     var radius: f32;

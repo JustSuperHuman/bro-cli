@@ -223,8 +223,6 @@ pub(crate) struct VoiceRoute {
     generation: u64,
     saved_generation: u64,
     pending_dispatch: Option<(String, u64)>,
-    /// External acknowledgements wait for the corresponding durable save.
-    orbit_acks: Vec<(String, u64, bool)>,
 }
 
 impl App {
@@ -302,105 +300,7 @@ impl App {
         };
         self.send_to_orchestrator(What::Say { text: format!("[task action] User requested {action} for task {task_id}, observed revision {revision}. Read coordination_context and current state first; reconcile any newer revision. {instruction}"), reply: Reply::None });
     }
-    /// Orbit is only a transport/voice owner. Admission and deduplication live
-    /// in the same durable inbox as phone messages, schedules and watchdogs.
-    pub(crate) fn orbit_command(&mut self, command: bro_bridge::orbit_voice::Command) {
-        use bro_bridge::orbit_voice::Command;
-        let Some(handle) = self.svc.orbit_handle() else { return };
-        if !self.svc.settings().orbit_voice.enabled || self.guest {
-            return;
-        }
-        match command {
-            Command::Focus { session_id } => {
-                if self.term_id(&session_id).is_some() {
-                    self.bridge_command(bro_bridge::BridgeCommand::Focus { id: session_id });
-                }
-            }
-            Command::Submit { id, utterance_id, text, focused, generation } => {
-                self.restore_inbox();
-                if !self.voice.loaded || self.voice.persistence_error {
-                    handle.reject(&id, "The durable inbox is recovering. Nothing was submitted; try again when it is ready.");
-                    return;
-                }
-                if let Some(target) = &focused {
-                    let valid = self.term_id(target).and_then(|pane| self.panes.get(&pane))
-                        .and_then(|pane| pane.as_term_ref())
-                        .is_some_and(|term| generation.as_deref() == Some(super::orbit_voice::generation(term).as_str()));
-                    if !valid {
-                        handle.reject(&id, "The session changed or closed after speech began. Nothing was retargeted or submitted.");
-                        return;
-                    }
-                }
-                let stable_id = format!("orbit:{id}");
-                let identity = ExternalVoice { utterance_id, text: text.clone(), focused: focused.clone(), generation };
-                if self.voice.completed.contains(&stable_id) {
-                    handle.reject(&id, "This request was already completed or cancelled. It will not be executed again; inspect its original conversation.");
-                    return;
-                }
-                if let Some(existing) = self.voice.queue.iter().map(|(request, _)| request)
-                    .chain(self.voice.awaiting.iter().map(|awaiting| &awaiting.request))
-                    .find(|request| request.id == stable_id) {
-                    if existing.external.as_ref() != Some(&identity) {
-                        handle.reject(&id, "This request identity already belongs to different content or a different target.");
-                    } else {
-                        let required = self.voice.generation;
-                        self.voice.orbit_acks.push((id.clone(), required, false));
-                        self.flush_orbit_acks();
-                        if self.voice.awaiting.iter().any(|a| a.request.id == stable_id && a.dispatched) {
-                            handle.dispatched(&id);
-                        }
-                    }
-                    return;
-                }
-                let mut request = Request::new(What::Say {
-                    text: self.spoken_text(&text, focused.as_deref()),
-                    reply: Reply::Voice(stable_id.clone()),
-                });
-                request.id = stable_id.clone();
-                request.external = Some(identity);
-                self.send_inbox_request(request);
-                if self.voice.queue.iter().any(|(r, _)| r.id == stable_id)
-                    || self.voice.awaiting.iter().any(|a| a.request.id == stable_id) {
-                    self.voice.orbit_acks.push((id, self.voice.generation, false));
-                    self.flush_orbit_acks();
-                }
-            }
-            Command::Cancel { id } => {
-                self.restore_inbox();
-                let stable_id = format!("orbit:{id}");
-                let queued = self.voice.queue.iter().position(|(r, _)| r.id == stable_id);
-                let waiting = self.voice.awaiting.iter().position(|a| a.request.id == stable_id && !a.dispatched);
-                if let Some(index) = queued {
-                    self.voice.queue.remove(index);
-                } else if let Some(index) = waiting {
-                    self.voice.awaiting.remove(index);
-                    if self.voice.pending_dispatch.as_ref().is_some_and(|(request, _)| request == &stable_id) {
-                        self.voice.pending_dispatch = None;
-                    }
-                } else {
-                    handle.progress(&id, "This request has already been dispatched or finished. It was not interrupted; stopping speech does not stop session work.");
-                    return;
-                }
-                self.voice.completed.push(stable_id);
-                if self.voice.completed.len() > 512 { self.voice.completed.remove(0); }
-                let required = self.save_inbox();
-                self.voice.orbit_acks.retain(|(request, _, _)| request != &id);
-                self.voice.orbit_acks.push((id, required, true));
-                self.flush_orbit_acks();
-            }
-        }
-    }
 
-    fn flush_orbit_acks(&mut self) {
-        let Some(handle) = self.svc.orbit_handle() else { return };
-        if self.voice.persistence_error { return; }
-        let saved = if self.persist { self.voice.saved_generation } else { u64::MAX };
-        self.voice.orbit_acks.retain(|(id, required, cancelled)| {
-            if *required > saved { return true; }
-            if *cancelled { handle.cancelled(id); } else { handle.queued(id); }
-            false
-        });
-    }
 
     /// Push-to-talk: words (or a live-voice request) for the orchestrator.
     pub(crate) fn voice_message(&mut self, m: VoiceMsg) {
@@ -668,6 +568,7 @@ impl App {
                 browser: r.browser,
                 extra_args: vec![],
                 orchestrator: true,
+                studio: None,
             });
         }
         let profile = self.roomiest_login();
@@ -694,6 +595,7 @@ impl App {
             browser: bro_core::browser::BrowserMode::Off,
             extra_args: vec![],
             orchestrator: true,
+            studio: None,
         })
     }
 
@@ -1052,7 +954,6 @@ impl App {
             }
             _ => {}
         }
-        self.flush_orbit_acks();
     }
 
     fn save_inbox(&mut self) -> u64 {
@@ -1092,20 +993,14 @@ impl App {
             return;
         };
         let request = self.voice.awaiting[index].request.clone();
-        if let Some(external) = &request.external
-            && let Some(target) = &external.focused {
-            let current = self.term_id(target).and_then(|pane| self.panes.get(&pane))
-                .and_then(|pane| pane.as_term_ref())
-                .is_some_and(|term| external.generation.as_deref() == Some(super::orbit_voice::generation(term).as_str()));
-            if !current {
-                let awaiting = self.voice.awaiting.remove(index);
-                self.answer(&awaiting.reply, "The original session changed or closed while this request was queued. It was not retargeted or dispatched.", false);
-                self.voice.completed.push(request.id);
-                if self.voice.completed.len() > 512 { self.voice.completed.remove(0); }
-                self.voice.pending_dispatch = None;
-                self.save_inbox();
-                return;
-            }
+        if request.external.is_some() {
+            let awaiting = self.voice.awaiting.remove(index);
+            self.answer(&awaiting.reply, "This request came from a voice integration that is no longer available. Please ask again with push-to-talk.", false);
+            self.voice.completed.push(request.id);
+            if self.voice.completed.len() > 512 { self.voice.completed.remove(0); }
+            self.voice.pending_dispatch = None;
+            self.save_inbox();
+            return;
         }
         let session_id = self.voice.awaiting[index].session_id.clone();
         if !self
@@ -1147,11 +1042,6 @@ impl App {
                 }
                 self.voice.awaiting[index].dispatched = true;
                 self.voice.awaiting[index].since = Instant::now();
-                if let Some(id) = request.id.strip_prefix("orbit:")
-                    && let Some(handle) = self.svc.orbit_handle() {
-                    handle.queued(id);
-                    handle.dispatched(id);
-                }
             }
             What::Clear { handoff } => {
                 if let Some(t) = self.panes.get_mut(&boss).and_then(|p| p.as_term()) {
@@ -1187,13 +1077,7 @@ impl App {
     fn answer(&mut self, reply: &Reply, text: &str, ok: bool) {
         match reply {
             Reply::None => {}
-            Reply::Voice(tag) => {
-                if let Some(id) = tag.strip_prefix("orbit:") {
-                    if let Some(handle) = self.svc.orbit_handle() { handle.finish(id, text, ok); }
-                } else {
-                    self.svc.voice_delegation_result(tag, text);
-                }
-            }
+            Reply::Voice(tag) => self.svc.voice_delegation_result(tag, text),
             Reply::Panel(id) => self.svc.orchestrator_answer(id, text, ok),
             Reply::Watchdog(sid, generation) => {
                 self.svc
@@ -1283,7 +1167,7 @@ fn strip_response_marker<'a>(text: &'a str, id: &str) -> &'a str {
 }
 
 #[cfg(test)]
-mod orbit_persistence_tests {
+mod persistence_tests {
     use super::*;
 
     #[test]
@@ -1299,18 +1183,4 @@ mod orbit_persistence_tests {
         assert!(encoded["queue"][0].get("external").is_none());
     }
 
-    #[test]
-    fn orbit_identity_round_trips_without_a_schema_change() {
-        let mut request = Request::new(What::Say { text: "[voice] status".into(), reply: Reply::Voice("orbit:one".into()) });
-        request.id = "orbit:one".into();
-        let external = ExternalVoice { utterance_id: "utterance".into(), text: "status".into(), focused: Some("session".into()), generation: Some("generation".into()) };
-        request.external = Some(external.clone());
-        let saved = SavedRoute { schema: 1, queue: vec![request], awaiting: vec![], completed: vec![] };
-        let restored: SavedRoute = serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
-        restored.validate().unwrap();
-        assert_eq!(restored.queue[0].external.as_ref(), Some(&external));
-        let mut changed = external;
-        changed.text = "different work".into();
-        assert_ne!(restored.queue[0].external.as_ref(), Some(&changed));
-    }
 }

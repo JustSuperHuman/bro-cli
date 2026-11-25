@@ -182,7 +182,7 @@ impl App {
             let Some(dog) = dogs.get(&t.meta.sid) else { continue };
             let helpers_busy = dog.helpers.iter().any(|h| self.panes.values().any(|hp| hp.as_term_ref().is_some_and(|ht| ht.meta.sid == *h) && hp.busy()));
             let blocked = p.activity() == Some(Activity::Blocked);
-            let seen = Seen { busy: p.busy() && !blocked, question: blocked.then(|| t.prompt_title().unwrap_or("a question on screen")), helpers_busy };
+            let seen = Seen { busy: p.busy() && !blocked, question: blocked.then(|| t.browser_waiting().map(|h| h.reason.as_str()).filter(|r| !r.trim().is_empty()).or(t.prompt_title()).unwrap_or("a question on screen")), helpers_busy };
             let trigger = self.watch.entry(*id).or_insert_with(|| Trigger::new(true));
             if let Some(reason) = trigger.step(now, &seen, dog) {
                 wakes.push((*id, reason));

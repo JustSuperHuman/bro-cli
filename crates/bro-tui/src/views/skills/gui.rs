@@ -280,7 +280,7 @@ fn dialog(v: &SkillsView, ui: &mut Ui, area: Rect, cx: &mut Cx) {
     let blurb = ui.para("Paste a GitHub link, owner/repo or any git URL. bro lists the skills in it: install the ones you want, everywhere or into a project, and bro keeps them up to date.", Style::new(size::BODY, weight::REGULAR, t.muted), iw, Some(3));
     // what bro makes of it, as it's typed
     let (glyph, line, ink) = match &check {
-        AddCheck::Empty => (INFO, "A skill is a folder with a SKILL.md: the repo itself, a folder at its root, or one under skills/.".to_string(), t.faint),
+        AddCheck::Empty => (INFO, "A skill is a folder with a SKILL.md: the repo itself, a folder at its root, or one anywhere under skills/. Paste a link to a folder to watch just the skills in it.".to_string(), t.faint),
         AddCheck::NotARepo => (ALERT, "Not a repo yet: github.com/owner/repo, owner/repo or a git URL".to_string(), t.danger),
         AddCheck::Watched(spec) => (CHECK, format!("Already watching {}", skill_repos::label(spec)), t.inline),
         AddCheck::Ready(spec) => (CHECK, format!("{} · ready to watch", skill_repos::label(spec)), t.good),

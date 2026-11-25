@@ -18,9 +18,14 @@ Linux.
   answers. Three levels, off by default ([docs/caveman.md](docs/caveman.md)).
 - **Sound packs.** PeonPing voice lines when an agent finishes or needs you, in all four agents. Browse,
   preview and install 370+ packs. MP3 packs and the volume work on every OS ([docs/sounds.md](docs/sounds.md)).
-- **Orbit Voice — Windows compatibility preview.** Realtime conversation through Orbit, with its moving native
-  companion and a private connection to your sessions. Uses a separate Windows companion preview; see
-  [setup and current limits](docs/orbit-voice.md).
+- **Live voice.** Headphones on, talk to your agents from the phone app or a browser: ask what they're doing,
+  tell them what's next, start new work, and hear them when they finish or need you. bro runs every tool and
+  keeps your key; destructive actions wait for your spoken yes ([docs/voice.md](docs/voice.md)).
+- **Push-to-talk.** Hold your voice key in any app, speak, and release. Hugh answers out loud or sends your
+  words straight to the orchestrator. Choose the key and voice in Settings → Voice ([docs/voice.md](docs/voice.md)).
+- **Create Slop.** A new-session tab for making video. Cast characters from character.slop.cc or Claudia,
+  see which media tools this computer has (JustImagine, ElevenLabs, Higgsfield, SLOPCANNON, ffmpeg, Remotion),
+  and start an agent with their MCP servers connected ([docs/create-slop.md](docs/create-slop.md)).
 - **A beautiful desktop app, and the same workspace as a TUI.** GPU-rendered GUI on Windows, macOS and
   Linux; over SSH or with no display, `bro` opens the terminal version with the same sessions and keys.
 - **On your phone.** The Just Terminal mobile and web clients connect to a built-in bridge.
@@ -80,12 +85,12 @@ Running the install line again works too.
 - [Using bro](docs/using.md): profiles, pasting images, fonts, themes
 - [The desktop app](docs/gui.md) and its keys
 - [Quick Install](docs/quick-install.md): `bro install` for Git, Node.js, the agents and more
-- [Orbit Voice](docs/orbit-voice.md): realtime voice, the moving companion, and compatibility-preview setup
-- [Remote desktop](docs/remote-desktop.md): optional Mobile Companion viewing and control, with a separate Bro RMM package
-- [Orbit collaboration notes](docs/orbit-voice-collaboration.md): protocol, upstream review scope and acceptance gates
+- [Create Slop](docs/create-slop.md): start a session cast with characters from character.slop.cc or Claudia, with your media tools connected
+- [Live voice](docs/voice.md): talk to every agent from your phone or a browser, how calls work, settings and the client API
+- [Remote desktop](docs/remote-desktop.md): optional viewing and control from your phone (Settings → Remote Control), with a separate Bro RMM package
 - [Gemini on your Google AI subscription](docs/gemini.md)
 - [Env files](docs/env-files.md): carry your API keys to a new machine
-- [Claude Code presets](docs/claude-env.md), [the bro mod for Claude Code](docs/claude-mod.md), [watchdogs](docs/watchdog.md), [caveman mode](docs/caveman.md), [sounds](docs/sounds.md)
+- [Claude Code presets](docs/claude-env.md), [the bro mod for Claude Code](docs/claude-mod.md), [watchdogs](docs/watchdog.md), [caveman mode](docs/caveman.md), [sounds](docs/sounds.md), [Slop Collector](docs/slop-collector.md)
 
 ## License
 

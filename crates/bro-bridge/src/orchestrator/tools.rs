@@ -3,7 +3,7 @@
 //! MCP form (served by [`super::mcp`]); every tool runs in process against the
 //! same session registry the web and native clients use.
 
-use super::{cast, chats, context, folders};
+use super::{cast, chats, context, folders, storyboard};
 use crate::BridgeCommand;
 use crate::commands::{compose_input, compose_payload, launch_terminal, write_paced};
 use crate::model::TerminalNotification;
@@ -66,6 +66,8 @@ pub(crate) fn tool(name: &str, description: &str, properties: Value, required: &
 
 pub fn definitions() -> Vec<Value> {
     let mut definitions = vec![
+        tool("list_computers", "List computers you may access through your Just Superhuman account. Returns computer IDs, owner, platform and whether Bro is online.", json!({}), &[]),
+        tool("run_on_computer", "Run a Bro tool on an explicitly selected account computer. Uses that computer's user session and returns the persisted job result. The target must have remote management enabled.", json!({"computerId":{"type":"string"},"tool":{"type":"string","enum":["list_sessions","list_projects","open_session","read_session","read_chat","send_input","send_keys","answer_prompt","close_session"]},"arguments":{"type":"object"}}), &["computerId","tool"]),
         tool(
             "list_sessions",
             "Fresh snapshot of every terminal tab: id, title, directory, git branch, project, shell, which AI agent is running and what it is doing, any question it is waiting on, and the last screen lines. Use when the workspace may have changed since the conversation started.",
@@ -124,19 +126,21 @@ pub fn definitions() -> Vec<Value> {
             "open_session",
             "Open a new agent session in a project and optionally give it a task. The project may be spoken loosely (\"justgains\", \"bro cli\") or be a path; it is resolved like find_project. The session gets the next free squad name (Mal, Pinky, Toast, Minty, Lilac, Sky, Bitty) unless you pass one, so the user can refer to it by name. With a task, waits for the agent to reach its prompt and sends it. Prefer this over create_session.",
             json!({
-                "project": { "type": "string", "description": "Project name or directory path." },
+                "project": { "type": "string", "description": "Project name or directory path. Optional: without one the session starts in the user's home folder." },
                 "task": { "type": "string", "description": "First message to send the agent (optional)." },
                 "taskId": { "type": "string", "description": "Existing durable task to assign. Omit to create durable work from task." },
                 "taskContract": { "type": "object", "description": "Explicit durable contract with goal, instructions and acceptance criteria; include exact required check commands. Default task uses coordinator outcome review and captures repository instructions." },
                 "readOnly": { "type": "boolean", "description": "Share workspace read access for research/review; default is an exclusive writer." },
+                "permission": { "type": "string", "enum": ["default", "auto", "skip"], "description": "Agent permission mode. Remote JustConnect sessions default to normal approval prompts." },
                 "origin": { "type": "object", "description": "Exact request origin JSON from the bro-request envelope: originRequestId, replyChannel, replyHandle. Preserves the final result's original destination." },
                 "agent": { "type": "string", "description": "claude (default), codex, pi, or shell. A login-specific id like claude:work also works." },
                 "name": { "type": "string", "description": "Session name; default is the next free squad name." },
                 "focus": { "type": "boolean", "description": "Bring it to the front in bro (default false; true when the user wants to see it)." },
                 "model": { "type": "string", "description": "Model for the agent (e.g. \"opus\", \"sonnet\", or a Codex model id); default is the login's own." },
+                "effort": { "type": "string", "enum": ["none", "low", "medium", "high"], "description": "Reasoning effort for Claude Code and Codex; none turns extended thinking off where the model allows it. Default is the agent's own. Ignored for other agents." },
                 "forWatchdog": { "type": "string", "description": "A watchdog reviewer opening a helper (a second opinion, a refinement pass): the watched session's id. The helper is listed in later wake-ups." }
             }),
-            &["project"],
+            &[],
         ),
         tool(
             "open_orchestrator",
@@ -318,6 +322,7 @@ pub fn definitions() -> Vec<Value> {
         ),
     ];
     definitions.extend(crate::coordination::definitions());
+    definitions.extend(storyboard::definitions());
     definitions
 }
 
@@ -526,6 +531,19 @@ pub fn summarize(app: &AppState, name: &str, args: &Value) -> String {
             Some(true) => "Stood the watchdog down".into(),
             _ => "Updated the milestones".into(),
         },
+        "storyboard_get" => "Read the storyboard".into(),
+        "storyboard_plan" => match args.get("scenes").and_then(Value::as_array) {
+            Some(scenes) => format!("Planned {} scenes", scenes.len()),
+            None => "Updated the storyboard".into(),
+        },
+        "storyboard_scene" => {
+            let scene = string_arg(args, "scene").or_else(|| args.get("scene").map(Value::to_string)).unwrap_or_default();
+            if args.get("remove").and_then(Value::as_bool) == Some(true) { format!("Removed scene {scene}") }
+            else if args.get("insert").and_then(Value::as_bool) == Some(true) { "Added a scene".into() }
+            else { format!("Changed scene {scene}") }
+        }
+        "storyboard_timed_plan" => "Made the timed plan".into(),
+        "storyboard_show" => "Showed the storyboard".into(),
         "notify_user" => format!(
             "Notified you: {}",
             string_arg(args, "title").unwrap_or_default()
@@ -610,8 +628,21 @@ pub(crate) fn read_session_exact(app: &AppState, id: &str, lines: usize) -> Resu
 }
 
 pub async fn execute(app: &AppState, name: &str, args: &Value) -> Result<String, String> {
+    if matches!(name, "list_computers" | "run_on_computer") {
+        if worker_scoped() { return Err("Remote computer control is available to the orchestrator and direct user calls.".into()); }
+        let name = name.to_string(); let args = args.clone();
+        return tokio::task::spawn_blocking(move || {
+            let value = if name == "list_computers" {
+                bro_core::justconnect::call("GET", "/computers", json!({}))
+            } else {
+                bro_core::justconnect::remote_tool(args["computerId"].as_str().unwrap_or(""), args["tool"].as_str().unwrap_or(""), args.get("arguments").cloned().unwrap_or(json!({})))
+            }.map_err(|e| e.to_string())?;
+            serde_json::to_string(&value).map_err(|e|e.to_string())
+        }).await.map_err(|e| e.to_string())?;
+    }
     if name.starts_with("coordination_") { return crate::coordination::execute_tool(app,name,args).await; }
     if worker_scoped() { return Err("This worker capability only permits its assigned task protocol.".into()); }
+    if storyboard::is_tool(name) { return storyboard::execute(app, name, args).await; }
     match name {
         "list_sessions" => Ok(
             serde_json::to_string_pretty(&context::session_records(app, 8))
@@ -1162,40 +1193,90 @@ pub(crate) async fn wait_until_ready_for(app: &AppState, id: &str, expected_agen
     Ok(Readiness::TimedOut)
 }
 
-async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
-    let query = string_arg(args, "project").ok_or("project is required.")?;
-    let matches = find_folders(app, &query).await;
-    let best = matches.first().ok_or_else(|| {
-        format!("No folder on this machine matches \"{query}\". Ask the user for the path.")
-    })?;
-    if let Some(second) = matches.get(1)
-        && second.score == best.score
-        && best.score < 1000
-    {
-        return Err(format!(
-            "\"{query}\" is ambiguous; ask which one: {}",
-            matches
-                .iter()
-                .take_while(|found| found.score == best.score)
-                .map(|found| found.path.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+/// The Claude Code or Codex harness an `agent` id names (`claude`, `codex`, `jsh:claude`,
+/// `claude:<login>`, `codex:<login>`); None for pi, omp, shell and anything else.
+fn installable_harness(agent: &str) -> Option<bro_core::Harness> {
+    use bro_core::Harness;
+    if agent == bro_core::jsh::BRIDGE_PROFILE_ID {
+        return Some(Harness::Claude);
     }
+    match agent.split_once(':').map_or(agent, |(kind, _)| kind) {
+        "claude" => Some(Harness::Claude),
+        "codex" => Some(Harness::Codex),
+        _ => None,
+    }
+}
+
+/// Installs the Claude Code / Codex CLI the session needs when it is missing, off the async
+/// runtime and with no stdin. Ok holds the agent's display name when it was just installed.
+async fn ensure_agent_installed(agent: &str) -> Result<Option<&'static str>, String> {
+    let Some(harness) = installable_harness(agent) else { return Ok(None) };
+    if bro_core::agent_install::installed(harness).is_some() {
+        return Ok(None);
+    }
+    let name = bro_core::agent_install::display_name(harness);
+    let result = tokio::task::spawn_blocking(move || bro_core::agent_install::install_unattended(harness, |_| {}))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|result| result);
+    match result {
+        Ok(_) => Ok(Some(name)),
+        Err(reason) => Err(format!("{name} isn't installed on this computer and installing it failed: {reason}")),
+    }
+}
+
+async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
+    // No project: the session starts in the user's home folder.
+    let (folder_path, folder_name, also_found): (String, String, Vec<String>) = match string_arg(args, "project") {
+        Some(query) => {
+            let matches = find_folders(app, &query).await;
+            let best = matches.first().ok_or_else(|| {
+                format!("No folder on this machine matches \"{query}\". Ask the user for the path.")
+            })?;
+            if let Some(second) = matches.get(1)
+                && second.score == best.score
+                && best.score < 1000
+            {
+                return Err(format!(
+                    "\"{query}\" is ambiguous; ask which one: {}",
+                    matches
+                        .iter()
+                        .take_while(|found| found.score == best.score)
+                        .map(|found| found.path.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            // Same-named folders elsewhere (the most recently used one was picked).
+            let others = matches
+                .iter()
+                .skip(1)
+                .filter(|found| found.score == best.score)
+                .map(|found| found.path.clone())
+                .collect();
+            (best.path.clone(), best.name.clone(), others)
+        }
+        None => {
+            let home = bro_core::util::home_dir();
+            let name = home.file_name().map_or_else(|| "home".to_string(), |n| n.to_string_lossy().into_owned());
+            (home.to_string_lossy().into_owned(), name, vec![])
+        }
+    };
     let agent = string_arg(args, "agent").unwrap_or_else(|| "claude".into());
+    let installed_agent = ensure_agent_installed(&agent).await?;
     let name = string_arg(args, "name").unwrap_or_else(|| {
         let titles: Vec<String> = app.summaries().into_iter().map(|s| s.title).collect();
         cast::next_name(titles.iter().map(String::as_str))
     });
-    let title = cast::title(&name, Some(&best.name));
-    let durable_task=crate::coordination::prepare_assignment(app,&best.path,args).await?;
+    let title = cast::title(&name, Some(&folder_name));
+    let durable_task=crate::coordination::prepare_assignment(app,&folder_path,args).await?;
     let watched = match string_arg(args, "forWatchdog") {
         Some(_) => Some(resolve_session(app, &json!({ "sessionId": args["forWatchdog"] }))?),
         None => None,
     };
     let session = launch_terminal(
         app,
-        json!({ "title": title, "cwd": best.path, "profileId": agent, "model": string_arg(args, "model") }),
+        json!({ "title": title, "cwd": folder_path, "profileId": agent, "model": string_arg(args, "model"), "effort": string_arg(args, "effort"), "permission": args.get("permission") }),
     )
     .await?;
     let id = session.id.clone();
@@ -1210,19 +1291,15 @@ async fn open_session(app: &AppState, args: &Value) -> Result<String, String> {
         "id": id,
         "name": name,
         "title": title,
-        "cwd": best.path,
+        "cwd": folder_path,
         "agent": agent,
         "taskId": durable_task.as_ref().map(|task|task.id.clone()),
     });
-    // Same-named folders elsewhere (the most recently used one was picked).
-    let others: Vec<&str> = matches
-        .iter()
-        .skip(1)
-        .filter(|found| found.score == best.score)
-        .map(|found| found.path.as_str())
-        .collect();
-    if !others.is_empty() {
-        outcome["alsoFound"] = json!(others);
+    if let Some(name) = installed_agent {
+        outcome["installed"] = json!(name);
+    }
+    if !also_found.is_empty() {
+        outcome["alsoFound"] = json!(also_found);
     }
     if let Some(durable_task) = durable_task {
         match wait_until_ready(app, &id, agent != "shell").await? {

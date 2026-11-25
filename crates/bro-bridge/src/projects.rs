@@ -145,6 +145,7 @@ pub fn visible_projects<'a>(
                 cwd: directory.trim().to_owned(),
                 created_at: session.created_at.clone(),
                 automatic: Some(true),
+                ..TerminalProject::default()
             },
         ));
     }
@@ -263,6 +264,7 @@ mod tests {
             cwd: "F:\\one".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             automatic: None,
+            ..TerminalProject::default()
         }];
         let mut remembered = HashMap::new();
         remembered.insert(

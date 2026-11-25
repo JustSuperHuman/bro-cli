@@ -10,7 +10,7 @@ pub fn badge(harness: Option<Harness>, profile: Option<&str>, model: Option<&str
     let own = match harness? {
         Harness::Claude => Some("claude"),
         Harness::Codex => Some("codex"),
-        Harness::Pi | Harness::Omp => None,
+        Harness::Pi | Harness::Omp | Harness::Antigravity => None,
     };
     let maker = model.and_then(of_model).or_else(|| profile.and_then(of_login))?;
     (Some(maker) != own).then_some(maker)

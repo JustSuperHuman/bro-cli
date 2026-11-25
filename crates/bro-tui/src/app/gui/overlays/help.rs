@@ -7,7 +7,7 @@
 
 use super::super::actions::Action;
 use super::super::kit::{Style, TextBox, Ui, radius, size, weight, widgets};
-use super::palette::{CAP_H, appear, cap, glide, hints, just_opened, kbd_width, sentence};
+use super::palette::{CAP_H, appear, arrive, cap, glide, hints, just_opened, kbd_width, sentence};
 use crate::app::{App, Overlay};
 use crate::help::Line;
 use crate::keymap::Group;
@@ -45,9 +45,10 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     let fresh = just_opened(ui);
     let k = appear(ui, "help", fresh);
     widgets::scrim(ui, window, k, Action::CloseOverlay);
+    let from = ui.group_start();
     let w = (window.w - 80.0).min(1120.0).max((window.w - 16.0).min(360.0));
     let h = (window.h - 72.0).max((window.h - 16.0).min(260.0));
-    let r = Rect::new((window.x + (window.w - w) / 2.0).round(), (window.y + (window.h - h) / 2.0).round() + (1.0 - k) * 10.0, w, h);
+    let r = Rect::new((window.x + (window.w - w) / 2.0).round(), (window.y + (window.h - h) / 2.0).round(), w, h);
     widgets::card(ui, r, radius::OVERLAY);
 
     // header: what this is, the prefix, how to leave
@@ -124,6 +125,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     }
     let vis = 0.45 + 0.55 * ui.hover_amount("help-sheet", view);
     widgets::scrollbar(ui, Rect::new(view.x, view.y + 4.0, view.w - 2.0, view.h - 8.0), content, view.h, shown, vis);
+    arrive(ui, from, r, k);
     true
 }
 

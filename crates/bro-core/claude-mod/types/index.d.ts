@@ -23,8 +23,11 @@ export type BroLimit = {
   isExhausted: boolean
 }
 
-/** The question on the clock: its dialog (the call's tool_use_id) and its seconds, all and left. */
-export type BroQuestion = { id: string; left: number; total: number }
+/**
+ * The question on the clock: its dialog (the call's tool_use_id) and its seconds, all and left;
+ * paused while you answer it (absent in a value an earlier mod stored: running).
+ */
+export type BroQuestion = { id: string; left: number; total: number; isPaused?: boolean }
 
 declare module 'claude-code' {
   interface PluginState {

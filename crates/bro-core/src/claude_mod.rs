@@ -4,8 +4,10 @@
 //! * **The link.** `/bro`: a pane of every session and limit; jump to one, rename this one. It goes
 //!   through bro's bridge on loopback.
 //! * **The questions.** A chime when Claude asks you something, and with the timer on, a countdown above the
-//!   question that ticks for its last 15 seconds; at zero Claude goes with its best judgement. bro plays the
-//!   sounds itself (`bro hook sound`, `bro_voice::cue`), the same on every OS.
+//!   question that ticks for its last 15 seconds; at zero Claude goes with its best judgement. Start answering
+//!   and it stops, until you leave the question a minute (bro tells the mod when you last typed, on the bridge's
+//!   `/api/mod/{session}/typed`). bro plays the sounds itself (`bro hook sound`, `bro_voice::cue`), the same on
+//!   every OS.
 //! * **The apps.** MCP work for bro's focus mode (a widget's HTML, the tools it calls), done through
 //!   Claude Code's own MCP connections: the mod long-polls the bridge for jobs and answers them
 //!   (`bro_bridge::Bridge::mod_ask`).

@@ -261,7 +261,8 @@ fn proxy_provider(upstream: &str, base: &str, model: Option<&str>) -> Provider {
 
 pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow::Result<CommandSpec> {
     let home = if spec.harness == Harness::Omp { paths::omp_agent_dir() } else { paths::pi_agent_dir() };
-    crate::tool_skills::write_desktop_cached(&home);
+    let automation = crate::automation::Active::for_launch(ctx);
+    crate::tool_skills::write_configured(&home, &automation);
     let mut cmd = CommandSpec::default();
     let model = spec.model.as_deref().filter(|m| !m.is_empty());
     // (provider to configure, its key, who for the label)
@@ -371,8 +372,22 @@ pub(super) fn build(spec: &LaunchSpec, ctx: &LaunchCtx, r: &Resolved) -> anyhow:
     }
     // Both read the file when given a path; omp's help documents the `=` form.
     let mut prompts: Vec<std::path::PathBuf> = vec![];
+    if automation.managed() {
+        prompts.push(automation.prompt_file(spec.harness)?);
+    }
+    if let Some(parent) = automation.desktop.as_ref().and_then(|p| p.parent()) {
+        // The install may have updated the user's PATH after this Bro process started.
+        let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+        if !dirs.iter().any(|p| crate::util::same_path(p, parent)) { dirs.push(parent.to_path_buf()); }
+        cmd.set_env("PATH", std::env::join_paths(dirs)?.to_string_lossy());
+    }
     if spec.orchestrator {
         prompts.push(crate::orchestrator::write_scoped_prompt(spec.harness, &spec.cwd)?);
+    }
+    if let Some(kit) = &spec.studio {
+        // no MCP here: the brief gives each character's plain JSON
+        let facts = super::studio_facts(ctx);
+        prompts.push(crate::studio::write_brief(&crate::studio::brief(kit, &facts, spec.harness, &spec.cwd, &[]))?);
     }
     if let Some(level) = ctx.caveman.active()
         && let Ok(rules) = crate::caveman::rules_file(level)

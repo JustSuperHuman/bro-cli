@@ -13,6 +13,9 @@ mod process_tests;
 #[cfg(test)]
 #[path = "host_tests.rs"]
 mod host_tests;
+#[path = "term/input.rs"]
+mod input;
+pub(crate) use input::{Delivery, DeliveryState};
 
 use super::keys::{encode_key, encode_mouse};
 use crate::pane::{Activity, Cx, Pane, Waker};
@@ -78,6 +81,9 @@ pub struct Meta {
     /// bro's orchestrator: the one session that drives the others (gold, pinned atop the sidebar).
     pub orchestrator: bool,
 }
+
+/// How long a session that hasn't drawn anything yet shows it's on its way up (a fire catching, in both UIs).
+pub const BOOTING: Duration = Duration::from_secs(25);
 
 /// The root Orchestrator's key, also used for the Orchestrators grid.
 pub const ORCHESTRATOR_KEY: &str = bro_core::orchestrator::GLOBAL_KEY;
@@ -234,15 +240,11 @@ struct Saved {
     /// The agent's conversation (Claude / Codex), so it resumes exactly that one if it has to come back.
     #[serde(default)]
     agent_session: Option<String>,
-    /// Stable through window/background handover; never a credential.
-    #[serde(default)]
-    orbit_lifetime: Option<String>,
 }
 
 /// The terminal pane.
 pub struct Term {
     pub meta: Meta,
-    orbit_lifetime: String,
     /// Original launch choices, reused when reloading with current profile settings.
     pub launch_spec: Option<bro_core::launch::LaunchSpec>,
     pub reloading: bool,
@@ -253,7 +255,7 @@ pub struct Term {
     /// The last painted viewport, used while the output worker owns the parser.
     frame_cache: Option<ratatui::buffer::Buffer>,
     cached_cursor: Option<(u16, u16)>,
-    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    writer: Arc<Mutex<Option<super::writer::Writer>>>,
     exited: Arc<AtomicBool>,
     /// Cancels background work tied to this pane, including an in-progress recap.
     closed: Arc<AtomicBool>,
@@ -306,6 +308,11 @@ pub struct Term {
     prompt_title: Option<String>,
     /// Last complete prompt, kept only when a concurrent output read holds the screen.
     prompt_choice: Option<bro_core::terminal_prompt::Choice>,
+    queued_questions: Option<bro_core::terminal_prompt::QueuedQuestions>,
+    /// Keep the native editor visible while its opening keystroke is being rendered.
+    opening_questions: Option<(bro_core::terminal_prompt::QueuedQuestions, Instant)>,
+    /// The browser page this session's agent handed you (the bridge's pending list, kept by the app).
+    pub(crate) browser_handoff: Option<bro_bridge::BrowserHandoff>,
     answered_choice: Option<bro_core::terminal_prompt::Choice>,
     /// A currently rendered provider limit; this outranks a busy footer or transcript.
     limit: Option<bro_core::sessions::limits::UsageLimit>,
@@ -314,11 +321,12 @@ pub struct Term {
     resume: super::auto_resume::AutoResume,
     /// Input from you so far (auto-resume backs off when this moves).
     typed: u64,
+    /// When you last typed into it: the Claude mod's question timer stops while you answer.
+    typed_at: Option<Instant>,
     /// Auto-resume typed its prompt: press enter at this time (a separate write, so it isn't read as a paste).
     enter_at: Option<Instant>,
-    /// What goes to the program in turns, each at its time: a message's pieces (the agent reads a picture's path
-    /// before the next piece arrives), a command and then its Enter.
-    outbox: std::collections::VecDeque<(Instant, Vec<u8>)>,
+    /// Composed input stays ordered through its final Enter, paced after each write receipt.
+    input: input::Queue,
     /// When auto-approve last answered a prompt (one answer per prompt while the screen catches up).
     approved_at: Option<Instant>,
     /// A resume waiting its turn: shows a loader until the real session takes this pane.
@@ -359,14 +367,11 @@ pub struct Queued {
     pub starting: bool,
 }
 
-#[cfg(test)]
-#[path = "term/orbit_tests.rs"]
-mod orbit_tests;
 
 impl Term {
     #[cfg(test)]
     pub(crate) fn set_test_writer(&mut self, writer: Box<dyn Write + Send>) {
-        *self.writer.lock() = Some(writer);
+        *self.writer.lock() = Some(super::writer::Writer::direct(writer));
     }
     /// A session that spawns lazily at its first render (when the real size is known).
     pub fn new(meta: Meta, spawn: Spawn, svc: Services) -> Term {
@@ -379,7 +384,6 @@ impl Term {
         let program_state = ProgramState::of(&parser);
         Term {
             meta,
-            orbit_lifetime: uuid::Uuid::new_v4().to_string(),
             launch_spec: None,
             reloading: false,
             spawn: Some(spawn),
@@ -420,13 +424,17 @@ impl Term {
             launch: None,
             prompt_title: None,
             prompt_choice: None,
+            queued_questions: None,
+            opening_questions: None,
+            browser_handoff: None,
             answered_choice: None,
             limit: None,
             cleared_limit_error: None,
             resume: Default::default(),
             typed: 0,
+            typed_at: None,
             enter_at: None,
-            outbox: Default::default(),
+            input: Default::default(),
             approved_at: None,
             queued: None,
             mirror,
@@ -501,7 +509,13 @@ impl Term {
             vec![],
             vec![Span::raw("     "), Span::styled(crate::ui::fit("Sessions open one at a time so they don't fight over your machine.", width), Style::default().fg(t.frame))],
         ];
-        let top = area.y + area.height.saturating_sub(lines.len() as u16) / 3;
+        // petals turning above the lines when the pane is tall enough
+        let bloom = if area.height >= 16 && area.width >= 30 { (area.height / 3).min(9) } else { 0 };
+        let top = area.y + area.height.saturating_sub(lines.len() as u16 + bloom + u16::from(bloom > 0)) / 3;
+        if bloom > 0 {
+            crate::ui::rune(f, Rect { y: top, height: bloom, ..area }, crate::rune::Scene::Bloom, q.since.elapsed().as_secs_f64(), t);
+        }
+        let top = top + bloom + u16::from(bloom > 0);
         for (i, l) in lines.into_iter().enumerate() {
             let y = top + i as u16;
             if y >= area.bottom() {
@@ -570,12 +584,12 @@ impl Term {
             }
             None => {
                 let (live, writer, reader) = Self::start_local(cmd, s, rows, cols)?;
-                (live, Box::new(super::writer::Writer::new(writer).map_err(|e| format!("pty input worker: {e}"))?), reader)
+                (live, writer, reader)
             }
         };
         let pid = live.pid();
         let remote = matches!(live, Live::Remote(_));
-        *self.writer.lock() = Some(writer);
+        *self.writer.lock() = Some(super::writer::Writer::new(writer).map_err(|e| format!("pty input worker: {e}"))?);
         self.parser.lock().screen_mut().set_size(rows, cols);
         if let Some(m) = &self.mirror {
             m.resize(rows, cols);
@@ -631,7 +645,7 @@ impl Term {
         let s = self.launch.clone().unwrap_or_default();
         let mut remote = host.attach(&info);
         let reader = remote.take_reader_with(self.follow_resizes()).ok_or("the session server gave no output")?;
-        *self.writer.lock() = Some(remote.writer());
+        *self.writer.lock() = Some(super::writer::Writer::new(remote.writer()).map_err(|e| format!("pty input worker: {e}"))?);
         let pid = remote.pid();
         self.live = Some(Live::Remote(remote));
         // ask for this pane's size at its first draw
@@ -678,7 +692,6 @@ impl Term {
             orchestrator: saved.orchestrator,
         };
         let mut t = Term::new(meta, saved.spawn.clone(), svc);
-        if let Some(lifetime) = saved.orbit_lifetime.filter(|id| uuid::Uuid::parse_str(id).is_ok()) { t.orbit_lifetime = lifetime; }
         t.spawn = None;
         t.launch = Some(saved.spawn);
         t.launch_spec = saved.launch_spec;
@@ -765,7 +778,6 @@ impl Term {
             spawn: s.clone(),
             launch_spec: self.launch_spec.clone(),
             agent_session: self.agent_session(),
-            orbit_lifetime: Some(self.orbit_lifetime.clone()),
         };
         serde_json::to_value(saved).ok()
     }
@@ -872,6 +884,7 @@ impl Term {
         let var = if harness == Harness::Claude { "CLAUDE_CONFIG_DIR" } else { "CODEX_HOME" };
         let config_dir = s.env.iter().find(|(k, _)| k == var).map(|(_, v)| PathBuf::from(v)).filter(|p| !p.as_os_str().is_empty());
         let started = std::time::SystemTime::now().checked_sub(self.meta.started.elapsed()).unwrap_or_else(std::time::SystemTime::now);
+        let (resume_id, fork_source) = super::insights::launch_session_ids(harness, &s.args);
         Some(bro_core::sessions::live::BindSpec {
             harness,
             profile_id: self.meta.store.clone(),
@@ -879,7 +892,8 @@ impl Term {
             pid,
             cwd: self.meta.cwd.clone(),
             started,
-            resume_id: super::insights::resume_id(harness, &s.args),
+            resume_id,
+            fork_source,
         })
     }
 
@@ -888,9 +902,47 @@ impl Term {
         self.insights.as_ref().map(|i| i.snapshot())
     }
 
+    /// The background tasks of `snap`'s conversation at work now (commands, watches, workflows), the oldest first.
+    pub fn background_tasks(&self, snap: Option<&super::insights::Snapshot>) -> Vec<bro_core::sessions::tasks::Task> {
+        snap.and_then(|s| s.conversation.as_deref()).map_or_else(Vec::new, |conv| self.live_tasks(conv).cloned().collect())
+    }
+
+    /// `conv`'s background tasks at work now. One an earlier run of the session left isn't: a task doesn't outlive
+    /// the process that ran it.
+    fn live_tasks<'a>(&self, conv: &'a bro_core::sessions::conversation::Conversation) -> impl Iterator<Item = &'a bro_core::sessions::tasks::Task> {
+        let now_ms = crate::util::now_ms();
+        let since_ms = now_ms - i64::try_from(self.meta.started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        conv.tasks.iter().filter(move |t| t.live(now_ms, Some(since_ms)))
+    }
+
+    /// What it has at work in the background (its own turn may be over): how many of its subagents are still
+    /// running, and how many background tasks its process left going. Cheap enough for every frame.
+    pub fn background_work(&self) -> (usize, usize) {
+        let Some((conv, subs)) = self.insights.as_ref().map(|i| i.work()) else { return (0, 0) };
+        let subs = subs.map_or(0, |l| l.iter().filter(|s| s.state.running()).count());
+        (subs, conv.map_or(0, |c| self.live_tasks(&c).count()))
+    }
+
+    /// Observable changes a periodic process poll can discover without new output.
+    pub(crate) fn poll_display(&self) -> impl PartialEq + use<> {
+        (self.status, self.alive(), self.size, self.title_sent.clone(), self.prompt_title.clone(),
+         self.prompt_choice.clone(), self.queued_questions, self.limit.clone(), self.input.pending())
+    }
+
     /// User input received, independently of terminal output and screen redraws.
     pub fn input_revision(&self) -> u64 {
         self.typed
+    }
+
+    /// Input from you (keys, a paste, the phone, the reply box), not bro typing for you.
+    pub(super) fn note_typed(&mut self) {
+        self.typed += 1;
+        self.typed_at = Some(Instant::now());
+    }
+
+    /// How long ago you last typed into it; `None` before you have.
+    pub fn typed_ago(&self) -> Option<Duration> {
+        self.typed_at.map(|at| at.elapsed())
     }
 
     #[cfg(test)]
@@ -926,6 +978,15 @@ impl Term {
         self.insights = Some(insights);
     }
 
+    /// `bro --demo`: the subagents this session started, each with its own conversation.
+    pub fn set_demo_subagents(&mut self, subagents: Vec<bro_core::sessions::subagents::Subagent>) {
+        if let Some(insights) = &self.insights
+            && !subagents.is_empty()
+        {
+            insights.set_subagents(subagents);
+        }
+    }
+
     /// The agent team this Claude session leads, as Claude Code last wrote it (see [`super::insights::Snapshot::team`]).
     pub fn team(&self) -> Option<std::sync::Arc<bro_core::agent_teams::Team>> {
         self.insights.as_ref().and_then(|i| i.team())
@@ -955,6 +1016,11 @@ impl Term {
     /// The question on screen while the agent waits on a prompt.
     pub fn prompt_title(&self) -> Option<&str> {
         self.prompt_title.as_deref()
+    }
+
+    /// A browser page this session's agent waits on you for, while it waits (not once you have it).
+    pub fn browser_waiting(&self) -> Option<&bro_bridge::BrowserHandoff> {
+        self.browser_handoff.as_ref().filter(|h| h.phase == "requested" && !h.returning)
     }
 
     pub fn limit_warning(&self) -> Option<bro_core::sessions::limits::UsageLimit> {
@@ -988,15 +1054,6 @@ impl Term {
         }
     }
 
-    /// Stable PTY/project identity, not a reconstructed UI Instant. A real process,
-    /// host, or project change invalidates captures; a window handover does not.
-    pub(crate) fn orbit_generation(&self) -> String {
-        let pid = self.live.as_ref().and_then(Live::pid).or_else(|| self.attach.as_ref().and_then(|info| info.pid));
-        let host = self.svc.host().map(|host| host.info().started_ms).unwrap_or(0);
-        let project = bro_core::orbit_voice::project_scope_id(&self.meta.project.root).unwrap_or_default();
-        let cwd = bro_core::orbit_voice::project_scope_id(&self.meta.cwd).unwrap_or_default();
-        bro_core::coordination::digest_bytes(format!("bro-voice-target-v1\0{}\0{}\0{host}\0{pid:?}\0{project}\0{cwd}", self.meta.sid, self.orbit_lifetime).as_bytes())
-    }
 
     /// Re-announce to a bridge that started after this session.
     pub fn reregister(&self) {
@@ -1074,7 +1131,7 @@ impl Term {
 
     /// Write raw bytes to the program (keys, paste, bridge input).
     pub fn send(&mut self, bytes: &[u8]) {
-        self.typed += 1;
+        self.note_typed();
         self.scroll = 0;
         self.write(bytes);
     }
@@ -1084,39 +1141,18 @@ impl Term {
         if self.exited.load(Ordering::SeqCst) {
             return Err("The session has exited.".into());
         }
-        self.typed += 1;
+        self.note_typed();
         self.scroll = 0;
         #[cfg(test)]
         self.sent.extend_from_slice(bytes);
-        let mut writer = self.writer.lock();
-        let writer = writer.as_mut().ok_or("The session input is not available.")?;
-        writer.write_all(bytes).and_then(|_| writer.flush()).map_err(|error| format!("The session could not receive input: {error}"))
-    }
-
-    /// Type `text` as one message and press Enter a moment later (a separate write, so the program doesn't
-    /// read the Enter as part of a paste).
-    pub fn submit(&mut self, text: &str) {
-        let bracketed = self.program_state.lock().bracketed_paste;
-        let text = text.replace("\r\n", "\n").replace(['\r', '\n'], " ");
-        if bracketed {
-            self.write(format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", "")).as_bytes());
-        } else {
-            self.write(text.as_bytes());
+        {
+            let mut writer = self.writer.lock();
+            let writer = writer.as_mut().ok_or("The session input is not available.")?;
+            writer.write_all(bytes).and_then(|_| writer.flush()).map_err(|error| format!("The session could not receive input: {error}"))?;
         }
-        self.enter_at = Some(Instant::now() + Duration::from_millis(300));
-    }
-
-    /// A message you wrote (focus mode's reply box): typed as one paste with its line breaks kept when the
-    /// program takes pastes, then Enter a moment later. It counts as your typing, as keys do.
-    pub fn send_message(&mut self, text: &str) {
-        self.typed += 1;
-        self.scroll = 0;
-        if !self.program_state.lock().bracketed_paste {
-            return self.submit(text);
-        }
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.write(format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", "")).as_bytes());
-        self.enter_at = Some(Instant::now() + Duration::from_millis(300));
+        // a message from the phone, the web or `bro ctl`: Codex's Enter is checked as focus view's is
+        self.note_remote_input(bytes);
+        Ok(())
     }
 
     /// The native editor's character before its caret, for a word-boundary shortcut.
@@ -1126,58 +1162,6 @@ impl Term {
         let (row, col) = screen.cursor_position();
         if col == 0 { return Some(' '); }
         screen.cell(row, col - 1)?.contents().chars().next_back()
-    }
-
-    /// Type a slash command key by key, let the program's command menu settle on it, then Enter. A command after
-    /// one still on its way waits for it.
-    pub fn type_command(&mut self, command: &str) {
-        let at = self.outbox.back().map_or_else(Instant::now, |(t, _)| *t + Duration::from_millis(150));
-        self.outbox.push_back((at, command.as_bytes().to_vec()));
-        self.outbox.push_back((at + Duration::from_millis(400), b"\r".to_vec()));
-        self.send_due();
-    }
-
-    /// A message with pictures in it (focus mode): each piece of text and each picture's path as a paste of its
-    /// own, in order, a moment apart, so the agent takes each picture in where it was (a path pasted alone is how
-    /// Claude Code and Codex take a picture), then Enter once it has read the last. Counts as your typing.
-    pub fn send_parts(&mut self, parts: &[crate::focus::Part]) {
-        use crate::focus::Part;
-        self.typed += 1;
-        self.scroll = 0;
-        let bracketed = self.program_state.lock().bracketed_paste;
-        let mut at = self.outbox.back().map_or_else(Instant::now, |(t, _)| *t + Duration::from_millis(150));
-        for part in parts {
-            let (text, wait) = match part {
-                Part::Text(t) => (t.replace("\r\n", "\n").replace('\r', "\n"), 80),
-                Part::Picture(p) => (crate::clip::paste_form(&[p.to_string_lossy().into_owned()]), 500),
-            };
-            if text.is_empty() {
-                continue;
-            }
-            let bytes = if bracketed { format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", "")) } else { text.replace('\n', " ") };
-            self.outbox.push_back((at, bytes.into_bytes()));
-            at += Duration::from_millis(wait);
-        }
-        self.outbox.push_back((at + Duration::from_millis(250), b"\r".to_vec()));
-        self.send_due();
-    }
-
-    /// Write what's waiting in the outbox whose time has come.
-    fn send_due(&mut self) {
-        let now = Instant::now();
-        while self.outbox.front().is_some_and(|(at, _)| *at <= now) {
-            if let Some((_, bytes)) = self.outbox.pop_front() {
-                self.write(&bytes);
-            }
-        }
-    }
-
-    /// Tests: everything waiting in the outbox, now.
-    #[cfg(test)]
-    pub fn flush_outbox(&mut self) {
-        while let Some((_, bytes)) = self.outbox.pop_front() {
-            self.write(&bytes);
-        }
     }
 
     /// The agent's config folder as bro started it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), when it set one.
@@ -1220,12 +1204,28 @@ impl Term {
     /// Answer the current single-select menu once. Focus cards also supply the
     /// request they displayed, so an old click cannot answer a newer question.
     pub fn answer_prompt_option(&mut self, key: &str, shown: Option<&bro_core::terminal_prompt::Choice>) -> bool {
+        self.answer_prompt(Some(key), shown)
+    }
+
+    /// Confirm the native cursor without moving it: an arrow may have reached the
+    /// agent before its next redraw reaches Bro.
+    pub fn confirm_prompt(&mut self, shown: &bro_core::terminal_prompt::Choice) -> bool {
+        self.answer_prompt(None, Some(shown))
+    }
+
+    fn answer_prompt(&mut self, key: Option<&str>, shown: Option<&bro_core::terminal_prompt::Choice>) -> bool {
         if crate::pane::Pane::activity(self) != Some(Activity::Blocked) || self.limit_warning().is_some() { return false; }
         let Some(rows) = self.try_live_screen_rows() else { return false };
         let Some(current) = bro_core::terminal_prompt::choice(&rows) else { return false };
         if shown.is_some_and(|shown| !shown.same_request(&current)) { return false; }
         if self.answered_choice.as_ref().is_some_and(|answered| answered.same_request(&current)) { return false; }
-        let Some(bytes) = current.response(key, self.program_state.lock().app_cursor) else { return false };
+        let bytes = match key {
+            Some(key) => {
+                let Some(bytes) = current.response(key, self.program_state.lock().app_cursor) else { return false };
+                bytes
+            }
+            None => "\r".to_string(),
+        };
         self.answered_choice = Some(current);
         self.send(bytes.as_bytes());
         true
@@ -1381,6 +1381,45 @@ impl Term {
         self.error.as_deref()
     }
 
+    /// On its way up: running for only moments, nothing on its screen yet.
+    pub fn booting(&self) -> bool {
+        self.live.is_some() && self.scroll == 0 && self.meta.started.elapsed() < BOOTING && self.parser.try_lock().is_some_and(|p| p.screen().contents().trim().is_empty())
+    }
+
+    /// What it's called while it starts: "Claude Code", "Codex", or the shell's name.
+    pub fn starting_name(&self) -> String {
+        match self.meta.harness {
+            Some(Harness::Claude) => "Claude Code".into(),
+            Some(Harness::Codex) => "Codex".into(),
+            Some(Harness::Pi) => "Pi".into(),
+            Some(Harness::Omp) => "omp".into(),
+            Some(Harness::Antigravity) => "Antigravity".into(),
+            None => self.meta.label.split(" · ").next().filter(|s| !s.is_empty()).unwrap_or("the shell").to_string(),
+        }
+    }
+
+    /// While it boots: a fire catching in its agent's colour, what's starting, and for how long.
+    fn render_booting(&self, f: &mut Frame, area: Rect, t: &Theme, age: Duration) {
+        if area.height < 10 || area.width < 28 {
+            return;
+        }
+        let fire_h = (area.height * 2 / 5).clamp(5, 12);
+        let top = area.y + area.height.saturating_sub(fire_h + 3) * 2 / 5;
+        let inks = crate::ui::kindle_inks(self.meta.harness, t);
+        crate::ui::rune_inked(f, Rect { y: top, height: fire_h, ..area }, crate::rune::Scene::Kindle, age.as_secs_f64() - 0.3, &inks);
+        let s = age.as_secs();
+        let note = if s < 8 { format!("in {} · {s}s", self.meta.project.name) } else { format!("Still warming up · {s}s. A first run can take a while.") };
+        let lines = [(format!("Starting {}", self.starting_name()), Style::default().add_modifier(Modifier::BOLD)), (note, Style::default().fg(t.muted))];
+        for (i, (text, st)) in lines.into_iter().enumerate() {
+            let text = crate::ui::fit(&text, area.width.saturating_sub(4) as usize);
+            let w = crate::ui::width(&text) as u16;
+            let y = top + fire_h + 1 + i as u16;
+            if y < area.bottom() {
+                crate::ui::line(f, Rect { x: area.x + area.width.saturating_sub(w) / 2, y, width: w.min(area.width), height: 1 }, vec![Span::styled(text, st)]);
+            }
+        }
+    }
+
     /// The program is running (spawned and not yet reaped).
     pub fn started(&self) -> bool {
         self.live.is_some() || self.scene.as_ref().is_some_and(|s| s.drawn.is_some())
@@ -1405,7 +1444,8 @@ impl Term {
         p.screen().rows(0, cols).collect()
     }
 
-    /// [`Term::screen_rows`] unless the output reader holds the screen right now (a frame never waits on it).
+
+    #[cfg(test)]
     pub fn try_screen_rows(&self) -> Option<Vec<String>> {
         let p = self.parser.try_lock()?;
         let (_, cols) = p.screen().size();
@@ -1429,6 +1469,38 @@ impl Term {
             Some(rows) => bro_core::terminal_prompt::choice(&rows),
             None => self.prompt_choice.clone(),
         }
+    }
+
+    pub fn queued_questions(&self) -> Option<bro_core::terminal_prompt::QueuedQuestions> {
+        if self.meta.harness != Some(Harness::Codex) { return None; }
+        match self.try_live_screen_rows() {
+            Some(rows) => bro_core::terminal_prompt::queued_questions(&rows),
+            None => self.queued_questions,
+        }
+    }
+
+    pub fn focus_queued_questions(&self) -> Option<bro_core::terminal_prompt::QueuedQuestions> {
+        let queued = self.queued_questions()?;
+        (!self.opening_questions.is_some_and(|(shown, at)| shown == queued && at.elapsed() < Duration::from_secs(2))).then_some(queued)
+    }
+
+    /// Open the current queue once; this only opens Codex's editor and never chooses an answer.
+    pub fn open_queued_questions(&mut self) -> bool {
+        use bro_core::terminal_prompt::QuestionShortcut;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if self.limit_warning().is_some() { return false; }
+        // A stale card or a busy screen cannot send a shortcut into a different editor.
+        let Some(rows) = self.try_live_screen_rows() else { return false };
+        let Some(queued) = bro_core::terminal_prompt::queued_questions(&rows) else { return false };
+        if self.meta.harness != Some(Harness::Codex) || self.focus_queued_questions() != Some(queued) { return false; }
+        let (code, modifiers) = match queued.shortcut {
+            QuestionShortcut::ShiftLeft => (KeyCode::Left, KeyModifiers::SHIFT),
+            QuestionShortcut::AltUp => (KeyCode::Up, KeyModifiers::ALT),
+        };
+        let Some(bytes) = encode_key(KeyEvent::new(code, modifiers), self.program_state.lock().app_cursor) else { return false };
+        self.opening_questions = Some((queued, Instant::now()));
+        self.send(&bytes);
+        true
     }
 
     /// (rows, cols) of the pty.
@@ -1565,7 +1637,7 @@ impl Term {
     /// Read the bottom of the screen for an agent's tell-tale lines: "esc to interrupt" while it works, a
     /// permission prompt or question when it's waiting on you.
     fn scan(&mut self) {
-        let (text, question, limit, choice, blocked) = {
+        let (text, question, limit, choice, blocked, queued_questions) = {
             let Some(mut p) = self.parser.try_lock() else { return };
             let back = p.screen().scrollback();
             p.screen_mut().set_scrollback(0);
@@ -1577,7 +1649,7 @@ impl Term {
             let choice = bro_core::terminal_prompt::choice(&rows);
             let question = choice.as_ref().map(|c| c.question.clone()).or_else(|| prompt_question(&tail));
             // contents() joins soft-wrapped rows, preserving words and reset dates at narrow widths.
-            let result = (tail.iter().rev().map(|r| r.as_str()).collect::<Vec<_>>().join("\n"), question, bro_core::sessions::limits::UsageLimit::from_screen(&s.contents()), choice, bro_core::terminal_prompt::waiting(&rows));
+            let result = (tail.iter().rev().map(|r| r.as_str()).collect::<Vec<_>>().join("\n"), question, bro_core::sessions::limits::UsageLimit::from_screen(&s.contents()), choice, bro_core::terminal_prompt::waiting(&rows), bro_core::terminal_prompt::queued_questions(&rows));
             p.screen_mut().set_scrollback(back);
             result
         };
@@ -1585,8 +1657,12 @@ impl Term {
             self.answered_choice = None;
         }
         self.prompt_choice = choice;
+        self.queued_questions = queued_questions;
+        if queued_questions.is_none() && blocked { self.opening_questions = None; }
         let text = text.to_lowercase();
-        let working = ["esc to interrupt", "esc to cancel", "ctrl+c to interrupt", "ctrl-c to interrupt"].iter().any(|m| text.contains(m));
+        let working = ["esc to interrupt", "esc to cancel", "ctrl+c to interrupt", "ctrl-c to interrupt"].iter().any(|m| text.contains(m))
+            // A narrow Codex tile clips the interrupt hint, but keeps the start of its working banner.
+            || self.meta.harness == Some(Harness::Codex) && text.lines().any(|line| line.trim_start().starts_with("• working ("));
         if working || blocked {
             self.agent = true;
         }
@@ -1602,9 +1678,11 @@ impl Term {
         let quiet_ms = (self.born.elapsed().as_millis() as u64).saturating_sub(self.last_output.load(Ordering::Relaxed));
         if blocked && self.status != Some(Activity::Blocked) { self.scroll = 0; }
         self.prompt_title = if blocked { question } else { None };
+        // A new Codex animates its welcome until the first message: output that isn't work.
+        let welcome = self.meta.harness == Some(Harness::Codex) && text.contains("ask codex to do anything") && self.insights().and_then(|s| s.facts).is_none_or(|f| f.prompt.is_none());
         self.status = Some(if blocked || self.limit.is_some() {
             Activity::Blocked
-        } else if working || quiet_ms < 1500 {
+        } else if working || quiet_ms < 1500 && !welcome {
             Activity::Working
         } else {
             Activity::Idle
@@ -1623,7 +1701,7 @@ impl Term {
             self.write(b"\r");
         }
         // agents only: a shell that printed "(y/n)" once never gets `continue` typed into it
-        if !self.agent || self.meta.harness.is_none() || self.svc.is_demo() || self.enter_at.is_some() {
+        if !self.agent || self.meta.harness.is_none() || self.svc.is_demo() || self.enter_at.is_some() || self.input.pending() {
             return;
         }
         let cfg = self.svc.settings().auto_resume;
@@ -1644,7 +1722,7 @@ impl Term {
 
     /// Answer Yes to a Claude permission prompt ("Do you want to proceed?") when the setting is on.
     fn auto_approve(&mut self, cx: &mut Cx) {
-        if self.meta.harness != Some(Harness::Claude) || self.svc.is_demo() || self.status != Some(Activity::Blocked) || self.limit_warning().is_some() || !self.svc.settings().auto_approve {
+        if self.meta.harness != Some(Harness::Claude) || self.svc.is_demo() || self.input.pending() || self.status != Some(Activity::Blocked) || self.limit_warning().is_some() || !self.svc.settings().auto_approve {
             return;
         }
         // let the prompt finish drawing, and give the last answer time to clear it
@@ -1838,11 +1916,23 @@ impl Pane for Term {
             return Some(Activity::Working);
         }
         if self.limit_warning().is_some() { return Some(Activity::Blocked); }
+        // the agent's tool is still running, but it can't go on until you do something in the browser
+        if self.browser_waiting().is_some() { return Some(Activity::Blocked); }
+        if self.queued_questions().is_some()
+            || self.opening_questions.is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(2))
+                && self.try_live_screen_rows().is_none_or(|rows| bro_core::terminal_prompt::waiting(&rows))
+        {
+            return Some(Activity::Blocked);
+        }
         let screen = self.demo_activity.or(self.status);
         // A question tool waiting for its answer means the agent needs you, whatever the screen
         // markers say (Claude's question menu shows "esc to cancel", which reads as working).
         if self.demo_activity.is_none() && screen.is_some() && screen != Some(Activity::Blocked) && self.asking_question() {
             return Some(Activity::Blocked);
+        }
+        // A running turn stays active through quiet tools and clipped or partially repainted terminal banners.
+        if self.demo_activity.is_none() && screen != Some(Activity::Blocked) && self.insights.as_ref().and_then(|i| i.busy()) == Some(true) {
+            return Some(Activity::Working);
         }
         screen
     }
@@ -1862,7 +1952,7 @@ impl Pane for Term {
         // Watch every running process, including hidden shell tabs. ConPTY may keep its
         // output pipe open after the child exits, so EOF alone cannot drive tab cleanup.
         // A message going in piece by piece is watched closely, so each goes at its time.
-        if !self.outbox.is_empty() {
+        if self.input.pending() {
             return Some(Duration::from_millis(60));
         }
         (self.agent || self.live.is_some()).then_some(Duration::from_millis(400))
@@ -1872,10 +1962,14 @@ impl Pane for Term {
             return;
         }
         if self.exit_code().is_some() {
+            self.input.cancel("The session has exited.");
             self.exited.store(true, Ordering::SeqCst);
             return;
         }
         self.send_due();
+        while let Some(error) = self.input.error() {
+            cx.toast(crate::alerts::Kind::Error, error);
+        }
         // hidden panes are never rendered: start and end the remote minimum from here too
         if self.sized() {
             self.apply_size();
@@ -1999,6 +2093,9 @@ impl Pane for Term {
                 }
             }
         }
+        // nothing on screen moments after it started: it's still on its way up
+        let age = self.meta.started.elapsed();
+        let booting = self.live.is_some() && self.scroll == 0 && age < BOOTING && age > Duration::from_millis(300) && screen.contents().trim().is_empty();
         self.cached_cursor = None;
         if !screen.hide_cursor() && self.scroll == 0 && self.live.is_some() {
             let (r, c) = screen.cursor_position();
@@ -2010,6 +2107,9 @@ impl Pane for Term {
             }
         }
         drop(p);
+        if booting {
+            self.render_booting(f, area, cx.theme, age);
+        }
         let local = Rect { x: 0, y: 0, ..area };
         if self.frame_cache.as_ref().is_none_or(|cache| cache.area != local) {
             self.frame_cache = Some(ratatui::buffer::Buffer::empty(local));

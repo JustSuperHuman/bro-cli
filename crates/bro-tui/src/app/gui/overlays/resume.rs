@@ -7,7 +7,7 @@
 use super::super::actions::Action;
 use super::super::kit::{Style, Ui, brand, radius, size, weight, widgets};
 use super::super::sidebar;
-use super::palette::{CAP_H, appear, button_band, current, glide, hints, just_opened, sentence};
+use super::palette::{CAP_H, appear, arrive, button_band, current, glide, hints, just_opened, sentence};
 use crate::app::overlays::{ResumeFrom, ResumeTarget};
 use crate::app::{App, Overlay};
 use bro_gfx::{Point, Rect};
@@ -47,6 +47,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     let fresh = opened || was != id;
     let k = appear(ui, "resume", opened);
     widgets::scrim(ui, window, k, Action::None);
+    let from = ui.group_start();
     let w = WIDTH.min(window.w - 32.0).max(300.0);
     let live = matches!(p.from, ResumeFrom::Live { .. });
     let reload = matches!(p.from, ResumeFrom::Reload { .. });
@@ -75,7 +76,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     TOP.set((id, top));
     let h = fixed + rows as f32 * ROW_H;
     let y = (window.y + window.h * 0.3 - h / 2.0).max(window.y + 16.0).round();
-    let r = Rect::new((window.x + (window.w - w) / 2.0).round(), y + (1.0 - k) * 10.0, w, h);
+    let r = Rect::new((window.x + (window.w - w) / 2.0).round(), y, w, h);
     widgets::card(ui, r, radius::OVERLAY);
 
     // the agent's logo, what this does, the session
@@ -122,6 +123,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
         let pairs = [("⏎", if reload { "reload" } else { "resume" }), ("1-9", "pick + go"), ("↑↓", "move"), ("esc", "cancel")];
         hints(ui, Some(Point::new(r.x + PAD, by + (BUTTON_H - CAP_H) / 2.0)), &pairs, room);
     }
+    arrive(ui, from, r, k);
     true
 }
 

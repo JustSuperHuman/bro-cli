@@ -10,6 +10,12 @@ use std::time::{Duration, Instant};
 
 /// A pass longer than this (or input kept waiting this long) is logged.
 pub const SLOW: Duration = Duration::from_millis(50);
+
+/// [`SLOW`], or `BRO_PERF_SLOW_MS` when it's set: `0` writes every pass down, for measuring a change.
+fn slow() -> Duration {
+    static LIMIT: OnceLock<Duration> = OnceLock::new();
+    *LIMIT.get_or_init(|| std::env::var("BRO_PERF_SLOW_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).map_or(SLOW, Duration::from_millis))
+}
 /// The log is cut back to its newest half past this size.
 const MAX_LOG: u64 = 512 * 1024;
 
@@ -59,12 +65,14 @@ fn kind(ev: &Event) -> &'static str {
         Event::FileView(_) => "file preview",
         Event::EditorPane(_) => "editor",
         Event::ThemeFilesChanged => "theme files",
+        Event::ThemeImported(_) => "theme imported",
+        Event::ThemeEditor(_) => "theme editor",
         Event::OpenProject(_) => "open project",
         Event::ClipboardFolder(_) => "clipboard folder",
         Event::FolderCreated(..) => "folder",
         Event::Watchdog(_) => "watchdog",
         Event::Voice(_) => "voice",
-        Event::OrbitVoice(..) => "orbit voice",
+        Event::Dictation(_, _) => "dictation",
         Event::CoordinationTaskAction { .. } => "task coordination",
         Event::OrchestratorInbox(_) => "orchestrator inbox",
         Event::Host(_) => "session server",
@@ -79,6 +87,7 @@ pub struct Pass {
     /// the slowest event: what it was, which pane, how long
     worst: Option<(&'static str, Option<PaneId>, Duration)>,
     input_wait: Option<Duration>,
+    first_input: Option<Instant>,
     handle: Duration,
     after: Duration,
     render: Duration,
@@ -87,6 +96,8 @@ pub struct Pass {
     pane: Option<(PaneId, Duration)>,
     /// the frame went to the GPU (the desktop app), not a terminal: `write` is the GPU's part
     gpu: bool,
+    /// the GPU's part, split: getting an image to draw on, drawing, handing the frame over
+    gpu_steps: Option<[Duration; 3]>,
 }
 
 impl Pass {
@@ -104,6 +115,9 @@ impl Pass {
             self.input_wait = Some(self.input_wait.map_or(w, |k| k.max(w)));
         }
         let t = Instant::now();
+        if matches!(ev, Event::Input(_) | Event::Navigate(_)) {
+            self.first_input.get_or_insert(t);
+        }
         let r = f(ev);
         let took = t.elapsed();
         self.events += 1;
@@ -137,12 +151,22 @@ impl Pass {
         self.drawn(build, build + gpu);
     }
 
+    /// [`Pass::drawn_gpu`], with where the GPU's part went: a stalled frame is stuck getting an image (`acquire`)
+    /// or handing the finished one over (`present`), and the log says which.
+    pub fn drawn_gpu_steps(&mut self, build: Duration, gpu: Duration, acquire: Duration, draw: Duration, present: Duration) {
+        self.drawn_gpu(build, gpu);
+        let steps = self.gpu_steps.get_or_insert([Duration::ZERO; 3]);
+        for (sum, step) in steps.iter_mut().zip([acquire, draw, present]) {
+            *sum += step;
+        }
+    }
+
     /// End the pass; a slow one is logged.
     pub fn finish(&mut self) {
         let pass = std::mem::take(self);
         let Some(start) = pass.start else { return };
         let total = start.elapsed();
-        if total < SLOW && pass.input_wait.is_none_or(|w| w < SLOW) {
+        if total < slow() && pass.input_wait.is_none_or(|w| w < slow()) {
             return;
         }
         log(pass.line(total));
@@ -151,6 +175,9 @@ impl Pass {
     fn line(&self, total: Duration) -> String {
         let ms = |d: Duration| format!("{:.1} ms", d.as_secs_f64() * 1000.0);
         let mut s = format!("slow pass {}", ms(total));
+        if self.gpu && let Some(input) = self.first_input {
+            s += &format!(" · input to frame {}", ms(input.elapsed()));
+        }
         if let Some(w) = self.input_wait {
             s += &format!(" · input waited {}", ms(w));
         }
@@ -163,6 +190,9 @@ impl Pass {
             s += &format!(" (pane {id} {})", ms(d));
         }
         s += &format!(" · {} {}", if self.gpu { "gpu" } else { "terminal write" }, ms(self.write));
+        if let Some([acquire, draw, present]) = self.gpu_steps {
+            s += &format!(" (acquire {} · draw {} · present {})", ms(acquire), ms(draw), ms(present));
+        }
         s
     }
 }
@@ -232,6 +262,11 @@ mod tests {
         let line = p.line(Duration::from_millis(62));
         assert!(line.contains("render 7.0 ms") && line.contains("gpu 55.0 ms"), "{line}");
         assert!(!line.contains("terminal write"), "{line}");
+        // which step of the GPU's part the time went to
+        let mut p = Pass { start: Some(Instant::now()), ..Pass::default() };
+        p.drawn_gpu_steps(Duration::from_millis(7), Duration::from_millis(55), Duration::from_millis(50), Duration::from_millis(3), Duration::from_millis(2));
+        let line = p.line(Duration::from_millis(62));
+        assert!(line.ends_with("gpu 55.0 ms (acquire 50.0 ms · draw 3.0 ms · present 2.0 ms)"), "{line}");
     }
 
     #[test]

@@ -6,12 +6,13 @@
 //! panels all render, and takes messages from any of them or from bro's
 //! push-to-talk voice input.
 
-mod cast;
+pub(crate) mod cast;
 pub(crate) mod chats;
 pub(crate) mod claude;
-mod context;
+pub(crate) mod context;
 pub(crate) mod folders;
 pub(crate) mod mcp;
+pub(crate) mod storyboard;
 pub(crate) mod tools;
 mod turn;
 

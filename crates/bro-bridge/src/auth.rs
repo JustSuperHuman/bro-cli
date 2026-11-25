@@ -127,7 +127,10 @@ pub(crate) async fn auth_middleware(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|connect| connect.0);
-    if is_authorized(peer, request.headers(), request.uri(), &state.token) {
+    // A request that came down the account relay carries no pairing token: the account server checked who is
+    // asking before it sent it, and only the relay's own door can mark a request this way (`relay.rs`).
+    let relayed = request.extensions().get::<crate::relay::RelayPeer>().is_some();
+    if relayed || is_authorized(peer, request.headers(), request.uri(), &state.token) {
         next.run(request).await
     } else {
         (

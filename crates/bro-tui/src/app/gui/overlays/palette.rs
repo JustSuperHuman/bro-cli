@@ -52,11 +52,13 @@ struct View {
     armed: bool,
     /// (the theme shown because the pointer rests on its row, the theme to put back when it leaves)
     previewing: Option<(String, String)>,
+    /// the items whose rows were drawn last frame (the others arrive instead of gliding in from where they were)
+    seen: Vec<usize>,
 }
 
 impl Default for View {
     fn default() -> View {
-        View { palette: 0, top: 0, pointer: None, sel: 0, query: String::new(), hovered: None, since: Instant::now(), armed: false, previewing: None }
+        View { palette: 0, top: 0, pointer: None, sel: 0, query: String::new(), hovered: None, since: Instant::now(), armed: false, previewing: None, seen: vec![] }
     }
 }
 
@@ -86,13 +88,14 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     // (one palette replacing another, like "pick a theme", doesn't fade in again)
     let k = appear(ui, "palette", opened);
     widgets::scrim(ui, window, k, Action::CloseOverlay);
+    let from = ui.group_start();
     let w = WIDTH.min(window.w - 32.0).max(280.0);
     let top_y = window.y + (window.h * 0.18).round().max(16.0);
     let room = window.bottom() - 24.0 - top_y - SEARCH_H - PAD;
     let fit = ((room / ROW_H).floor().max(3.0) as usize).min(MAX_ROWS);
     let rows = m.len().min(fit);
     let list_h = if m.is_empty() { 64.0 } else { rows as f32 * ROW_H + PAD };
-    let r = Rect::new((window.x + (window.w - w) / 2.0).round(), top_y + (1.0 - k) * 10.0, w, SEARCH_H + list_h);
+    let r = Rect::new((window.x + (window.w - w) / 2.0).round(), top_y, w, SEARCH_H + list_h);
     widgets::card(ui, r, radius::OVERLAY);
 
     // the search box (it has the keyboard): what's typed, the caret, how many rows match
@@ -119,14 +122,22 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     v.top = v.top.min(m.len().saturating_sub(rows));
     let shown = glide(ui, "palette", v.top as f32, fresh);
     let mut hovered = None;
+    let mut drawn = vec![];
     ui.clip(list, 0.0);
     for (pos, &i) in m.iter().enumerate().skip(shown.floor().max(0.0) as usize).take(rows + 1) {
-        let rr = Rect::new(list.x, list.y + (pos as f32 - shown) * ROW_H, list.w, ROW_H);
+        // typing reorders the list: a row that stays glides to its new place, a new one fades in from a little
+        // below (when the palette opens, one after another)
+        let (at, a) = flow(ui, i, pos, !v.seen.contains(&i) || fresh, fresh || v.query != p.query, fresh);
+        drawn.push(i);
+        let rr = Rect::new(list.x, list.y + (at - shown) * ROW_H, list.w, ROW_H);
         if ui.hovered(rr) {
             hovered = Some(i);
         }
+        let g = ui.group_start();
         row(ui, rr, &p.items[i], i, pos == sel, &p.query, &prefix, recents);
+        ui.transform_since(g, rr.center(), 1.0, Point::new(0.0, (1.0 - a.clamp(0.0, 1.0)) * 6.0), a);
     }
+    v.seen = drawn;
     ui.unclip();
     if m.len() > rows {
         let vis = 0.45 + 0.55 * ui.hover_amount("palette-list", list);
@@ -178,6 +189,7 @@ pub fn draw(app: &mut App, ui: &mut Ui, window: Rect, _time: f64) -> bool {
     v.sel = now_sel;
     v.query = now_query;
     VIEW.set(v);
+    arrive(ui, from, r, k);
     true
 }
 
@@ -229,13 +241,13 @@ fn query(ui: &mut Ui, r: Rect, q: &str) {
     if q.is_empty() {
         let b = ui.line("type a command, a theme, a recent launch…", st.color(t.faint), Some(r.w - 4.0));
         ui.draw(&b, Point::new(r.x + 2.0, r.y + (r.h - b.h) / 2.0));
-        widgets::draw_caret(ui, Point::new(r.x, caret_y), caret_h);
+        widgets::caret(ui, "palette-query", Point::new(r.x, caret_y), caret_h);
     } else {
         let b = ui.line(q, st, None);
         let end = b.layout.caret_x(q.len()) / ui.scale;
         let shift = (end + 4.0 - r.w).max(0.0);
         ui.draw(&b, Point::new(r.x - shift, r.y + (r.h - b.h) / 2.0));
-        widgets::draw_caret(ui, Point::new(r.x - shift + end + 1.0, caret_y), caret_h);
+        widgets::caret(ui, "palette-query", Point::new(r.x - shift + end + 1.0, caret_y), caret_h);
     }
     ui.unclip();
 }
@@ -409,6 +421,7 @@ fn glyph(name: &str) -> &'static str {
         "account" => "\u{F0004}",
         "proxy" => "\u{F04E1}",
         "bridge" => "\u{F05A9}",
+        "remote" | "computers" => "\u{F0989}",
         "settings" => "\u{F0493}",
         "theme" => "\u{F03D8}",
         "help" => "\u{F02D7}",
@@ -429,10 +442,17 @@ fn glyph(name: &str) -> &'static str {
 /// How far a dialog has appeared, 0..1: the scrim fades in and the card lifts into place over ~140 ms after
 /// `fresh`.
 pub(super) fn appear(ui: &mut Ui, key: &str, fresh: bool) -> f32 {
+    // on a spring with a little overshoot: the card lifts past its place and settles
     if fresh {
-        ui.ease(("appear", key), 0.0, 0.0001);
+        ui.spring_set(("appear", key), 0.0);
     }
-    ui.ease(("appear", key), 1.0, 140.0)
+    ui.spring(("appear", key), 1.0, crate::app::gui::kit::motion::Spring::ARRIVE, 0.0)
+}
+
+/// The card (and all it holds, drawn since `from`) arriving at spring position `k`: it grows from a little smaller,
+/// rising into place, fading in. The scrim, drawn before `from`, has its own fade.
+pub(super) fn arrive(ui: &mut Ui, from: kit::group::Mark, card: Rect, k: f32) {
+    ui.transform_since(from, card.center(), 0.965 + 0.035 * k, Point::new(0.0, (1.0 - k) * 8.0), (k * 1.25).min(1.0));
 }
 
 /// True on the first frame a dialog is drawn: last frame the pointer was over something on a lower layer (from
@@ -447,6 +467,20 @@ pub(super) fn glide(ui: &mut Ui, key: &str, target: f32, snap: bool) -> f32 {
         ui.ease(("glide", key), target, 0.0001);
     }
     ui.ease(("glide", key), target, 120.0)
+}
+
+/// Where list item `item`'s row is (its position in the list, sprung so it glides when the list reorders) and how
+/// visible it is (0..1). A row `entering` starts at its place and (when the list changed, `fade`) fades in, `stagger`ed by its position when the
+/// whole list is arriving.
+pub(super) fn flow(ui: &mut Ui, item: usize, pos: usize, entering: bool, fade: bool, stagger: bool) -> (f32, f32) {
+    let spot = ("flow-at", item);
+    if entering {
+        ui.spring_set(spot, pos as f32);
+        ui.spring_set(("flow-a", item), if !fade { 1.0 } else if stagger { -0.06 * pos.min(10) as f32 } else { 0.0 });
+    }
+    let at = ui.spring(spot, pos as f32, crate::app::gui::kit::motion::Spring::new(0.26, 0.0), pos as f32);
+    let a = ui.spring(("flow-a", item), 1.0, crate::app::gui::kit::motion::Spring::new(0.2, 0.0), 1.0);
+    (at, a)
 }
 
 /// A keycap's height (as `widgets::kbd` draws them).

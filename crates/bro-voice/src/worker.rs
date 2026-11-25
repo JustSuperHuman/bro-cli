@@ -11,6 +11,7 @@ use crate::transcribe::{self, Request};
 use crate::{DEFAULT_MODEL, Shared, VoiceEvent};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 pub enum Msg {
@@ -67,6 +68,9 @@ pub fn run(shared: Arc<Shared>, tx: Sender<Msg>, rx: Receiver<Msg>) {
     let mut take: Option<Take> = None;
     let mut next_id = 0u64;
     while let Ok(msg) = rx.recv() {
+        if shared.stopped.load(Ordering::Acquire) {
+            break;
+        }
         match msg {
             Msg::Stop => break,
             Msg::Key(Signal::Down) => {
@@ -159,6 +163,9 @@ fn finish(shared: &Arc<Shared>, t: Take) {
     let owned = shared.clone();
     let spawned = std::thread::Builder::new().name("bro-voice-transcribe".into()).spawn(move || {
         let shared = owned;
+        if shared.stopped.load(Ordering::Acquire) {
+            return;
+        }
         let cfg = &shared.cfg;
         let Some(key) = transcribe::resolve_key(&cfg.api_key_env) else {
             return shared.emit(VoiceEvent::Error(format!(

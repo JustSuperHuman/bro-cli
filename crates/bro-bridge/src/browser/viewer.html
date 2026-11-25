@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <title>Bro Browser</title>
+    <link rel="stylesheet" href="browser/viewer.css" />
+    <script type="module" src="browser/viewer.js"></script>
+  </head>
+  <body>
+    <header>
+      <button id="leave" class="leave" hidden title="Back to Bro. The agent keeps waiting.">
+        <svg viewBox="0 0 24 24"><path d="m14 5-7 7 7 7" /></svg><span>Back to Bro</span>
+      </button>
+      <button
+        id="tabs"
+        class="icon"
+        title="Choose a browser tab"
+        aria-label="Choose a browser tab"
+      >
+        <svg viewBox="0 0 24 24">
+          <rect x="3" y="5" width="16" height="16" rx="3" />
+          <path d="M8 2h10a4 4 0 0 1 4 4v10" />
+        </svg>
+      </button>
+      <div class="heading">
+        <strong id="title">Bro Browser</strong
+        ><span id="status" role="status"
+          >Your signed-in browser, within reach.</span
+        >
+      </div>
+      <button id="done" class="primary" disabled>Done</button>
+    </header>
+    <form id="address-form">
+      <button
+        type="button"
+        id="back"
+        class="icon"
+        title="Go back"
+        aria-label="Go back"
+        disabled
+      >
+        <svg viewBox="0 0 24 24"><path d="m14 5-7 7 7 7" /></svg></button
+      ><input
+        id="address"
+        type="text"
+        inputmode="url"
+        enterkeyhint="go"
+        autocapitalize="off"
+        aria-label="Page address"
+        placeholder="Search or enter an address"
+        autocomplete="off"
+        spellcheck="false"
+      /><button
+        type="button"
+        id="reload"
+        class="icon"
+        title="Reload page"
+        aria-label="Reload page"
+        disabled
+      >
+        <svg viewBox="0 0 24 24">
+          <path d="M20 7v5h-5M20 12a8 8 0 1 0-2 5" />
+        </svg>
+      </button>
+    </form>
+    <main
+      id="stage"
+      tabindex="0"
+      aria-label="Remote browser trackpad. Slide to move the cursor, tap to click, hold to drag, two fingers to scroll or pinch to zoom."
+    >
+      <img
+        id="frame"
+        alt="Live view of your browser tab"
+        draggable="false"
+        hidden
+      />
+      <button id="zoom" type="button" hidden>100%</button>
+      <div id="cursor" aria-hidden="true" hidden>
+        <svg viewBox="0 0 24 30"><path d="M1.5 1.5v22l6-5 4.5 9 4-2-4.5-9H21Z" /></svg>
+      </div>
+      <div id="empty">
+        <svg viewBox="0 0 48 48">
+          <rect x="5" y="7" width="38" height="34" rx="5" />
+          <path d="M5 17h38M12 12h1m5 0h1M19 25l-5 5 5 5m10-10 5 5-5 5" />
+        </svg>
+        <h1>Your browser is here.</h1>
+        <p>
+          Choose a tab to use the page you already have open. Your sign-ins stay
+          with it.
+        </p>
+        <p class="tip">Hold Ctrl and scroll to zoom in.</p>
+        <button id="choose" class="primary">Choose a tab</button>
+      </div>
+      <div id="connecting" hidden>
+        <span class="spinner"></span>
+        <p>Connecting to your tab…</p>
+      </div>
+      <section id="manual-handoff" aria-labelledby="manual-title" hidden>
+        <h1 id="manual-title">Continue in your desktop browser</h1>
+        <p id="manual-reason"></p>
+        <p>
+          This tab cannot be shown in Bro Browser. Complete the requested steps
+          in the browser on your computer, then select <strong>Return control</strong>
+          above. You can also use <strong>Desktop</strong> below to access your computer.
+        </p>
+      </section>
+    </main>
+    <div id="notice" role="alert" hidden>
+      <span></span><button id="retry">Reconnect</button>
+    </div>
+    <div id="keyboard-row" hidden>
+      <textarea
+        id="keyboard-input"
+        rows="1"
+        aria-label="Type into the remote page"
+        placeholder="Type on this page"
+        autocomplete="off"
+        autocapitalize="off"
+        spellcheck="false"
+      ></textarea
+      ><button id="hide-keyboard" aria-label="Hide keyboard">Hide</button>
+    </div>
+    <p id="gesture-hint">Slide to move · Tap to click · Two fingers scroll</p>
+    <footer>
+      <button id="pointer-mode" aria-pressed="true" aria-label="Cursor mode. Switch to direct touch" title="Switch between cursor and direct touch" disabled>
+        <svg viewBox="0 0 24 24"><path d="M5 3v17l5-5 4 7 3-2-4-7h7Z" /></svg><span>Cursor</span>
+      </button>
+      <button id="keyboard" disabled>
+        <svg viewBox="0 0 24 24">
+          <rect x="2" y="5" width="20" height="14" rx="3" />
+          <path
+            d="M6 9h1m3 0h1m3 0h1m3 0h1M6 12h1m3 0h1m3 0h1m3 0h1M7 15h10"
+          /></svg
+        ><span>Keyboard</span></button
+      ><button id="tab-key" disabled>Tab</button
+      ><button id="enter" disabled>Enter</button
+      ><button id="fit" disabled>
+        <svg viewBox="0 0 24 24">
+          <path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5" /></svg
+        ><span>Fit</span></button
+      ><button
+        id="desktop"
+        title="Use desktop control for file pickers and browser dialogs"
+      >
+        <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 22h8m-4-5v5" /></svg><span>Desktop</span>
+      </button>
+    </footer>
+    <dialog id="picker" aria-labelledby="picker-title">
+      <div class="picker-head">
+        <div>
+          <h2 id="picker-title">Your browser tabs</h2>
+          <p>Continue in the same signed-in page.</p>
+        </div>
+        <button id="close-picker" class="icon" aria-label="Close tab picker">
+          <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" /></svg>
+        </button>
+      </div>
+      <div id="tab-list" aria-live="polite"></div>
+      <form id="new-form">
+        <input
+          id="new-address"
+          aria-label="New tab address"
+          placeholder="Open a website…"
+          type="text"
+          inputmode="url"
+          enterkeyhint="go"
+          autocapitalize="off"
+          required
+          autocomplete="off"
+        /><button class="primary">Open</button>
+      </form>
+      <p class="footnote">
+        Control pauses the agent. Done returns the tab to it.
+      </p>
+    </dialog>
+  </body>
+</html>

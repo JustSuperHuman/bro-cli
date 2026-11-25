@@ -6,6 +6,7 @@
 //! [`draw_late`] runs last and paints them otherwise.
 
 use super::actions::Action;
+use super::kit::motion::Spring;
 use super::kit::{Style, Ui, radius, size, weight};
 use crate::alerts::Kind;
 use crate::app::{App, Overlay};
@@ -34,6 +35,11 @@ pub fn draw_late(app: &mut App, ui: &mut Ui, window: Rect) {
     }
 }
 
+thread_local! {
+    /// the toasts on screen last frame (or still leaving)
+    static SHOWN: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn paint(app: &App, ui: &mut Ui, window: Rect) {
     let t = ui.t;
     let prev = ui.layer();
@@ -44,6 +50,7 @@ fn paint(app: &App, ui: &mut Ui, window: Rect) {
     }
     // under the window's buttons
     let mut y = window.y.max(super::caption::bottom()) + 14.0;
+    let mut present: Vec<u64> = vec![];
     for (i, toast) in app.toasts.items.iter().rev().enumerate() {
         let (icon, c) = match toast.kind {
             Kind::Error => ("\u{F0159}", t.danger),
@@ -57,10 +64,17 @@ fn paint(app: &App, ui: &mut Ui, window: Rect) {
         let body = ui.para(&text, Style::new(size::BODY, weight::MEDIUM, t.text), 380.0, Some(3));
         let w = body.w + 58.0;
         let h = (body.h + 22.0).max(42.0);
-        // slide in from the right
-        let k = ui.ease(("toast", toast.text.as_str(), i), 1.0, 160.0);
-        let x = window.right() - w - 16.0 + (1.0 - k) * 40.0;
-        let r = Rect::new(x, y, w, h);
+        // springs in from the right with a little overshoot; when one above it goes, it glides up into its place
+        let s = ui.now.saturating_duration_since(toast.at).as_secs_f32();
+        let slide = Spring::ARRIVE.step(s);
+        if s < Spring::ARRIVE.settle() {
+            ui.anim.moving = true;
+        }
+        let k = slide.clamp(0.0, 1.0);
+        let x = window.right() - w - 16.0 + (1.0 - slide) * 56.0;
+        let yy = ui.spring(("toast-y", toast.text.as_str(), toast.at), y, Spring::GLIDE, y);
+        let r = Rect::new(x, yy, w, h);
+        let from = ui.group_start();
         ui.shadow(r, radius::OVERLAY, 28.0, 8.0, t.shadow.fade(0.8 * k));
         ui.panel(r, radius::OVERLAY, t.raised, t.border.fade(k));
         // the icon in its colour, standing on the card (no tile behind it)
@@ -68,7 +82,20 @@ fn paint(app: &App, ui: &mut Ui, window: Rect) {
         ui.icon(ir, icon, size::HEADING, c.fade(k));
         ui.draw_faded(&body, Point::new(r.x + 46.0, r.y + (h - body.h) / 2.0), k);
         ui.hit(r, Action::Toast(i));
+        // a copy to play out when it goes
+        let key = super::kit::id(("toast", toast.text.as_str(), toast.at));
+        ui.ghost_keep(key, from);
+        present.push(key);
         y += h + 8.0;
     }
+    // the ones that went since last frame slide off to the right, fading, while the rest glide up
+    SHOWN.with_borrow_mut(|shown| {
+        shown.retain(|k| present.contains(k) || ui.ghost_leave(*k, Point::new(48.0, 0.0), 1.0, window.center()));
+        for k in present {
+            if !shown.contains(&k) {
+                shown.push(k);
+            }
+        }
+    });
     ui.set_layer(prev);
 }

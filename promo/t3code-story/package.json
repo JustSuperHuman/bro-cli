@@ -1,0 +1,25 @@
+{
+  "name": "bro-t3code-story",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A narrated Remotion story: what bro took from T3 Code, what changed in 2.1.49 and what to expect next.",
+  "scripts": {
+    "prepare-assets": "node scripts/prepare.mjs",
+    "studio": "remotion studio src/index.ts",
+    "still": "remotion still src/index.ts Story",
+    "render": "remotion render src/index.ts Story out/story.raw.mp4 --codec h264 --crf 17 --audio-bitrate 192k && node scripts/level.mjs out/story.raw.mp4 out/bro-t3code-story.mp4",
+    "check": "node scripts/check-sync.mjs out/story.raw.mp4"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.0",
+    "@remotion/google-fonts": "^4.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "remotion": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -4,6 +4,9 @@
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Computers(Vec<String>),
+    /// `bro agent …`: Bro as a Windows service for computers the RMM manages
+    Agent(Vec<String>),
     /// The TUI (`bro`, `bro --demo`).
     /// `new`: don't hand off to a running bro (`bro --new`)
     /// `dir`: `bro <folder>` opens that folder (default: where you ran bro)
@@ -15,6 +18,9 @@ pub enum Command {
     /// `bro ctl [<tool> …]` — call bro's session tools (the orchestrator's) from a shell.
     Ctl(crate::ctl_cmd::CtlArgs),
     CtlHelp,
+    /// JustBrowse tools for harnesses without an MCP client.
+    Browse(crate::ctl_cmd::CtlArgs),
+    BrowseHelp,
     /// `bro open <path>[:line]` — show a file to the user (from inside a bro pane).
     Open(crate::open_cmd::OpenArgs),
     OpenHelp,
@@ -22,8 +28,6 @@ pub enum Command {
     Install(crate::install_cmd::InstallArgs),
     InstallHelp,
     /// Validate a fork and leave a narrow installer handoff for the live settings owner.
-    OrbitRegister { executable: std::path::PathBuf, application_dir: std::path::PathBuf },
-    OrbitHelp,
     /// `bro update [--check]` — install the newest bro release over this one (or only look).
     Update { check_only: bool },
     /// `bro env encrypt | decrypt | list` — env files (`--env` itself is taken off in `main`).
@@ -31,6 +35,11 @@ pub enum Command {
     EnvHelp,
     /// `bro imagine` — open the running JustImagine gallery, signed in.
     Imagine,
+    /// `bro firewall [status | allow]` — the firewall rules phones need to reach this computer.
+    Firewall(crate::firewall_cmd::FirewallCmd),
+    /// `bro remote-desktop-permissions` — macOS: what this app may do (Screen Recording, Accessibility), as a fresh
+    /// process sees it (a running app keeps seeing "not allowed" until it relaunches). Bro runs it; not in [`HELP`].
+    RemoteDesktopPermissions,
     /// `bro skills [add | remove | sync] [repo]` — the git repos bro watches for agent skills.
     Skills(crate::skills_cmd::SkillsCmd),
     SkillsHelp,
@@ -76,12 +85,10 @@ usage
   bro ctl [<tool> [key=value …]]
                    drive bro's sessions from a shell: list, open, prompt and watch them
                    (the orchestrator's tools; no tool: list them)
-  bro orbit register <electron-executable> <application-directory>
-                   validate the installed Orbit build for Settings → Orbit Voice
   bro update [--check]
                    install the newest bro release over this one (--check: only look)
   bro install [tools… | recommended | agents | all] [--force]
-                   Quick Install: JustTools, JustPaste, JustWatch, JustBrowseMCP, agent-desktop, Git, Node.js, Bun, Python, .NET 9/10/11,
+                   Quick Install: JustTools, JustPaste, JustWatch, JustBrowseMCP, CUA, agent-desktop, Git, Node.js, Bun, Python, .NET 9/10/11,
                    Claude Code, Codex, Pi, omp… (no names: pick from a list)
   bro --env <file|url> [--save] [command]
                    load API keys and settings from an env file (encrypted ones ask for a
@@ -97,17 +104,33 @@ usage
                    your Google AI subscription (status: plan and quota left per model)
   bro jsh login | status | logout
                    sign in to Just Superhuman to run Claude Code on your organization's credits
+  bro computers [list | enable | disable | select | status | run | desktop | history]
+                   manage your account's computers and choose where bro ctl runs work
   bro skills [add | remove | sync] [repo]
                    agent skills from git repos bro watches (e.g. bro skills add t3dotgg/tstack):
                    every skill in them goes into your Claude and Codex homes and stays in step
+  bro slop [collect]
+                   what Slop Collector finds left behind in your sessions (programs
+                   a cut-short render or test left running, and their temp folders)
+                   and what it has cleaned up; collect cleans it all up now
   bro host [status | stop | install | uninstall]
                    the session server that keeps your sessions running while bro is closed
                    (bro starts it itself; stop ends its sessions; install starts bro in the
                    background when you sign in, for your user only)
+  bro firewall [status | allow]
+                   Windows: check or add the firewall rules that let your phone reach this PC
+                   (phone access and remote desktop) without an Allow prompt in the way
   bro imagine      open your JustImagine gallery in the browser, signed in, and refresh the
                    generate-images, -video and -voice skills for your agents
   bro --version    print the version
   bro --help       this help
+
+when the window won't open
+  WGPU_BACKEND=dx12|vulkan|gl
+                   draw with that graphics API. Left to itself, bro starts DX12 first on
+                   Windows, and a graphics API whose driver crashed the window is skipped
+                   from then on (listed in ~/.bro/v2-gpu.json: delete it to try them all)
+  bro-cli          the terminal UI, which needs no GPU
 
 inside
   alt+n launch an agent · alt+b sidebar · alt+p palette · F1 keys · ctrl+space prefix
@@ -127,15 +150,6 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     if args.first().map(String::as_str) == Some("open") {
         return crate::open_cmd::parse(&args[1..]).map(|a| a.map_or(Command::OpenHelp, Command::Open));
     }
-    if args.first().map(String::as_str) == Some("orbit") {
-        return match args.get(1).map(String::as_str) {
-            None | Some("--help" | "-h") if args.len() <= 2 => Ok(Command::OrbitHelp),
-            Some("register") if args.len() == 4 => Ok(Command::OrbitRegister {
-                executable: args[2].clone().into(), application_dir: args[3].clone().into(),
-            }),
-            _ => Err("bro orbit register <electron-executable> <application-directory>".into()),
-        };
-    }
     if args.first().map(String::as_str) == Some("update") {
         return match args.get(1).map(String::as_str) {
             None => Ok(Command::Update { check_only: false }),
@@ -150,6 +164,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
     if args.first().map(String::as_str) == Some("env") {
         return crate::env_cmd::parse(&args[1..]).map(|a| a.map_or(Command::EnvHelp, Command::Env));
+    }
+    if args.first().map(String::as_str) == Some("remote-desktop-permissions") && args.len() == 1 {
+        return Ok(Command::RemoteDesktopPermissions);
+    }
+    if args.first().map(String::as_str) == Some("firewall") {
+        return crate::firewall_cmd::parse(&args[1..]).map(Command::Firewall);
     }
     if args.first().map(String::as_str) == Some("imagine") {
         return match args.get(1).map(String::as_str) {
@@ -166,14 +186,27 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     if args.first().map(String::as_str) == Some("host") {
         return crate::host_cmd::parse(&args[1..]).map(Command::Host);
     }
+    // `bro slop [collect]`: the session server's Slop Collector
+    if args.first().map(String::as_str) == Some("slop") {
+        return crate::host_cmd::parse(args).map(Command::Host);
+    }
     if args.first().map(String::as_str) == Some("jsh") {
         return crate::jsh_cmd::parse(&args[1..]).map(|a| a.map_or(Command::JshHelp, Command::Jsh));
+    }
+    if args.first().map(String::as_str) == Some("computers") {
+        return Ok(Command::Computers(args[1..].to_vec()));
+    }
+    if args.first().map(String::as_str) == Some("agent") {
+        return Ok(Command::Agent(args[1..].to_vec()));
     }
     if args.first().map(String::as_str) == Some("gemini") {
         return crate::gemini_cmd::parse(&args[1..]).map(|a| a.map_or(Command::GeminiHelp, Command::Gemini));
     }
     if args.first().map(String::as_str) == Some("install") {
         return crate::install_cmd::parse(&args[1..]).map(|a| a.map_or(Command::InstallHelp, Command::Install));
+    }
+    if args.first().map(String::as_str) == Some("browse") {
+        return crate::ctl_cmd::parse(&args[1..]).map(|a| a.map_or(Command::BrowseHelp, Command::Browse));
     }
     let (mut demo, mut new, mut dir) = (false, false, None);
     for a in args {
@@ -211,9 +244,6 @@ mod tests {
         assert!(p(&["open"]).is_err());
         assert!(matches!(p(&["install", "claude"]), Ok(Command::Install(ref a)) if a.tools == [bro_core::quick_install::Tool::Agent(bro_core::Harness::Claude)]));
         assert_eq!(p(&["install", "-h"]), Ok(Command::InstallHelp));
-        assert_eq!(p(&["orbit", "--help"]), Ok(Command::OrbitHelp));
-        assert!(matches!(p(&["orbit", "register", "C:/preview/electron.exe", "C:/preview/app"]), Ok(Command::OrbitRegister { .. })));
-        assert!(p(&["orbit", "register", "C:/preview/electron.exe"]).is_err());
         assert_eq!(p(&["update"]), Ok(Command::Update { check_only: false }));
         assert_eq!(p(&["update", "--check"]), Ok(Command::Update { check_only: true }));
         assert!(p(&["update", "now"]).is_err());

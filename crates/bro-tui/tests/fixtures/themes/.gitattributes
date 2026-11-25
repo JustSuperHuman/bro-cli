@@ -1,0 +1,2 @@
+# Preserve downloaded fixtures and license notices byte for byte, including CRLF.
+* -text

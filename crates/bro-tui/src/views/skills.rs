@@ -26,8 +26,9 @@ pub mod gui;
 use super::settings::{ago, spinner};
 use crate::alerts::Kind;
 use crate::pane::{Cx, Event, Pane};
-use crate::services::skills::{Bundled, and_list, plural};
+use crate::services::skills::{Bundled, RepoState, and_list, plural};
 use crate::theme::Theme;
+use std::collections::HashMap;
 use crate::ui::{self, fg, muted};
 use bro_core::disabled_skills::Disabled;
 use bro_core::skill_inventory::{Agent, Inventory, Origin, Place, Skill, one_line};
@@ -124,6 +125,9 @@ impl Browse {
 pub(crate) enum Entry {
     /// a group's heading
     Head(String),
+    /// the heading of a family of skills a watched repo keeps together (its folder in the repo, "dcc/blender"; empty
+    /// for those kept with the rest): ticking it ticks them all
+    Family(String),
     /// a skill of the inventory (its index)
     Skill(usize),
     /// one of bro's own, installed or not, with its switch
@@ -479,7 +483,7 @@ impl SkillsView {
                 None
             }
         };
-        for spec in settings.skills.repos.iter().filter(|r| skill_repos::pick(r).is_none()) {
+        for spec in settings.skills.repos.iter().filter(|r| own_page(r, &repos)) {
             // how many of its skills are installed, of all it holds
             let names = repos.get(spec).and_then(|r| r.skills.as_ref()).map(|s| &s.skills);
             let note = match (names, &inv) {
@@ -489,9 +493,9 @@ impl SkillsView {
             };
             out.push(NavItem::Page(Page::Repo(spec.clone()), skill_repos::label(spec), state(&[spec]).unwrap_or(note)));
         }
-        let picks: Vec<&String> = settings.skills.repos.iter().filter(|r| skill_repos::pick(r).is_some()).collect();
+        let picks: Vec<&String> = settings.skills.repos.iter().filter(|r| !own_page(r, &repos)).collect();
         if !picks.is_empty() {
-            out.push(NavItem::Page(Page::Picks, "Skill Issue".into(), state(&picks).unwrap_or(NavNote::Count(count(&|s| global(s) && is_pick(s))))));
+            out.push(NavItem::Page(Page::Picks, "Skill Issue".into(), state(&picks).unwrap_or(NavNote::Count(count(&|s| global(s) && is_pick(s, &repos))))));
         }
         let yours = count(&|s| global(s) && s.origin == Origin::Yours);
         if yours > 0 {
@@ -607,6 +611,7 @@ impl SkillsView {
         };
         let global = |s: &Skill| s.project.is_none();
         let from = |s: &Skill, spec: &str| matches!(&s.origin, Origin::Repo(r) if skill_repos::same(r, spec));
+        let repos = cx.svc.state().skills.repos.clone();
         let mut out = vec![];
         match &self.page {
             Page::Installed => {
@@ -614,7 +619,7 @@ impl SkillsView {
                 let mut specs: Vec<&str> = vec![];
                 for s in inv.everywhere() {
                     if let Origin::Repo(r) = &s.origin
-                        && skill_repos::pick(r).is_none()
+                        && own_page(r, &repos)
                         && !specs.contains(&r.as_str())
                     {
                         specs.push(r);
@@ -623,7 +628,7 @@ impl SkillsView {
                 for spec in specs {
                     group(&mut out, skill_repos::label(spec), rows(&|s| global(s) && from(s, spec)));
                 }
-                group(&mut out, "From Skill Issue".into(), rows(&|s| global(s) && is_pick(s)));
+                group(&mut out, "From Skill Issue".into(), rows(&|s| global(s) && is_pick(s, &repos)));
                 group(&mut out, "Built into Codex".into(), rows(&|s| global(s) && s.origin == Origin::Codex));
                 group(&mut out, "Yours".into(), rows(&|s| global(s) && s.origin == Origin::Yours));
                 let mut roots: Vec<&PathBuf> = vec![];
@@ -640,8 +645,23 @@ impl SkillsView {
             }
             Page::Disabled => out = inv.disabled.iter().enumerate().filter(|(_, d)| matches(&d.name, d.description.as_deref())).map(|(i, _)| Entry::Disabled(i)).collect(),
             Page::Repo(spec) => {
-                // every skill in it: what's installed, what's waiting to be picked, what's disabled
                 let found = self.repo_skills(spec, cx);
+                // a repo that keeps its skills in families (skills/dcc/blender/…): each family under its heading, each
+                // skill saying where it stands; the ones kept with the rest first
+                let mut families: Vec<&str> = found.iter().map(|f| f.group.as_str()).collect();
+                families.sort_by_key(|g| (!g.is_empty(), *g));
+                families.dedup();
+                if families.len() > 1 {
+                    for g in families {
+                        let rows: Vec<Entry> = found.iter().enumerate().filter(|(_, f)| f.group == g && matches(&f.name, f.description.as_deref())).map(|(k, _)| Entry::Repo(k)).collect();
+                        if !rows.is_empty() {
+                            out.push(Entry::Family(g.to_string()));
+                            out.extend(rows);
+                        }
+                    }
+                    return out;
+                }
+                // every skill in it: what's installed, what's waiting to be picked, what's disabled
                 let (mut installed, mut available, mut disabled) = (vec![], vec![], vec![]);
                 for (k, f) in found.iter().enumerate().filter(|(_, f)| matches(&f.name, f.description.as_deref())) {
                     let st = repo_status(spec, &f.name, &inv);
@@ -657,7 +677,7 @@ impl SkillsView {
                 group(&mut out, "Not installed".into(), available);
                 group(&mut out, "Disabled".into(), disabled);
             }
-            Page::Picks => out = rows(&|s| global(s) && is_pick(s)),
+            Page::Picks => out = rows(&|s| global(s) && is_pick(s, &repos)),
             Page::Yours => out = rows(&|s| global(s) && s.origin == Origin::Yours),
             Page::Codex => out = rows(&|s| s.origin == Origin::Codex),
             Page::Project(root) => {
@@ -859,6 +879,30 @@ impl SkillsView {
         }
     }
 
+    /// Tick every skill of a family of the repo shown (`group`, as [`Entry::Family`] names it) that isn't installed,
+    /// or untick them when they're all ticked: a family's skills often lean on each other (Blender's specialists run
+    /// the lead's scripts), so they go in together.
+    pub(crate) fn tick_family(&mut self, group: &str, cx: &Cx) {
+        let Page::Repo(spec) = &self.page else { return };
+        let Some(inv) = cx.svc.state().skills.inventory.clone() else { return };
+        let names: Vec<String> = self.repo_skills(spec, cx).into_iter().filter(|f| f.group == group && repo_status(spec, &f.name, &inv).tickable()).map(|f| f.name).collect();
+        if !names.is_empty() && names.iter().all(|n| self.ticked.contains(n)) {
+            self.ticked.retain(|n| !names.contains(n));
+        } else {
+            for n in names {
+                if !self.ticked.contains(&n) {
+                    self.ticked.push(n);
+                }
+            }
+        }
+    }
+
+    /// How a family of a watched repo reads: its folder, its parts joined ("dcc › blender"); those kept with the rest,
+    /// "Skills".
+    pub(crate) fn family_label(group: &str) -> String {
+        if group.is_empty() { "Skills".to_string() } else { group.split('/').collect::<Vec<_>>().join(" › ") }
+    }
+
     /// Tick every skill of the repo shown that isn't installed (or untick them all, when they are).
     pub(crate) fn tick_all(&mut self, cx: &Cx) {
         let Page::Repo(spec) = &self.page else { return };
@@ -1030,7 +1074,7 @@ impl SkillsView {
                 items.push(MenuItem::new("Delete forever", MenuIcon::Delete, Some("x"), MenuAct::Delete(Box::new(d.clone()), false)).danger());
                 d.name
             }
-            Entry::Head(_) | Entry::Note(_) => return None,
+            Entry::Head(_) | Entry::Family(_) | Entry::Note(_) => return None,
         };
         Some((title, items))
     }
@@ -1157,7 +1201,7 @@ impl SkillsView {
             AddCheck::NotARepo => cx.toast(Kind::Error, format!("'{}' isn't a repo: paste owner/repo, a GitHub link or a git URL", self.adding.as_deref().unwrap_or("").trim())),
             AddCheck::Watched(spec) => {
                 self.adding = None;
-                self.show_spec(spec);
+                self.show_spec(spec, cx);
             }
             AddCheck::Ready(_) => {
                 let typed = self.adding.clone().unwrap_or_default();
@@ -1172,7 +1216,7 @@ impl SkillsView {
             Ok(spec) => {
                 self.adding = None;
                 cx.toast(Kind::Info, format!("watching {} · pulling it, then pick the skills you want", skill_repos::label(&spec)));
-                self.show_spec(spec);
+                self.show_spec(spec, cx);
             }
             Err(e) => cx.toast(Kind::Error, e),
         }
@@ -1181,13 +1225,17 @@ impl SkillsView {
     /// A featured repo: watch it, or show it when it's watched already.
     pub(crate) fn feature(&mut self, f: &Featured, cx: &mut Cx) {
         match cx.svc.settings().skills.repos.into_iter().find(|w| skill_repos::same(w, f.repo)) {
-            Some(spec) => self.show_spec(spec),
+            Some(spec) => self.show_spec(spec, cx),
             None => self.watch(f.repo, cx),
         }
     }
 
-    fn show_spec(&mut self, spec: String) {
-        self.go(if skill_repos::pick(&spec).is_some() { Page::Picks } else { Page::Repo(spec) });
+    /// Show what `spec` watches: its own page, where its skills wait to be picked (a repo, or a folder of skills in
+    /// one: a link to `…/tree/main/skills/dcc/blender` lists that family); a single skill picked out of a repo, as
+    /// Skill Issue installs it, on the Skill Issue page once that's what it's known to be.
+    fn show_spec(&mut self, spec: String, cx: &Cx) {
+        let single = skill_repos::pick(&spec).is_some() && cx.svc.state().skills.repos.get(&spec).and_then(|r| r.skills.as_ref()).is_some_and(|s| s.found.len() <= 1);
+        self.go(if single { Page::Picks } else { Page::Repo(spec) });
     }
 
     // ---------------------------------------------------------------------------------------- Discover
@@ -1509,6 +1557,7 @@ impl SkillsView {
             let name_style = if on { ui::bold() } else { Style::default() };
             let line = match e {
                 Entry::Head(h) => (None, vec![Span::styled(format!("  {h}"), fg(t.fg).add_modifier(Modifier::BOLD))]),
+                Entry::Family(g) => (None, vec![Span::styled(format!("  {}", Self::family_label(g)), fg(t.fg).add_modifier(Modifier::BOLD))]),
                 Entry::Note(n) => (None, vec![Span::styled(format!("    {n}"), muted(t))]),
                 Entry::Skill(i) => {
                     let Some(s) = inv.as_ref().and_then(|v| v.skills.get(*i)) else { continue };
@@ -1626,7 +1675,7 @@ impl SkillsView {
             Page::Repo(spec) => match st.skills.repos.get(spec) {
                 Some(r) if r.syncing.is_some() => format!("pulling {}…", skill_repos::label(spec)),
                 Some(r) if r.error.is_some() => "its last pull didn't work · r tries again".into(),
-                Some(r) if r.skills.is_some() => "no skills in it: a folder with a SKILL.md at its root, one folder down, or under skills/".into(),
+                Some(r) if r.skills.is_some() => "no skills in it: a folder with a SKILL.md at its root, one folder down, or anywhere under skills/".into(),
                 _ => "not pulled yet · r pulls it".into(),
             },
             Page::Disabled => "nothing disabled · d on a skill disables it: every copy moves here, out of your agents' reach".into(),
@@ -1822,8 +1871,15 @@ impl SkillsView {
 }
 
 /// A skill picked out of its repo (what Skill Issue installs).
-fn is_pick(s: &Skill) -> bool {
-    matches!(&s.origin, Origin::Repo(r) if skill_repos::pick(r).is_some())
+fn is_pick(s: &Skill, repos: &HashMap<String, RepoState>) -> bool {
+    matches!(&s.origin, Origin::Repo(r) if !own_page(r, repos))
+}
+
+/// A watched spec the view gives a page of its own, as it does a repo: a whole repo, or a folder of skills in one
+/// (`owner/repo#skills/dcc/blender`, as a link to that folder adds it). A single skill picked out of a repo (as
+/// Skill Issue installs them) goes with the others on the Skill Issue page.
+pub(crate) fn own_page(spec: &str, repos: &HashMap<String, RepoState>) -> bool {
+    skill_repos::pick(spec).is_none() || repos.get(spec).and_then(|r| r.skills.as_ref()).is_some_and(|s| s.found.len() > 1)
 }
 
 /// Where a skill of watched repo `spec` named `name` stands: installed everywhere, in which projects, disabled, or

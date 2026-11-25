@@ -230,22 +230,130 @@ const CLAUDE_LEVELS: [(&str, &str); 5] = [
     ("max", "The deepest reasoning, and the slowest"),
 ];
 
-/// The models Claude Code's own /model picker offers, in its order (`/model <id>` takes these ids).
-pub fn claude_choices() -> Vec<ModelChoice> {
-    const MODELS: [(&str, &str, &str, &str); 4] = [
-        ("claude-opus-5-5", "Opus 5.5", "For complex work and everyday tasks", "medium"),
-        ("claude-sonnet-5-5", "Sonnet 5.5", "Most efficient for simpler tasks", "medium"),
-        ("claude-fable-5-1", "Fable 5.1", "For your toughest challenges", "high"),
-        ("claude-haiku-5-5", "Haiku 5.5", "Fastest for quick answers", "medium"),
-    ];
-    MODELS
+const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models?limit=1000";
+
+/// Claude's families in Claude Code's picker order, with what each is for and the thinking level it starts on.
+/// A family Anthropic adds later still shows (after these), dated instead of described.
+const CLAUDE_FAMILIES: [(&str, &str, &str); 4] = [
+    ("opus", "For complex work and everyday tasks", "medium"),
+    ("sonnet", "Most efficient for simpler tasks", "medium"),
+    ("fable", "For your toughest challenges", "high"),
+    ("haiku", "Fastest for quick answers", "medium"),
+];
+
+/// What bro offers before it has asked Anthropic (and when no Claude login can), newest of each family.
+const CLAUDE_BUILT_IN: [(&str, &str); 4] =
+    [("claude-opus-5-5", "Claude Opus 5.5"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"), ("claude-fable-5-2", "Claude Fable 5.2"), ("claude-haiku-5-5", "Claude Haiku 5.5")];
+
+/// `~/.bro/claude-models.cache.json`: the models Anthropic lists for this machine's Claude login, newest first.
+pub fn claude_models_cache_path() -> PathBuf {
+    paths::bro_dir().join("claude-models.cache.json")
+}
+
+/// The cached Claude models (newest first) and their age in seconds.
+pub fn claude_models_cached() -> Option<(Vec<ModelRow>, u64)> {
+    let path = claude_models_cache_path();
+    let Value::Array(rows) = read_json(&path)? else { return None };
+    let models: Vec<ModelRow> = rows.iter().filter_map(ModelRow::from_value).collect();
+    if models.is_empty() {
+        return None;
+    }
+    let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map(|d| d.as_secs()).unwrap_or(u64::MAX);
+    Some((models, age))
+}
+
+/// The Claude models a Claude login can use, newest first: what Anthropic listed last, else [`claude_built_in`].
+/// Reads the cache.
+pub fn claude_models() -> Vec<ModelRow> {
+    claude_models_cached().map(|(rows, _)| rows).unwrap_or_else(claude_built_in)
+}
+
+/// bro's own list of Claude models, for before it has asked Anthropic. Touches nothing.
+pub fn claude_built_in() -> Vec<ModelRow> {
+    CLAUDE_BUILT_IN.iter().map(|(id, name)| ModelRow { id: id.to_string(), name: name.to_string(), context: None, pricing: None, reasoning: true, created: None }).collect()
+}
+
+/// `GET /v1/models` `data` → cache rows, newest first.
+pub fn map_anthropic(data: &Value) -> Vec<Value> {
+    let Some(items) = data.as_array() else { return vec![] };
+    let mut rows: Vec<Value> = items
         .iter()
-        .map(|(id, name, detail, default)| ModelChoice {
-            id: id.to_string(),
-            name: name.to_string(),
-            detail: Some(detail.to_string()),
-            levels: CLAUDE_LEVELS.iter().map(|(l, d)| Level { id: l.to_string(), detail: Some(d.to_string()) }).collect(),
-            default_level: Some(default.to_string()),
+        .filter_map(|m| {
+            let id = m.get("id").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+            let mut row = json!({ "id": id, "name": m.get("display_name").and_then(Value::as_str).unwrap_or(id), "reasoning": true });
+            if let Some(at) = m.get("created_at").and_then(Value::as_str).and_then(crate::util::parse_iso_secs) {
+                row["created"] = json!(at);
+            }
+            Some(row)
+        })
+        .collect();
+    // stable: the API's own order (newest first) breaks ties and stands in for missing dates
+    rows.sort_by_key(|r| std::cmp::Reverse(r.get("created").and_then(Value::as_i64).unwrap_or(0)));
+    rows
+}
+
+/// Ask Anthropic which models the Claude login in `config_dir` can use and cache them (refreshing its token
+/// when expired, and once more after a 401). Blocking. Returns the model count.
+pub fn refresh_claude_models(config_dir: &Path) -> anyhow::Result<usize> {
+    let request = |token: &str| {
+        let bearer = format!("Bearer {token}");
+        crate::http::get_json(
+            ANTHROPIC_MODELS_URL,
+            &[("authorization", &bearer), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "oauth-2025-04-20")],
+            Duration::from_secs(8),
+        )
+    };
+    let mut resp = request(&crate::creds::claude_access_token(config_dir, false)?)?;
+    if resp.status == 401 {
+        resp = request(&crate::creds::claude_access_token(config_dir, true)?)?;
+    }
+    if !resp.ok() {
+        bail!("Claude models: HTTP {}", resp.status);
+    }
+    let rows = map_anthropic(resp.body.get("data").unwrap_or(&Value::Null));
+    if rows.is_empty() {
+        bail!("Anthropic listed no models");
+    }
+    write_json_pretty(&claude_models_cache_path(), &Value::Array(rows.clone()))?;
+    Ok(rows.len())
+}
+
+/// `claude-haiku-4-5-20251001` → `haiku` (older ids put the version first: `claude-3-5-sonnet-…`).
+fn claude_family(id: &str) -> Option<&str> {
+    id.strip_prefix("claude-")?.split('-').find(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
+/// The models Claude Code's own /model picker offers, in its order (`/model <id>` takes these ids): the newest
+/// of each family in what Anthropic last listed, so a new model shows once bro has asked. Reads the cache.
+pub fn claude_choices() -> Vec<ModelChoice> {
+    claude_choices_from(&claude_models())
+}
+
+/// The newest model of each Claude family in `rows` (newest first), known families in Claude Code's order and
+/// any newer family after them.
+pub fn claude_choices_from(rows: &[ModelRow]) -> Vec<ModelChoice> {
+    let mut newest: Vec<(&str, &ModelRow)> = vec![];
+    for row in rows {
+        if let Some(family) = claude_family(&row.id)
+            && !newest.iter().any(|(f, _)| *f == family)
+        {
+            newest.push((family, row));
+        }
+    }
+    let rank = |family: &str| CLAUDE_FAMILIES.iter().position(|(f, ..)| *f == family).unwrap_or(CLAUDE_FAMILIES.len());
+    newest.sort_by_key(|(family, _)| rank(family));
+    newest
+        .into_iter()
+        .map(|(family, row)| {
+            let known = CLAUDE_FAMILIES.iter().find(|(f, ..)| *f == family);
+            let released = || row.created.and_then(|s| chrono::DateTime::from_timestamp(s, 0)).map(|d| format!("New from Anthropic, out {}", d.format("%b %-d, %Y")));
+            ModelChoice {
+                id: row.id.clone(),
+                name: row.name.strip_prefix("Claude ").unwrap_or(&row.name).to_string(),
+                detail: known.map(|(_, detail, _)| detail.to_string()).or_else(released),
+                levels: CLAUDE_LEVELS.iter().map(|(l, d)| Level { id: l.to_string(), detail: Some(d.to_string()) }).collect(),
+                default_level: known.map(|(.., level)| level.to_string()),
+            }
         })
         .collect()
 }
@@ -384,7 +492,41 @@ mod tests {
     }
 
     #[test]
+    fn claude_offers_the_newest_of_each_family_anthropic_lists() {
+        let _s = sandbox();
+        let built_in = claude_choices();
+        assert_eq!(built_in.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["Opus 5.5", "Sonnet 5.5", "Fable 5.2", "Haiku 5.5"], "before bro has asked");
+        let data = json!([
+            { "id": "claude-haiku-5-5", "display_name": "Claude Haiku 5.5", "created_at": "2026-10-07T18:00:00Z" },
+            { "id": "claude-fable-5-1", "display_name": "Claude Fable 5.1", "created_at": "2026-08-28T00:00:00Z" },
+            { "id": "claude-fable-5-3", "display_name": "Claude Fable 5.3", "created_at": "2026-12-01T09:00:00Z" },
+            { "id": "claude-lyric-1", "display_name": "Claude Lyric 1", "created_at": "2026-11-20T00:00:00Z" },
+            { "id": "claude-opus-5-5", "display_name": "Claude Opus 5.5", "created_at": "2026-09-21T16:24:00Z" },
+            { "id": "claude-3-5-sonnet-20241022", "display_name": "Claude Sonnet 3.5", "created_at": "2024-10-22T00:00:00Z" },
+            { "id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5", "created_at": "2026-09-28T00:00:00Z" },
+            { "id": "" }
+        ]);
+        let rows = map_anthropic(&data);
+        assert_eq!(rows.len(), 7);
+        assert_eq!(rows[0]["id"], "claude-fable-5-3", "newest first");
+        write_json_pretty(&claude_models_cache_path(), &Value::Array(rows)).unwrap();
+        let (cached, age) = claude_models_cached().unwrap();
+        assert!(age < 60);
+        assert_eq!(cached, claude_models());
+        let choices = claude_choices();
+        assert_eq!(
+            choices.iter().map(|m| (m.id.as_str(), m.name.as_str())).collect::<Vec<_>>(),
+            [("claude-opus-5-5", "Opus 5.5"), ("claude-sonnet-5-5", "Sonnet 5.5"), ("claude-fable-5-3", "Fable 5.3"), ("claude-haiku-5-5", "Haiku 5.5"), ("claude-lyric-1", "Lyric 1")],
+            "Claude Code's order; a family bro doesn't know yet goes last",
+        );
+        assert_eq!((choices[2].detail.as_deref(), choices[2].default_level.as_deref()), (Some("For your toughest challenges"), Some("high")));
+        assert_eq!((choices[4].detail.as_deref(), choices[4].default_level.as_deref()), (Some("New from Anthropic, out Nov 20, 2026"), None));
+        assert!(choices.iter().all(|m| m.levels.len() == 5));
+    }
+
+    #[test]
     fn models_to_switch_to_know_their_thinking_levels() {
+        let _s = sandbox();
         let claude = claude_choices();
         assert_eq!(claude[0].id, "claude-opus-5-5");
         assert_eq!(claude[0].levels.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["low", "medium", "high", "xhigh", "max"]);

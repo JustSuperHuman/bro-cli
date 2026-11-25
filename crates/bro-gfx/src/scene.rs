@@ -1,12 +1,16 @@
 //! A frame's worth of drawing, in physical pixels: layers of shadows, rounded rects, images and glyphs.
 //!
-//! Inside a layer the passes draw in a fixed order — glass, shadows, quads, images, glyphs, then `top` quads
+//! Inside a layer the passes draw in a fixed order — cuts, glass, shadows, quads, images, glyphs, then `top` quads
 //! (cursor beams, underlines, scrollbars) and `top_glass` — so a panel's background always sits under its text.
 //! Anything that must cover text (a menu, a dialog, a toast) goes in a later layer.
 //!
 //! Glass quads paint their colour into what's already there without changing how see-through it is: over a
 //! see-through window (its clear colour's alpha below 1) the surfaces drawn that way all stay exactly as
 //! see-through as the window, however many are stacked; over an opaque one they're ordinary fills.
+//!
+//! A cut wipes what the layers below drew under it, down to clear: a page that covers what's beneath it (a
+//! session's text, which is solid) paints its own colour over the cut at the window's alpha, and so is as
+//! see-through as the window with nothing showing through it but the desktop.
 
 use crate::color::Color;
 use crate::geom::{Corners, Rect};
@@ -22,7 +26,7 @@ pub struct QuadInstance {
     pub fill2: [f32; 4],
     pub border: [f32; 4],
     pub clip: [f32; 4],
-    /// border width, gradient (0 none, 1 vertical, 2 horizontal), clip corner radius, dashed border
+    /// border width, gradient (0 none, 1 vertical, 2 horizontal, 3 radial), clip corner radius, dashed border
     pub params: [f32; 4],
 }
 
@@ -85,6 +89,8 @@ pub enum Fill {
     Vertical(Color, Color),
     /// left → right
     Horizontal(Color, Color),
+    /// the centre → the middle of each side (a glow, in one quad)
+    Radial(Color, Color),
 }
 
 impl From<Color> for Fill {
@@ -99,12 +105,13 @@ impl Fill {
             Fill::Solid(c) => (c.to_array(), c.to_array(), 0.0),
             Fill::Vertical(a, b) => (a.to_array(), b.to_array(), 1.0),
             Fill::Horizontal(a, b) => (a.to_array(), b.to_array(), 2.0),
+            Fill::Radial(a, b) => (a.to_array(), b.to_array(), 3.0),
         }
     }
     fn invisible(&self) -> bool {
         match *self {
             Fill::Solid(c) => c.a <= 0.0,
-            Fill::Vertical(a, b) | Fill::Horizontal(a, b) => a.a <= 0.0 && b.a <= 0.0,
+            Fill::Vertical(a, b) | Fill::Horizontal(a, b) | Fill::Radial(a, b) => a.a <= 0.0 && b.a <= 0.0,
         }
     }
 }
@@ -157,7 +164,9 @@ impl Clip {
 /// One layer.
 #[derive(Default, Debug)]
 pub struct Layer {
-    /// surfaces of the window itself (its content area, cards, panels on them), first, in the order given
+    /// what the layers below drew under these is wiped clear (by their alpha), before anything else here
+    pub cut: Vec<QuadInstance>,
+    /// surfaces of the window itself (its content area, cards, panels on them), next, in the order given
     pub glass: Vec<QuadInstance>,
     pub shadows: Vec<ShadowInstance>,
     pub quads: Vec<QuadInstance>,
@@ -172,6 +181,7 @@ pub struct Layer {
 
 impl Layer {
     fn clear(&mut self) {
+        self.cut.clear();
         self.glass.clear();
         self.top_glass.clear();
         self.shadows.clear();
@@ -182,7 +192,7 @@ impl Layer {
         self.top.clear();
     }
     pub fn is_empty(&self) -> bool {
-        self.glass.is_empty() && self.shadows.is_empty() && self.quads.is_empty() && self.images.is_empty() && self.mid.is_empty() && self.glyphs.is_empty() && self.top.is_empty() && self.top_glass.is_empty()
+        self.cut.is_empty() && self.glass.is_empty() && self.shadows.is_empty() && self.quads.is_empty() && self.images.is_empty() && self.mid.is_empty() && self.glyphs.is_empty() && self.top.is_empty() && self.top_glass.is_empty()
     }
 }
 
@@ -307,7 +317,15 @@ impl Scene {
         }
     }
 
-    /// A surface of the window (see [`Layer::glass`]): drawn before everything else in this layer, in call order.
+    /// Wipe what the layers below drew under `q` (see [`Layer::cut`]): how much goes is `q`'s alpha, so a faded
+    /// one wipes less. Done before anything else in this layer.
+    pub fn cut_quad(&mut self, q: Quad) {
+        if let Some(i) = self.quad_instance(&q) {
+            self.layers[self.current].cut.push(i);
+        }
+    }
+
+    /// A surface of the window (see [`Layer::glass`]): drawn before the rest of this layer, in call order.
     pub fn glass_quad(&mut self, q: Quad) {
         if let Some(i) = self.quad_instance(&q) {
             self.layers[self.current].glass.push(i);
@@ -417,7 +435,9 @@ mod tests {
         // invisible quads aren't drawn
         s.rect(Rect::new(0.0, 0.0, 1.0, 1.0), Color::TRANSPARENT);
         assert!(s.used_layers()[0].quads.is_empty());
-        // glass keeps its own lists, cleared with the rest
+        // glass and cuts keep their own lists, cleared with the rest
+        s.cut_quad(Quad::new(Rect::new(0.0, 0.0, 4.0, 4.0), Color::WHITE));
+        assert_eq!(s.used_layers()[0].cut.len(), 1);
         s.glass_quad(Quad::new(Rect::new(0.0, 0.0, 4.0, 4.0), Color::WHITE));
         s.top_glass_quad(Quad::new(Rect::new(0.0, 0.0, 4.0, 4.0), Color::WHITE));
         assert_eq!((s.used_layers()[0].glass.len(), s.used_layers()[0].top_glass.len()), (1, 1));

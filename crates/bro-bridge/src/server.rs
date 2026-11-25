@@ -66,6 +66,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/health", get(rest::health))
         .route("/api/host", get(rest::host))
         .route("/api/hosts", get(rest::hosts))
+        .route("/api/justconnect", get(crate::justconnect::status))
+        .route("/api/justconnect/{action}", post(crate::justconnect::action))
         .route("/api/folders", get(rest::folders))
         .route("/api/acp", get(rest::acp))
         .route("/api/acp/{*rest}", any(rest::unavailable))
@@ -130,6 +132,7 @@ pub(crate) fn router(state: AppState) -> Router {
             get(rest::projects).post(rest::create_project),
         )
         .route("/api/projects/recent", get(rest::recent_projects))
+        .route("/api/project-icons/{file}", get(crate::project_icons::picture))
         .route("/api/projects/order", patch(rest::reorder_projects))
         .route(
             "/api/projects/{id}",
@@ -157,10 +160,22 @@ pub(crate) fn router(state: AppState) -> Router {
                 .delete(crate::orchestrator::mcp::not_allowed),
         )
         .route(
+            "/mcp/studio",
+            post(crate::orchestrator::mcp::post_studio)
+                .get(crate::orchestrator::mcp::not_allowed)
+                .delete(crate::orchestrator::mcp::not_allowed),
+        )
+        .route(
             "/api/orchestrator/messages",
             post(rest::orchestrator_send).delete(rest::orchestrator_clear),
         )
         .route("/api/orchestrator/cancel", post(rest::orchestrator_cancel))
+        .route("/api/voice", get(crate::voice::status))
+        .route("/api/voice/calls", post(crate::voice::start))
+        .route("/api/voice/calls/{id}/hangup", post(crate::voice::hangup))
+        .route("/api/voice/calls/{id}/context", post(crate::voice::update))
+        .route("/api/voice/calls/{id}/confirm", post(crate::voice::confirm))
+        .route("/voice", get(crate::voice::page))
         .route("/api/orchestrator/test", post(rest::orchestrator_test))
         .route("/api/orchestrator/start", post(rest::orchestrator_retired))
         .route("/api/orchestrator/stop", post(rest::orchestrator_retired))
@@ -186,6 +201,7 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .merge(protected)
         .merge(crate::rmm::routes(state.clone()))
+        .merge(crate::browser::routes(state.clone()))
         .merge(crate::mod_jobs::routes())
         .merge(client)
         .with_state(state)
@@ -288,7 +304,9 @@ pub(crate) fn spawn_background(state: &AppState) {
         }
     });
     crate::hosts::spawn(state);
+    crate::justconnect::spawn(state);
     crate::rmm::spawn(state);
+    crate::browser::spawn(state);
     crate::coordination::spawn_supervisor(state);
     let observer = state.clone();
     tokio::spawn(async move {

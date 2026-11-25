@@ -14,6 +14,7 @@ mod loader;
 
 use super::actions::Action;
 use super::kit::widgets::MenuLine;
+use super::kit::motion::Spring;
 use super::kit::{Cursor, Style, Ui, size, weight, widgets};
 use crate::layout::PaneId;
 use bro_gfx::text::Align;
@@ -236,6 +237,7 @@ enum DragKind {
 
 pub struct Media {
     pub items: Vec<Item>,
+    pub(super) gallery_revision: u64,
     pub sel: Option<PathBuf>,
     /// the whole project's media (else the focused session's)
     pub whole_project: bool,
@@ -275,6 +277,8 @@ pub struct Media {
     /// The first viewer click's playback state, restored when it becomes a double-click.
     viewer_was_playing: Option<bool>,
     viewer: Rect,
+    /// the panel's picture last time it was drawn: where opening it full size zooms from, and closing it back to
+    thumb: Rect,
     /// logical → physical pixels, as of the last draw
     scale: f32,
     /// wakes the window (a decoded frame is ready)
@@ -365,6 +369,7 @@ impl Media {
     pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Media {
         Media {
             items: vec![],
+            gallery_revision: 0,
             sel: None,
             whole_project: false,
             focus: false,
@@ -392,6 +397,7 @@ impl Media {
             viewer_was_playing: None,
             page: 0,
             viewer: Rect::ZERO,
+            thumb: Rect::ZERO,
             scale: 1.0,
             wake,
             req: 0,
@@ -430,11 +436,13 @@ impl Media {
             // a stronger reason to have it (sent beats looked at) shows; a caption sticks
             if (source as u8) < (it.source as u8) {
                 it.source = source;
+                self.gallery_revision += 1;
             }
             if caption.is_some() {
                 it.caption = caption;
             }
             let Some(at) = at.filter(|at| explicit || *at > it.at) else { return false };
+            self.gallery_revision += 1;
             let mut it = self.items.remove(i);
             it.at = at;
             if owner.is_some() {
@@ -459,6 +467,7 @@ impl Media {
         let m = mtime(&path);
         // newest first: something older than the top goes below the newer ones
         let at_i = self.items.iter().position(|it| it.at <= at).unwrap_or(self.items.len());
+        self.gallery_revision += 1;
         self.items.insert(at_i, Item { path, kind, owner, source, at, caption, mtime: m });
         self.items.truncate(500);
         self.unseen += 1;
@@ -770,6 +779,15 @@ impl Media {
         self.scale = ui.scale;
         let t = ui.t;
         self.unseen = 0;
+        // the full-size view closed: it shrinks back into the panel's picture
+        ui.spring("media-open", 0.0, Spring::GLIDE, 0.0);
+        if self.thumb.w > 0.0 {
+            let (c, to) = (ui.screen.center(), self.thumb.center());
+            let end = (self.thumb.w / ui.screen.w.max(1.0)).clamp(0.05, 0.9);
+            // the scale's fixed point that carries the window's middle onto the picture's
+            let about = Point::new((to.x - end * c.x) / (1.0 - end), (to.y - end * c.y) / (1.0 - end));
+            ui.ghost_leave_for("media-expanded", 0.26, Point::new(0.0, 0.0), end, about);
+        }
         // the panel's edge: drag to resize
         let edge = Rect::new(r.x - 3.0, r.y, 6.0, r.h);
         let eh = ui.hover_amount("media-edge", edge);
@@ -819,6 +837,7 @@ impl Media {
         let viewer_h = (inner.w * 0.78).clamp(160.0, (inner.h * 0.55).max(160.0));
         let viewer = Rect::new(inner.x, y, inner.w, viewer_h);
         self.viewer = viewer;
+        self.thumb = viewer;
         self.draw_viewer(ui, viewer, shown.len());
         y = viewer.bottom() + 12.0;
         // about it
@@ -826,11 +845,11 @@ impl Media {
             y = self.draw_info(ui, Rect::new(inner.x, y, inner.w, 140.0), it);
         }
         // what you can do with it (the path line above copies the path)
-        let copy_tip = if item.as_ref().is_some_and(|it| self.copies_as_picture(it)) { "Copy the picture · c" } else { "Copy the file · c" };
+        let copy_tip = if item.as_ref().is_some_and(|it| self.copies_as_picture(it)) { "Copy the picture" } else { "Copy the file" };
         let actions: [(&str, &str, &str, Target); 5] = [
             ("\u{F018F}", "Copy", copy_tip, Target::Copy),
-            ("\u{F0065}", "Mention", "Mention · @", Target::Mention),
-            ("\u{F03CC}", "Open", "Open · o", Target::Open),
+            ("\u{F0065}", "Mention", "Mention in session", Target::Mention),
+            ("\u{F03CC}", "Open", "Open with default app", Target::Open),
             ("\u{F0256}", "Folder", "", Target::Reveal),
             ("\u{F0A7A}", "Remove", "Remove · del", Target::Remove),
         ];
@@ -862,6 +881,7 @@ impl Media {
     /// viewer's sits under them. Returns the bar, which drags the window where nothing in it is clickable.
     pub fn draw_expanded(&mut self, ui: &mut Ui, r: Rect, buttons: Rect, focus: Option<&Owner>) -> Rect {
         let prev = ui.layer();
+        let from = ui.group_start();
         self.targets.clear();
         self.scale = ui.scale;
         let t = ui.t;
@@ -940,6 +960,20 @@ impl Media {
         self.viewer = view;
         self.draw_viewer(ui, view, shown.len());
         self.draw_menu(ui, item.as_ref());
+        // opening it: the picture grows out of the panel's thumbnail, the rest fading in around it
+        let open = ui.spring("media-open", 1.0, Spring::new(0.34, 0.06), 1.0);
+        if open != 1.0 && self.thumb.w > 0.0 {
+            let (c, to) = (r.center(), self.thumb.center());
+            let start = (self.thumb.w / r.w.max(1.0)).clamp(0.05, 0.9);
+            let s = start + (1.0 - start) * open;
+            // the point this scale is about: where the window's middle lands between the picture's and its own
+            let about = Point::new((to.x - start * c.x) / (1.0 - start), (to.y - start * c.y) / (1.0 - start));
+            let k = (open * 1.6).clamp(0.0, 1.0);
+            // keeping the middle on the line from the picture to the window's: scaling about a fixed point does it
+            ui.transform_since(from, about, s, Point::new(0.0, 0.0), k);
+        } else {
+            ui.ghost_keep("media-expanded", from);
+        }
         ui.set_layer(prev);
         bar
     }
@@ -952,7 +986,7 @@ impl Media {
 
     /// The menu's lines for `it` (None: a separator), as things stand: Play or Pause, the zoom there is to undo.
     fn menu_lines(&self, it: &Item) -> Vec<Option<Line>> {
-        let l = |icon, label, key, cmd| Some(Line { icon, label, key, cmd });
+        let l = |icon, label, key: Option<&'static str>, cmd| Some(Line { icon, label, key: key.filter(|key| self.expanded || *key == "del"), cmd });
         let copy = if self.copies_as_picture(it) { "Copy picture" } else { "Copy file" };
         let mut out = vec![l("\u{F018F}", copy, Some("c"), Cmd::Copy), l("\u{F0337}", "Copy path", Some("shift+c"), Cmd::CopyPath), l("\u{F0065}", "Mention in session", Some("@"), Cmd::Mention)];
         let shown = self.view.path() == Some(it.path.as_path());
@@ -1369,7 +1403,7 @@ impl Media {
         let n = self.target(Target::CopyPath);
         ui.hit(hit, Action::Media(n));
         if h > 0.5 {
-            widgets::tooltip(ui, hit, "Copy path · shift+c");
+            widgets::tooltip(ui, hit, if self.expanded { "Copy path · shift+c" } else { "Copy path" });
         }
         let when = ago(it.at);
         let from = match &it.owner {
@@ -1431,9 +1465,14 @@ impl Media {
                         let k = w / hh;
                         [0.0, (1.0 - k) / 2.0, 1.0, (1.0 + k) / 2.0]
                     };
-                    ui.image(*id, b, uv, super::kit::radius::CONTROL, 1.0);
+                    // one that was loading comes in: it fades up and settles from a touch smaller
+                    let a = ui.spring(("thumb-in", &it.path), 1.0, Spring::new(0.3, 0.0), 1.0).clamp(0.0, 1.0);
+                    ui.image(*id, b.inset(b.w * 0.04 * (1.0 - a)), uv, super::kit::radius::CONTROL, a);
                 }
-                Some((Thumb::Loading, _)) => ui.spinner(b.center(), 6.0, 2.0, t.faint),
+                Some((Thumb::Loading, _)) => {
+                    ui.spring_set(("thumb-in", &it.path), 0.0);
+                    ui.spinner(b.center(), 6.0, 2.0, t.faint)
+                }
                 Some((Thumb::Failed, _)) => {
                     let icon = match it.kind {
                         MediaKind::Pdf => "\u{F0226}",
@@ -1637,7 +1676,7 @@ impl Media {
     }
 
     /// A key while the menu is open: the arrows move in it, Enter runs the line, Escape closes it. Any other key
-    /// closes it and goes on to do what it does (c still copies); None then.
+    /// closes it and goes on to do what it does; None then.
     fn menu_key(&mut self, k: &crossterm::event::KeyEvent, focus: Option<&Owner>) -> Option<Ask> {
         use crossterm::event::{KeyCode, KeyModifiers};
         let cmds: Vec<Option<Cmd>> = self.selected_item().map(|it| self.menu_lines(&it)).unwrap_or_default().iter().map(|l| l.map(|l| l.cmd)).collect();
@@ -1737,6 +1776,7 @@ impl Media {
         let Some(path) = self.sel.clone() else { return };
         let shown: Vec<PathBuf> = self.shown(focus).iter().map(|it| it.path.clone()).collect();
         let at = shown.iter().position(|p| *p == path).unwrap_or(0);
+        self.gallery_revision += 1;
         self.items.retain(|it| it.path != path);
         // hidden, not deleted: the file stays where it is, and re-reading the transcript doesn't bring it back
         self.hidden.insert(key(&path), SystemTime::now());
@@ -1891,6 +1931,11 @@ impl Media {
             return Some(self.copy());
         }
         if !k.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            return None;
+        }
+        // Typing in the sidebar returns to the workspace; None forwards this same character there.
+        if !self.expanded && matches!(k.code, KeyCode::Char(c) if !c.is_control()) {
+            self.focus = false;
             return None;
         }
         let zoomed = self.zoom > 1.01;
@@ -2363,6 +2408,7 @@ mod tests {
     fn copy_takes_the_picture_or_the_file() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut m = Media::new(Arc::new(|| {}));
+        m.expanded = true;
         let c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
         assert!(matches!(m.key(&c, None), Some(Ask::None)), "nothing selected, nothing to copy");
         let path = PathBuf::from("still.png");
@@ -2376,6 +2422,42 @@ mod tests {
         assert!(!m.copies_as_picture(&Item { path: PathBuf::from("dance.GIF"), ..still.clone() }), "an animation goes as the file");
         assert!(!m.copies_as_picture(&Item { path: PathBuf::from("clip.mp4"), kind: MediaKind::Video, ..still.clone() }));
         assert!(!m.copies_as_picture(&Item { path: PathBuf::from("doc.pdf"), kind: MediaKind::Pdf, ..still }));
+    }
+
+    #[test]
+    fn typing_in_the_gallery_returns_the_first_character_to_the_workspace() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut m = Media::new(Arc::new(|| {}));
+        let path = PathBuf::from("still.png");
+        m.select(&path);
+        m.zoom = 2.0;
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            for c in "hello mcoCi@+-=01 !é中".chars() {
+                m.focus = true;
+                let key = KeyEvent::new(KeyCode::Char(c), modifiers);
+                assert!(m.key(&key, None).is_none(), "{key:?} must reach the workspace");
+                assert!(!m.focus, "{key:?} must return focus");
+                assert_eq!(m.sel.as_ref(), Some(&path));
+                assert_eq!(m.zoom, 2.0, "typing must not change the preview");
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_and_shortcut_chords_keep_gallery_focus() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut m = Media::new(Arc::new(|| {}));
+        m.focus = true;
+        for code in [KeyCode::Enter, KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right, KeyCode::Tab, KeyCode::BackTab, KeyCode::Home, KeyCode::End, KeyCode::PageUp, KeyCode::PageDown, KeyCode::F(1)] {
+            m.key(&KeyEvent::new(code, KeyModifiers::NONE), None);
+            assert!(m.focus, "{code:?} must keep gallery focus");
+        }
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::CONTROL | KeyModifiers::SHIFT, KeyModifiers::ALT | KeyModifiers::SHIFT, KeyModifiers::CONTROL | KeyModifiers::ALT, KeyModifiers::SUPER] {
+            for c in ['a', 'c', 'm', ' ', '+'] {
+                m.key(&KeyEvent::new(KeyCode::Char(c), modifiers), None);
+                assert!(m.focus, "{modifiers:?}+{c} must keep gallery focus");
+            }
+        }
     }
 
     #[test]

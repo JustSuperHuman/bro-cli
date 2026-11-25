@@ -159,11 +159,10 @@ pub struct Settings {
     pub bridge: BridgeSettings,
     /// Optional desktop viewing/control, downloaded separately when enabled.
     pub mobile_companion: crate::rmm::Settings,
+    /// Bro supplies browser and desktop tools to every harness when installed.
+    pub automation: crate::automation::Settings,
     pub proxy: ProxySettings,
-    /// Legacy voice preferences remain readable; they are not consent to start Orbit.
     pub voice: VoiceSettings,
-    /// Orbit owns realtime audio, credentials, microphones and hotkeys.
-    pub orbit_voice: OrbitSettings,
     pub insights: InsightsSettings,
     pub auto_resume: AutoResumeSettings,
     /// Answer Yes for you when Claude stops on a "Do you want to proceed?" permission prompt (the safety
@@ -175,12 +174,14 @@ pub struct Settings {
     /// Tiles that sit side by side share one border line instead of each drawing its own, and each tile's status
     /// moves up into its title band. Off by default (trying it out).
     pub shared_borders: bool,
-    /// A strip of project tabs across the top of the sessions (not in the sidebar): All tiles every session,
-    /// each project's tab tiles just its own. Off by default.
-    pub project_tabs: bool,
-    /// What the project tabs do when there are more than fit across: scroll along one row (the default) or stack
-    /// into more rows.
+    /// What the session tabs across the top of the sessions do when there are more than fit across: scroll along
+    /// one row (the default) or stack into more rows. (A `project_tabs` switch older files carry is ignored: the
+    /// tabs are always on.)
     pub tab_overflow: TabOverflow,
+    /// A project with no icon of its own (no picture chosen or found) gets one drawn: the login you launched on last
+    /// draws a symbol for it, which bro sets on its own tile so every drawn icon shares one style (see
+    /// [`crate::icon_maker`]). On by default; off shows their letters again.
+    pub draw_project_icons: bool,
     /// Permission mode new sessions start on: the one last picked in the launcher.
     pub permission: crate::launch::Permission,
     /// Privacy / update / behaviour env for Claude launches (preset + overrides).
@@ -203,6 +204,8 @@ pub struct Settings {
     pub server: ServerSettings,
     /// Watchdogs: a fresh reviewer agent that hands an idle session its next task.
     pub watchdog: WatchdogSettings,
+    /// Slop Collector (beta): ends what the tools your agents run leave behind in a session (see [`crate::slop`]).
+    pub slop: crate::slop::SlopSettings,
     /// The setup guide (install an agent, add a login) was dismissed: it no longer opens by itself at startup.
     pub setup_done: bool,
     /// action name -> key chord, overriding defaults (e.g. "palette" = "ctrl+k")
@@ -308,31 +311,7 @@ impl Default for WatchdogSettings {
     }
 }
 
-/// Orbit Voice's local integration preferences. Provider settings and secrets live in Orbit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct OrbitSettings {
-    /// Explicit consent to connect; legacy `voice.enabled` never enables Orbit.
-    pub enabled: bool,
-    /// Legacy placement, retained for compatibility. Never grants escape permission.
-    pub mode: String,
-    /// Explicit permission for Qubit to roam outside the native bro client.
-    pub allow_escape: bool,
-    /// Remain available through bro's background driver, subject to its global policy.
-    pub keep_in_background: bool,
-    /// An explicitly selected compatible application, or Electron for a local preview.
-    pub executable: Option<std::path::PathBuf>,
-    /// Local preview's application directory, passed as Electron's first argument.
-    pub application_dir: Option<std::path::PathBuf>,
-}
-
-impl Default for OrbitSettings {
-    fn default() -> Self {
-        Self { enabled: false, mode: "attached".into(), allow_escape: false, keep_in_background: true, executable: None, application_dir: None }
-    }
-}
-
-/// Legacy push-to-talk preferences, retained for old settings files.
+/// Push-to-talk and live call preferences.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VoiceSettings {
@@ -345,6 +324,8 @@ pub struct VoiceSettings {
     pub model: Option<String>,
     /// ISO-639-1 hint such as "en"; None = auto-detect.
     pub language: Option<String>,
+    /// Desktop composer dictation preferences.
+    pub dictation: DictationSettings,
     /// "live": talk with GPT-Live, which answers out loud and hands work to Hugh. "transcribe": speech to text
     /// only, Hugh's answers as toasts.
     pub mode: String,
@@ -352,6 +333,37 @@ pub struct VoiceSettings {
     pub live_voice: Option<String>,
     /// GPT-Live model; None = bro-voice's default.
     pub live_model: Option<String>,
+    /// Live voice calls from bro's phone app and the `/voice` page (OpenAI Realtime through bro's bridge).
+    pub calls: bool,
+    /// Realtime model for live calls; None = the bridge's default.
+    pub realtime_model: Option<String>,
+    /// Voice for live calls (marin, cedar, ...); None = the bridge's default. A client may pick its own per call.
+    pub realtime_voice: Option<String>,
+    /// What live calls say unprompted: "all" (agents finishing or needing you), "asked" (only agents you talked
+    /// to, plus questions), "off".
+    pub announce: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DictationSettings {
+    pub enabled: bool,
+    pub shortcut: DictationShortcut,
+    pub cleanup: bool,
+    pub cleanup_model: Option<String>,
+    pub correction_cue: String,
+    pub remove_fillers: bool,
+    /// Canonical spelling and its possible misrecognitions.
+    pub dictionary: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DictationShortcut {
+    #[default]
+    Auto,
+    Hold,
+    Toggle,
 }
 
 /// What the desktop app's window is made of.
@@ -474,16 +486,16 @@ impl Default for Settings {
             material_tint: MATERIAL_TINT,
             bridge: BridgeSettings::default(),
             mobile_companion: crate::rmm::Settings::default(),
+            automation: crate::automation::Settings::default(),
             proxy: ProxySettings::default(),
             voice: VoiceSettings::default(),
-            orbit_voice: OrbitSettings::default(),
             insights: InsightsSettings::default(),
             auto_resume: AutoResumeSettings::default(),
             auto_approve: false,
             summary_screensaver_secs: 0,
             shared_borders: false,
-            project_tabs: false,
             tab_overflow: TabOverflow::Scroll,
+            draw_project_icons: true,
             permission: Default::default(),
             claude_env: Default::default(),
             caveman: Default::default(),
@@ -495,6 +507,7 @@ impl Default for Settings {
             updates: Default::default(),
             server: Default::default(),
             watchdog: Default::default(),
+            slop: Default::default(),
             setup_done: false,
             keys: BTreeMap::new(),
         }
@@ -502,7 +515,10 @@ impl Default for Settings {
 }
 impl Default for VoiceSettings {
     fn default() -> Self {
-        Self { enabled: true, hotkey: None, api_key_env: "OPENAI_API_KEY".into(), model: None, language: None, mode: "live".into(), live_voice: None, live_model: None }
+        Self {
+            enabled: true, hotkey: None, api_key_env: "OPENAI_API_KEY".into(), model: None, language: None, mode: "live".into(), live_voice: None, live_model: None,
+            dictation: DictationSettings::default(), calls: true, realtime_model: None, realtime_voice: None, announce: "all".into(),
+        }
     }
 }
 impl Default for BridgeSettings {
@@ -529,17 +545,51 @@ impl Default for ProxySettings {
 impl Settings {
     /// Missing or malformed file → defaults (never fails).
     pub fn load() -> Settings {
-        std::fs::read_to_string(paths::settings_path())
+        Settings::load_from(&paths::settings_path())
+    }
+
+    /// The settings in `path` (a `v2.toml`); missing or malformed → defaults.
+    pub fn load_from(path: &std::path::Path) -> Settings {
+        std::fs::read_to_string(path)
             .ok()
             .and_then(|t| toml::from_str(&t).ok())
             .unwrap_or_default()
     }
 
+    /// Why the settings file can't be read (the parser's words), when there is one and it can't. A file like
+    /// that loads as the defaults, which is not the same as having none: it is someone's settings with a slip
+    /// in them.
+    pub fn problem() -> Option<String> {
+        Settings::problem_in(&paths::settings_path())
+    }
+
+    /// [`Settings::problem`] for the file at `path`.
+    pub fn problem_in(path: &std::path::Path) -> Option<String> {
+        let text = std::fs::read_to_string(path).ok()?;
+        toml::from_str::<Settings>(&text).err().map(|e| e.to_string())
+    }
+
     /// Atomic write of `~/.bro/v2.toml`.
     pub fn save(&self) -> anyhow::Result<()> {
+        self.save_to(&paths::settings_path())
+    }
+
+    /// [`Settings::save`] to `path`. A file there that couldn't be read is kept beside the new one first
+    /// (`v2.toml.unreadable-<when>`): bro started on defaults because of it, and writing those over it would
+    /// throw away everything the person had set for the sake of one stray character.
+    pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let text = toml::to_string_pretty(self).context("serializing settings")?;
-        let path = paths::settings_path();
-        atomic_write(&path, text.as_bytes()).with_context(|| format!("writing {}", path.display()))
+        if Settings::problem_in(path).is_some() {
+            let kept = Settings::set_aside_name(path, &chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
+            std::fs::copy(path, &kept).with_context(|| format!("keeping the unreadable {} as {}", path.display(), kept.display()))?;
+        }
+        atomic_write(path, text.as_bytes()).with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// Where an unreadable settings file is kept: beside it, named for when.
+    pub fn set_aside_name(path: &std::path::Path, when: &str) -> std::path::PathBuf {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "v2.toml".into());
+        path.with_file_name(format!("{name}.unreadable-{when}"))
     }
 }
 
@@ -616,6 +666,32 @@ impl State {
 mod tests {
     use super::*;
     use crate::util::test_env::sandbox;
+
+    #[test]
+    fn settings_that_cannot_be_read_are_kept_when_new_ones_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.toml");
+        // no file, and a good one: nothing to report, nothing set aside
+        assert_eq!(Settings::problem_in(&path), None);
+        Settings::default().save_to(&path).unwrap();
+        assert_eq!(Settings::problem_in(&path), None);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // someone's settings with a slip in them: bro runs on defaults, and says why
+        let theirs = "theme = \"paper\"\nprefix = \"ctrl+a\n[bridge]\nenabled = true\n";
+        std::fs::write(&path, theirs).unwrap();
+        assert!(Settings::problem_in(&path).is_some());
+        assert_eq!(Settings::load_from(&path).prefix, Settings::default().prefix, "unreadable loads as the defaults");
+        // the next change writes a new file, with theirs kept beside it byte for byte
+        Settings::default().save_to(&path).unwrap();
+        assert_eq!(Settings::problem_in(&path), None);
+        let kept: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("v2.toml.unreadable-"))).collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), theirs);
+        // a later save of the now-good file sets nothing more aside
+        Settings::default().save_to(&path).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert_eq!(Settings::set_aside_name(&path, "20261110-120000").file_name().unwrap().to_string_lossy(), "v2.toml.unreadable-20261110-120000");
+    }
 
     #[test]
     fn config_round_trip_preserves_unknown_keys_and_order() {
@@ -720,44 +796,21 @@ mod tests {
         assert_eq!(Settings::load().theme, "graphite");
     }
 
-    #[test]
-    fn orbit_preferences_are_opt_in_and_keep_legacy_voice_readable() {
-        let _sb = sandbox();
-        let legacy: Settings = toml::from_str("[voice]\nenabled = true\nhotkey = 'right-win'\nmode = 'live'\n").unwrap();
-        assert!(legacy.voice.enabled);
-        assert_eq!(legacy.voice.hotkey.as_deref(), Some("right-win"));
-        assert_eq!(legacy.orbit_voice, OrbitSettings::default());
-        assert!(!legacy.orbit_voice.enabled);
-        assert_eq!(legacy.orbit_voice.mode, "attached");
-        assert!(!legacy.orbit_voice.allow_escape);
 
-        let mut settings = legacy;
-        settings.orbit_voice = OrbitSettings {
-            enabled: true,
-            mode: "attached".into(),
-            executable: Some(std::path::PathBuf::from("preview/electron")),
-            application_dir: Some(std::path::PathBuf::from("preview/app")),
-            ..Default::default()
-        };
-        settings.save().unwrap();
-        let back = Settings::load();
-        assert_eq!(back.orbit_voice, settings.orbit_voice);
-        assert!(back.voice.enabled);
-        settings.orbit_voice.mode = "auto".into();
-        settings.save().unwrap();
-        assert_eq!(Settings::load().orbit_voice, settings.orbit_voice);
-        let partial: Settings = toml::from_str("[orbit_voice]\nenabled = true\n").unwrap();
-        assert!(partial.orbit_voice.enabled);
-        assert_eq!(partial.orbit_voice.mode, "attached");
-        assert!(!partial.orbit_voice.allow_escape);
-        for mode in ["desktop", "auto", "attached", "unknown"] {
-            let old: Settings = toml::from_str(&format!("[orbit_voice]\nenabled = true\nmode = '{mode}'\n")).unwrap();
-            assert!(!old.orbit_voice.allow_escape, "old placement is not escape consent");
-        }
-        settings.orbit_voice.allow_escape = true;
-        settings.save().unwrap();
-        assert!(Settings::load().orbit_voice.allow_escape);
-        assert!(partial.orbit_voice.executable.is_none() && partial.orbit_voice.application_dir.is_none());
+    #[test]
+    fn voice_preferences_survive_removed_integration_settings() {
+        let settings: Settings = toml::from_str(
+            "[voice]\nenabled = true\nhotkey = 'f13'\nmode = 'transcribe'\nlive_voice = 'marin'\n\n[orbit_voice]\nenabled = true\nexecutable = 'old-companion.exe'\n",
+        ).unwrap();
+        assert!(settings.voice.enabled);
+        assert_eq!(settings.voice.hotkey.as_deref(), Some("f13"));
+        assert_eq!(settings.voice.mode, "transcribe");
+        assert_eq!(settings.voice.live_voice.as_deref(), Some("marin"));
+        let saved = toml::to_string(&settings).unwrap();
+        assert!(!saved.contains("orbit_voice"));
+        let restored: Settings = toml::from_str(&saved).unwrap();
+        assert_eq!(restored.voice.hotkey, settings.voice.hotkey);
+        assert_eq!(restored.voice.mode, settings.voice.mode);
     }
 
     #[test]

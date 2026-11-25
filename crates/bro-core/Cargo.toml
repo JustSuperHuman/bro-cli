@@ -15,11 +15,16 @@ dirs.workspace = true
 parking_lot.workspace = true
 base64.workspace = true
 sha2.workspace = true
+uuid.workspace = true
 rand.workspace = true
 ring = "0.17"
 chrono.workspace = true
 ureq.workspace = true
 memchr.workspace = true
+# ripgrep's walker: a project's icon is looked for in parallel, past what it .gitignores (`project_icon`)
+ignore = "0.4"
+# reading the SVG symbol an agent draws for a project (`icon_maker`); resvg already brings it in
+roxmltree = "0.21"
 regex.workspace = true
 url.workspace = true
 argon2.workspace = true
@@ -32,7 +37,9 @@ tempfile.workspace = true
 portable-pty.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_System_ProcessStatus", "Win32_NetworkManagement_IpHelper", "Wdk_System_Threading", "Win32_System_RestartManager"] }
+# Windows Firewall rules (firewall.rs): the COM policy API, and ShellExecuteEx to ask for elevation.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_NetworkManagement_WindowsFirewall", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Registry", "Win32_Security"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

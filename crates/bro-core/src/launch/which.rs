@@ -13,6 +13,9 @@ pub fn extra_bin_dirs() -> Vec<PathBuf> {
     if let Some(a) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
         dirs.push(PathBuf::from(a).join("npm"));
     }
+    if cfg!(windows) && let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local).join("agy").join("bin"));
+    }
     dirs
 }
 

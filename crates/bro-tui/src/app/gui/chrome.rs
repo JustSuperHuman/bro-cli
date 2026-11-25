@@ -4,6 +4,8 @@
 
 use super::actions::{Action, PaneAct};
 use super::kit::brand::{self, Mark};
+use super::kit::motion::Spring;
+use super::layout::{flow_begin, key_of};
 use super::kit::{Cursor, Style, Ui, radius, size, weight, widgets};
 use super::layout::{GroupBox, Layout, PaneBox};
 use super::term::draw::{self as tdraw, Palette};
@@ -63,21 +65,34 @@ pub struct Painted {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, focused_window: bool, media: &mut super::media::Media, apps: &mut super::apps::Apps, stage: &mut super::orbit_stage::Drawn) -> Painted {
+pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, focused_window: bool, media: &mut super::media::Media, apps: &mut super::apps::Apps) -> Painted {
     let mut out = Painted::default();
     if layout.all_minimized {
         ui.label_in(layout.body, "All sessions minimized · show minimized in the sidebar", Style::new(size::BODY, weight::MEDIUM, ui.t.muted), Align::Center);
     }
+    // Cards and their group frames spring to their places when tiles come, go or change size (the layout's own
+    // rects, which size every terminal, are already settled: a PTY is resized once, to where its card ends up).
+    // A window resize or a drag of an edge snaps instead, staying 1:1 with the pointer.
+    let snap = flow_begin("cards", ui.now, key_of((layout.window.w.round() as i32, layout.window.h.round() as i32, super::layout::resizing())));
+    let arrive = |r: Rect| super::layout::inset(r, 10.0);
+    let places: HashMap<PaneId, Rect> = layout.panes.iter().map(|b| (b.id, ui.flow_rect("cards", key_of(b.id), b.card, arrive(b.card), super::layout::FLOW, snap))).collect();
     for g in &layout.groups {
-        draw_group(app, ui, g);
+        let rect = ui.flow_rect("groups", key_of(&g.key), g.rect, arrive(g.rect), super::layout::FLOW, snap);
+        draw_group(app, ui, &GroupBox { rect, ..g.clone() });
     }
     let pal = Palette::from_tokens(ui.t, ui.theme);
     let now = Instant::now();
     app.flips.retain(|id, flip| app.panes.contains_key(id) && (flip.back || flip.turning(now)));
     // the card with the keyboard last, so its edge stays whole where tiles share a line
+    let mut ring = None;
     for b in layout.panes.iter().filter(|b| !b.focused).chain(layout.panes.iter().filter(|b| b.focused)) {
-        draw_card(app, ui, layout, b, panes, canvas, &pal, focused_window, &mut out, media, apps, stage);
+        let at = places[&b.id];
+        if b.focused {
+            ring = Some((at, b));
+        }
+        draw_card(app, ui, layout, b, at, panes, canvas, &pal, focused_window, &mut out, media, apps);
     }
+    draw_focus_ring(app, ui, ring);
     // where tiles share a line there's no gutter: the line itself is grabbed to move the edge (the mouse finds the
     // tile edge under it, as in a gutter)
     for b in &layout.panes {
@@ -86,6 +101,41 @@ pub fn draw_panes(app: &mut App, ui: &mut Ui, layout: &Layout, panes: &mut HashM
         }
     }
     out
+}
+
+thread_local! {
+    /// The focus ring as last drawn, so it can fade out where it was when nothing has the keyboard.
+    static LAST_RING: std::cell::Cell<Option<(Rect, Color, bro_gfx::Corners)>> = const { std::cell::Cell::new(None) };
+}
+
+/// The outline of the card with the keyboard, one shape that glides from card to card as focus moves (Rune's
+/// matched element), riding along while its card springs to a new place, and fading when nothing has the keyboard
+/// (a dialog is up, the sidebar has it).
+fn draw_focus_ring(app: &App, ui: &mut Ui, ring: Option<(Rect, &PaneBox)>) {
+    let t = ui.t;
+    let want = if ring.is_some() { 1.0 } else { 0.0 };
+    let a = ui.spring("card-ring-a", want, Spring::GLIDE, want).clamp(0.0, 1.0);
+    let now = match ring {
+        Some((at, b)) => {
+            let term = app.panes.get(&b.id).and_then(|p| p.as_term_ref());
+            let color = match term {
+                Some(term) if term.meta.orchestrator => t.gold,
+                Some(term) => t.project(&term.meta.project.key, ui.theme),
+                None => t.accent,
+            };
+            let g = ui.glide("card-ring", b.id, at, super::layout::FLOW);
+            let seen = (g, color, b.joined.corners(radius::OVERLAY));
+            LAST_RING.with(|l| l.set(Some(seen)));
+            Some(seen)
+        }
+        None if a > 0.01 => LAST_RING.with(|l| l.get()),
+        None => None,
+    };
+    let Some((rect, color, corners)) = now else { return };
+    let px = ui.px(rect);
+    let w = ui.scale.round().max(1.0);
+    // over the card's own faint edge: together they read as the accent at 70%
+    ui.scene.quad(bro_gfx::Quad::new(px, Color::TRANSPARENT).corners(corners.scale(ui.scale)).border(w, color.with_alpha(0.58 * a)));
 }
 
 fn draw_group(app: &App, ui: &mut Ui, g: &GroupBox) {
@@ -130,7 +180,7 @@ fn draw_group(app: &App, ui: &mut Ui, g: &GroupBox) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, pal: &Palette, focused_window: bool, out: &mut Painted, media: &mut super::media::Media, apps: &mut super::apps::Apps, stage: &mut super::orbit_stage::Drawn) {
+fn draw_card(app: &mut App, ui: &mut Ui, layout: &Layout, b: &PaneBox, at: Rect, panes: &mut HashMap<PaneId, PaneState>, canvas: &mut TuiCanvas, pal: &Palette, focused_window: bool, out: &mut Painted, media: &mut super::media::Media, apps: &mut super::apps::Apps) {
     let id = b.id;
     let Some(p) = app.panes.get(&id) else { return };
     let t = ui.t;
@@ -147,7 +197,7 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
         Some(term) => t.project(&term.meta.project.key, ui.theme),
         None => t.accent,
     };
-    let r = b.card;
+    let r = at;
     if r.w < 4.0 || r.h < 4.0 {
         return;
     }
@@ -167,11 +217,11 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
     };
     // card: a surface on the content layer, its edge the accent when it has the keyboard; the orchestrator keeps a
     // gold edge when it doesn't
-    let border = match (b.focused, orchestrator) {
-        (true, _) => accent.with_alpha(0.7),
-        (false, true) => t.gold.with_alpha(0.32 + 0.18 * hover),
-        (false, false) if term.is_some() => accent.with_alpha(0.3 + 0.2 * hover),
-        (false, false) => t.hairline.mix(t.border, hover),
+    // (the keyboard's outline is the focus ring, drawn over the cards: it glides from card to card)
+    let border = match orchestrator {
+        true => t.gold.with_alpha(0.32 + 0.18 * hover),
+        false if term.is_some() => accent.with_alpha(0.3 + 0.2 * hover),
+        false => t.hairline.mix(t.border, hover),
     };
     // square where it shares a line with the tile beside it (shared borders), rounded elsewhere
     let corners = b.joined.corners(radius::OVERLAY);
@@ -188,21 +238,30 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
     ui.hit_with(shown, Action::Pane(id, PaneAct::Header), Cursor::Default);
     // header
     let header = Rect { h: b.header.h, ..shown };
-    stage.pane(b, shown, header, app.focused() == Some(id), flip.is_some_and(|f| f.turning(ui.now)));
     let header_corners = bro_gfx::Corners { tl: corners.tl, tr: corners.tr, br: 0.0, bl: 0.0 };
+    if t.palette.is_some() { ui.glass(header, header_corners, t.role("toolbar", t.surface)); }
     // unread status colours only the title bar; the session's content keeps its own colours
     if let Some(ink) = notice_ink {
         let fill = t.surface.mix(ink, if t.light { 0.045 } else { 0.055 });
         ui.glass(header, header_corners, fill);
     }
-    if b.focused {
-        ui.round_corners(header, header_corners, t.text.with_alpha(if t.light { 0.025 } else { 0.03 }));
+    // the focused card's title bar lifts and settles as focus comes and goes
+    let lift = ui.spring(("card-focus", id), if b.focused { 1.0 } else { 0.0 }, Spring::GLIDE, if b.focused { 1.0 } else { 0.0 }).clamp(0.0, 1.0);
+    if lift > 0.01 {
+        ui.round_corners(header, header_corners, t.text.with_alpha((if t.light { 0.025 } else { 0.03 }) * lift));
     }
-    ui.hline(shown.x, header.bottom(), shown.w, t.hairline);
+    ui.hline(shown.x, header.bottom(), shown.w, t.role("toolbarBorder", t.hairline));
     ui.hit_with(header, Action::Pane(id, PaneAct::Header), Cursor::Default);
-    draw_header(app, ui, b, header, accent, hover, panes.get(&id).map(|st| &st.focus));
+    let show_location = layout.panes.len() == 1 && !back && !b.folded && app.focus_view(id);
+    let location = draw_header(app, ui, b, header, accent, hover, panes.get(&id).map(|st| &st.focus), show_location);
     // content
-    let content = Rect { x: shown.x + 1.0, w: (shown.w - 2.0).max(0.0), ..b.content };
+    // (the terminal keeps the size the layout settled on and rides along with its card, cut by the card's edge)
+    let (dx, dy) = (at.x - b.card.x, at.y - b.card.y);
+    let content = if cover < 0.999 {
+        Rect { x: shown.x + 1.0, y: b.content.y + dy, w: (shown.w - 2.0).max(0.0), h: b.content.h }
+    } else {
+        Rect { x: b.content.x + dx, y: b.content.y + dy, ..b.content }
+    };
     if b.folded {
         // folded out of the way of a grown session: just its name, down the sliver when it's narrow (the program
         // keeps its size until it unfolds)
@@ -242,7 +301,7 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
             }
             let st = panes.entry(id).or_default();
             st.drawn = Default::default();
-            super::focus::draw(app, ui, id, content, b.focused && focused_window, &mut st.focus, media, apps, stage);
+            super::focus::draw(app, ui, id, content, b.focused && focused_window, location, &mut st.focus, media, apps);
             app.perf.pane_rendered(id, started.elapsed());
         } else {
             let tags = super::focus::terminal_quips_height(app, id);
@@ -254,11 +313,8 @@ fn draw_card(app: &mut App, ui: &mut Ui, _layout: &Layout, b: &PaneBox, panes: &
             let state = panes.entry(id).or_default();
             let input = state.drawn.cursor.map(|(row, col)| Rect::new(state.drawn.origin.x + col as f32 * state.drawn.cell_w, state.drawn.origin.y + row as f32 * state.drawn.cell_h, state.drawn.cell_w, state.drawn.cell_h));
             super::focus::draw_terminal_quips(app, ui, id, content, b.focused && focused_window, input, &mut state.focus);
-            if app.focus.drafts.get(&id).is_some_and(|d| d.terminal_quips.query.is_some()) {
-                stage.suspend();
-            }
         }
-    } else if super::views::draw(app, ui, id, super::layout::inset(content, 6.0), b.focused) {
+    } else if super::views::draw_storyboard(app, ui, id, super::layout::inset(content, 6.0), b.focused && focused_window, media) || super::views::draw(app, ui, id, super::layout::inset(content, 6.0), b.focused) {
         // drawn natively by the view's own module
     } else {
         if let Some(p) = app.panes.get_mut(&id) {
@@ -327,10 +383,17 @@ fn app_waker(app: &App, id: PaneId) -> crate::pane::Waker {
 
 /// The header: agent mark, title, who and where, then badges, status and buttons on the right.
 /// `view`: the card's focus view, when it has one (its header then says what the agent is doing).
-fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, hover: f32, view: Option<&super::focus::View>) {
+#[allow(clippy::too_many_arguments)]
+fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, hover: f32, view: Option<&super::focus::View>, show_location: bool) -> Option<Rect> {
+    let tokens = ui.t.toolbar();
+    ui.with_tokens(&tokens, |ui| draw_header_inner(app, ui, b, r, accent, hover, view, show_location))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_header_inner(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, hover: f32, view: Option<&super::focus::View>, show_location: bool) -> Option<Rect> {
     let id = b.id;
     let t = ui.t;
-    let Some(p) = app.panes.get(&id) else { return };
+    let p = app.panes.get(&id)?;
     let mid = r.y + r.h / 2.0;
     let mut x = r.x + 12.0;
     // right side first: buttons, status, badges (they win the room)
@@ -357,14 +420,14 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
         right = br.x - 2.0;
     }
     // focus mode: this session's terminal, or its conversation again
-    if app.focus.on && r.w > 200.0 && p.as_term_ref().is_some_and(crate::app::focus::focusable) {
+    if r.w > 200.0 && p.as_term_ref().is_some_and(crate::app::focus::focusable) {
         let br = Rect::new(right - 24.0, mid - 12.0, 24.0, 24.0);
-        let peek = app.focus.peek.contains(&id);
-        let glyph = if peek { "\u{F0369}" } else { "\u{F018D}" };
+        let conversation = app.focus_view(id);
+        let glyph = if conversation { "\u{F018D}" } else { "\u{F0369}" };
         if show_buttons {
             widgets::icon_button(ui, br, glyph, t.muted, Action::Focus(id, super::focus::TERMINAL));
             if ui.hovered(br) {
-                widgets::tooltip(ui, br, if peek { "Back to the conversation" } else { "Show the terminal" });
+                widgets::tooltip(ui, br, if conversation { "Show terminal" } else { "Show conversation" });
             }
         } else {
             ui.hit(br, Action::Focus(id, super::focus::TERMINAL));
@@ -384,6 +447,10 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
     }
     let time = app.start.elapsed().as_secs_f64();
     if let Some(term) = p.as_term_ref() {
+        let dictating = app.dictation.phase(id);
+        if !app.focus_view(id) && (dictating.is_some() || (r.w > 260.0 && show_buttons && !app.dictation.active() && app.can_dictate(id))) {
+            right = super::focus::dictation_controls(ui, id, right, mid, dictating);
+        }
         // status: the indicator alone (spinner, alert); the header never says "done" (the sidebar and the tabs do).
         // In focus mode it says what the agent is doing in words, since the terminal that shows it is out of sight.
         if let Some(notice) = app.session_notice(id).filter(|n| n.unread) {
@@ -455,9 +522,13 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
         ui.mark_badged(m, session_badge(app, id), mark, 16.0, None);
         x = mark.right() + 8.0;
         let avail = (right - x - 8.0).max(0.0);
+        let show_location = show_location && avail >= 226.0;
+        let location_width = if show_location { (avail * 0.6).clamp(146.0, 420.0) } else { 0.0 };
+        let title_width = if show_location { avail - location_width - 16.0 } else { avail };
         // the session's own title (yours, else the agent's) leads; without one, its login · model does. Inside a
         // group frame, which names the project and agent, its number leads.
         let (who, place) = who_line(term, b.grouped);
+        let place = if show_location { String::new() } else { place };
         let (title, meta) = match term.display_title() {
             Some(t) => (t, [place, who].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")),
             None => (who, place),
@@ -472,8 +543,13 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
         if !meta.is_empty() {
             spans.push((format!("   {meta}"), Style::new(size::SMALL, weight::MEDIUM, t.muted)));
         }
-        let line = ui.rich(&spans, size::BODY, Some(avail), false, Some(1));
+        let line = ui.rich(&spans, size::BODY, Some(title_width), false, Some(1));
         ui.draw(&line, Point::new(x, mid - line.h / 2.0));
+        if show_location {
+            let start = x + line.w.min(title_width) + 16.0;
+            ui.vline(start - 8.0, mid - 7.0, 14.0, t.hairline);
+            return Some(Rect::new(start, r.y, (right - 8.0 - start).min(420.0), r.h));
+        }
     } else {
         // a view: its icon and title, and on the right what state its card is in (zoomed, grown)
         if let Some(sub) = subtitle(app, id, zoomed) {
@@ -490,6 +566,7 @@ fn draw_header(app: &mut App, ui: &mut Ui, b: &PaneBox, r: Rect, accent: Color, 
         let title = p.title();
         ui.label_in(Rect::new(x, r.y, (right - x - 8.0).max(0.0), r.h), &title, Style::new(size::BODY, if b.focused { weight::SEMIBOLD } else { weight::MEDIUM }, if b.focused { t.text } else { t.muted }), Align::Left);
     }
+    None
 }
 
 /// (login · model, where): "work · opus-5" and "bro-cli-v2 — ~\\src" (the project unless a group frame names it,
@@ -576,7 +653,9 @@ fn view_icon(name: &str) -> &'static str {
         "account" => "\u{F0004}",
         "proxy" => "\u{F04E1}",
         "bridge" => "\u{F05A9}",
+        "remote" | "computers" => "\u{F0989}",
         "rocket" => "\u{F0463}",
+        "film" => "\u{F0FCE}",
         "sound" => "\u{F057E}",
         "skills" => "\u{F0431}",
         _ => "\u{F05AF}",
@@ -611,15 +690,19 @@ fn draw_terminal(waker: crate::pane::Waker, ui: &mut Ui, term: &mut crate::panes
     // links follow the screen: recompute when it changed or scrolled, or when the paths on it have been checked
     let seq = m.seq.load(std::sync::atomic::Ordering::Relaxed);
     let checked = st.links_pending && !term.file_cache().busy();
-    if seq != st.links_seq || st.links_offset != term.scroll_offset() || checked {
+    if seq != st.links_seq || st.links_offset != term.scroll_offset() || checked || st.links_expire.is_some_and(|at| at <= ui.now) {
         let screen = m.lock();
         let mut lookup = term.file_cache().lookup();
         st.links = tdraw::find_links(&screen, &mut |f| lookup.get(f));
         drop(screen);
+        st.links_expire = lookup.expires;
         lookup.finish(Some(link_waker));
         st.links_pending = term.file_cache().busy();
         st.links_seq = seq;
         st.links_offset = term.scroll_offset();
+    }
+    if let Some(at) = st.links_expire {
+        ui.wake_after(at.saturating_duration_since(ui.now));
     }
     // a remote viewer grew the pty past the tile: show its bottom-left
     let (pty_rows, _) = term.pty_size();
@@ -649,6 +732,7 @@ fn draw_terminal(waker: crate::pane::Waker, ui: &mut Ui, term: &mut crate::panes
         view_top,
     };
     st.drawn = tdraw::draw(ui, m, pal, &view);
+    draw_booting(ui, term, m, area);
     // the program's own mouse use decides the pointer; prompt options light up under it
     let body = Rect::new(content.x, content.y, content.w, content.h);
     ui.hit_with(body, Action::Pane(id, PaneAct::Body), Cursor::Text);
@@ -661,6 +745,51 @@ fn draw_terminal(waker: crate::pane::Waker, ui: &mut Ui, term: &mut crate::panes
         let y = st.drawn.origin.y + row as f32 * st.drawn.cell_h;
         ui.round(Rect::new(area.x - 4.0, y, area.w + 8.0, st.drawn.cell_h), 4.0, accent.with_alpha(0.14));
     }
+}
+
+/// A session on its way up, its screen still blank: a fire catching in its agent's colour, until the program
+/// draws anything. A quick start never shows it.
+fn draw_booting(ui: &mut Ui, term: &crate::panes::term::Term, m: &Mirror, area: Rect) {
+    let age = term.meta.started.elapsed();
+    if age >= crate::panes::term::BOOTING || term.scroll_offset() > 0 || area.h < 120.0 || area.w < 160.0 {
+        return;
+    }
+    let blank = m.try_lock().is_some_and(|screen| tdraw::screen_text(&screen).iter().all(|l| l.trim().is_empty()));
+    if !blank {
+        return;
+    }
+    // it moves until the program draws (its output redraws the window anyway)
+    ui.ticking = true;
+    let secs = age.as_secs_f64();
+    let alpha = ((secs - 0.3) / 0.4).clamp(0.0, 1.0) as f32;
+    if alpha <= 0.0 {
+        return;
+    }
+    let t = ui.t;
+    // the flame in the agent's brand colour, as the terminal UI draws it (Claude's clay, Codex's teal, Pi's
+    // violet), else the theme's warm
+    let mut inks = super::kit::rune::inks(t, t.layer);
+    let own = crate::ui::kindle_inks(term.meta.harness, ui.theme);
+    if own.warm != crate::ui::rune_inks(ui.theme).warm {
+        inks.warm = own.warm;
+        inks.hot = own.warm.mix(inks.hot, 0.45);
+    }
+    let fire_h = (area.h * 0.4).clamp(90.0, 200.0);
+    let font = (fire_h / 15.0 / 1.12).clamp(7.0, 12.0);
+    let fire = Rect::new(area.x, area.y + (area.h - fire_h - 70.0) * 0.42, area.w, fire_h);
+    let drawn = super::kit::rune::draw(ui, fire, font, crate::rune::Scene::Kindle, secs - 0.3, &inks, alpha);
+    let y = drawn.bottom() + 14.0;
+    let title = format!("Starting {}", term.starting_name());
+    let tb = ui.line(&title, Style::new(size::HEADING, weight::SEMIBOLD, t.text), Some(area.w - 24.0));
+    ui.draw_faded(&tb, Point::new(area.x + (area.w - tb.w) / 2.0, y), alpha);
+    let s = age.as_secs();
+    let note = if s < 8 {
+        format!("in {} · {s}s", term.meta.project.name)
+    } else {
+        format!("Still warming up · {s}s. A first run can take a while.")
+    };
+    let nb = ui.line(&note, Style::new(size::SMALL, weight::REGULAR, t.muted), Some(area.w - 24.0));
+    ui.draw_faded(&nb, Point::new(area.x + (area.w - nb.w) / 2.0, y + tb.h + 4.0), alpha);
 }
 
 /// A session in focus mode isn't drawn, but it still starts and keeps the size its card gives it (what it shows
@@ -686,6 +815,27 @@ fn draw_queued(ui: &mut Ui, term: &crate::panes::term::Term, q: crate::panes::te
         format!("in line · {} ahead", q.ahead)
     };
     let who = [term.meta.label.clone(), term.meta.project.name.clone()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+    // room for it: petals turning over the lines, all centred
+    let bloom_h = (r.h * 0.34).clamp(90.0, 180.0);
+    if r.h >= bloom_h + 150.0 && r.w >= 260.0 {
+        let font = (bloom_h / 15.0 / 1.12).clamp(7.0, 11.0);
+        let top = r.y + (r.h - bloom_h - 110.0) * 0.4;
+        let inks = super::kit::rune::inks(t, t.layer);
+        let drawn = super::kit::rune::draw(ui, Rect::new(r.x, top, r.w, bloom_h), font, crate::rune::Scene::Bloom, q.since.elapsed().as_secs_f64(), &inks, 1.0);
+        let mut y = drawn.bottom() + 18.0;
+        let line = ui.rich(&[("Resuming ".into(), Style::new(size::HEADING, weight::MEDIUM, t.muted)), (title, Style::new(size::HEADING, weight::SEMIBOLD, t.text))], size::HEADING, Some(r.w - 48.0), false, Some(1));
+        ui.draw(&line, Point::new(r.x + (r.w - line.w) / 2.0, y));
+        y += line.h + 6.0;
+        for (text, st) in [
+            (format!("{who} · {state}"), Style::new(size::SMALL, weight::MEDIUM, t.muted)),
+            ("Sessions open one at a time so they don't fight over your machine.".to_string(), Style::new(size::SMALL, weight::REGULAR, t.faint)),
+        ] {
+            let b = ui.line(&text, st, Some(r.w - 48.0));
+            ui.draw(&b, Point::new(r.x + (r.w - b.w) / 2.0, y));
+            y += b.h + 8.0;
+        }
+        return;
+    }
     let cy = r.y + r.h * 0.38;
     let x = r.x + 32.0;
     ui.spinner(Point::new(x + 8.0, cy), 7.0, 2.2, t.accent);

@@ -161,7 +161,8 @@ impl AppState {
     pub(crate) fn reconcile_projects(&self) -> Vec<TerminalProject> {
         let (projects, projects_changed, changed_sessions) = {
             let mut inner = self.inner.lock();
-            let projects = visible_locked(&inner);
+            let mut projects = visible_locked(&inner);
+            self.icons.decorate(&mut projects);
             let projects_changed = inner.published_projects != projects;
             let mut changed_sessions = Vec::new();
             for session in inner.sessions.values_mut() {
@@ -221,6 +222,7 @@ impl AppState {
                     cwd: cwd.to_owned(),
                     created_at: iso_now(),
                     automatic: None,
+                    ..TerminalProject::default()
                 };
                 store.saved.push(project.clone());
                 if store.saved.len() > MAX_PROJECTS {

@@ -6,19 +6,28 @@
 //! agent shows are thumbnails. The reply box's footer switches the model and how hard it thinks, and typing `/`
 //! lists the commands the agent takes. The terminal still runs under it at the card's size.
 //!
+//! The subagents a session starts show where it started them, live, and each opens its own conversation in place of
+//! the session's ([`subagents`]); those at work stay in sight in a strip over the reply box, with the background
+//! tasks it left running (commands, watches, workflows: [`bro_core::sessions::tasks`]), and the header says they're
+//! at work once its turn is over.
+//!
 //! The text is the transcript's ([`bro_core::sessions::conversation`]), the reply box and what you sent are the
 //! app's ([`crate::focus::Draft`]); this keeps only layout and motion ([`View`]).
 
+mod arrive;
 mod markdown;
 mod pixels;
 mod sound;
 mod quips;
+mod subagents;
 
 use super::actions::Action;
+use super::kit::breadcrumbs::{crumb_plan, path_parts};
 use super::kit::{Cursor, Style, TextBox, Ui, radius, size, weight, widgets};
+use super::kit::motion::Spring;
 use super::apps::{Apps, FIRST_HEIGHT, Page, Want};
 use super::media::{Media, Thumbnail};
-use super::Gui;
+use super::{Drag, Gui};
 use crate::app::App;
 use crate::app::focus::{MenuRow, level_name, same_model};
 use crate::focus::{Choice, Command, MenuKind, Scroll, holds, model_name, visible};
@@ -27,10 +36,13 @@ use crate::pane::Activity;
 use bro_bridge::file_links::{FileLinkMatch, find_file_links, split_location};
 use bro_core::Harness;
 use bro_core::sessions::conversation::{Conversation, Item, McpApp, NoteKind, Step, StepKind, StepState, Thought};
+use bro_core::sessions::subagents::Subagent;
+use bro_core::sessions::tasks::Task;
+use subagents::Subs;
 use bro_gfx::text::{Align, Span as GSpan, TextOpts};
 use bro_gfx::{Color, Fill, Point, Quad, Rect};
 use markdown::{Block, Mark, Span};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,6 +60,12 @@ const EARLIER: usize = 6;
 /// the footer's model and thinking: open their lists
 const MODEL_CHIP: usize = 7;
 const THINKING_CHIP: usize = 8;
+/// from a subagent's own conversation back to the session's
+const BACK: usize = 9;
+const ANSWER_QUEUED: usize = 10;
+const DICTATE: usize = 11;
+const CANCEL_DICTATION: usize = 12;
+const SKIP_CLEANUP: usize = 13;
 const OPTION: usize = 100;
 /// + a picture's place in the reply box: its popover's Remove, and Open
 const UNATTACH: usize = 200;
@@ -68,7 +86,10 @@ const APP_RETRY: usize = 20;
 const APP_RETRY_END: usize = 100;
 /// + a sound card's index this frame: its play button, its waveform (plays from where it's clicked)
 const SOUND: usize = 3_000_000;
-const SOUND_AT: usize = 4_000_000;
+pub(super) const SOUND_AT: usize = 4_000_000;
+/// + a subagent's index this frame (its card, its chip, its note): show its own conversation
+const SUBAGENT: usize = 5_000_000;
+const SUBAGENT_END: usize = 6_000_000;
 
 /// Body text line height, as a multiple of its size.
 const LINE: f32 = 1.62;
@@ -113,6 +134,10 @@ pub struct View {
     line_height: f32,
     /// laid-out items by identity (the item itself is kept, so its address can't be reused while cached)
     cache: HashMap<usize, Cached>,
+    cached_skip: usize,
+    gallery_revision: u64,
+    narration: Vec<bool>,
+    message_pictures: Vec<Vec<PathBuf>>,
     /// items whose steps are open (a long message of yours shown whole), by identity
     open: HashSet<usize>,
     /// this frame's links and pictures (their targets)
@@ -137,6 +162,7 @@ pub struct View {
     command_top: usize,
     menu_top: usize,
     quip_fields: [Option<quips::FieldGeo>; 3],
+    quip_preview: quips::PreviewState,
     /// the pixel mark of a session with nothing said yet, while it shows
     mark: Option<pixels::Play>,
     /// MCP apps' cards drawn this frame (the call, the app, where its page goes: laid over them once the frame
@@ -146,6 +172,93 @@ pub struct View {
     clip: Rect,
     /// a list or a popover is open over the conversation: the pages hide under it
     popup: bool,
+    /// the conversation's text as drawn last frame, in reading order: what a press or a drag lands on
+    runs: Vec<Run>,
+    /// what's selected in the conversation
+    sel: Option<Sel>,
+    /// the text of every run the selection has been drawn over, kept while it lasts (one scrolled away still
+    /// copies)
+    sel_text: BTreeMap<RunKey, RunText>,
+    /// a press in the reply box: what it took (a double-click's word), which a drag grows from
+    box_origin: Option<(usize, usize)>,
+    /// where the conversation was last frame (a drag past its edge scrolls)
+    text_area: Rect,
+    /// the conversation drawn last frame (the session's, or a subagent's): what a click on an item means
+    drawn: Option<Arc<Conversation>>,
+    /// the subagents that open with a click this frame (cards, chips, notes), by the call that started each
+    opened: Vec<String>,
+    /// the subagent shown instead of the conversation last frame, and the conversation's scroll while it shows
+    lens: Option<String>,
+    saved: Option<(f32, bool, usize, HashSet<usize>)>,
+    /// a subagent's conversation made up of its brief and its report, when it left no transcript to read
+    made: Option<(String, usize, Arc<Conversation>)>,
+    /// how many items the conversation shown had last frame (those past it arrive: they rise and fade in), and
+    /// which one that was (the session's, or a subagent's: None before its first frame)
+    met: Option<usize>,
+    shown_lens: Option<Option<String>>,
+    /// what the strip over the reply box last held, to fade out once nothing is at work
+    dock_last: Option<(Vec<Arc<Subagent>>, Vec<Task>)>,
+    /// items that arrived and are still landing (by place in the conversation)
+    arriving: Vec<usize>,
+    /// how tall the reply box is when it's done growing (what it draws is on its way there)
+    box_full: f32,
+}
+
+/// A piece of the conversation's text: the item it's in, and its place among that item's pieces.
+type RunKey = (usize, u32);
+
+/// A place in the conversation's text: a byte of one run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Pos {
+    key: RunKey,
+    byte: usize,
+}
+
+/// One laid-out piece of the conversation's text (a paragraph, a list item, a line of code, your message), as
+/// drawn: `at` its top-left, logical px.
+#[derive(Clone)]
+struct Run {
+    key: RunKey,
+    at: Point,
+    layout: Arc<bro_gfx::text::Layout>,
+    scale: f32,
+    /// what goes before it when it's copied after the run before it, and the mark it's drawn with (a list's)
+    gap: &'static str,
+    lead: String,
+}
+
+impl Run {
+    fn rect(&self) -> Rect {
+        Rect::new(self.at.x, self.at.y, self.layout.width() / self.scale, self.layout.height() / self.scale)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RunText {
+    gap: &'static str,
+    lead: String,
+    text: String,
+}
+
+/// A selection in the conversation: what the press took (a place, a double-click's word, a triple-click's
+/// piece), and the ends now (the drag grows it from what the press took).
+#[derive(Clone, Debug)]
+struct Sel {
+    origin: (Pos, Pos),
+    anchor: Pos,
+    head: Pos,
+    /// where the press was, and what it would have done as a click (a link, a long message opening): done on
+    /// release when the pointer didn't move
+    press: Point,
+    click: Option<usize>,
+    moved: bool,
+}
+
+impl Sel {
+    /// Its ends in reading order; None when nothing is selected.
+    fn span(&self) -> Option<(Pos, Pos)> {
+        (self.anchor != self.head).then(|| (self.anchor.min(self.head), self.anchor.max(self.head)))
+    }
 }
 
 impl Default for View {
@@ -157,6 +270,10 @@ impl Default for View {
             room: 0.0,
             line_height: 30.0,
             cache: HashMap::new(),
+            cached_skip: 0,
+            gallery_revision: 0,
+            narration: Vec::new(),
+            message_pictures: Vec::new(),
             open: HashSet::new(),
             links: vec![],
             pictures: vec![],
@@ -171,11 +288,27 @@ impl Default for View {
             command_top: 0,
             menu_top: 0,
             quip_fields: [None; 3],
+            quip_preview: quips::PreviewState::default(),
             mark: None,
             cards: vec![],
             retry: vec![],
             clip: Rect::new(0.0, 0.0, 0.0, 0.0),
             popup: false,
+            runs: vec![],
+            sel: None,
+            sel_text: BTreeMap::new(),
+            box_origin: None,
+            text_area: Rect::new(0.0, 0.0, 0.0, 0.0),
+            drawn: None,
+            opened: vec![],
+            lens: None,
+            saved: None,
+            made: None,
+            met: None,
+            shown_lens: None,
+            dock_last: None,
+            arriving: vec![],
+            box_full: 0.0,
         }
     }
 }
@@ -198,6 +331,7 @@ struct BoxGeo {
 }
 
 /// Sizes and colours for one frame.
+#[derive(Clone)]
 struct Typo {
     body: f32,
     lh: f32,
@@ -217,6 +351,8 @@ struct Typo {
     working: bool,
     /// now, as transcripts stamp time
     now_ms: i64,
+    /// a subagent's own conversation: what asks it things is this agent, not you ("Claude")
+    asker: Option<&'static str>,
 }
 
 impl Typo {
@@ -231,13 +367,14 @@ impl Typo {
             narration: t.text.mix(t.muted, 0.55),
             muted: t.muted,
             faint: t.faint,
-            code: t.accent.mix(t.text, 0.42),
+            code: t.role("codeForeground", t.accent.mix(t.text, 0.42)),
             link: t.accent.mix(t.text, 0.2),
-            well: if t.light { t.text.with_alpha(0.045) } else { Color::BLACK.with_alpha(0.22) },
-            bubble: t.text.with_alpha(if t.light { 0.06 } else { 0.07 }),
+            well: t.role("codeBackground", if t.light { t.text.with_alpha(0.045) } else { Color::BLACK.with_alpha(0.22) }),
+            bubble: t.role("messageSurface", t.text.with_alpha(if t.light { 0.06 } else { 0.07 })),
             waiting: false,
             working: false,
             now_ms: crate::util::now_ms(),
+            asker: None,
         }
     }
 }
@@ -287,6 +424,7 @@ struct Seen {
     harness: Option<Harness>,
     conv: Option<Arc<Conversation>>,
     activity: Option<Activity>,
+    queued_questions: Option<bro_core::terminal_prompt::QueuedQuestions>,
     limit: Option<bro_core::sessions::limits::UsageLimit>,
     done: bool,
     /// the step running now, if the transcript says
@@ -299,6 +437,17 @@ struct Seen {
     thought: Option<Thought>,
     /// a message you sent from here isn't in the transcript yet (its newest line is from before it)
     sending: bool,
+    /// the subagents it started, as its worker follows them
+    subagents: Option<Arc<Vec<Arc<Subagent>>>>,
+    /// the background tasks at work now, the oldest first
+    tasks: Vec<Task>,
+}
+
+impl Seen {
+    /// How many of its subagents are at work.
+    fn subagents_working(&self) -> usize {
+        self.subagents.as_ref().map_or(0, |l| l.iter().filter(|s| s.state.running()).count())
+    }
 }
 
 fn seen(app: &App, id: PaneId) -> Option<Seen> {
@@ -307,9 +456,11 @@ fn seen(app: &App, id: PaneId) -> Option<Seen> {
     let snap = term.insights();
     let conv = snap.as_ref().and_then(|s| s.conversation.clone());
     let facts = snap.as_ref().and_then(|s| s.facts.clone());
+    let tasks = term.background_tasks(snap.as_ref());
     Some(Seen {
         harness: term.meta.harness,
         activity: p.activity(),
+        queued_questions: term.focus_queued_questions(),
         limit: term.limit_warning(),
         done: app.done.contains(&id),
         running: conv.as_ref().and_then(|c| c.running().cloned()),
@@ -317,7 +468,9 @@ fn seen(app: &App, id: PaneId) -> Option<Seen> {
         cwd: conv.as_ref().and_then(|c| c.cwd.clone()).map(PathBuf::from).unwrap_or_else(|| term.meta.cwd.clone()),
         branch: conv.as_ref().and_then(|c| c.branch.clone()).or_else(|| facts.as_ref().and_then(|f| f.branch.clone())),
         thought: conv.as_ref().and_then(|c| c.thought.clone()),
-        sending: app.focus.drafts.get(&id).is_some_and(|d| !d.sent.is_empty()),
+        sending: app.focus.drafts.get(&id).is_some_and(|d| d.sent.iter().any(|s| !matches!(s.delivery.state(), crate::panes::term::DeliveryState::Failed(_)))),
+        subagents: snap.as_ref().and_then(|s| s.subagents.clone()),
+        tasks,
         conv,
     })
 }
@@ -380,15 +533,21 @@ pub fn header_status(app: &App, ui: &mut Ui, id: PaneId, view: Option<&View>, ri
     let prev = view.and_then(|v| v.mood);
     let mood = mood_of(&seen, prev, ui.now);
     let t = ui.t;
+    // its turn is over but its subagents or background tasks work on: that's what it's doing
+    let crew = seen.subagents_working();
+    let busy = crew > 0 || !seen.tasks.is_empty();
+    let mood = if busy && matches!(mood, Mood::Idle | Mood::Done) { Mood::Working } else { mood };
     let (words, ink) = match mood {
+        Mood::Working if busy && seen.activity != Some(Activity::Working) => (subagents::working(crew, &seen.tasks, crate::util::now_ms()), t.text.mix(t.muted, 0.35)),
         Mood::Working => (doing(&seen, crate::util::now_ms(), working_secs(prev, ui.now)), t.text.mix(t.muted, 0.35)),
-        Mood::Blocked => (seen.limit.as_ref().map_or_else(|| "Needs you".to_string(), |limit| limit.title.clone()), t.danger),
+        Mood::Blocked => (seen.limit.as_ref().map_or_else(|| seen.queued_questions.map_or_else(|| "Needs you".to_string(), |q| queued_question_label(q.count)), |limit| limit.title.clone()), t.danger),
         Mood::Done => ("Done".to_string(), t.good),
         Mood::Idle => return None,
     };
     let st = Style::new(size::SMALL, weight::MEDIUM, ink);
     let b = ui.line(&words, st, Some((room - 22.0).max(40.0)));
     let w = 22.0 + b.w;
+    let done_for = ui.since_on(("focus-done", id), mood == Mood::Done);
     let x = right.x - w;
     let mid = right.y;
     match mood {
@@ -398,10 +557,32 @@ pub fn header_status(app: &App, ui: &mut Ui, id: PaneId, view: Option<&View>, ri
             let k = if seen.limit.is_some() { 1.0 } else { 0.7 + 0.3 * ((ui.time * 4.0).sin() as f32 * 0.5 + 0.5) };
             ui.icon(Rect::new(x, mid - 8.0, 14.0, 16.0), "\u{F0026}", 13.0, t.danger.fade(k));
         }
-        Mood::Done => ui.icon(Rect::new(x, mid - 8.0, 14.0, 16.0), "\u{F012C}", 14.0, t.good),
+        Mood::Done => {
+            if !seen.done && let Some((Mood::Done, since)) = prev {
+                let expiry = since + std::time::Duration::from_secs_f32(DONE_SHOWS);
+                if expiry > ui.now { ui.wake_after(expiry - ui.now); }
+            }
+            // it pops in when the turn ends
+            let pop = match done_for {
+                Some(s) if s < 1.6 => {
+                    ui.anim.moving = true;
+                    let p = (s / 0.7).min(1.0);
+                    ui.ring(Point::new(x + 7.0, mid), 4.0 + 11.0 * p, 1.6 * (1.0 - p) + 0.4, t.good.fade(0.6 * (1.0 - p)));
+                    super::kit::motion::Spring::POP.step(s)
+                }
+                _ => 1.0,
+            };
+            ui.icon(Rect::new(x, mid - 8.0, 14.0, 16.0), "\u{F012C}", (14.0 * pop).max(1.0), t.good)
+        }
         Mood::Idle => {}
     }
-    ui.draw(&b, Point::new(x + 22.0, mid - b.h / 2.0));
+    if mood == Mood::Working {
+        // a band of light sweeping over what it's doing (Rune's shimmer over a streaming reply)
+        let glint = if t.light { t.accent } else { t.text };
+        ui.shimmer(Point::new(x + 22.0, mid - b.h / 2.0), &words, st, glint, Some((room - 22.0).max(40.0)));
+    } else {
+        ui.draw(&b, Point::new(x + 22.0, mid - b.h / 2.0));
+    }
     if ui.hovered(Rect::new(x, mid - 12.0, w, 24.0)) && b.layout.truncated {
         widgets::tooltip(ui, Rect::new(x, mid - 12.0, w, 24.0), &words);
     }
@@ -412,8 +593,10 @@ pub fn header_status(app: &App, ui: &mut Ui, id: PaneId, view: Option<&View>, ri
 
 /// Draw `id`'s conversation in `content` (the card under its header).
 #[allow(clippy::too_many_arguments)]
-pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool, v: &mut View, media: &mut Media, apps: &mut Apps, stage: &mut super::orbit_stage::Drawn) {
+pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool, session_location: Option<Rect>, v: &mut View, media: &mut Media, apps: &mut Apps) {
     let Some(seen) = seen(app, id) else { return };
+    super::backdrop::aurora(ui,content);
+    v.quip_preview.hovered = None;
     // the choice on screen: read when the screen is free, kept while it waits on you
     if seen.limit.is_none() && seen.activity == Some(Activity::Blocked) {
         v.choice = app.focus_choice(id);
@@ -435,7 +618,8 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool
     v.pictures.clear();
     v.caret = None;
     // the keys are here only while nothing else has them
-    let focused = focused && !app.side_focus && !app.overlay.is_open() && app.renaming.is_none() && !app.prefix_armed;
+    let focused = focused && !app.side_focus && !app.overlay.is_open() && app.renaming.is_none() && !app.prefix_armed
+        && app.theme_editor.as_ref().is_none_or(|e|e.minimized || e.field==crate::theme::editor::Field::None);
     ui.hit_with(content, Action::Focus(id, AREA), Cursor::Default);
     // a comfortable measure, centred: big type, never a wall of it
     let avail = (content.w - 48.0).max(120.0);
@@ -446,26 +630,79 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool
     v.line_height = c.lh;
     let measure = avail.min((c.adv * 76.0).round());
     let mx = content.x + (content.w - measure) / 2.0;
-    // the reply box at the foot, the choice it waits on over it, the conversation over both
-    let box_h = reply_height(app, id, &c, measure);
-    let box_r = Rect::new(mx, content.bottom() - 16.0 - box_h, measure, box_h);
-    let choice_h = v.choice.as_ref().map(|ch| choice_height(ui, &c, ch, measure)).unwrap_or(0.0);
+    // its subagents, and the one shown instead of the conversation (one no longer known goes back to it)
+    let last = v.lens.as_ref().and(v.drawn.clone());
+    let subs = Subs::new(seen.subagents.as_ref(), &[seen.conv.as_deref(), last.as_deref()]);
+    let lens = app.focus.subagent.get(&id).and_then(|call| subs.get(call).cloned());
+    if lens.is_none() {
+        app.focus.subagent.remove(&id);
+    }
+    v.look_at(lens.as_ref().map(|s| s.call.as_str()));
+    // in a subagent's conversation, what asks it things is the session's agent, and its turn is its own
+    let mut lc = c.clone();
+    if let Some(s) = &lens {
+        lc.working = s.state.running();
+        lc.waiting = c.waiting && s.state.running();
+        lc.asker = Some(agent_name(seen.harness));
+    }
+    // the reply box at the foot, the choice it waits on over it, the subagents at work over that, the
+    // conversation over them all
+    let full_h = reply_height(app, id, &c, measure);
+    // the box grows and shrinks as lines come and go, what's over it riding along
+    let box_h = ui.spring(("focus-box-h", id), full_h, arrive::GROW, full_h);
+    v.box_full = full_h;
+    let box_r = Rect::new(mx, content.bottom() - 18.0 - box_h, measure, box_h);
+    let queued = seen.queued_questions.filter(|_| seen.limit.is_none() && v.choice.is_none());
+    // a browser page the agent handed you sits where a question would
+    let handoff = app.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.browser_handoff.clone())
+        .filter(|_| seen.limit.is_none() && v.choice.is_none() && queued.is_none());
+    let choice_h = v.choice.as_ref().map(|ch| choice_height(ui, &c, ch, measure)).unwrap_or(if queued.is_some() {
+        80.0
+    } else if let Some(h) = &handoff {
+        super::browser::focus_card_height(ui, c.small, c.body, h, measure)
+    } else {
+        0.0
+    });
     let choice_r = Rect::new(mx, box_r.y - 12.0 - choice_h, measure, choice_h);
     let bottom = if choice_h > 0.0 { choice_r.y } else { box_r.y };
+    let running = subs.running();
+    let at_work = !running.is_empty() || !seen.tasks.is_empty();
+    let dock_h = ui.ease(("focus-dock-h", id), if at_work { subagents::DOCK_H + 10.0 } else { 0.0 }, 160.0);
+    let dock_r = Rect::new(mx, bottom - dock_h, measure, subagents::DOCK_H);
+    let bottom = bottom - dock_h;
     // a little room under the header: the text scrolls away under a fade, not against its line
     let area = Rect::new(content.x, content.y + 6.0, content.w, (bottom - 8.0 - content.y - 6.0).max(0.0));
-    conversation(app, ui, id, area, Rect::new(mx, area.y, measure, area.h), &c, &seen, v, mood, media, apps);
+    conversation(app, ui, id, area, Rect::new(mx, area.y, measure, area.h), if lens.is_some() { &lc } else { &c }, &seen, v, mood, media, apps, &subs, lens.as_ref(), session_location.is_some());
+    // the strip keeps what it last held while it fades away
+    if at_work {
+        v.dock_last = Some((running.clone(), seen.tasks.clone()));
+    } else if dock_h <= 4.0 {
+        v.dock_last = None;
+    }
+    let (strip_subs, strip_tasks) = v.dock_last.clone().unwrap_or_default();
+    if dock_h > 4.0 && (!strip_subs.is_empty() || !strip_tasks.is_empty()) {
+        let band = Rect::new(content.x, dock_r.y, content.w, dock_h);
+        ui.clip(band, 0.0);
+        let tip = subagents::dock(ui, &c, id, &strip_subs, &strip_tasks, dock_r, lens.as_ref().map(|s| s.call.as_str()), &mut v.opened, &mut v.links);
+        ui.veil(band, 0.0, dock_h / (subagents::DOCK_H + 10.0));
+        ui.unclip();
+        // above the chip, kept inside the card (its edges clip)
+        if let Some((anchor, text)) = tip {
+            let screen = ui.screen;
+            ui.screen = content;
+            widgets::tooltip(ui, anchor, &text);
+            ui.screen = screen;
+        }
+    }
     if let Some(ch) = v.choice.clone() {
         draw_choice(ui, id, &c, &ch, choice_r);
+    } else if let Some(queued) = queued {
+        draw_queued_questions(ui, id, &c, queued, choice_r);
+    } else if let Some(h) = &handoff {
+        super::browser::draw_focus_card(ui, c.small, c.body, h, choice_r);
     }
     reply_box(app, ui, id, box_r, focused, &c, &seen, mood, v, media);
-    stage.composer(id, box_r, content);
-    if choice_h > 0.0 {
-        stage.choice(id, choice_r, content);
-    }
-    if v.popup {
-        stage.suspend();
-    }
+    v.popup |= v.quip_preview.draw(ui, id);
     // the apps' pages go over their cards once the frame is drawn, unless a list over the box covers them
     let cards = std::mem::take(&mut v.cards);
     let sid = app.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone());
@@ -474,6 +711,14 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, content: Rect, focused: bool
         for (call, a, rect) in cards {
             apps.want(Want { key: (id, call), sid: sid.clone(), app: a, rect, clip: v.clip, fill, max_h: APP_MAX });
         }
+    }
+    // Header links share the conversation's targets, which are rebuilt while it draws.
+    if let Some(r) = session_location {
+        let tokens = ui.t.toolbar();
+        ui.with_tokens(&tokens, |ui| {
+            ui.screen = Rect { y: r.y, h: content.bottom() - r.y, ..content };
+            draw_session_location(app, ui, id, r, v, &seen);
+        });
     }
 }
 
@@ -493,6 +738,95 @@ struct Paint<'a> {
     media: Option<&'a mut Media>,
     resolve: Option<Resolve<'a>>,
     apps: AppPaint<'a>,
+    /// the text drawn can be selected (the conversation's items, not the header or what's on its way)
+    text: TextPaint,
+    /// the subagents the frame knows (the steps that started them get cards), and those a click opens
+    subs: Option<&'a Subs>,
+    opened: Vec<String>,
+    quip_hover: Option<quips::Preview>,
+}
+
+/// The conversation's selectable text as it's drawn: which item, the next piece's place in it and what goes
+/// before it when copied, the pieces drawn, and the selection to show over them.
+#[derive(Default)]
+struct TextPaint {
+    collect: bool,
+    item: usize,
+    seq: u32,
+    gap: &'static str,
+    lead: String,
+    runs: Vec<Run>,
+    sel: Option<(Pos, Pos)>,
+}
+
+impl TextPaint {
+    /// The next item's pieces start.
+    fn item(&mut self, i: usize) {
+        self.item = i;
+        self.seq = 0;
+        self.gap = "\n\n";
+        self.lead.clear();
+    }
+}
+
+/// The bytes of a run with `key` (`len` long) that the selection `(start, end)` covers. An empty run inside
+/// the selection is covered (it shows a sliver: a blank line selected).
+fn covered(sel: (Pos, Pos), key: RunKey, len: usize) -> Option<Range<usize>> {
+    let (s, e) = sel;
+    if key < s.key || key > e.key {
+        return None;
+    }
+    let start = if key == s.key { s.byte.min(len) } else { 0 };
+    let end = if key == e.key { e.byte.min(len) } else { len };
+    (start < end || (len == 0 && s.key < key && key < e.key)).then_some(start..end)
+}
+
+/// x of the caret before byte `at` on `line` (physical px from the layout's left).
+fn caret_in(layout: &bro_gfx::text::Layout, line: &bro_gfx::text::LLine, at: usize) -> f32 {
+    let glyphs = &layout.glyphs[line.glyphs.clone()];
+    for g in glyphs {
+        if at <= g.start {
+            return g.x;
+        }
+        if at < g.end {
+            return g.x + g.w * (at - g.start) as f32 / (g.end - g.start).max(1) as f32;
+        }
+    }
+    glyphs.last().map_or(0.0, |g| g.x + g.w)
+}
+
+/// The rectangles a selected byte range of a layout covers, a line each (logical px, from `at`). `on` says the
+/// selection goes on past the range's end: each line it runs off gets a sliver for its line break.
+fn selection_rects(layout: &bro_gfx::text::Layout, at: Point, scale: f32, range: &Range<usize>, on: bool) -> Vec<Rect> {
+    let mut out = vec![];
+    let sliver = (layout.lines.first().map_or(16.0, |l| l.height) * 0.3).max(3.0);
+    let n = layout.lines.len();
+    for (i, line) in layout.lines.iter().enumerate() {
+        let lt = &line.text;
+        let a = range.start.max(lt.start);
+        let b = range.end.min(lt.end);
+        // runs off this line: on into the next line, or past the run's end
+        let off = range.end > lt.end || (on && i + 1 == n && range.end >= lt.end);
+        if a > b {
+            continue;
+        }
+        // none of this line's text: only a line break the selection runs over shows (not the end of the line
+        // before the one it starts on)
+        if a == b && (!off || (range.start >= lt.end && i + 1 < n)) {
+            continue;
+        }
+        let x0 = caret_in(layout, line, a);
+        let mut x1 = caret_in(layout, line, b);
+        if off {
+            x1 += sliver;
+        }
+        out.push(Rect::new(at.x + x0 / scale, at.y + line.top / scale, ((x1 - x0) / scale).max(1.0), line.height / scale));
+    }
+    if out.is_empty() && n == 0 && range.start == range.end && on {
+        // a blank piece inside the selection
+        out.push(Rect::new(at.x, at.y, sliver / scale, (layout.height() / scale).max(4.0)));
+    }
+    out
 }
 
 /// The MCP apps' cards an item draws: their pages and heights by call (none: no cards), and what it drew (the
@@ -502,6 +836,8 @@ struct AppPaint<'a> {
     cards: Option<&'a HashMap<String, Card>>,
     drawn: Vec<(String, Arc<McpApp>, Rect)>,
     retry: Vec<Arc<McpApp>>,
+    /// the item being drawn is a card whose steps are opening or closing: how far open (None: as `open` says)
+    reveal: Option<f32>,
 }
 
 /// An MCP app's card this frame: its page as far as it's read, how tall the page is and whether it has said so,
@@ -515,7 +851,29 @@ struct Card {
 
 impl Paint<'_> {
     fn measuring<'b>(id: PaneId) -> Paint<'b> {
-        Paint { draw: false, id, links: vec![], pictures: vec![], sounds: vec![], media: None, resolve: None, apps: AppPaint::default() }
+        Paint { draw: false, id, links: vec![], pictures: vec![], sounds: vec![], media: None, resolve: None, apps: AppPaint::default(), text: TextPaint::default(), subs: None, opened: vec![], quip_hover: None }
+    }
+
+    /// Laid-out text about to be drawn at `at`: the selection goes under it, and a drag can land on it.
+    fn run(&mut self, ui: &mut Ui, b: &TextBox, at: Point) {
+        let tp = &mut self.text;
+        if !self.draw || !tp.collect {
+            return;
+        }
+        let key = (tp.item, tp.seq);
+        tp.seq += 1;
+        // the pieces after the first in a block (a code block's lines, a table's rows) follow on the next line
+        let gap = std::mem::replace(&mut tp.gap, "\n");
+        let lead = std::mem::take(&mut tp.lead);
+        if let Some(sel) = tp.sel
+            && let Some(range) = covered(sel, key, b.layout.text.len())
+        {
+            let on = sel.1.key > key;
+            for r in selection_rects(&b.layout, at, ui.scale, &range, on) {
+                ui.round(r, 2.0, ui.t.selection);
+            }
+        }
+        tp.runs.push(Run { key, at, layout: b.layout.clone(), scale: ui.scale, gap, lead });
     }
 
     fn resolve(&mut self, m: &FileLinkMatch) -> Option<Arc<str>> {
@@ -622,67 +980,172 @@ fn step_pictures(steps: &[Step]) -> Vec<PathBuf> {
 
 // ------------------------------------------------------------------------------------------ the conversation
 
-/// The conversation, scrolled, in `area` (`col` the text column inside it).
+/// A subagent's own conversation, as drawn: what its transcript says, or (when it left none bro can read) its brief
+/// and its report, made once.
+fn lens_conversation(v: &mut View, s: &Subagent, harness: Option<Harness>) -> Arc<Conversation> {
+    if let Some(conv) = &s.conversation {
+        return conv.clone();
+    }
+    let size = s.brief.as_ref().map_or(0, String::len) * 31 + s.result.as_ref().map_or(0, String::len);
+    if let Some((call, n, conv)) = &v.made
+        && *call == s.call
+        && *n == size
+    {
+        return conv.clone();
+    }
+    let mut conv = Conversation::subagent(harness.unwrap_or(Harness::Claude));
+    if let Some(brief) = &s.brief {
+        conv.items.push(Arc::new(Item::You { text: brief.clone(), images: 0, pictures: vec![], command: false, at_ms: s.started_ms }));
+    }
+    if let Some(result) = s.result.as_ref().filter(|_| !s.state.running()) {
+        conv.items.push(Arc::new(Item::Said { text: result.clone(), at_ms: s.ended_ms }));
+    }
+    let conv = Arc::new(conv);
+    v.made = Some((s.call.clone(), size, conv.clone()));
+    conv
+}
+
+/// Keep parsed items across frames and amend the last affected turn when output arrives.
+fn update_history(v: &mut View, shown: &Option<Arc<Conversation>>, skip: usize, switched: bool, media: &Media, in_lens: bool) {
+    let items = shown.as_ref().map(|c| c.items.as_slice()).unwrap_or_default();
+    let changed = match (&v.drawn, shown) {
+        (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+        (None, None) => false,
+        _ => true,
+    };
+    if changed || switched || v.cached_skip != skip {
+        let mut cache: HashMap<usize, Cached> = HashMap::with_capacity(items.len() - skip);
+        for it in &items[skip..] {
+            let k = Arc::as_ptr(it) as usize;
+            let e = v.cache.remove(&k).filter(|e| Arc::ptr_eq(&e.item, it)).unwrap_or_else(|| Cached {
+                item: it.clone(),
+                blocks: match it.as_ref() {
+                    Item::Said { text, .. } => Some(Arc::new(markdown::parse(text))),
+                    _ => None,
+                },
+                h: None,
+            });
+            cache.insert(k, e);
+        }
+        v.cache = cache;
+        v.open.retain(|k| v.cache.contains_key(k));
+        v.cached_skip = skip;
+    }
+    if changed || switched || v.gallery_revision != media.gallery_revision {
+        // A later tool can turn earlier speech within its turn into narration.
+        // Shared item identities identify the untouched prefix, including across appends.
+        let previous = v.drawn.as_ref().map(|c| c.items.as_slice()).unwrap_or_default();
+        let shared = if switched || v.gallery_revision != media.gallery_revision { 0 } else {
+            items.iter().zip(previous).take_while(|(new, old)| Arc::ptr_eq(new, old)).count()
+        };
+        let start = items[..shared].iter().rposition(|it| matches!(it.as_ref(), Item::You { .. })).unwrap_or(0);
+        if v.gallery_revision != media.gallery_revision {
+            for entry in v.cache.values_mut() {
+                if matches!(entry.item.as_ref(), Item::You { .. }) { entry.h = None; }
+            }
+        }
+        v.narration.resize(items.len(), false);
+        let mut has_step = false;
+        for i in (start..items.len()).rev() {
+            v.narration[i] = has_step && matches!(items[i].as_ref(), Item::Said { .. });
+            match items[i].as_ref() {
+                Item::Did { .. } => has_step = true,
+                Item::You { .. } => has_step = false,
+                _ => {}
+            }
+        }
+        let mut prev_you = items[..start].iter().rev().find_map(|it| match it.as_ref() {
+            Item::You { at_ms, .. } => Some(*at_ms),
+            _ => None,
+        }).flatten();
+        v.message_pictures.truncate(start);
+        let pastes: Vec<(i64, PathBuf)> = media
+            .items
+            .iter()
+            // a subagent's brief came from its agent, not from your pastes
+            .filter(|it| it.source == super::media::Source::Pasted && !in_lens)
+            .map(|it| (it.at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64), it.path.clone()))
+            .collect();
+        v.message_pictures.extend(items[start..]
+            .iter()
+            .map(|it| match it.as_ref() {
+                Item::You { images, pictures, at_ms, .. } => {
+                    let mut out: Vec<PathBuf> = pictures.iter().map(PathBuf::from).filter(|p| p.is_absolute()).collect();
+                    if *images > out.len()
+                        && let Some(at) = *at_ms
+                    {
+                        let mut found: Vec<&(i64, PathBuf)> = pastes.iter().filter(|(ts, _)| *ts <= at + 3000 && prev_you.is_none_or(|p| *ts > p)).collect();
+                        found.sort_by_key(|(ts, _)| *ts);
+                        let need = *images - out.len();
+                        out.extend(found.iter().rev().take(need).rev().map(|(_, p)| p.clone()));
+                    }
+                    prev_you = *at_ms;
+                    out
+                }
+                _ => vec![],
+            }));
+        v.gallery_revision = media.gallery_revision;
+    }
+    v.drawn = shown.clone();
+}
+
+#[cfg(test)]
+#[test]
+fn history_cache_follows_edits_and_turn_boundaries() {
+    let mut view = View::default();
+    let gallery = Media::new(Arc::new(|| {}));
+    let said = Arc::new(Item::Said { text: "checking".into(), at_ms: None });
+    let you = Arc::new(Item::You { text: "hi".into(), images: 0, pictures: vec![], command: false, at_ms: None });
+    let did = Arc::new(Item::Did { steps: vec![] });
+    let mut history = Arc::new(Conversation::subagent(Harness::Codex));
+    Arc::make_mut(&mut history).items = vec![you.clone(), said.clone()];
+    update_history(&mut view, &Some(history.clone()), 0, true, &gallery, false);
+    assert_eq!(view.narration, [false, false]);
+    Arc::make_mut(&mut history).items.extend([did.clone(), you, said]);
+    update_history(&mut view, &Some(history.clone()), 1, false, &gallery, false);
+    assert_eq!(view.narration, [false, true, false, false, false]);
+    assert_eq!(view.message_pictures.len(), 5);
+    Arc::make_mut(&mut history).items[2] = Arc::new(Item::Said { text: "finished".into(), at_ms: None });
+    update_history(&mut view, &Some(history), 0, false, &gallery, false);
+    assert_eq!(view.narration, [false; 5]);
+    update_history(&mut view, &None, 0, true, &gallery, true);
+    assert!(view.cache.is_empty() && view.message_pictures.is_empty());
+}
+
+/// The conversation, scrolled, in `area` (`col` the text column inside it): the session's, or the subagent's in
+/// `lens` (its own head, its own turn, and none of what you sent).
 #[allow(clippy::too_many_arguments)]
-fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c: &Typo, seen: &Seen, v: &mut View, mood: Mood, media: &mut Media, apps: &mut Apps) {
+fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c: &Typo, seen: &Seen, v: &mut View, mood: Mood, media: &mut Media, apps: &mut Apps, subs: &Subs, lens: Option<&Arc<Subagent>>, header_has_location: bool) {
     let t = ui.t;
-    let items: Vec<Arc<Item>> = seen.conv.as_ref().map(|c| c.items.clone()).unwrap_or_default();
-    let sent: Vec<(String, f32, bool, Vec<PathBuf>, usize)> = app
+    let shown: Option<Arc<Conversation>> = match lens {
+        Some(s) => Some(lens_conversation(v, s, seen.harness)),
+        None => seen.conv.clone(),
+    };
+    let items = shown.as_ref().map(|c| c.items.as_slice()).unwrap_or_default();
+    // going into a subagent's conversation or back: what shows is new, so it fades in (the first frame is just there)
+    let lens_name = lens.map(|s| s.call.as_str());
+    let switched = v.shown_lens.as_ref().is_none_or(|l| l.as_deref() != lens_name);
+    if switched {
+        if v.shown_lens.is_some() {
+            ui.spring_set(("focus-lens-in", id), 0.0);
+        }
+        v.shown_lens = Some(lens_name.map(str::to_string));
+        v.met = None;
+        v.arriving.clear();
+    }
+    let lens_in = ui.spring(("focus-lens-in", id), 1.0, Spring::ARRIVE, 1.0);
+    let sent: Vec<(String, crate::panes::term::DeliveryState, bool, Vec<PathBuf>, usize)> = app
         .focus
         .drafts
         .get(&id)
-        .map(|d| d.sent.iter().map(|s| (s.text.clone(), ui.now.saturating_duration_since(s.at).as_secs_f32(), s.queued, s.pictures.clone(), s.after)).collect())
+        .filter(|_| lens.is_none())
+        .map(|d| d.sent.iter().map(|s| (s.text.clone(), s.delivery.state(), s.queued, s.pictures.clone(), s.after)).collect())
         .unwrap_or_default();
     // the latest items show; earlier ones wait behind a button (a long session stays quick to lay out)
     let skip = items.len().saturating_sub(v.shown.max(HISTORY));
-    // the cache follows the items: kept by identity, dropped when they go
-    let mut cache: HashMap<usize, Cached> = HashMap::with_capacity(items.len() - skip);
-    for it in &items[skip..] {
-        let k = Arc::as_ptr(it) as usize;
-        let e = v.cache.remove(&k).filter(|e| Arc::ptr_eq(&e.item, it)).unwrap_or_else(|| Cached {
-            item: it.clone(),
-            blocks: match it.as_ref() {
-                Item::Said { text, .. } => Some(Arc::new(markdown::parse(text))),
-                _ => None,
-            },
-            h: None,
-        });
-        cache.insert(k, e);
-    }
-    v.cache = cache;
-    v.open.retain(|k| v.cache.contains_key(k));
-    // which replies are the agent narrating its work (more of it follows in the same turn): those read quieter
-    let narration: Vec<bool> = (0..items.len())
-        .map(|i| matches!(items[i].as_ref(), Item::Said { .. }) && items[i + 1..].iter().take_while(|it| !matches!(it.as_ref(), Item::You { .. })).any(|it| matches!(it.as_ref(), Item::Did { .. })))
-        .collect();
-    // the pictures in your messages: their paths when the transcript has them, else the ones you pasted (alt+v)
-    // since the message before
-    let pastes: Vec<(i64, PathBuf)> = media
-        .items
-        .iter()
-        .filter(|it| it.source == super::media::Source::Pasted)
-        .map(|it| (it.at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64), it.path.clone()))
-        .collect();
-    let mut prev_you: Option<i64> = None;
-    let pics: Vec<Vec<PathBuf>> = items
-        .iter()
-        .map(|it| match it.as_ref() {
-            Item::You { images, pictures, at_ms, .. } => {
-                let mut out: Vec<PathBuf> = pictures.iter().map(PathBuf::from).filter(|p| p.is_absolute()).collect();
-                if *images > out.len()
-                    && let Some(at) = *at_ms
-                {
-                    let mut found: Vec<&(i64, PathBuf)> = pastes.iter().filter(|(ts, _)| *ts <= at + 3000 && prev_you.is_none_or(|p| *ts > p)).collect();
-                    found.sort_by_key(|(ts, _)| *ts);
-                    let need = *images - out.len();
-                    out.extend(found.iter().rev().take(need).rev().map(|(_, p)| p.clone()));
-                }
-                prev_you = *at_ms;
-                out
-            }
-            _ => vec![],
-        })
-        .collect();
+    update_history(v, &shown, skip, switched, media, lens.is_some());
+    let narration = &v.narration;
+    let pics = &v.message_pictures;
     // the MCP apps' cards: their pages as far as they're read (the first look starts reading one), and how tall
     // each page says it is
     let sid = app.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone()).unwrap_or_default();
@@ -704,29 +1167,38 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
         }
     }
     let gap = c.lh.round();
-    let intro_h = intro_height(c);
+    let intro_h = if header_has_location && lens.is_none() { 0.0 } else { intro_height(c) };
     let earlier_h = if skip > 0 { 44.0 } else { 0.0 };
     let top_pad = 18.0 + intro_h + earlier_h;
     // heights first (cached per width), so the scroll knows where everything is
-    let mut heights = Vec::with_capacity(items.len());
-    for (i, it) in items.iter().enumerate() {
-        if i < skip {
-            heights.push(0.0);
-            continue;
-        }
+    let mut heights = Vec::with_capacity(items.len() - skip);
+    // the steps of a card opening or closing: how far open, while it's on its way
+    let mut reveals: HashMap<usize, f32> = HashMap::new();
+    for (i, it) in items.iter().enumerate().skip(skip) {
         let k = Arc::as_ptr(it) as usize;
         let open = v.open.contains(&k);
+        if matches!(it.as_ref(), Item::Did { .. }) {
+            let want = if open { 1.0 } else { 0.0 };
+            let now = ui.spring(("focus-open", id, lens_name, k), want, arrive::FOLD, want);
+            if now != want {
+                reveals.insert(i, now.clamp(0.0, 1.0));
+            }
+        }
         let e = v.cache.get(&k);
-        // an app's card grows as its page says (no height kept)
-        let app = matches!(it.as_ref(), Item::Did { steps } if steps.iter().any(|s| s.app.is_some()));
-        let h = match e.and_then(|e| e.h) {
+        // an app's card grows as its page says, and the subagents a turn started get their cards as they're
+        // known (no height kept)
+        let app = matches!(it.as_ref(), Item::Did { steps } if steps.iter().any(|s| s.app.is_some() || subs.get(&s.id).is_some()));
+        let moving = reveals.contains_key(&i);
+        let h = match e.and_then(|e| e.h).filter(|_| !moving) {
             Some((w, s, o, n, h)) if !app && (w - col.w).abs() < 0.5 && (s - c.body).abs() < 0.01 && o == open && n == narration[i] => h,
             _ => {
                 let blocks = e.and_then(|e| e.blocks.clone());
                 let mut p = Paint::measuring(id);
                 p.apps.cards = Some(&cards);
+                p.apps.reveal = reveals.get(&i).copied();
+                p.subs = Some(subs);
                 let h = item(ui, c, it, blocks.as_deref(), &pics[i], i, Point::new(col.x, 0.0), col.w, open, narration[i], &mut p);
-                if let Some(e) = v.cache.get_mut(&k) {
+                if !moving && let Some(e) = v.cache.get_mut(&k) {
                     e.h = Some((col.w, c.body, open, narration[i], h));
                 }
                 h
@@ -738,9 +1210,14 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
     // what you sent goes where you sent it (after what the conversation had then), until the transcript has it
     // where the agent read it
     let sent_at: Vec<usize> = sent.iter().map(|s| s.4.clamp(skip, items.len())).collect();
-    let working_line = mood == Mood::Working && seen.running.is_none();
-    let limit_box = seen.limit.as_ref().filter(|_| !items.is_empty() || !sent.is_empty()).map(|limit| lay(ui, &[(limit.message.clone(), Style::mono(c.small, t.danger))], c.small, 1.6, (col.w - 26.0).max(80.0), None));
-    let tail_h = limit_box.as_ref().map_or_else(|| if working_line { c.lh + gap } else { 0.0 }, |b| b.h + gap + 8.0);
+    // at the end: how its thinking is going while it runs no step (a subagent's own), or how a subagent's work ended
+    let working_line = match lens {
+        Some(s) => s.state.running() && shown.as_ref().is_none_or(|c| c.running().is_none()),
+        None => mood == Mood::Working && seen.running.is_none(),
+    };
+    let ending = lens.and_then(|s| subagents::ending(s, c.now_ms));
+    let limit_box = seen.limit.as_ref().filter(|_| lens.is_none() && (!items.is_empty() || !sent.is_empty())).map(|limit| lay(ui, &[(limit.message.clone(), Style::mono(c.small, t.danger))], c.small, 1.6, (col.w - 26.0).max(80.0), None));
+    let tail_h = limit_box.as_ref().map_or_else(|| if working_line || ending.is_some() { c.lh + gap } else { 0.0 }, |b| b.h + gap + 8.0);
     let total = top_pad + heights.iter().filter(|h| **h > 0.0).map(|h| h + gap).sum::<f32>() + sent_hs.iter().map(|h| h + gap).sum::<f32>() + tail_h + 8.0;
     let room = area.h;
     let max = (total - room).max(0.0);
@@ -770,17 +1247,50 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
     v.top = v.top.clamp(0.0, max);
     v.total = total;
     v.room = room;
-    let offset = ui.ease(("focus-scroll", id), v.top, 160.0);
+    // each conversation (the session's, each subagent's) scrolls on its own, on a spring: a wheel notch while it's
+    // still moving carries on from its speed, and what lands at the bottom lifts the text up rather than jumping
+    let scroll_key = ("focus-scroll", id, lens_name);
+    if switched {
+        ui.spring_set(scroll_key, v.top);
+    }
+    let offset = ui.spring(scroll_key, v.top, arrive::SCROLL, v.top);
+    // what arrived since last frame rises and fades in (what you sent shows by itself, and the transcript's copy of
+    // it takes its place unseen)
+    let met = v.met.unwrap_or(items.len()).min(items.len());
+    v.met = Some(items.len());
+    for i in met.max(skip)..items.len() {
+        if !matches!(items[i].as_ref(), Item::You { .. }) && !v.arriving.contains(&i) {
+            v.arriving.push(i);
+        }
+    }
+    let mut arrive: HashMap<usize, f32> = HashMap::new();
+    v.arriving.retain(|&i| {
+        let k = ui.spring(("focus-arrive", id, lens_name, i), 1.0, Spring::ARRIVE, 0.0);
+        let landed = k == 1.0 || i >= items.len();
+        if !landed {
+            arrive.insert(i, k);
+        }
+        !landed
+    });
     // the session's file lookups, for its links (what isn't known yet is looked up off this thread, and the
     // pane wakes when it's in)
     let waker = crate::pane::Waker::new(id, app.tx.clone());
     let term = app.panes.get(&id).and_then(|p| p.as_term_ref());
     let mut lookup = term.map(|t| t.file_cache().lookup());
     let mut resolve = |m: &FileLinkMatch| lookup.as_mut().and_then(|l| l.get(m));
-    let mut p = Paint { draw: true, id, links: vec![], pictures: vec![], sounds: vec![], media: Some(media), resolve: Some(&mut resolve), apps: AppPaint { cards: Some(&cards), ..AppPaint::default() } };
+    // a selection whose ends left the conversation (it was replaced) goes
+    if v.sel.as_ref().is_some_and(|s| s.anchor.key.0.max(s.head.key.0) >= items.len()) {
+        v.sel = None;
+    }
+    let selectable = TextPaint { sel: v.sel.as_ref().and_then(Sel::span), ..TextPaint::default() };
+    let mut p = Paint { draw: true, id, links: vec![], pictures: vec![], sounds: vec![], media: Some(media), resolve: Some(&mut resolve), apps: AppPaint { cards: Some(&cards), ..AppPaint::default() }, text: selectable, subs: Some(subs), opened: vec![], quip_hover: None };
     ui.clip(area, 0.0);
-    let mut y = area.y + 18.0 - offset;
-    intro(ui, c, seen, Point::new(col.x, y), col.w, &mut p);
+    let mut y = area.y + 18.0 - offset + (1.0 - lens_in) * arrive::RISE;
+    match lens {
+        Some(s) => subagents::head(ui, c, id, s, Point::new(col.x, y), col.w),
+        None if !header_has_location => intro(ui, c, seen, Point::new(col.x, y), col.w, &mut p),
+        None => {}
+    }
     y += intro_h;
     if skip > 0 {
         let label = format!("Earlier · {skip} more");
@@ -794,14 +1304,17 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
         y += earlier_h;
     }
     let mut next = 0;
-    for (i, it) in items.iter().enumerate() {
+    for (i, it) in items.iter().enumerate().skip(skip) {
         while next < sent.len() && sent_at[next] <= i {
-            let (text, age, queued, pics, _) = &sent[next];
-            you(ui, c, text, pics.len(), pics, false, Point::new(col.x, y), col.w, false, Some(sent_state(*age, *queued)), &mut p);
+            let (text, delivery, queued, pics, after) = &sent[next];
+            let k = ui.arrival(("focus-sent", id, text, *after), true, Spring::ARRIVE);
+            let dy = (1.0 - k) * arrive::RISE;
+            you(ui, c, text, pics.len(), pics, false, Point::new(col.x, y + dy), col.w, false, Some(sent_state(delivery, *queued)), &mut p);
+            ui.veil(Rect::new(col.x - 10.0, y + dy - 4.0, col.w + 20.0, sent_hs[next] + 8.0), 0.0, k);
             y += sent_hs[next] + gap;
             next += 1;
         }
-        let h = heights[i];
+        let h = heights[i - skip];
         if h <= 0.0 {
             continue;
         }
@@ -809,12 +1322,26 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
             let k = Arc::as_ptr(it) as usize;
             let open = v.open.contains(&k);
             let blocks = v.cache.get(&k).and_then(|e| e.blocks.clone());
-            item(ui, c, it, blocks.as_deref(), &pics[i], i, Point::new(col.x, y), col.w, open, narration[i], &mut p);
+            // its words can be selected
+            p.text.collect = true;
+            p.text.item(i);
+            let (born, reveal) = (arrive.get(&i).copied(), reveals.get(&i).copied());
+            let dy = born.map_or(0.0, |k| (1.0 - k) * arrive::RISE);
+            p.apps.reveal = reveal;
+            item(ui, c, it, blocks.as_deref(), &pics[i], i, Point::new(col.x, y + dy), col.w, open, narration[i], &mut p);
+            p.apps.reveal = None;
+            p.text.collect = false;
+            if let Some(k) = born {
+                ui.veil(Rect::new(col.x - 10.0, y + dy - 4.0, col.w + 20.0, h + 8.0), 0.0, k);
+            }
         }
         y += h + gap;
     }
-    for (n, (text, age, queued, pics, _)) in sent.iter().enumerate().skip(next) {
-        you(ui, c, text, pics.len(), pics, false, Point::new(col.x, y), col.w, false, Some(sent_state(*age, *queued)), &mut p);
+    for (n, (text, delivery, queued, pics, after)) in sent.iter().enumerate().skip(next) {
+        let k = ui.arrival(("focus-sent", id, text, *after), true, Spring::ARRIVE);
+        let dy = (1.0 - k) * arrive::RISE;
+        you(ui, c, text, pics.len(), pics, false, Point::new(col.x, y + dy), col.w, false, Some(sent_state(delivery, *queued)), &mut p);
+        ui.veil(Rect::new(col.x - 10.0, y + dy - 4.0, col.w + 20.0, sent_hs[n] + 8.0), 0.0, k);
         y += sent_hs[n] + gap;
     }
     if let Some(b) = &limit_box {
@@ -823,15 +1350,31 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
     } else if working_line {
         // how its thinking is going, at the end of what it's said
         ui.spinner(Point::new(col.x + 7.0, y + c.lh / 2.0), 4.6, 1.6, t.accent);
-        let words = thinking(seen, c.now_ms, working_secs(v.mood, ui.now));
+        let words = match lens {
+            Some(s) => subagents::thinking(s, c.now_ms),
+            None => thinking(seen, c.now_ms, working_secs(v.mood, ui.now)),
+        };
         let b = ui.line(&words, Style::mono(c.small, c.muted), Some(col.w - 26.0));
         ui.draw(&b, Point::new(col.x + 22.0, y + (c.lh - b.h) / 2.0));
+    } else if let Some(words) = &ending {
+        // a subagent's work is over: how it went, quietly
+        let b = ui.line(words, Style::mono(c.small, c.faint), Some(col.w));
+        ui.draw(&b, Point::new(col.x, y + (c.lh - b.h) / 2.0));
     }
     let (links, pictures, sounds) = (std::mem::take(&mut p.links), std::mem::take(&mut p.pictures), std::mem::take(&mut p.sounds));
     let (drawn, retry) = (std::mem::take(&mut p.apps.drawn), std::mem::take(&mut p.apps.retry));
+    let runs = std::mem::take(&mut p.text.runs);
+    v.opened = std::mem::take(&mut p.opened);
+    v.quip_preview.hovered = p.quip_hover.take();
     drop(p);
     v.cards = drawn;
     v.retry = retry;
+    // what a press lands on next; while something's selected, the text it's drawn over is kept for the copy
+    if v.sel.is_some() {
+        keep_text(&mut v.sel_text, &runs);
+    }
+    v.runs = runs;
+    v.text_area = area;
     v.clip = area;
     if let Some(l) = lookup {
         l.finish(Some(waker));
@@ -841,54 +1384,140 @@ fn conversation(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, col: Rect, c
     v.sounds = sounds;
     // more above / below: the text fades under the edge
     let surface = t.surface;
-    if offset > 0.5 {
+    let (fade_top, fade_bottom) = (ui.ease(("focus-fade-top", id), if offset > 0.5 { 1.0 } else { 0.0 }, 120.0), ui.ease(("focus-fade-bottom", id), if offset < max - 0.5 { 1.0 } else { 0.0 }, 120.0));
+    if fade_top > 0.01 {
         let fr = ui.px(Rect::new(area.x, area.y, area.w, 36.0));
-        ui.scene.top_glass_quad(Quad::new(fr, Fill::Vertical(surface, surface.with_alpha(0.0))));
+        ui.scene.top_glass_quad(Quad::new(fr, Fill::Vertical(surface.fade(fade_top), surface.with_alpha(0.0))));
     }
-    if offset < max - 0.5 {
+    if fade_bottom > 0.01 {
         let fr = ui.px(Rect::new(area.x, area.bottom() - 28.0, area.w, 28.0));
-        ui.scene.top_glass_quad(Quad::new(fr, Fill::Vertical(surface.with_alpha(0.0), surface)));
+        ui.scene.top_glass_quad(Quad::new(fr, Fill::Vertical(surface.with_alpha(0.0), surface.fade(fade_bottom))));
     }
     ui.unclip();
     let over = ui.hovered(area);
     widgets::scrollbar(ui, Rect::new(area.right() - 10.0, area.y, 12.0, area.h), total, room, offset, if over { 0.9 } else { 0.0 });
     // away from the bottom: a way back to the latest, floating over the text on a layer of its own
-    if !v.follow && max - v.top > room * 0.4 {
+    let away = !v.follow && max - v.top > room * 0.4;
+    let latest = ui.spring(("focus-latest-in", id, lens_name), if away { 1.0 } else { 0.0 }, Spring::ARRIVE, 0.0);
+    if latest > 0.01 {
         let prev = ui.layer();
         let label = "Latest";
         let st = Style::mono(size::SMALL, t.text).weight(weight::MEDIUM);
         let w = ui.measure(label, st) + 40.0;
-        let pr = Rect::new(col.x + (col.w - w) / 2.0, area.bottom() - 42.0, w, 28.0);
+        let shown = latest.clamp(0.0, 1.0);
+        let pr = Rect::new(col.x + (col.w - w) / 2.0, area.bottom() - 42.0 + (1.0 - latest) * 14.0, w, 28.0);
         // an app's page stops short of it (a page is a window of its own, over anything drawn)
-        v.clip.h = (pr.y - 8.0 - area.y).max(0.0);
+        if away {
+            v.clip.h = (area.bottom() - 42.0 - 8.0 - area.y).max(0.0);
+        }
         let hot = ui.hover_amount(("focus-latest", id), pr);
-        ui.shadow(pr, radius::OVERLAY, 12.0, 3.0, t.shadow.fade(0.6));
-        ui.panel(pr, radius::OVERLAY, t.raised.mix(t.text, 0.04 * hot), t.border);
-        ui.icon(Rect::new(pr.x + 10.0, pr.y + 6.0, 16.0, 16.0), "\u{F0045}", 14.0, t.muted);
-        ui.label(Point::new(pr.x + 28.0, pr.y + 5.0), label, st);
-        ui.hit(pr, Action::Focus(id, LATEST));
+        ui.shadow(pr, radius::OVERLAY, 12.0, 3.0, t.shadow.fade(0.6 * shown));
+        ui.panel(pr, radius::OVERLAY, t.raised.mix(t.text, 0.04 * hot).fade(shown), t.border.fade(shown));
+        ui.icon(Rect::new(pr.x + 10.0, pr.y + 6.0, 16.0, 16.0), "\u{F0045}", 14.0, t.muted.fade(shown));
+        ui.label(Point::new(pr.x + 28.0, pr.y + 5.0), label, st.color(st.color.fade(shown)));
+        if away {
+            ui.hit(pr, Action::Focus(id, LATEST));
+        }
         ui.set_layer(prev);
     }
-    if items.is_empty() && sent.is_empty() {
-        empty(ui, c, seen, Rect::new(col.x, area.y + intro_h + 18.0, col.w, (area.h - intro_h - 18.0).max(0.0)), &mut v.mark);
-    } else {
-        v.mark = None;
+    ui.veil(area, 0.0, lens_in);
+    match lens {
+        // a subagent with nothing to show yet says so (one at work shows its thinking line)
+        Some(s) if items.is_empty() && !s.state.running() => {
+            let b = ui.line("No transcript of its work to show", Style::mono(c.small, c.faint), Some(col.w));
+            ui.draw(&b, Point::new(col.x + (col.w - b.w) / 2.0, area.y + intro_h + 18.0 + (area.h - intro_h) * 0.3));
+        }
+        Some(_) => v.mark = None,
+        None if items.is_empty() && sent.is_empty() => empty(ui, c, seen, Rect::new(col.x, area.y + intro_h + 18.0, col.w, (area.h - intro_h - 18.0).max(0.0)), &mut v.mark),
+        None => v.mark = None,
     }
 }
 
 /// The caption under a message on its way.
-fn sent_state(age: f32, queued: bool) -> &'static str {
-    if queued {
-        "Queued · sending on the next turn"
-    } else if age < 2.5 {
-        "Sending…"
-    } else {
-        "Sent"
+fn sent_state(delivery: &crate::panes::term::DeliveryState, queued: bool) -> &'static str {
+    use crate::panes::term::DeliveryState;
+    match delivery {
+        DeliveryState::Sending => "Sending…",
+        DeliveryState::Submitted if queued => "Queued · waiting for the agent",
+        DeliveryState::Submitted => "Waiting for the agent…",
+        DeliveryState::Failed(_) => "Not sent · check the terminal",
     }
 }
 
 fn intro_height(c: &Typo) -> f32 {
     (c.small * 1.7).round() + 18.0
+}
+
+/// Draw the working folder and Git branch next to the chat session's title.
+fn draw_session_location(app: &App, ui: &mut Ui, id: PaneId, r: Rect, v: &mut View, seen: &Seen) {
+    let Some(term) = app.panes.get(&id).and_then(|p| p.as_term_ref()) else { return };
+    let mut lookup = term.file_cache().lookup();
+    let full = seen.cwd.to_string_lossy().into_owned();
+    let path = FileLinkMatch { start: 0, end: full.len(), label: full.clone(), path: full.clone(), line: None, column: None };
+    let action = lookup.get(&path).map(|uri| {
+        let target = LINK + v.links.len();
+        v.links.push(uri.to_string());
+        Action::Focus(id, target)
+    });
+    lookup.finish(Some(crate::pane::Waker::new(id, app.tx.clone())));
+    breadcrumb_bar(ui, seen, r, &full, action);
+}
+
+fn breadcrumb_bar(ui: &mut Ui, seen: &Seen, r: Rect, full: &str, action: Option<Action>) {
+    let t = ui.t;
+    let mid = r.y + r.h / 2.0;
+    let branch = seen.branch.as_deref().filter(|b| !b.is_empty()).map(|branch| {
+        let ink = Style::new(size::SMALL, weight::MEDIUM, t.muted);
+        let budget = (r.w * 0.45 - 32.0).max(1.0);
+        (branch, ui.line(branch, ink, Some(budget)))
+    });
+    let end = r.right() - branch.as_ref().map_or(0.0, |(_, text)| text.w + 40.0);
+
+    let parts = path_parts(&crate::util::strip_verbatim(seen.cwd.clone()));
+    let Some(last) = parts.len().checked_sub(1) else { return };
+    let quiet = Style::new(size::BODY, weight::MEDIUM, t.muted);
+    let current = Style::new(size::BODY, weight::SEMIBOLD, t.text);
+    let style = |i| if i == last { current } else { quiet };
+    let widths: Vec<_> = parts.iter().enumerate().map(|(i, part)| ui.measure(part, style(i))).collect();
+    let ellipsis = ui.measure("…", quiet);
+    const GAP: f32 = 16.0;
+    let text_x = r.x + 27.0;
+    let room = (end - text_x - 8.0).max(1.0);
+    let plan = crumb_plan(&widths, ellipsis, GAP, room);
+    let used: f32 = plan.iter().map(|i| i.map_or(ellipsis, |i| widths[i])).sum::<f32>()
+        + GAP * plan.len().saturating_sub(1) as f32;
+    let hit = Rect::new(r.x, mid - 14.0, (text_x - r.x) + used.min(room) + 8.0, 28.0);
+    if let Some(action) = action {
+        let hot = ui.hover_amount("session-breadcrumbs", hit);
+        ui.round(hit, 7.0, t.text.with_alpha(0.065 * hot));
+        ui.hit(hit, action);
+    } else {
+        ui.block(hit);
+    }
+    if ui.hovered(hit) {
+        widgets::tooltip_under(ui, hit, full, (ui.screen.w - 32.0).min(480.0));
+    }
+    ui.icon(Rect::new(r.x + 5.0, r.y, 17.0, r.h), "\u{F0256}", 15.0, t.muted);
+    let mut x = text_x;
+    for (j, part) in plan.into_iter().enumerate() {
+        if j > 0 {
+            ui.icon(Rect::new(x, r.y, GAP, r.h), "\u{F0142}", 10.0, t.faint);
+            x += GAP;
+        }
+        let (label, ink) = part.map_or(("…", quiet), |i| (parts[i].as_str(), style(i)));
+        let text = ui.line(label, ink, Some((text_x + room - x).max(1.0)));
+        ui.draw(&text, Point::new(x, mid - text.h / 2.0));
+        x += text.w;
+    }
+    if let Some((label, text)) = branch {
+        let chip = Rect::new(hit.right() + 8.0, mid - 12.0, text.w + 32.0, 24.0);
+        ui.panel(chip, 12.0, t.text.with_alpha(0.04), t.hairline);
+        ui.icon(Rect::new(chip.x + 7.0, chip.y, 14.0, chip.h), "\u{F062C}", 12.0, t.muted);
+        ui.draw(&text, Point::new(chip.x + 22.0, mid - text.h / 2.0));
+        if text.layout.truncated && ui.hovered(chip) {
+            widgets::tooltip_under(ui, chip, label, (ui.screen.w - 32.0).min(360.0));
+        }
+    }
 }
 
 /// Where the session works, at the head of its conversation: the folder (it opens, as a path does in the
@@ -993,7 +1622,18 @@ fn item_body(ui: &mut Ui, c: &Typo, it: &Item, blocks: Option<&Vec<Block>>, pics
                 let h = you(ui, c, text, *images, pics, *command, at, w, open, None, &mut Paint::measuring(id));
                 ui.hit_with(Rect::new(at.x + w * 0.14, at.y, w * 0.86, h), Action::Focus(id, OPEN + i), Cursor::Default);
             }
-            you(ui, c, text, *images, pics, *command, at, w, open, None, p)
+            let h = you(ui, c, text, *images, pics, *command, at, w, open, None, p);
+            // in a subagent's conversation, what it's asked comes from the session's agent, not from you
+            match c.asker {
+                Some(who) => {
+                    if p.draw {
+                        let b = ui.line(&format!("From {who}"), Style::mono(c.small, c.faint), None);
+                        ui.draw(&b, Point::new(at.x + w - b.w - 4.0, at.y + h + 6.0));
+                    }
+                    h + (c.small * 1.8).round()
+                }
+                None => h,
+            }
         }
         Item::Said { .. } => {
             let ink = if narration { c.narration } else { c.text };
@@ -1015,6 +1655,7 @@ fn item_body(ui: &mut Ui, c: &Typo, it: &Item, blocks: Option<&Vec<Block>>, pics
             h
         }
         Item::Did { steps } => did(ui, c, steps, i, at, w, open, p),
+        Item::Note { kind: NoteKind::Subagent, text, .. } => subagents::note(ui, c, text, i, at, w, p),
         Item::Note { kind, text, .. } => note(ui, c, *kind, text, at, w, p.draw),
     }
 }
@@ -1034,14 +1675,25 @@ fn setting(text: &str) -> Option<String> {
 /// (a message on its way).
 #[allow(clippy::too_many_arguments)]
 fn you(ui: &mut Ui, c: &Typo, text: &str, images: usize, pics: &[PathBuf], command: bool, at: Point, w: f32, open: bool, state: Option<&str>, p: &mut Paint) -> f32 {
-    let short = crate::quips::collapse(text);
+    let (short, quip_badges) = crate::quips::collapse_with_expansions(text);
     let text = short.as_str();
     let t = ui.t;
     let max_w = (w * 0.86).max(120.0);
     let (px, py) = (16.0, 11.0);
     let inner = max_w - 2.0 * px;
     let spans = [Span { text: text.to_string(), code: command, ..Span::default() }];
-    let runs = styled(c, &spans, c.body, c.text, weight::REGULAR, false);
+    let mut runs = styled(c, &spans, c.body, t.role("messageForeground", c.text), weight::REGULAR, false);
+    if !quip_badges.is_empty() {
+        let normal = runs[0].1;
+        runs.clear();
+        let mut start = 0;
+        for badge in &quip_badges {
+            if start < badge.range.start { runs.push((text[start..badge.range.start].into(), normal)); }
+            runs.push((text[badge.range.clone()].into(), normal.weight(weight::SEMIBOLD).color(quips::badge_ink(ui))));
+            start = badge.range.end;
+        }
+        if start < text.len() { runs.push((text[start..].into(), normal)); }
+    }
     let tb = (!text.is_empty()).then(|| lay(ui, &runs, c.body, LINE, inner, (!open).then_some(YOU_LINES)));
     // its pictures in rows over the words; a tile where there's no picture to show
     let per_row = (((inner + 8.0) / (SHOT.0 + 8.0)).floor() as usize).max(1);
@@ -1059,6 +1711,8 @@ fn you(ui: &mut Ui, c: &Typo, text: &str, images: usize, pics: &[PathBuf], comma
         let x = at.x + w - bw;
         let alpha = if state.is_some() { 0.6 } else { 1.0 };
         ui.round(Rect::new(x, at.y, bw, bh), radius::OVERLAY, c.bubble.fade(alpha));
+        ui.theme_region(Rect::new(x,at.y,bw,bh),"messageSurface");
+        if ui.theme.aurora(){ui.outline(Rect::new(x,at.y,bw,bh),16.0,1.0,t.border);}
         let mut y = at.y + py;
         for n in 0..shots {
             let (row, col) = (n / per_row, n % per_row);
@@ -1073,7 +1727,13 @@ fn you(ui: &mut Ui, c: &Typo, text: &str, images: usize, pics: &[PathBuf], comma
         }
         y += shots_h + between;
         if let Some(b) = &tb {
+            p.run(ui, b, Point::new(x + px, y));
             ui.draw_faded(b, Point::new(x + px, y), alpha);
+            for badge in &quip_badges {
+                if let Some(preview) = quips::badge(ui, b, Point::new(x + px, y), &badge.range, &text[badge.range.clone()], &badge.instructions, c.body) {
+                    p.quip_hover = Some(preview);
+                }
+            }
             links_over(ui, c, b, &spans, Point::new(x + px, y), p);
         }
         if let Some(s) = state.filter(|s| !s.is_empty()) {
@@ -1134,6 +1794,7 @@ fn text_block(ui: &mut Ui, c: &Typo, spans: &[Span], at: Point, w: f32, size: f3
     let runs = styled(c, spans, size, ink, w8, italic);
     let b = lay(ui, &runs, size, LINE, w, None);
     if p.draw {
+        p.run(ui, &b, at);
         ui.draw(&b, at);
         links_over(ui, c, &b, spans, at, p);
     }
@@ -1153,6 +1814,21 @@ fn said(ui: &mut Ui, c: &Typo, blocks: &[Block], at: Point, w: f32, ink: Color, 
             (Some(_), Block::Heading(..)) => (c.lh * 0.95).round(),
             (Some(Block::Heading(..)), _) => (c.lh * 0.3).round(),
             _ => (c.lh * 0.55).round(),
+        };
+        // copied, the blocks keep their shape: a blank line between paragraphs, list items one to a line, each
+        // with its mark
+        p.text.gap = if matches!((prev, b), (Some(Block::Item { .. }), Block::Item { .. })) { "\n" } else { "\n\n" };
+        p.text.lead = match b {
+            Block::Item { depth, mark, .. } => {
+                let mark = match mark {
+                    Mark::Bullet => "-".to_string(),
+                    Mark::Number(n) => format!("{n}."),
+                    Mark::Check(done) => (if *done { "- [x]" } else { "- [ ]" }).to_string(),
+                };
+                format!("{}{mark} ", "  ".repeat(*depth))
+            }
+            Block::Quote(_) => "> ".to_string(),
+            _ => String::new(),
         };
         let h = match b {
             Block::Para(spans) => text_block(ui, c, spans, Point::new(at.x, y), w, c.body, ink, weight::REGULAR, false, p),
@@ -1181,7 +1857,7 @@ fn said(ui: &mut Ui, c: &Typo, blocks: &[Block], at: Point, w: f32, ink: Color, 
                 text_block(ui, c, spans, Point::new(at.x + indent + mark_w, y), (w - indent - mark_w).max(40.0), c.body, if done { c.muted } else { ink }, weight::REGULAR, false, p)
             }
             Block::Quote(spans) => text_block(ui, c, spans, Point::new(at.x + c.adv * 2.0, y), (w - c.adv * 2.0).max(40.0), c.body, c.muted, weight::REGULAR, true, p),
-            Block::Code { lang, lines } => code(ui, c, lang, lines, Point::new(at.x, y), w, p.draw),
+            Block::Code { lang, lines } => code(ui, c, lang, lines, Point::new(at.x, y), w, p),
             Block::Rule => {
                 if p.draw {
                     ui.hline(at.x, y + c.lh / 2.0, w, ui.t.hairline);
@@ -1196,21 +1872,26 @@ fn said(ui: &mut Ui, c: &Typo, blocks: &[Block], at: Point, w: f32, ink: Color, 
     y - at.y
 }
 
-fn code(ui: &mut Ui, c: &Typo, lang: &str, lines: &[String], at: Point, w: f32, draw: bool) -> f32 {
+fn code(ui: &mut Ui, c: &Typo, lang: &str, lines: &[String], at: Point, w: f32, p: &mut Paint) -> f32 {
     let size = (c.body * 0.86).round();
     let lh = (size * 1.5).round();
     let shown = lines.len().min(CODE_LINES);
     let more = lines.len() - shown;
     let pad = 14.0;
     let h = shown.max(1) as f32 * lh + 2.0 * pad + if more > 0 { lh } else { 0.0 };
-    if draw {
+    if p.draw {
         let r = Rect::new(at.x, at.y, w, h);
         ui.round(r, radius::OVERLAY, c.well);
+        ui.theme_region(r,"codeBackground");
+        if ui.theme.aurora(){ui.outline(r,16.0,1.0,ui.t.border);}
         ui.clip(r, radius::OVERLAY);
-        let st = Style::mono(size, c.text.mix(c.code, 0.25));
+        let st = Style::mono(size, ui.t.role("codeForeground", c.text.mix(c.code, 0.25)));
         for (i, l) in lines.iter().take(shown).enumerate() {
             let b = ui.line(l, st, Some(w - 2.0 * pad));
-            ui.draw(&b, Point::new(r.x + pad, r.y + pad + i as f32 * lh + (lh - b.h) / 2.0));
+            let at = Point::new(r.x + pad, r.y + pad + i as f32 * lh + (lh - b.h) / 2.0);
+            // each line selects on its own, and copies on a line of its own
+            p.run(ui, &b, at);
+            ui.draw(&b, at);
         }
         if more > 0 {
             let b = ui.line(&format!("… {more} more line{}", if more == 1 { "" } else { "s" }), Style::mono(size, c.faint), None);
@@ -1391,7 +2072,8 @@ fn summary(steps: &[Step], now_ms: i64, working: bool) -> String {
         (first(&|k| matches!(k, StepKind::Edit | StepKind::Create | StepKind::Delete)), n(count(&|k| matches!(k, StepKind::Edit | StepKind::Create | StepKind::Delete)), "Changed a file", "Changed # files")),
         (first(&|k| k == StepKind::Run), n(count(&|k| k == StepKind::Run), "Ran a command", "Ran # commands")),
         (first(&|k| matches!(k, StepKind::Search | StepKind::Web)), n(count(&|k| matches!(k, StepKind::Search | StepKind::Web)), "Searched once", "Searched # times")),
-        (first(&|k| k == StepKind::Agent), n(count(&|k| k == StepKind::Agent), "Asked a helper", "Asked # helpers")),
+        // the subagents it started have cards of their own: what's left is talking to them, waiting on them
+        (first(&|k| k == StepKind::Agent), n(count(&|k| k == StepKind::Agent), "Checked in with a subagent", "Checked in with subagents # times")),
         (first(&|k| k == StepKind::Mcp), server),
         (first(&|k| matches!(k, StepKind::Plan | StepKind::Ask | StepKind::Send | StepKind::Other)), n(count(&|k| matches!(k, StepKind::Plan | StepKind::Ask | StepKind::Send | StepKind::Other)), "Used a tool", "Used # tools")),
     ];
@@ -1409,91 +2091,119 @@ fn step_file(s: &Step, p: &mut Paint) -> Option<String> {
     p.resolve(&m).map(|u| u.to_string())
 }
 
-/// What the agent did: one quiet line, the pictures it showed you or looked at under it, its steps when open
-/// (each opens its file).
+/// What the agent did: one quiet line, the pictures it showed you or looked at under it, the subagents it started
+/// (a card each, live), its steps when open (each opens its file).
 #[allow(clippy::too_many_arguments)]
 fn did(ui: &mut Ui, c: &Typo, steps: &[Step], i: usize, at: Point, w: f32, open: bool, p: &mut Paint) -> f32 {
     let t = ui.t;
     let id = p.id;
     let row_h = (c.small * 1.9).round();
+    // the subagents these steps started have cards of their own: the line sums up the rest (no rest, no line)
+    let launched: Vec<Arc<Subagent>> = p.subs.map(|s| steps.iter().filter_map(|st| s.get(&st.id).cloned()).collect()).unwrap_or_default();
+    let rest: Vec<Step> = if launched.is_empty() { vec![] } else { steps.iter().filter(|st| !launched.iter().any(|l| l.call == st.id)).cloned().collect() };
+    let line: &[Step] = if launched.is_empty() { steps } else { &rest };
+    // how far open its steps are: all the way or not at all, or on their way
+    let k = p.apps.reveal.unwrap_or(if open { 1.0 } else { 0.0 });
+    let unfolded = open || k > 0.001;
+    let line_h = if line.is_empty() && !unfolded { 0.0 } else { row_h };
+    let crew_h = if launched.is_empty() { 0.0 } else { subagents::cards_height(c, launched.len()) + if line_h > 0.0 { 8.0 } else { 0.0 } };
     let shots = step_pictures(steps);
     let shots_h = if shots.is_empty() { 0.0 } else { SHOWN.1 + 10.0 };
     // its MCP apps' cards, under the line
     let all = p.apps.cards;
     let cards: Vec<(&Step, &Card)> = steps.iter().filter(|s| s.app.is_some()).filter_map(|s| all.and_then(|a| a.get(&s.id)).map(|c| (s, c))).filter(|(_, c)| card_height(c) > 0.0).collect();
     let cards_h: f32 = cards.iter().map(|(_, c)| APP_GAP + card_height(c)).sum();
-    let mut h = row_h + shots_h + cards_h + if cards.is_empty() { 0.0 } else { 4.0 };
-    if open {
-        h += steps.len() as f32 * row_h + 4.0;
-    }
+    let mut h = line_h + shots_h + cards_h + crew_h + if cards.is_empty() { 0.0 } else { 4.0 };
+    let steps_h = (steps.len() as f32 * row_h + 4.0) * k;
+    h += steps_h;
     if !p.draw {
         return h;
     }
-    let row = Rect::new(at.x - 8.0, at.y, w + 16.0, row_h);
-    let hot = ui.hover_amount(("focus-did", id, i), row);
-    if hot > 0.01 {
-        ui.round(row, radius::CONTROL, t.text.with_alpha(0.045 * hot));
-    }
-    ui.hit(row, Action::Focus(id, OPEN + i));
-    let running = steps.iter().any(|s| s.state == StepState::Running) && (c.working || c.waiting);
-    let failed = steps.iter().filter(|s| s.state == StepState::Failed).count();
-    let (added, removed) = steps.iter().fold((0, 0), |(a, r), s| (a + s.added, r + s.removed));
-    let mid = at.y + row_h / 2.0;
-    let quiet = Style::mono(c.small, c.muted);
-    let ir = Rect::new(at.x, mid - 8.0, 16.0, 16.0);
-    // a step waiting for your answer isn't working: it pauses, in the colour of needing you
-    if running && c.waiting {
-        ui.icon(ir, "\u{F03E4}", c.small + 1.0, t.danger);
-    } else if running {
-        ui.spinner(Point::new(at.x + 8.0, mid), 4.4, 1.5, t.accent);
-    } else if let Some(lead) = steps.iter().find(|s| s.kind == StepKind::Skill).or(steps.last()) {
-        // the skill it used when it used one, else what it did last
-        ui.icon(ir, step_glyph(lead), c.small + 1.0, c.faint);
-    }
-    // the counts on the right: lines added and removed, then the chevron
-    let mut right = at.x + w;
-    ui.icon(Rect::new(right - 16.0, mid - 8.0, 16.0, 16.0), if open { "\u{F0140}" } else { "\u{F0142}" }, 14.0, c.faint);
-    right -= 22.0;
-    if removed > 0 {
-        let rb = ui.line(&format!("−{removed}"), Style::mono(c.small, t.danger.mix(c.muted, 0.35)), None);
-        ui.draw(&rb, Point::new(right - rb.w, mid - rb.h / 2.0));
-        right -= rb.w + 8.0;
-    }
-    if added > 0 {
-        let ab = ui.line(&format!("+{added}"), Style::mono(c.small, t.good.mix(c.muted, 0.35)), None);
-        ui.draw(&ab, Point::new(right - ab.w, mid - ab.h / 2.0));
-        right -= ab.w + 8.0;
-    }
-    right -= 4.0;
     let x = at.x + 26.0;
-    let what = match steps.iter().rev().find(|s| s.state == StepState::Running) {
-        Some(s) if c.waiting => format!("{} · waiting for you", s.label),
-        _ => summary(steps, c.now_ms, c.working),
-    };
-    let mut spans = if running && c.waiting {
-        vec![(what, Style::mono(c.small, c.text.mix(c.muted, 0.2)))]
-    } else if !running && steps.iter().any(|s| s.kind == StepKind::Skill) {
-        // the skill's name, a shade above the rest
-        label_runs(&what, c.text.mix(c.muted, 0.35), c.muted, c.small)
-    } else {
-        vec![(what, quiet)]
-    };
-    if failed > 0 && !running {
-        spans.push((format!(" · {failed} failed"), Style::mono(c.small, t.danger)));
+    if line_h > 0.0 {
+        let row = Rect::new(at.x - 8.0, at.y, w + 16.0, row_h);
+        let hot = ui.hover_amount(("focus-did", id, i), row);
+        if hot > 0.01 {
+            ui.round(row, radius::CONTROL, t.text.with_alpha(0.045 * hot));
+        }
+        ui.hit(row, Action::Focus(id, OPEN + i));
+        let running = line.iter().any(|s| s.state == StepState::Running) && (c.working || c.waiting);
+        // a step that finished: its mark pops in, a flush of the finish colour fading as it lands
+        let done = ui.since_on(("did-done", id, i), !running);
+        let pop = ui.pop_scale(done);
+        let failed = line.iter().filter(|s| s.state == StepState::Failed).count();
+        let (added, removed) = line.iter().fold((0, 0), |(a, r), s| (a + s.added, r + s.removed));
+        let mid = at.y + row_h / 2.0;
+        let quiet = Style::mono(c.small, c.muted);
+        let ir = Rect::new(at.x, mid - 8.0, 16.0, 16.0);
+        // a step waiting for your answer isn't working: it pauses, in the colour of needing you
+        if running && c.waiting {
+            ui.icon(ir, "\u{F03E4}", c.small + 1.0, t.danger);
+        } else if running {
+            ui.spinner(Point::new(at.x + 8.0, mid), 4.4, 1.5, t.accent);
+        } else if let Some(lead) = line.iter().find(|s| s.kind == StepKind::Skill).or(line.last()).or(steps.last()) {
+            // the skill it used when it used one, else what it did last
+            let flush = done.map_or(0.0, |s| (1.0 - s * 1.4).max(0.0));
+            ui.icon(ir, step_glyph(lead), (c.small + 1.0) * pop, c.faint.mix(t.good, 0.8 * flush).fade(pop));
+        }
+        // the counts on the right: lines added and removed, then the chevron
+        let mut right = at.x + w;
+        // the chevron turns over as the steps open: one fades out as the other comes in
+        let chev = Rect::new(right - 16.0, mid - 8.0, 16.0, 16.0);
+        ui.icon(chev, "\u{F0142}", 14.0, c.faint.fade(1.0 - k));
+        if k > 0.0 {
+            ui.icon(chev, "\u{F0140}", 14.0, c.faint.fade(k));
+        }
+        right -= 22.0;
+        if removed > 0 {
+            let rb = ui.line(&format!("−{removed}"), Style::mono(c.small, t.danger.mix(c.muted, 0.35)), None);
+            ui.draw(&rb, Point::new(right - rb.w, mid - rb.h / 2.0));
+            right -= rb.w + 8.0;
+        }
+        if added > 0 {
+            let ab = ui.line(&format!("+{added}"), Style::mono(c.small, t.good.mix(c.muted, 0.35)), None);
+            ui.draw(&ab, Point::new(right - ab.w, mid - ab.h / 2.0));
+            right -= ab.w + 8.0;
+        }
+        right -= 4.0;
+        let what = match line.iter().rev().find(|s| s.state == StepState::Running) {
+            Some(s) if c.waiting => format!("{} · waiting for you", s.label),
+            // open with nothing but the steps that started its subagents: say so
+            _ if line.is_empty() => if launched.len() == 1 { "Started a subagent".to_string() } else { format!("Started {} subagents", launched.len()) },
+            _ => summary(line, c.now_ms, c.working),
+        };
+        let mut spans = if running && c.waiting {
+            vec![(what, Style::mono(c.small, c.text.mix(c.muted, 0.2)))]
+        } else if !running && line.iter().any(|s| s.kind == StepKind::Skill) {
+            // the skill's name, a shade above the rest
+            label_runs(&what, c.text.mix(c.muted, 0.35), c.muted, c.small)
+        } else {
+            vec![(what, quiet)]
+        };
+        if failed > 0 && !running {
+            spans.push((format!(" · {failed} failed"), Style::mono(c.small, t.danger)));
+        }
+        let b = ui.rich(&spans, c.small, Some((right - x).max(20.0)), false, Some(1));
+        ui.draw(&b, Point::new(x, mid - b.h / 2.0));
+        // one step about a file: its name opens it, as a path in the terminal does
+        if let [one] = line
+            && let Some(uri) = step_file(one, p)
+        {
+            let r = Rect::new(x, mid - b.h / 2.0, b.w, b.h);
+            let on = ui.hovered(r);
+            ui.top_fill(Rect::new(x, r.bottom() - 2.0, b.w.min(right - x), 1.0), 0.0, c.muted.with_alpha(if on { 0.85 } else { 0.3 }));
+            ui.hit(r, Action::Focus(id, LINK + p.links.len()));
+            p.links.push(uri);
+        }
     }
-    let b = ui.rich(&spans, c.small, Some((right - x).max(20.0)), false, Some(1));
-    ui.draw(&b, Point::new(x, mid - b.h / 2.0));
-    // one step about a file: its name opens it, as a path in the terminal does
-    if let [one] = steps
-        && let Some(uri) = step_file(one, p)
-    {
-        let r = Rect::new(x, mid - b.h / 2.0, b.w, b.h);
-        let on = ui.hovered(r);
-        ui.top_fill(Rect::new(x, r.bottom() - 2.0, b.w.min(right - x), 1.0), 0.0, c.muted.with_alpha(if on { 0.85 } else { 0.3 }));
-        ui.hit(r, Action::Focus(id, LINK + p.links.len()));
-        p.links.push(uri);
+    let mut y = at.y + line_h;
+    if !launched.is_empty() {
+        if line_h > 0.0 {
+            y += 8.0;
+        }
+        subagents::cards(ui, c, p, &launched, Point::new(at.x, y), w);
+        y += subagents::cards_height(c, launched.len());
     }
-    let mut y = at.y + row_h;
     if !shots.is_empty() {
         y += 6.0;
         for (n, path) in shots.iter().enumerate() {
@@ -1514,8 +2224,12 @@ fn did(ui: &mut Ui, c: &Typo, steps: &[Step], i: usize, at: Point, w: f32, open:
     if !cards.is_empty() {
         y += 4.0;
     }
-    if open {
+    if unfolded {
         y += 2.0;
+        let block = Rect::new(at.x - 8.0, y, w + 16.0, (steps_h - 2.0).max(0.0));
+        if k < 1.0 {
+            ui.clip(block, 0.0);
+        }
         for s in steps {
             let m = y + row_h / 2.0;
             let sr = Rect::new(at.x + 18.0, y, w - 18.0, row_h);
@@ -1570,6 +2284,10 @@ fn did(ui: &mut Ui, c: &Typo, steps: &[Step], i: usize, at: Point, w: f32, open:
             let b = ui.rich(&runs, c.small, Some((right - 8.0 - lx).max(20.0)), false, Some(1));
             ui.draw(&b, Point::new(lx, m - b.h / 2.0));
             y += row_h;
+        }
+        if k < 1.0 {
+            ui.veil(block, 0.0, k);
+            ui.unclip();
         }
     }
     h
@@ -1645,6 +2363,8 @@ fn note(ui: &mut Ui, c: &Typo, kind: NoteKind, text: &str, at: Point, w: f32, dr
     let t = ui.t;
     let st = Style::mono(c.small, c.faint);
     match kind {
+        // drawn with the subagents ([`subagents::note`]), which know who reported back
+        NoteKind::Subagent => 0.0,
         NoteKind::Worked => {
             // only turns that took a while say how long
             let long = text.contains('m') || text.contains('h') || text.trim_end_matches('s').parse::<u32>().is_ok_and(|s| s >= 20);
@@ -1685,6 +2405,26 @@ fn note(ui: &mut Ui, c: &Typo, kind: NoteKind, text: &str, at: Point, w: f32, dr
 }
 
 // ------------------------------------------------------------------------------------------------ the choice
+
+fn queued_question_label(count: usize) -> String {
+    if count == 1 { "1 question waiting".to_string() } else { format!("{count} questions waiting") }
+}
+
+fn draw_queued_questions(ui: &mut Ui, id: PaneId, c: &Typo, queued: bro_core::terminal_prompt::QueuedQuestions, r: Rect) {
+    use bro_core::terminal_prompt::QuestionShortcut;
+    let t = ui.t;
+    ui.panel(r, radius::OVERLAY, t.warn.with_alpha(if t.light { 0.035 } else { 0.05 }), t.hairline.mix(t.warn, 0.35));
+    let inner = Rect::new(r.x + 12.0, r.y + 10.0, (r.w - 24.0).max(0.0), r.h - 20.0);
+    let label = ui.line(&queued_question_label(queued.count), Style::mono(c.small, t.text).weight(weight::SEMIBOLD), Some(inner.w));
+    ui.draw(&label, Point::new(inner.x, inner.y));
+    let button = Rect::new(inner.x, r.bottom() - 40.0, widgets::button_width(ui, "Answer").min(inner.w), 30.0);
+    widgets::button(ui, button, "Answer", widgets::Kind::Primary, Action::Focus(id, ANSWER_QUEUED));
+    let shortcut = match queued.shortcut { QuestionShortcut::ShiftLeft => "Shift+←", QuestionShortcut::AltUp => "Alt+↑" };
+    let hint = ui.line(shortcut, Style::mono(c.small, t.muted), None);
+    if hint.w + 12.0 <= inner.right() - button.right() {
+        ui.draw(&hint, Point::new(button.right() + 12.0, button.y + (button.h - hint.h) / 2.0));
+    }
+}
 
 fn choice_height(ui: &mut Ui, c: &Typo, ch: &Choice, w: f32) -> f32 {
     let inner = w - 32.0;
@@ -1740,7 +2480,7 @@ fn draw_choice(ui: &mut Ui, id: PaneId, c: &Typo, ch: &Choice, r: Rect) {
         y += oh + 4.0;
     }
     y += 8.0;
-    let hint = "↑ ↓ to move · enter to pick · esc to cancel";
+    let hint = "↑ ↓ to move · enter or number to pick · esc to cancel";
     let b = ui.line(hint, Style::mono(c.small, c.faint), Some(inner.w));
     ui.draw(&b, Point::new(inner.x, y));
 }
@@ -1748,8 +2488,15 @@ fn draw_choice(ui: &mut Ui, id: PaneId, c: &Typo, ch: &Choice, r: Rect) {
 // -------------------------------------------------------------------------------------------- the reply box
 
 /// The reply box's padding and its footer's height (logical px).
-const BOX_PAD: (f32, f32) = (16.0, 13.0);
-const FOOTER: f32 = 32.0;
+const BOX_PAD: (f32, f32) = (18.0, 15.0);
+/// The footer row: its pills and the round send button, with the air above and below them.
+const FOOTER: f32 = 48.0;
+/// The composer's corners (softer than a field's: it's the view's one place to write).
+const BOX_RADIUS: f32 = 16.0;
+/// The send / stop button.
+const SEND_D: f32 = 30.0;
+/// A picture waiting in the composer.
+const THUMB_RADIUS: f32 = 10.0;
 
 /// How tall the reply box is: the pictures going with it, up to eight rows of text, its footer.
 fn reply_height(app: &mut App, id: PaneId, c: &Typo, w: f32) -> f32 {
@@ -1767,21 +2514,46 @@ fn reply_height(app: &mut App, id: PaneId, c: &Typo, w: f32) -> f32 {
 /// over the conversation.
 #[allow(clippy::too_many_arguments)]
 fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: &Typo, seen: &Seen, mood: Mood, v: &mut View, media: &mut Media) {
+    let choosing = v.choice.is_some();
+    let dictating = app.dictation.phase(id);
+    let focused = focused && !choosing;
     let t = ui.t;
     let (pad_x, pad_y) = BOX_PAD;
     let hot = ui.hover_amount(("focus-box", id), r);
-    let fill = if focused { t.field_focus } else { t.control.mix(t.control_hover, hot) };
-    ui.panel(r, radius::OVERLAY, fill, if focused { t.accent.with_alpha(0.6) } else { t.stroke });
+    let lit = ui.ease(("focus-box-keys", id), if focused { 1.0 } else { 0.0 }, 140.0);
+    // a surface a step up from the card, its edge a hairline: depth from a whisper of shadow, and a soft ring
+    // round it while the keys are here
+    let rest = if t.light { Color::WHITE } else { t.surface.mix(t.raised, 0.55) };
+    let fill = rest.mix(t.raised, 0.6 * hot.max(lit));
+    let edge = t.hairline.mix(t.border, hot.max(lit)).mix(t.accent, 0.3 * lit);
+    ui.shadow(r, BOX_RADIUS, 28.0, 10.0, t.shadow.fade(if t.light { 0.55 } else { 0.7 }));
+    // while the agent works, light flows round the box in its colour (Rune's aura): it flares as the turn starts,
+    // settles to a glow, and fades when the turn ends
+    let working = mood == Mood::Working;
+    let flare = match v.mood {
+        Some((Mood::Working, since)) => 1.6 * (-ui.now.saturating_duration_since(since).as_secs_f32() * 2.2).exp(),
+        _ => 0.0,
+    };
+    let glow = ui.ease(("focus-aura", id), if working { 1.0 } else { 0.0 }, 420.0);
+    let own = super::chrome::harness_mark(seen.harness).color(t);
+    let aura = [if own == t.text { Color::hex(0x22d3ee) } else { own }, Color::hex(0x7c5cff), Color::hex(0x22d3ee)];
+    ui.aura(r, BOX_RADIUS, aura, glow * (1.0 + flare));
+    ui.shadow(r, BOX_RADIUS, 3.0, 1.0, t.shadow.fade(0.3));
+    if lit > 0.01 {
+        ui.outline(r.outset(3.0), BOX_RADIUS + 3.0, 3.0, t.accent.with_alpha(0.13 * lit));
+    }
+    ui.panel(r, BOX_RADIUS, fill, edge);
+    ui.aura_rim(r, BOX_RADIUS, aura, glow * (1.0 + flare));
     ui.hit_with(r, Action::Focus(id, BOX), Cursor::Text);
     // what the footer and the lists need, before the box itself is borrowed
     let (model, effort) = app.focus_running_on(id);
     let models = app.focus_models(id);
     let levels = app.focus_levels(id);
     let waits = app.focus_change_waits(id);
-    let commands = app.focus_command_rows(id);
-    let quip_rows = app.focus_quip_rows(id);
+    let commands = if choosing || dictating.is_some() { vec![] } else { app.focus_command_rows(id) };
+    let quip_rows = if choosing || dictating.is_some() { vec![] } else { app.focus_quip_rows(id) };
     let quip_open = focused && (app.focus.drafts.get(&id).is_some_and(|d| d.quips.open || d.quips.editor.is_some()) || !quip_rows.is_empty());
-    let menu = app.focus.drafts.get(&id).and_then(|d| d.menu.clone());
+    let menu = app.focus.drafts.get(&id).and_then(|d| d.menu.clone()).filter(|_| !choosing);
     let menu_rows: Vec<MenuRow> = menu.as_ref().map(|m| app.focus_menu_rows(id, m.kind)).unwrap_or_default();
     let Some(d) = app.focus.drafts.get_mut(&id) else { return };
     let attachments: Vec<PathBuf> = d.attachments.iter().map(|a| a.path.clone()).collect();
@@ -1789,32 +2561,36 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
     let rows = d.area.rows(cols);
     let text = d.area.text().to_string();
     let cur = d.area.cursor();
+    let selected = d.area.selection();
     let quip_matches: Vec<_> = app.focus.quips.matches(&text).into_iter().map(|(r, q)| (r, q.instructions.clone())).collect();
     let blank = d.blank();
     let command_sel = d.command.min(commands.len().saturating_sub(1));
     // the pictures going with it; the one under the pointer opens its popover, which stays while the pointer
     // crosses to it
-    let mut top = r.y + pad_y;
+    // laid out as tall as the box will be, anchored to its foot: while it grows or shrinks, its edge moves over it
+    let full_h = if v.box_full > 0.0 { v.box_full } else { r.h };
+    let mut top = r.bottom() - full_h + pad_y;
+    let growing = (full_h - r.h).abs() > 0.05;
+    if growing {
+        ui.clip(r, BOX_RADIUS);
+    }
     let mut thumbs: Vec<Rect> = vec![];
     if !attachments.is_empty() {
-        let mut p = Paint { draw: true, id, links: vec![], pictures: std::mem::take(&mut v.pictures), sounds: vec![], media: Some(&mut *media), resolve: None, apps: AppPaint::default() };
+        let mut p = Paint { draw: true, id, links: vec![], pictures: std::mem::take(&mut v.pictures), sounds: vec![], media: Some(&mut *media), resolve: None, apps: AppPaint::default(), text: TextPaint::default(), subs: None, opened: vec![], quip_hover: None };
         for (n, path) in attachments.iter().enumerate() {
             let pr = Rect::new(r.x + pad_x + n as f32 * (ATTACHED + 8.0), top, ATTACHED, ATTACHED);
             if pr.right() > r.right() - pad_x {
                 break;
             }
-            picture(ui, &mut p, path, pr, radius::CONTROL + 2.0);
-            if v.pop == Some(n) {
-                ui.outline_over(pr, radius::CONTROL + 2.0, 1.5, t.accent.with_alpha(0.75));
-            }
+            picture(ui, &mut p, path, pr, THUMB_RADIUS);
+            ui.outline_over(pr, THUMB_RADIUS, 1.0, if v.pop == Some(n) { t.accent.with_alpha(0.75) } else { t.hairline });
             thumbs.push(pr);
         }
         v.pictures = std::mem::take(&mut p.pictures);
         top += ATTACHED + 10.0;
     }
-    let pointer = ui.pointer;
-    let over = thumbs.iter().position(|pr| pointer.is_some_and(|q| pr.contains(q)));
-    let stays = v.pop_rect.is_some_and(|pr| pointer.is_some_and(|q| pr.outset(12.0).contains(q)));
+    let over = thumbs.iter().position(|pr| ui.hovered(*pr));
+    let stays = v.pop_rect.is_some_and(|pr| ui.hovered(pr.outset(12.0)));
     v.pop = over.or(v.pop.filter(|n| stays && *n < thumbs.len()));
     // what you're writing
     let room = 8usize;
@@ -1832,22 +2608,35 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
         } else {
             format!("Reply to {}…", agent_name(seen.harness))
         };
-        let b = ui.line(&ph, Style::mono(c.body, t.muted), Some(r.w - 2.0 * pad_x));
-        ui.draw(&b, Point::new(r.x + pad_x, top + (c.lh - b.h) / 2.0));
+        let b = ui.line(&ph, Style::mono(c.body, t.faint), Some(r.w - 2.0 * pad_x));
+        // a hair past the caret, so the caret doesn't sit on its first letter
+        let nudge = if focused { 2.0 } else { 0.0 };
+        ui.draw(&b, Point::new(r.x + pad_x + nudge, top + (c.lh - b.h) / 2.0));
     }
     let mut caret_at = None;
     for (n, &(s, e)) in rows.iter().enumerate().skip(first).take(room) {
         let y = origin.y + n as f32 * c.lh;
         let b = ui.line(&visible(&text[s..e]), st, None);
         let at = Point::new(origin.x, y + (c.lh - b.h) / 2.0);
+        // the selection, under the words (quieter while the box doesn't have the keys)
+        if let Some(sel) = &selected {
+            let (a, z) = (sel.start.max(s), sel.end.min(e));
+            // the line break after this row is selected (the next row starts past it): a sliver shows it
+            let off = rows.get(n + 1).is_some_and(|r| r.0 > e) && sel.start <= e && sel.end > e;
+            if a < z || off {
+                let x0 = b.layout.caret_x(visible(&text[s..a]).len()) / ui.scale;
+                let x1 = b.layout.caret_x(visible(&text[s..z]).len()) / ui.scale + if off { c.adv * 0.5 } else { 0.0 };
+                let ink = if focused { t.selection } else { t.selection.fade(0.55) };
+                ui.round(Rect::new(origin.x + x0, y + 1.0, (x1 - x0).max(1.0), c.lh - 2.0), 2.0, ink);
+            }
+        }
         for (range, instructions) in &quip_matches {
             let start = range.start.max(s);
             let end = range.end.min(e);
             if start < end {
                 let local = visible(&text[s..start]).len()..visible(&text[s..end]).len();
-                for rect in range_rects(&b, at, &local, ui.scale) {
-                    ui.round(rect.outset(2.0), 4.0, t.accent.with_alpha(0.14));
-                    if ui.hovered(rect) { widgets::tooltip(ui, rect, instructions); }
+                if let Some(preview) = quips::badge(ui, &b, at, &local, &text[range.clone()], instructions, c.body) {
+                    v.quip_preview.hovered = Some(preview);
                 }
             }
         }
@@ -1857,7 +2646,7 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
             let end = range.end.min(e);
             if start < end {
                 let prefix = ui.measure(&visible(&text[s..start]), st);
-                let mark = ui.line(&visible(&text[start..end]), st.weight(weight::SEMIBOLD).color(t.accent), None);
+                let mark = ui.line(&visible(&text[start..end]), st.weight(weight::SEMIBOLD).color(quips::badge_ink(ui)), None);
                 ui.draw(&mark, Point::new(origin.x + prefix, at.y));
             }
         }
@@ -1867,65 +2656,56 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
     }
     ui.unclip();
     // a steady caret, as the terminals' cursor is (a blink would keep the window drawing)
-    if focused && let Some(at) = caret_at {
+    if focused && dictating.is_none() && let Some(at) = caret_at {
         ui.top_fill(Rect::new(at.x, at.y + (c.lh - c.body * 1.25) / 2.0, 1.8, c.body * 1.25), 0.9, t.accent);
         v.caret = Some(Rect::new(at.x, at.y, 2.0, c.lh));
     }
-    // the footer: the key that acts on the right
-    let foot = Rect::new(r.x + pad_x, r.bottom() - FOOTER, r.w - 2.0 * pad_x, FOOTER - 6.0);
-    let fmid = foot.y + foot.h / 2.0;
-    let (key, what, target) = if !commands.is_empty() {
-        ("enter", "run", SEND)
-    } else if !blank || !attachments.is_empty() {
-        ("enter", "send", SEND)
-    } else if mood == Mood::Working || seen.limit.as_ref().is_some_and(|limit| limit.is_retrying()) {
-        ("esc", "stop", STOP)
+    // the footer: a round button that acts on the right, the model and how hard it thinks on the left
+    let fmid = r.bottom() - 10.0 - SEND_D / 2.0;
+    let working = mood == Mood::Working || seen.limit.as_ref().is_some_and(|limit| limit.is_retrying());
+    let act = if choosing {
+        Go::Idle
+    } else if !commands.is_empty() {
+        Go::Run
+    } else if dictating.is_some() || !blank || !attachments.is_empty() {
+        Go::Send
+    } else if working {
+        Go::Stop
     } else {
-        ("", "", 0)
+        Go::Idle
     };
-    let mut right = foot.right();
-    if !key.is_empty() {
-        let kw = widgets::kbd_width(ui, key);
-        let wb = ui.line(what, Style::new(size::SMALL, weight::MEDIUM, t.muted), None);
-        let w = kw + 6.0 + wb.w + 16.0;
-        let br = Rect::new(right + 8.0 - w, fmid - 12.0, w, 24.0);
-        let h = ui.hover_amount(("focus-act", id, target), br);
-        if h > 0.01 {
-            ui.round(br, radius::CONTROL, t.text.with_alpha(0.06 * h));
-        }
-        widgets::kbd(ui, Point::new(br.x + 8.0, br.y + 3.0), key);
-        ui.draw(&wb, Point::new(br.x + 8.0 + kw + 6.0, br.y + (24.0 - wb.h) / 2.0));
-        ui.hit(br, Action::Focus(id, target));
-        right = br.x - 8.0;
-    }
-    // ... and on the left the model and how hard it thinks, each opening its list
+    let send = Rect::new(r.right() - 10.0 - SEND_D, fmid - SEND_D / 2.0, SEND_D, SEND_D);
+    send_button(ui, id, send, act);
+    let right = if dictating.is_some() || (!choosing && !app.dictation.active()) {
+        dictation_controls(ui, id, send.x - 8.0, fmid, dictating)
+    } else {
+        send.x - 8.0
+    };
     let later = if waits { " · Codex switches when this turn ends" } else { "" };
-    let mut x = foot.x;
+    let mut x = r.x + pad_x;
     let mut anchors: [Option<Rect>; 2] = [None, None];
-    if let Some(m) = model.as_deref().filter(|_| right - x > 64.0) {
-        let name = models.as_ref().and_then(|ms| ms.iter().find(|c| same_model(m, c))).map_or_else(|| model_name(m), |c| c.name.clone());
+    if (model.is_some() || models.is_some()) && right - x > 64.0 {
+        let name = model.as_deref().map_or_else(|| "Model".to_string(), |m| models.as_ref().and_then(|ms| ms.iter().find(|c| same_model(m, c))).map_or_else(|| model_name(m), |c| c.name.clone()));
         let open = menu.as_ref().is_some_and(|m| m.kind == MenuKind::Model);
-        let cr = chip(ui, id, c, Point::new(x, fmid), &name, MODEL_CHIP, models.is_some(), open, right - x);
+        let cr = chip(ui, id, Point::new(x, fmid), &name, MODEL_CHIP, models.is_some(), open, right - x);
         if !open && ui.hovered(cr) {
             let tip = if models.is_some() { format!("Switch the model{later}") } else { format!("{name} · bro has no list of this provider's models yet") };
             widgets::tooltip(ui, cr, &tip);
         }
         anchors[0] = Some(cr);
-        x = cr.right() + 2.0;
+        x = cr.right() + 14.0;
     }
     if (levels.is_some() || effort.is_some()) && right - x > 100.0 {
-        if anchors[0].is_some() {
-            let dot = ui.line("·", Style::mono(c.small, t.faint), None);
-            ui.draw(&dot, Point::new(x + 4.0, fmid - dot.h / 2.0));
-            x += dot.w + 16.0;
-        }
-        let label = effort.as_deref().map_or_else(|| "thinking".to_string(), |e| format!("thinking {}", level_name(e)));
+        let label = effort.as_deref().map_or_else(|| "Thinking".to_string(), thinking_label);
         let open = menu.as_ref().is_some_and(|m| m.kind == MenuKind::Thinking);
-        let cr = chip(ui, id, c, Point::new(x, fmid), &label, THINKING_CHIP, levels.is_some(), open, right - x);
+        let cr = chip(ui, id, Point::new(x, fmid), &label, THINKING_CHIP, levels.is_some(), open, right - x);
         if !open && ui.hovered(cr) && levels.is_some() {
             widgets::tooltip(ui, cr, &format!("How hard it thinks{later}"));
         }
         anchors[1] = Some(cr);
+    }
+    if growing {
+        ui.unclip();
     }
     // the lists, over everything (they slide in)
     let k = ui.ease(("focus-menu", id), if menu.is_some() { 1.0 } else { 0.0 }, 120.0);
@@ -1955,23 +2735,124 @@ fn reply_box(app: &mut App, ui: &mut Ui, id: PaneId, r: Rect, focused: bool, c: 
     v.popup = quip_open || menu.is_some() || !commands.is_empty() || v.pop_rect.is_some();
 }
 
-/// A quiet word in the reply box's footer, at `at` (its left, centred on its line) and at most `room` wide, that
-/// opens a list when it's `pickable`: the model, how hard it thinks. Returns where it is.
-#[allow(clippy::too_many_arguments)]
-fn chip(ui: &mut Ui, id: PaneId, c: &Typo, at: Point, label: &str, target: usize, pickable: bool, open: bool, room: f32) -> Rect {
+pub(super) fn dictation_controls(ui: &mut Ui, id: PaneId, right: f32, mid: f32, phase: Option<crate::app::dictation::Phase>) -> f32 {
+    use crate::app::dictation::Phase;
     let t = ui.t;
-    let arrow = if pickable { 18.0 } else { 0.0 };
-    let b = ui.line(label, Style::mono(c.small, t.faint), Some((room - arrow - 16.0).max(24.0)));
-    let r = Rect::new(at.x - 8.0, at.y - 12.0, b.w + arrow + 16.0, 24.0);
+    let action = Rect::new(right - 26.0, mid - 13.0, 26.0, 26.0);
+    let Some(phase) = phase else {
+        if widgets::icon_button(ui, action, "\u{F036C}", t.muted, Action::Focus(id, DICTATE)) {
+            let label = if cfg!(target_os = "macos") { "Dictate (⌘⇧D)" } else { "Dictate (Ctrl+Shift+D)" };
+            widgets::tooltip(ui, action, label);
+        }
+        return action.x - 8.0;
+    };
+    let cancel = Rect::new(action.x - 28.0, action.y, action.w, action.h);
+    if widgets::icon_button(ui, cancel, "\u{F0156}", t.muted, Action::Focus(id, CANCEL_DICTATION)) {
+        widgets::tooltip(ui, cancel, "Cancel dictation (Esc)");
+    }
+    let label = match phase {
+        Phase::Recording(level) => {
+            if widgets::icon_button(ui, action, "\u{F012C}", t.good, Action::Focus(id, DICTATE)) {
+                widgets::tooltip(ui, action, "Finish recording");
+            }
+            for (i, weight) in [0.5, 0.8, 1.0, 0.8, 0.5].into_iter().enumerate() {
+                let height = 3.0 + level * weight * 14.0;
+                ui.round(Rect::new(cancel.x - 24.0 + i as f32 * 4.0, mid - height / 2.0, 2.0, height), 1.0, t.danger);
+            }
+            return cancel.x - 32.0;
+        }
+        Phase::Transcribing => "Transcribing…",
+        Phase::Cleaning => {
+            if widgets::icon_button(ui, action, "\u{F04AD}", t.muted, Action::Focus(id, SKIP_CLEANUP)) {
+                widgets::tooltip(ui, action, "Skip cleanup");
+            }
+            "Cleaning up…"
+        }
+    };
+    let text = ui.line(label, Style::new(size::SMALL, weight::MEDIUM, t.muted), None);
+    let x = cancel.x - text.w - 6.0;
+    ui.draw(&text, Point::new(x, mid - text.h / 2.0));
+    x - 8.0
+}
+
+/// What the composer's round button does now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Go {
+    /// a `/command` is picked: run it
+    Run,
+    /// words or pictures to send
+    Send,
+    /// nothing written while the agent works: stop it
+    Stop,
+    /// nothing to do: the button rests, quiet
+    Idle,
+}
+
+/// "High thinking", "Extra high thinking", "Thinking off".
+fn thinking_label(level: &str) -> String {
+    let name = level_name(level);
+    if name == "off" {
+        return "Thinking off".into();
+    }
+    let mut chars = name.chars();
+    let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+    format!("{first}{} thinking", chars.as_str())
+}
+
+/// The composer's round button: send (accent), stop (ink, a square), or resting when there's nothing to do. Its
+/// tooltip names the key that does the same.
+fn send_button(ui: &mut Ui, id: PaneId, r: Rect, go: Go) {
+    let t = ui.t;
+    let live = go != Go::Idle;
+    let hot = if live { ui.hover_amount(("focus-go", id), r) } else { 0.0 };
+    let shown = ui.ease(("focus-go-live", id), if live { 1.0 } else { 0.0 }, 120.0);
+    let center = Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+    let soft = t.text.with_alpha(if t.light { 0.07 } else { 0.09 });
+    let fill = match go {
+        // a soft disc with a solid square: unlike send's solid accent in every theme, even one whose accent is ink
+        Go::Stop => t.text.with_alpha((if t.light { 0.09 } else { 0.12 }) + 0.06 * hot),
+        Go::Run | Go::Send => soft.mix(t.accent.mix(t.text, 0.14 * hot), shown),
+        // at rest: a faint disc, as a disabled button is
+        Go::Idle => soft,
+    };
+    ui.circle(center, r.w / 2.0, fill);
+    match go {
+        Go::Stop => ui.round(Rect::new(center.x - 5.0, center.y - 5.0, 10.0, 10.0), 2.5, t.text),
+        Go::Run | Go::Send => ui.icon(Rect::new(center.x - 9.0, center.y - 9.0, 18.0, 18.0), "\u{F005D}", 16.0, t.on_accent),
+        Go::Idle => ui.icon(Rect::new(center.x - 9.0, center.y - 9.0, 18.0, 18.0), "\u{F005D}", 16.0, t.faint),
+    }
+    if live {
+        let target = if go == Go::Stop { STOP } else { SEND };
+        ui.hit(r, Action::Focus(id, target));
+        if ui.hovered(r) {
+            let tip = match go {
+                Go::Run => "Run · Enter",
+                Go::Send => "Send · Enter",
+                _ => "Stop · Esc",
+            };
+            widgets::tooltip(ui, r, tip);
+        }
+    }
+}
+
+/// A quiet pill in the composer's footer, at `at` (its label's left, centred on its line) and at most `room` wide,
+/// that opens a list when it's `pickable`: the model, how hard it thinks. Returns where it is.
+#[allow(clippy::too_many_arguments)]
+fn chip(ui: &mut Ui, id: PaneId, at: Point, label: &str, target: usize, pickable: bool, open: bool, room: f32) -> Rect {
+    let t = ui.t;
+    let arrow = if pickable { 16.0 } else { 0.0 };
+    let b = ui.line(label, Style::new(size::BODY, weight::MEDIUM, t.muted), Some((room - arrow - 20.0).max(24.0)));
+    let h = 28.0;
+    let r = Rect::new(at.x - 10.0, at.y - h / 2.0, b.w + arrow + 20.0, h);
     let hot = if pickable { ui.hover_amount(("focus-chip", id, target), r) } else { 0.0 };
     let lit = if open { 1.0 } else { hot };
     if lit > 0.01 {
-        ui.round(r, radius::CONTROL, t.text.with_alpha(0.06 * lit));
+        ui.round(r, h / 2.0, t.text.with_alpha((if t.light { 0.055 } else { 0.07 }) * lit));
     }
-    let ink = t.faint.mix(t.text, 0.75 * lit);
+    let ink = t.muted.mix(t.text, 0.85 * lit);
     ui.draw_color(&b, Point::new(at.x, at.y - b.h / 2.0), ink);
     if pickable {
-        ui.icon(Rect::new(at.x + b.w + 3.0, at.y - 7.0, 14.0, 14.0), if open { "\u{F0143}" } else { "\u{F0140}" }, 12.0, ink);
+        ui.icon(Rect::new(at.x + b.w + 2.0, at.y - 7.0, 14.0, 14.0), if open { "\u{F0143}" } else { "\u{F0140}" }, 13.0, ink.fade(0.8));
         ui.hit(r, Action::Focus(id, target));
     }
     r
@@ -2141,6 +3022,126 @@ fn attachment_popover(ui: &mut Ui, id: PaneId, path: &Path, n: usize, anchor: Re
     r
 }
 
+// ------------------------------------------------------------------------------- selecting the conversation
+
+/// Keep the text of the runs drawn (a piece of a reply still being written grows in place).
+fn keep_text(kept: &mut BTreeMap<RunKey, RunText>, runs: &[Run]) {
+    for r in runs {
+        let fresh = RunText { gap: r.gap, lead: r.lead.clone(), text: r.layout.text.clone() };
+        if kept.get(&r.key) != Some(&fresh) {
+            kept.insert(r.key, fresh);
+        }
+    }
+}
+
+/// The byte of `run` nearest `p` (the line under it, else the nearest line; a point past the end is its end).
+fn byte_in(run: &Run, p: Point) -> usize {
+    let l = &run.layout;
+    let (x, y) = ((p.x - run.at.x) * run.scale, (p.y - run.at.y) * run.scale);
+    if l.lines.is_empty() {
+        return if y < 0.0 { 0 } else { l.text.len() };
+    }
+    if y < 0.0 {
+        return 0;
+    }
+    if y >= l.height() {
+        return l.text.len();
+    }
+    let line = l.lines.iter().rev().find(|line| line.top <= y).unwrap_or(&l.lines[0]);
+    for g in &l.glyphs[line.glyphs.clone()] {
+        if x < g.x + g.w * 0.5 {
+            return g.start.max(line.text.start);
+        }
+    }
+    line.text.end
+}
+
+/// The place in the conversation's text under `p`, or the nearest one: in the piece it's over, else the end of
+/// the piece above it (between two paragraphs, a drag takes the first whole), else the start of the first.
+fn pos_at(runs: &[Run], p: Point) -> Option<Pos> {
+    let first = runs.first()?;
+    if let Some(r) = runs.iter().find(|r| r.rect().contains(p)) {
+        return Some(Pos { key: r.key, byte: byte_in(r, p) });
+    }
+    // the last piece starting above the point: on its lines when level with them (left or right of a message),
+    // else past its end
+    match runs.iter().rev().find(|r| r.at.y <= p.y) {
+        Some(r) => Some(Pos { key: r.key, byte: byte_in(r, p) }),
+        None => Some(Pos { key: first.key, byte: 0 }),
+    }
+}
+
+/// What a press with `count` clicks takes at `pos`: nothing yet, the word under it, or its whole piece.
+fn press_span(runs: &[Run], pos: Pos, count: u32) -> (Pos, Pos) {
+    let text = runs.iter().find(|r| r.key == pos.key).map(|r| r.layout.text.as_str()).unwrap_or_default();
+    let range = match count {
+        1 => return (pos, pos),
+        2 => crate::textarea::word_range(text, pos.byte),
+        _ => 0..text.len(),
+    };
+    (Pos { key: pos.key, byte: range.start }, Pos { key: pos.key, byte: range.end })
+}
+
+/// The selection grown from what the press took to `to`: (anchor, head).
+fn grow(origin: (Pos, Pos), to: Pos) -> (Pos, Pos) {
+    if to < origin.0 {
+        (origin.1, to)
+    } else if to > origin.1 {
+        (origin.0, to)
+    } else {
+        origin
+    }
+}
+
+/// The selected text as plain text: each piece's words, list items with their marks, paragraphs a blank line
+/// apart. An item the selection crosses that was never drawn (scrolled past at speed) copies as the transcript
+/// has it (`raw`).
+fn selected_text(sel: (Pos, Pos), kept: &BTreeMap<RunKey, RunText>, raw: &dyn Fn(usize) -> Option<String>) -> String {
+    let (s, e) = sel;
+    let mut out = String::new();
+    let mut last_item: Option<usize> = None;
+    let push = |out: &mut String, gap: &str, piece: &str| {
+        if !out.is_empty() && !piece.is_empty() {
+            out.push_str(gap);
+        }
+        out.push_str(piece);
+    };
+    for (key, rt) in kept.range(s.key..=e.key) {
+        if let Some(li) = last_item {
+            for i in li + 1..key.0 {
+                if let Some(text) = raw(i) {
+                    push(&mut out, "\n\n", &text);
+                }
+            }
+        }
+        let len = rt.text.len();
+        let mut start = if *key == s.key { s.byte.min(len) } else { 0 };
+        let mut end = if *key == e.key { e.byte.min(len) } else { len };
+        while !rt.text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while !rt.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let gap = if last_item.is_some_and(|li| li != key.0) { "\n\n" } else { rt.gap };
+        last_item = Some(key.0);
+        if start >= end && !(start == 0 && len == 0 && s.key < *key && *key < e.key) {
+            continue;
+        }
+        let lead = if start == 0 { rt.lead.as_str() } else { "" };
+        let piece = format!("{lead}{}", &rt.text[start..end]);
+        if piece.is_empty() {
+            // a blank line of code
+            if !out.is_empty() {
+                out.push_str(gap);
+            }
+            continue;
+        }
+        push(&mut out, gap, &piece);
+    }
+    out.trim_end().to_string()
+}
+
 /// The byte a click at `p` in the reply box puts the caret on.
 fn byte_at(ta: &crate::textarea::TextArea, g: &BoxGeo, p: Point, ui_measure: &mut dyn FnMut(&str) -> f32) -> usize {
     let rows = ta.rows(g.cols);
@@ -2172,9 +3173,301 @@ pub(super) fn draw_terminal_quips(app: &mut App, ui: &mut Ui, id: PaneId, conten
     quips::draw_terminal(app, ui, id, content, focused, input, view);
 }
 
+/// The reply box's byte under `p` (as last drawn).
+fn box_byte(g: &mut Gui, id: PaneId, p: Point) -> Option<usize> {
+    let geo = g.panes.get(&id).and_then(|st| st.focus.geo)?;
+    let adv = geo.adv;
+    let d = g.app.focus.draft(id);
+    // the terminal font's cells: as many as the characters before the click
+    let mut measure = |s: &str| unicode_width::UnicodeWidthStr::width(s) as f32 * adv;
+    Some(byte_at(&d.area, &geo, p, &mut measure))
+}
+
+/// A press in the reply box: the caret goes there (a double-click takes the word, a triple the line;
+/// shift grows the selection to it), and a drag selects from it.
+fn press_box(g: &mut Gui, id: PaneId, p: Point, count: u32) {
+    let Some(at) = box_byte(g, id, p) else { return };
+    let shift = g.mods.shift_key();
+    let d = g.app.focus.draft(id);
+    let origin = if shift && count == 1 {
+        let anchor = d.area.anchor();
+        d.area.select(anchor, at);
+        (anchor, anchor)
+    } else {
+        let r = match count {
+            1 => at..at,
+            2 => crate::textarea::word_range(d.area.text(), at),
+            _ => crate::textarea::line_range(d.area.text(), at),
+        };
+        d.area.select(r.start, r.end);
+        (r.start, r.end)
+    };
+    if let Some(st) = g.panes.get_mut(&id) {
+        st.focus.box_origin = Some(origin);
+    }
+    g.drag = Some(Drag::FocusBox { pane: id });
+}
+
+/// The pointer dragged from a press in the reply box: the selection runs to it (rows past the box's edge
+/// scroll into it, as the caret follows).
+pub(super) fn drag_box(g: &mut Gui, id: PaneId, p: Point) {
+    let Some(origin) = g.panes.get(&id).and_then(|st| st.focus.box_origin) else { return };
+    let Some(at) = box_byte(g, id, p) else { return };
+    let (anchor, head) = if at < origin.0 {
+        (origin.1, at)
+    } else if at > origin.1 {
+        (origin.0, at)
+    } else {
+        origin
+    };
+    g.app.focus.draft(id).area.select(anchor, head);
+    g.dirty = true;
+}
+
+/// A press on the conversation: a selection starts there (a double-click takes the word, a triple the whole
+/// piece; shift grows the one there). `click` is what the press does as a plain click (a link opens, a long
+/// message shows whole): on release, if the pointer didn't move.
+fn press_text(g: &mut Gui, id: PaneId, p: Point, count: u32, click: Option<usize>) {
+    let shift = g.mods.shift_key();
+    let Some(v) = g.panes.get_mut(&id).map(|st| &mut st.focus) else { return };
+    let Some(pos) = pos_at(&v.runs, p) else {
+        // no text to select: it's just the click
+        if let Some(n) = click {
+            clicked(g, id, n, p);
+        }
+        return;
+    };
+    match v.sel.as_mut() {
+        Some(sel) if shift && count == 1 => {
+            sel.origin = (sel.anchor, sel.anchor);
+            sel.head = pos;
+            sel.press = p;
+            sel.click = None;
+            sel.moved = true;
+        }
+        _ => {
+            let origin = press_span(&v.runs, pos, count);
+            v.sel = Some(Sel { origin, anchor: origin.0, head: origin.1, press: p, click: click.filter(|_| count == 1), moved: false });
+            v.sel_text.clear();
+            keep_text(&mut v.sel_text, &v.runs);
+        }
+    }
+    g.drag = Some(Drag::FocusText { pane: id });
+}
+
+/// The pointer dragged from a press on the conversation: the selection runs to it. Past the top or the bottom
+/// the conversation scrolls, and the selection with it.
+pub(super) fn drag_text(g: &mut Gui, id: PaneId, p: Point) {
+    let Some(v) = g.panes.get_mut(&id).map(|st| &mut st.focus) else { return };
+    let Some(sel) = v.sel.as_ref() else { return };
+    if !sel.moved && (p.x - sel.press.x).abs().max((p.y - sel.press.y).abs()) < 4.0 {
+        return;
+    }
+    let a = v.text_area;
+    if p.y < a.y + 6.0 {
+        v.scroll_pixels(((a.y + 6.0 - p.y) * 0.5).clamp(4.0, 60.0));
+    } else if p.y > a.bottom() - 6.0 {
+        v.scroll_pixels(-((p.y - a.bottom() + 6.0) * 0.5).clamp(4.0, 60.0));
+    }
+    let Some(pos) = pos_at(&v.runs, p) else { return };
+    if let Some(sel) = v.sel.as_mut() {
+        sel.moved = true;
+        sel.click = None;
+        (sel.anchor, sel.head) = grow(sel.origin, pos);
+    }
+    g.dirty = true;
+}
+
+/// The press on the conversation let go: a click that didn't move does what it was for; a selection is
+/// copied, as a terminal's is.
+pub(super) fn release_text(g: &mut Gui, id: PaneId, p: Point) {
+    let Some(v) = g.panes.get_mut(&id).map(|st| &mut st.focus) else { return };
+    let Some(sel) = v.sel.clone() else { return };
+    if !sel.moved
+        && let Some(n) = sel.click
+    {
+        v.sel = None;
+        clicked(g, id, n, p);
+        return;
+    }
+    if sel.span().is_none() {
+        v.sel = None;
+        return;
+    }
+    if let Some(text) = output_text(g, id) {
+        super::window::set_clipboard(&text);
+        copied_toast(g, &text);
+    }
+}
+
+fn copied_toast(g: &mut Gui, text: &str) {
+    let n = text.chars().count();
+    g.app.toast(crate::alerts::Kind::Info, format!("copied {n} character{}", if n == 1 { "" } else { "s" }));
+}
+
+/// What's selected in `id`'s conversation, as it copies.
+fn output_text(g: &Gui, id: PaneId) -> Option<String> {
+    let v = &g.panes.get(&id)?.focus;
+    let span = v.sel.as_ref()?.span()?;
+    let conv = shown_conversation(g, id);
+    let raw = |i: usize| match conv.as_ref().and_then(|c| c.items.get(i)).map(|it| it.as_ref()) {
+        Some(Item::Said { text, .. } | Item::You { text, .. }) => Some(text.clone()),
+        _ => None,
+    };
+    Some(selected_text(span, &v.sel_text, &raw)).filter(|t| !t.is_empty())
+}
+
+/// The conversation `id` shows (the session's, or the subagent's open in its place), as last drawn: what an item's
+/// place in it means.
+fn shown_conversation(g: &Gui, id: PaneId) -> Option<Arc<Conversation>> {
+    g.panes.get(&id).and_then(|st| st.focus.drawn.clone()).or_else(|| g.app.panes.get(&id)?.as_term_ref()?.insights()?.conversation)
+}
+
+/// The session in focus mode whose reply box has the keys.
+fn box_owner(g: &Gui) -> Option<PaneId> {
+    let app = &g.app;
+    let id = app.focused()?;
+    (app.focus_view(id) && !app.overlay.is_open() && !app.side_focus && app.renaming.is_none() && !app.prefix_armed).then_some(id)
+}
+
+pub(super) fn dictation_modifiers() -> winit::keyboard::ModifiersState {
+    use winit::keyboard::ModifiersState as M;
+    let command = if cfg!(target_os = "macos") { M::SUPER } else { M::CONTROL };
+    command | M::SHIFT
+}
+
+pub(super) fn dictation_key(g: &mut Gui, event: &winit::event::KeyEvent) -> bool {
+    use winit::{event::ElementState, keyboard::{Key, NamedKey}};
+    let pressed = event.state == ElementState::Pressed;
+    let letter = matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("d"));
+    if !pressed && letter {
+        return g.app.dictation.release_shortcut();
+    }
+    if !pressed || g.app.overlay.is_open() || g.media.expanded || g.media.focus
+        || g.app.theme_editor.as_ref().is_some_and(|editor| !editor.minimized)
+    {
+        return false;
+    }
+    if g.app.dictation.active() && event.logical_key == Key::Named(NamedKey::Escape) {
+        g.app.dictation.cancel_all();
+        return true;
+    }
+    if !letter || g.mods != dictation_modifiers() {
+        return false;
+    }
+    let app = &g.app;
+    let Some(id) = app.focused().filter(|id| app.can_dictate(*id)) else { return false };
+    if app.side_focus || app.renaming.is_some() || app.prefix_armed
+        || app.focus.drafts.get(&id).is_some_and(|d| d.quips.editor.is_some())
+    {
+        return false;
+    }
+    if !event.repeat {
+        g.app.toggle_dictation(id, true);
+    }
+    true
+}
+
+/// What's selected in `id`'s reply box (the pictures' tokens left out).
+fn box_text(g: &Gui, id: PaneId) -> Option<String> {
+    let text = crate::focus::visible(g.app.focus.drafts.get(&id)?.area.selected()?);
+    (!text.is_empty()).then_some(text)
+}
+
+/// Something in a focus view is selected that ctrl+c would copy.
+pub(super) fn has_selection(g: &Gui) -> bool {
+    g.panes.values().any(|st| st.focus.sel.as_ref().is_some_and(|s| s.span().is_some())) || box_owner(g).and_then(|id| box_text(g, id)).is_some()
+}
+
+/// What a right-click's Copy takes in `id`'s focus view: the conversation's selection, else the reply box's.
+pub(super) fn selection_text(g: &Gui, id: PaneId) -> Option<String> {
+    output_text(g, id).or_else(|| box_text(g, id))
+}
+
+/// Copy a focus view's selection (ctrl+c): the conversation's (it ends, as a terminal's does), else the reply
+/// box's (it stays, as a text field's does). True when something was copied.
+pub(super) fn copy(g: &mut Gui) -> bool {
+    let ids: Vec<PaneId> = g.panes.iter().filter(|(_, st)| st.focus.sel.is_some()).map(|(id, _)| *id).collect();
+    for id in ids {
+        if let Some(text) = output_text(g, id) {
+            super::window::set_clipboard(&text);
+            copied_toast(g, &text);
+            clear(g, None);
+            return true;
+        }
+    }
+    if let Some(text) = box_owner(g).and_then(|id| box_text(g, id)) {
+        super::window::set_clipboard(&text);
+        copied_toast(g, &text);
+        return true;
+    }
+    false
+}
+
+/// Cut the reply box's selection (ctrl+x). True when there was one.
+pub(super) fn cut(g: &mut Gui) -> bool {
+    let Some(id) = box_owner(g) else { return false };
+    if g.app.dictation.phase(id).is_some() {
+        return true;
+    }
+    let Some(text) = box_text(g, id) else { return false };
+    super::window::set_clipboard(&text);
+    let d = g.app.focus.draft(id);
+    d.area.delete_selection();
+    d.keep_tokens();
+    d.recall = None;
+    true
+}
+
+/// End the conversations' selections, but `keep`'s.
+pub(super) fn clear(g: &mut Gui, keep: Option<PaneId>) {
+    for (id, st) in g.panes.iter_mut() {
+        if Some(*id) != keep {
+            st.focus.sel = None;
+        }
+    }
+}
+
+/// The pointer over the conversation's words is a text cursor.
+pub(super) fn cursor(g: &Gui, id: PaneId, n: usize, p: Point) -> Option<Cursor> {
+    if n != AREA && !(OPEN..COPY).contains(&n) {
+        return None;
+    }
+    let v = &g.panes.get(&id)?.focus;
+    v.runs.iter().any(|r| r.rect().contains(p)).then_some(Cursor::Text)
+}
+
+/// What a click on `id`'s target `n` does once it's known to be a click (it let go where it pressed): show a
+/// long message whole or a turn's steps, open a link.
+fn clicked(g: &mut Gui, id: PaneId, n: usize, _p: Point) {
+    match n {
+        n if (OPEN..COPY).contains(&n) => {
+            let i = n - OPEN;
+            let item = shown_conversation(g, id).and_then(|c| c.items.get(i).cloned());
+            if let Some(it) = item
+                && let Some(st) = g.panes.get_mut(&id)
+            {
+                let k = Arc::as_ptr(&it) as usize;
+                if !st.focus.open.remove(&k) {
+                    st.focus.open.insert(k);
+                }
+            }
+        }
+        // a link opens as it does from the terminal: files in the preview (pictures in the media panel), the rest
+        // with the system
+        n if (LINK..PICTURE).contains(&n) => {
+            let uri = g.panes.get(&id).and_then(|st| st.focus.links.get(n - LINK).cloned());
+            if let Some(uri) = uri {
+                super::mouse::open_link(g, id, &uri);
+            }
+        }
+        _ => {}
+    }
+    g.dirty = true;
+}
+
 /// Target `n` of `id`'s focus view was clicked.
 pub fn click(g: &mut Gui, id: PaneId, n: usize, p: Point, count: u32) {
-    let _ = count;
     focus_pane(g, id);
     if quips::click(g, id, n, p, count) { return; }
     // a click anywhere but its list (or the word that opened it) closes the model or thinking list
@@ -2185,20 +3478,18 @@ pub fn click(g: &mut Gui, id: PaneId, n: usize, p: Point, count: u32) {
         AREA => {
             let d = g.app.focus.draft(id);
             d.quips.dismissed = Some((d.area.text().into(), d.area.cursor()));
+            press_text(g, id, p, count, None);
         }
-        BOX => {
-            let geo = g.panes.get(&id).and_then(|st| st.focus.geo);
-            if let Some(geo) = geo {
-                let adv = geo.adv;
-                let d = g.app.focus.draft(id);
-                // the terminal font's cells: as many as the characters before the click
-                let mut measure = |s: &str| unicode_width::UnicodeWidthStr::width(s) as f32 * adv;
-                let at = byte_at(&d.area, &geo, p, &mut measure);
-                d.area.set_cursor(at);
+        BOX => press_box(g, id, p, count),
+        DICTATE => g.app.toggle_dictation(id, false),
+        CANCEL_DICTATION => g.app.dictation.cancel(id),
+        SKIP_CLEANUP => g.app.skip_dictation_cleanup(id),
+        // as Enter does: a command picked from the list runs, anything else is sent
+        SEND => {
+            if g.app.focus_choice(id).is_none() {
+                g.app.focus_key(id, crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE));
             }
         }
-        // as Enter does: a command picked from the list runs, anything else is sent
-        SEND => g.app.focus_key(id, crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE)),
         MODEL_CHIP => g.app.focus_toggle_menu(id, MenuKind::Model),
         THINKING_CHIP => g.app.focus_toggle_menu(id, MenuKind::Thinking),
         STOP => {
@@ -2211,7 +3502,22 @@ pub fn click(g: &mut Gui, id: PaneId, n: usize, p: Point, count: u32) {
                 st.focus.follow = true;
             }
         }
-        TERMINAL => g.app.focus.toggle_peek(id),
+        TERMINAL => {
+            if !g.app.focus.on {
+                g.app.toggle_focus_mode();
+            } else {
+                g.app.focus.toggle_peek(id);
+            }
+        }
+        ANSWER_QUEUED => { g.app.focus_open_queued_questions(id); }
+        BACK => g.app.focus.show_subagent(id, None),
+        // a subagent's card, chip or note: its own conversation, in place of the session's
+        n if (SUBAGENT..SUBAGENT_END).contains(&n) => {
+            let call = g.panes.get(&id).and_then(|st| st.focus.opened.get(n - SUBAGENT).cloned());
+            if let Some(call) = call {
+                g.app.focus.show_subagent(id, Some(call));
+            }
+        }
         EARLIER => {
             if let Some(st) = g.panes.get_mut(&id) {
                 st.focus.shown += HISTORY;
@@ -2259,35 +3565,18 @@ pub fn click(g: &mut Gui, id: PaneId, n: usize, p: Point, count: u32) {
                 g.app.focus_complete(id, &cmd, true);
             }
         }
-        n if (OPEN..COPY).contains(&n) => {
-            let i = n - OPEN;
-            let item = g.app.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.insights()).and_then(|s| s.conversation).and_then(|c| c.items.get(i).cloned());
-            if let Some(it) = item
-                && let Some(st) = g.panes.get_mut(&id)
-            {
-                let k = Arc::as_ptr(&it) as usize;
-                if !st.focus.open.remove(&k) {
-                    st.focus.open.insert(k);
-                }
-            }
-        }
+        // a long message, a turn's steps, a link: the press can start a selection, and is the click when it
+        // lets go where it pressed
+        n if (OPEN..COPY).contains(&n) || (LINK..PICTURE).contains(&n) => press_text(g, id, p, count, Some(n)),
         n if (COPY..LINK).contains(&n) => {
             let i = n - COPY;
-            let text = g.app.panes.get(&id).and_then(|p| p.as_term_ref()).and_then(|t| t.insights()).and_then(|s| s.conversation).and_then(|c| match c.items.get(i).map(|it| it.as_ref()) {
+            let text = shown_conversation(g, id).and_then(|c| match c.items.get(i).map(|it| it.as_ref()) {
                 Some(Item::Said { text, .. }) => Some(text.clone()),
                 _ => None,
             });
             if let Some(text) = text {
                 super::window::set_clipboard(&text);
                 g.app.toast(crate::alerts::Kind::Info, "copied");
-            }
-        }
-        // a link opens as it does from the terminal: files in the preview (pictures in the media panel), the rest
-        // with the system
-        n if (LINK..PICTURE).contains(&n) => {
-            let uri = g.panes.get(&id).and_then(|st| st.focus.links.get(n - LINK).cloned());
-            if let Some(uri) = uri {
-                super::mouse::open_link(g, id, &uri);
             }
         }
         n if (SOUND..SOUND_AT).contains(&n) => {
@@ -2325,6 +3614,12 @@ fn focus_pane(g: &mut Gui, id: PaneId) {
 
 /// The wheel over `id`'s conversation: it scrolls (and stops following the newest once you go up).
 pub fn wheel(g: &mut Gui, id: PaneId, delta: super::scroll::Wheel) {
+    if let Some(st) = g.panes.get_mut(&id)
+        && st.focus.quip_preview.wheel(g.pointer, delta.pixels(22.0))
+    {
+        g.dirty = true;
+        return;
+    }
     if quips::wheel(g, id, delta.units()) { return; }
     let Some(st) = g.panes.get_mut(&id) else { return };
     let v = &mut st.focus;
@@ -2333,6 +3628,40 @@ pub fn wheel(g: &mut Gui, id: PaneId, delta: super::scroll::Wheel) {
 }
 
 impl View {
+    /// The subagent shown now (None: the conversation). Into a subagent, its latest shows; back in the
+    /// conversation, it's where it was left. A selection doesn't go across.
+    fn look_at(&mut self, call: Option<&str>) {
+        if self.lens.as_deref() == call {
+            return;
+        }
+        if self.lens.is_none() {
+            self.saved = Some((self.top, self.follow, self.shown, std::mem::take(&mut self.open)));
+        }
+        match call {
+            Some(_) => {
+                self.top = 0.0;
+                self.follow = true;
+                self.shown = HISTORY;
+            }
+            None => {
+                let (top, follow, shown, open) = self.saved.take().unwrap_or((0.0, true, HISTORY, HashSet::new()));
+                (self.top, self.follow, self.shown, self.open) = (top, follow, shown, open);
+            }
+        }
+        self.lens = call.map(str::to_string);
+        self.sel = None;
+        self.sel_text.clear();
+        self.made = None;
+    }
+
+    pub(super) fn has_selection(&self) -> bool {
+        self.sel.is_some()
+    }
+
+    pub(super) fn clear_selection(&mut self) {
+        self.sel = None;
+    }
+
     pub(super) fn scroll_rows(&mut self, rows: f32) {
         self.scroll_pixels(rows * self.line_height);
     }
@@ -2348,6 +3677,200 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_prompt_holds_focus_and_hides_composer_actions_and_lists() {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(crate::services::fallback_settings(), tx.clone());
+        let mut app = App::new(svc, tx, crate::app::Opts { demo: true, fixed_demo: true, load_recents: false });
+        let id = app.focused().unwrap();
+        let meta = app.panes[&id].as_term_ref().unwrap().meta.clone();
+        let screen = include_str!("../../../../tests/fixtures/codex-folder-trust.txt").replace('\n', "\r\n");
+        let mut term = crate::panes::term::Term::fixed(meta, &screen, app.svc.clone());
+        term.set_screen_status(Some(Activity::Blocked));
+        app.panes.insert(id, Box::new(term));
+        let theme = app.theme.clone();
+        let tokens = super::super::kit::Tokens::from_theme(&theme);
+        let mut text = bro_gfx::Text::new(crate::fonts::get("jetbrains-mono").unwrap().data, crate::fonts::SYMBOLS.data, false);
+        let mut media = Media::new(Arc::new(|| {}));
+        for width in [480.0, 900.0] {
+            let d = app.focus.draft(id);
+            d.area.set_text("/mo");
+            d.menu = Some(crate::focus::Menu { kind: MenuKind::Model, sel: 0, query: String::new() });
+            d.quips.open = true;
+            let mut view = View { choice: app.focus_choice(id), ..Default::default() };
+            assert!(view.choice.is_some());
+            let mut scene = bro_gfx::Scene::new();
+            let mut anim = super::super::kit::Anims::default();
+            let mut hits = vec![];
+            let screen = Rect::new(0.0, 0.0, width, 300.0);
+            text.begin_frame();
+            let mut ui = Ui {
+                scene: &mut scene, text: &mut text, t: &tokens, theme: &theme, scale: 1.0,
+                pointer: None, pressing: false, hits: &mut hits, top_layer: 0, anim: &mut anim,
+                now: Instant::now(), time: 0.0, ticking: false, screen,
+            };
+            let c = Typo::new(&mut ui, 14.0);
+            let seen = seen(&app, id).unwrap();
+            reply_box(&mut app, &mut ui, id, screen, true, &c, &seen, Mood::Blocked, &mut view, &mut media);
+            assert!(view.caret.is_none(), "the reply box must not claim keyboard focus");
+            assert!(!view.popup, "saved composer lists must not cover the choice");
+            assert!(!hits.iter().any(|h| matches!(h.action, Action::Focus(pane, SEND) if pane == id)), "Send must not act as an answer");
+            assert_eq!(app.focus.drafts[&id].area.text(), "/mo");
+            assert!(app.focus.drafts[&id].menu.is_some(), "the saved menu can return after the prompt");
+        }
+    }
+
+    #[test]
+    fn queued_questions_have_an_answer_button_at_narrow_and_wide_widths() {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(crate::services::fallback_settings(), tx.clone());
+        let app = App::new(svc, tx, crate::app::Opts { demo: true, fixed_demo: true, load_recents: false });
+        let theme = app.theme.clone();
+        let tokens = super::super::kit::Tokens::from_theme(&theme);
+        let mut text = bro_gfx::Text::new(crate::fonts::get("jetbrains-mono").unwrap().data, crate::fonts::SYMBOLS.data, false);
+        for width in [120.0, 240.0, 480.0, 900.0] {
+            let mut scene = bro_gfx::Scene::new();
+            let mut anim = super::super::kit::Anims::default();
+            let mut hits = vec![];
+            let screen = Rect::new(0.0, 0.0, width, 80.0);
+            text.begin_frame();
+            let mut ui = Ui {
+                scene: &mut scene, text: &mut text, t: &tokens, theme: &theme, scale: 1.0,
+                pointer: None, pressing: false, hits: &mut hits, top_layer: 0, anim: &mut anim,
+                now: Instant::now(), time: 0.0, ticking: false, screen,
+            };
+            let c = Typo::new(&mut ui, 14.0);
+            draw_queued_questions(&mut ui, 7, &c, bro_core::terminal_prompt::QueuedQuestions { count: 2, shortcut: bro_core::terminal_prompt::QuestionShortcut::ShiftLeft }, screen);
+            let button = hits.iter().find(|h| matches!(h.action, Action::Focus(7, ANSWER_QUEUED))).expect("the queue needs a clickable Answer action");
+            assert!(button.rect.w >= 48.0 && button.rect.h >= 28.0);
+            assert!(button.rect.x >= screen.x && button.rect.right() <= screen.right());
+            assert!(button.rect.y >= screen.y && button.rect.bottom() <= screen.bottom());
+        }
+    }
+
+    #[test]
+    fn a_browser_handoff_card_opens_and_returns_its_page_and_stays_inside_its_band() {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(crate::services::fallback_settings(), tx.clone());
+        let app = App::new(svc, tx, crate::app::Opts { demo: true, fixed_demo: true, load_recents: false });
+        let theme = app.theme.clone();
+        let tokens = super::super::kit::Tokens::from_theme(&theme);
+        let mut text = bro_gfx::Text::new(crate::fonts::get("jetbrains-mono").unwrap().data, crate::fonts::SYMBOLS.data, false);
+        let mut handoff = bro_bridge::BrowserHandoff {
+            id: "h1".into(), tab_id: 42, title: "GitHub · Sign in".into(), reason: "Sign in with your passkey, then press Done.".into(),
+            phase: "requested".into(), viewer_available: true, returning: false, session: Some("s".into()),
+        };
+        for (width, phase) in [(300.0, "requested"), (720.0, "requested"), (720.0, "human")] {
+            handoff.phase = phase.into();
+            let mut scene = bro_gfx::Scene::new();
+            let mut anim = super::super::kit::Anims::default();
+            let mut hits = vec![];
+            text.begin_frame();
+            let mut ui = Ui {
+                scene: &mut scene, text: &mut text, t: &tokens, theme: &theme, scale: 1.0,
+                pointer: None, pressing: false, hits: &mut hits, top_layer: 0, anim: &mut anim,
+                now: Instant::now(), time: 0.0, ticking: false, screen: Rect::new(0.0, 0.0, width, 400.0),
+            };
+            let c = Typo::new(&mut ui, 15.0);
+            let h = super::super::browser::focus_card_height(&mut ui, c.small, c.body, &handoff, width);
+            let band = Rect::new(0.0, 0.0, width, h);
+            super::super::browser::draw_focus_card(&mut ui, c.small, c.body, &handoff, band);
+            let buttons: Vec<_> = hits.iter().filter_map(|hit| match &hit.action {
+                Action::BrowserHandoff { tab_id: 42, id, finish } if id == "h1" => Some((*finish, hit.rect)),
+                _ => None,
+            }).collect();
+            if phase == "human" {
+                assert!(buttons.is_empty(), "with the page in your hands its own Done hands it back");
+                continue;
+            }
+            assert_eq!(buttons.iter().map(|(finish, _)| *finish).collect::<Vec<_>>(), [false, true], "{width}: Open, then Return");
+            for (_, r) in buttons {
+                assert!(r.h >= 28.0 && r.x >= band.x && r.right() <= band.right() && r.y >= band.y && r.bottom() <= band.bottom(), "{width}: {r:?} in {band:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn codex_focus_shows_working_controls_while_the_terminal_looks_idle() {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(crate::services::fallback_settings(), tx.clone());
+        let mut app = App::new(svc, tx, crate::app::Opts { demo: true, fixed_demo: true, load_recents: false });
+        let id = app.focused().unwrap();
+        let mut meta = app.panes[&id].as_term_ref().unwrap().meta.clone();
+        meta.harness = Some(Harness::Codex);
+        let mut term = crate::panes::term::Term::fixed(meta, "› Ask Codex to do anything", app.svc.clone());
+        term.set_screen_status(Some(Activity::Idle));
+        term.set_insights(crate::panes::insights::Insights::fixed_transcript(Harness::Codex,
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#));
+        app.panes.insert(id, Box::new(term));
+        app.focus.draft(id);
+        let seen = seen(&app, id).unwrap();
+        assert_eq!(seen.activity, Some(Activity::Working));
+        let mood = mood_of(&seen, None, Instant::now());
+        assert_eq!(mood, Mood::Working);
+        assert_eq!(doing(&seen, crate::util::now_ms(), 0), "Thinking");
+        let theme = app.theme.clone();
+        let tokens = super::super::kit::Tokens::from_theme(&theme);
+        let mut text = bro_gfx::Text::new(crate::fonts::get("jetbrains-mono").unwrap().data, crate::fonts::SYMBOLS.data, false);
+        let mut media = Media::new(Arc::new(|| {}));
+        for width in [240.0, 480.0, 900.0] {
+            let mut scene = bro_gfx::Scene::new();
+            let mut anim = super::super::kit::Anims::default();
+            let mut hits = vec![];
+            let screen = Rect::new(0.0, 0.0, width, 300.0);
+            text.begin_frame();
+            let mut ui = Ui {
+                scene: &mut scene, text: &mut text, t: &tokens, theme: &theme, scale: 1.0,
+                pointer: None, pressing: false, hits: &mut hits, top_layer: 0, anim: &mut anim,
+                now: Instant::now(), time: 0.0, ticking: false, screen,
+            };
+            assert!(header_status(&app, &mut ui, id, None, Point::new(width, 16.0), width * 0.36).is_some());
+            assert!(ui.ticking, "the working spinner must animate at {width}px");
+            let c = Typo::new(&mut ui, 18.0);
+            reply_box(&mut app, &mut ui, id, screen, true, &c, &seen, mood, &mut View::default(), &mut media);
+            assert!(hits.iter().any(|h| matches!(h.action, Action::Focus(pane, STOP) if pane == id)), "Stop must be available at {width}px");
+        }
+    }
+
+    #[test]
+    fn a_fresh_session_has_a_clickable_model_chip_at_narrow_and_wide_widths() {
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(crate::services::fallback_settings(), tx.clone());
+        let mut app = App::new(svc, tx, crate::app::Opts { demo: true, fixed_demo: true, load_recents: false });
+        let id = app.focused().unwrap();
+        let mut meta = app.panes[&id].as_term_ref().unwrap().meta.clone();
+        meta.model = None;
+        app.panes.insert(id, Box::new(crate::panes::term::Term::fixed(meta, "❯ ", app.svc.clone())));
+        app.focus.draft(id);
+        let theme = app.theme.clone();
+        let tokens = super::super::kit::Tokens::from_theme(&theme);
+        let mut text = bro_gfx::Text::new(crate::fonts::get("jetbrains-mono").unwrap().data, crate::fonts::SYMBOLS.data, false);
+        let mut media = Media::new(Arc::new(|| {}));
+        for width in [240.0, 480.0, 900.0] {
+            let mut scene = bro_gfx::Scene::new();
+            let mut anim = super::super::kit::Anims::default();
+            let mut hits = vec![];
+            let screen = Rect::new(0.0, 0.0, width, 300.0);
+            text.begin_frame();
+            let mut ui = Ui {
+                scene: &mut scene, text: &mut text, t: &tokens, theme: &theme, scale: 1.0,
+                pointer: None, pressing: false, hits: &mut hits, top_layer: 0, anim: &mut anim,
+                now: Instant::now(), time: 0.0, ticking: false, screen,
+            };
+            let c = Typo::new(&mut ui, 18.0);
+            let seen = seen(&app, id).unwrap();
+            reply_box(&mut app, &mut ui, id, screen, true, &c, &seen, Mood::Idle, &mut View::default(), &mut media);
+            let chip = hits.iter().find(|h| matches!(h.action, Action::Focus(pane, MODEL_CHIP) if pane == id)).expect("the model picker must be reachable before the model is known");
+            assert!(chip.rect.w > 24.0 && chip.rect.h >= 24.0);
+            assert!(chip.rect.x >= screen.x && chip.rect.right() <= screen.right());
+        }
+    }
 
     #[test]
     fn precise_scrolling_holds_the_reading_position_and_follows_again_at_the_bottom() {
@@ -2403,6 +3926,45 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_that_started_subagents_shows_a_card_each_that_opens_it() {
+        use bro_core::sessions::subagents::SubagentState;
+        let theme = crate::theme::get("graphite");
+        let tokens = super::super::kit::Tokens::from_theme(&theme);
+        let mut text = bro_gfx::Text::new(crate::fonts::get("jetbrains-mono").unwrap().data, crate::fonts::SYMBOLS.data, false);
+        let mut scene = bro_gfx::Scene::new();
+        let mut anim = super::super::kit::Anims::default();
+        let mut hits = vec![];
+        let screen = Rect::new(0.0, 0.0, 720.0, 600.0);
+        text.begin_frame();
+        let mut ui = Ui { scene: &mut scene, text: &mut text, t: &tokens, theme: &theme, scale: 1.0, pointer: None, pressing: false, hits: &mut hits, top_layer: 0, anim: &mut anim, now: Instant::now(), time: 0.0, ticking: false, screen };
+        let c = Typo::new(&mut ui, 16.0);
+        let done = Subagent { state: SubagentState::Done, result: Some("Routes are registered in three places.".into()), ..Subagent::started("a1", "Map every route registration".into(), Some(0)) };
+        let busy = Subagent { name: Some("route-cleanup".into()), ..Subagent::started("a2", "Check route cleanup on exit".into(), Some(0)) };
+        let mut conv = Conversation::new(Harness::Claude);
+        conv.subagents = vec![done, busy];
+        let subs = Subs::new(None, &[Some(&conv)]);
+        let launch = |id: &str| Step { id: id.into(), ..step(StepKind::Agent, "Started", StepState::Done) };
+        let steps = [launch("a1"), launch("a2"), step(StepKind::Read, "Read a.rs", StepState::Done)];
+        let paint = |draw: bool| Paint { draw, id: 7, links: vec![], pictures: vec![], sounds: vec![], media: None, resolve: None, apps: AppPaint::default(), text: TextPaint::default(), subs: Some(&subs), opened: vec![], quip_hover: None };
+        let measured = did(&mut ui, &c, &steps, 3, Point::new(20.0, 0.0), 680.0, false, &mut paint(false));
+        let mut p = paint(true);
+        let drawn = did(&mut ui, &c, &steps, 3, Point::new(20.0, 0.0), 680.0, false, &mut p);
+        assert_eq!(measured, drawn, "measured as tall as it's drawn");
+        assert_eq!(p.opened, ["a1", "a2"], "each card opens its subagent");
+        let cards: Vec<Rect> = ui.hits.iter().filter(|h| matches!(h.action, Action::Focus(7, n) if (SUBAGENT..SUBAGENT_END).contains(&n))).map(|h| h.rect).collect();
+        assert_eq!(cards.len(), 2);
+        assert!(cards[0].y < cards[1].y && cards[0].w > 600.0, "a row each, the card's width");
+        // a turn that only started subagents has its cards and no line over them
+        let only = [launch("a1"), launch("a2")];
+        let h = did(&mut ui, &c, &only, 4, Point::new(20.0, 0.0), 680.0, false, &mut paint(false));
+        assert_eq!(h, subagents::cards_height(&c, 2));
+        // without its subagents known, a turn is the line it always was
+        let mut plain = paint(false);
+        plain.subs = None;
+        assert_eq!(did(&mut ui, &c, &only, 4, Point::new(20.0, 0.0), 680.0, false, &mut plain), (c.small * 1.9).round());
+    }
+
+    #[test]
     fn steps_sum_up_plainly() {
         use StepKind::*;
         use StepState::*;
@@ -2445,8 +4007,11 @@ mod tests {
         assert_eq!(setting("/effort xhigh").as_deref(), Some("Thinking extra high"));
         assert_eq!(setting("/model"), None, "its own menu: a command like any other");
         assert_eq!(setting("/compact"), None);
-        assert_eq!(sent_state(30.0, true), "Queued · sending on the next turn");
-        assert_eq!(sent_state(0.5, false), "Sending…");
+        use crate::panes::term::DeliveryState;
+        assert_eq!(sent_state(&DeliveryState::Submitted, true), "Queued · waiting for the agent");
+        assert_eq!(sent_state(&DeliveryState::Sending, false), "Sending…");
+        assert_eq!(sent_state(&DeliveryState::Submitted, false), "Waiting for the agent…");
+        assert_eq!(sent_state(&DeliveryState::Failed("closed".into()), false), "Not sent · check the terminal");
     }
 
     #[test]
@@ -2463,7 +4028,7 @@ mod tests {
     }
 
     fn seen_at(last_ms: Option<i64>, thought: Option<Thought>) -> Seen {
-        Seen { harness: Some(Harness::Claude), conv: None, activity: Some(Activity::Working), limit: None, done: false, running: None, last_ms, cwd: PathBuf::from("/x"), branch: None, thought, sending: false }
+        Seen { harness: Some(Harness::Claude), conv: None, activity: Some(Activity::Working), queued_questions: None, limit: None, done: false, running: None, last_ms, cwd: PathBuf::from("/x"), branch: None, thought, sending: false, subagents: None, tasks: vec![] }
     }
 
     #[test]
@@ -2495,10 +4060,192 @@ mod tests {
     fn links_are_web_addresses_and_the_files_the_session_finds() {
         let spans = markdown::inline("see [docs](https://docs.rs/x), `src/focus.rs:12` and notes.txt");
         let mut found = |m: &FileLinkMatch| (m.path == "src/focus.rs").then(|| Arc::<str>::from(format!("file:///F:/app/{}#L{}", m.path, m.line.unwrap_or(0)).as_str()));
-        let mut p = Paint { draw: true, id: 1, links: vec![], pictures: vec![], sounds: vec![], media: None, resolve: Some(&mut found), apps: AppPaint::default() };
+        let mut p = Paint { draw: true, id: 1, links: vec![], pictures: vec![], sounds: vec![], media: None, resolve: Some(&mut found), apps: AppPaint::default(), text: TextPaint::default(), subs: None, opened: vec![], quip_hover: None };
         let links = link_ranges(&spans, &mut p);
         let text = markdown::plain(&spans);
         let got: Vec<(&str, &str)> = links.iter().map(|(r, t)| (&text[r.clone()], t.as_str())).collect();
         assert_eq!(got, [("docs", "https://docs.rs/x"), ("src/focus.rs:12", "file:///F:/app/src/focus.rs#L12")], "a file nobody found (notes.txt) isn't a link");
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::file_view::gui::tests::with_ui;
+
+    fn laid(ui: &mut Ui, text: &str, w: f32) -> TextBox {
+        lay(ui, &[(text.to_string(), Style::mono(16.0, ui.t.text))], 16.0, LINE, w, None)
+    }
+
+    fn run(ui: &mut Ui, key: RunKey, text: &str, at: Point, w: f32) -> Run {
+        let b = laid(ui, text, w);
+        Run { key, at, layout: b.layout.clone(), scale: ui.scale, gap: "\n\n", lead: String::new() }
+    }
+
+    fn two_runs() -> Vec<Run> {
+        with_ui("graphite", 800.0, 600.0, |ui| {
+            vec![run(ui, (0, 0), "alpha beta gamma", Point::new(10.0, 100.0), 600.0), run(ui, (1, 0), "second item", Point::new(10.0, 160.0), 600.0)]
+        })
+        .0
+    }
+
+    fn at(key: RunKey, byte: usize) -> Pos {
+        Pos { key, byte }
+    }
+
+    #[test]
+    fn a_press_lands_on_the_nearest_byte_of_the_text_drawn() {
+        let runs = two_runs();
+        let adv = runs[0].layout.glyphs[1].x - runs[0].layout.glyphs[0].x;
+        let mid = 100.0 + runs[0].rect().h / 2.0;
+        assert_eq!(pos_at(&runs, Point::new(10.0 + adv * 6.2, mid)), Some(at((0, 0), 6)), "the near half of a letter is before it");
+        assert_eq!(pos_at(&runs, Point::new(10.0 + adv * 6.7, mid)), Some(at((0, 0), 7)), "its far half after it");
+        assert_eq!(pos_at(&runs, Point::new(790.0, mid)), Some(at((0, 0), 16)), "right of the line: its end");
+        assert_eq!(pos_at(&runs, Point::new(0.0, mid)), Some(at((0, 0), 0)), "left of it: its start");
+        assert_eq!(pos_at(&runs, Point::new(300.0, 140.0)), Some(at((0, 0), 16)), "between two pieces: the end of the one above");
+        assert_eq!(pos_at(&runs, Point::new(300.0, 20.0)), Some(at((0, 0), 0)), "above them all: the start");
+        assert_eq!(pos_at(&runs, Point::new(30.0, 590.0)), Some(at((1, 0), 11)), "below them all: the end");
+        assert_eq!(pos_at(&[], Point::new(0.0, 0.0)), None, "nothing drawn, nothing to select");
+    }
+
+    #[test]
+    fn a_double_click_takes_a_word_a_triple_the_piece_and_a_drag_grows_from_what_it_took() {
+        let runs = two_runs();
+        let p = at((0, 0), 7);
+        assert_eq!(press_span(&runs, p, 1), (p, p));
+        let word = press_span(&runs, p, 2);
+        assert_eq!(word, (at((0, 0), 6), at((0, 0), 10)), "beta");
+        assert_eq!(press_span(&runs, p, 3), (at((0, 0), 0), at((0, 0), 16)));
+        // dragging back past the word keeps it whole: the anchor moves to its far end
+        assert_eq!(grow(word, at((0, 0), 2)), (word.1, at((0, 0), 2)));
+        assert_eq!(grow(word, at((1, 0), 3)), (word.0, at((1, 0), 3)), "on into the next piece");
+        assert_eq!(grow(word, p), word, "inside the word: just the word");
+        let sel = Sel { origin: word, anchor: word.1, head: at((0, 0), 2), press: Point::new(0.0, 0.0), click: None, moved: true };
+        assert_eq!(sel.span(), Some((at((0, 0), 2), word.1)), "in reading order, whichever way it was dragged");
+    }
+
+    #[test]
+    fn the_selection_shows_on_the_text_it_covers_and_runs_on_with_a_sliver() {
+        let (s, e) = (at((1, 0), 3), at((1, 2), 2));
+        assert_eq!(covered((s, e), (1, 0), 10), Some(3..10));
+        assert_eq!(covered((s, e), (1, 1), 5), Some(0..5));
+        assert_eq!(covered((s, e), (1, 1), 0), Some(0..0), "a blank line inside it shows");
+        assert_eq!(covered((s, e), (1, 2), 9), Some(0..2));
+        assert_eq!(covered((s, e), (0, 4), 9), None);
+        assert_eq!(covered((s, e), (2, 0), 9), None);
+        assert_eq!(covered((s, at((1, 0), 10)), (1, 0), 10), Some(3..10));
+        let ((one, on, wrapped, lines, adv), _) = with_ui("graphite", 800.0, 600.0, |ui| {
+            let b = laid(ui, "alpha beta", 600.0);
+            let adv = b.layout.glyphs[1].x - b.layout.glyphs[0].x;
+            let one = selection_rects(&b.layout, Point::new(10.0, 50.0), 1.0, &(6..10), false);
+            let on = selection_rects(&b.layout, Point::new(10.0, 50.0), 1.0, &(6..10), true);
+            let long = laid(ui, "one two three four five six seven eight", adv * 12.0);
+            let wrapped = selection_rects(&long.layout, Point::new(0.0, 0.0), 1.0, &(4..long.layout.text.len()), false);
+            (one, on, wrapped, long.layout.lines.len(), adv)
+        });
+        assert_eq!(one.len(), 1);
+        assert!((one[0].x - (10.0 + 6.0 * adv)).abs() < 0.5, "it starts at the selected letter");
+        assert!((one[0].w - 4.0 * adv).abs() < 0.5, "and covers just the four selected letters");
+        assert!(on[0].w > one[0].w, "running on into the next piece, a sliver shows the line break");
+        assert!(lines >= 3);
+        assert_eq!(wrapped.len(), lines, "a line each, across the wraps");
+        assert!(wrapped[0].x > 0.0 && wrapped[1].x < 1.0, "from the selected word, then from each next line's start");
+    }
+
+    #[test]
+    fn the_copy_keeps_paragraphs_list_marks_and_lines_of_code() {
+        let mut kept = BTreeMap::new();
+        for (key, gap, lead, text) in [
+            ((2, 0), "\n\n", "", "Here is the plan."),
+            ((2, 1), "\n\n", "- ", "ship it"),
+            ((2, 2), "\n", "- ", "then docs"),
+            ((2, 3), "\n\n", "", "cargo test"),
+            ((2, 4), "\n", "", ""),
+            ((2, 5), "\n", "", "cargo build"),
+            ((5, 0), "\n\n", "", "Done, thanks"),
+        ] {
+            kept.insert(key, RunText { gap, lead: lead.into(), text: text.into() });
+        }
+        // item 3 was never drawn while selected (scrolled past at speed): it copies as the transcript has it
+        let raw = |i: usize| (i == 3).then(|| "a reply scrolled past".to_string());
+        assert_eq!(
+            selected_text((at((2, 0), 8), at((5, 0), 4)), &kept, &raw),
+            "the plan.\n\n- ship it\n- then docs\n\ncargo test\n\ncargo build\n\na reply scrolled past\n\nDone"
+        );
+        assert_eq!(selected_text((at((2, 1), 2), at((2, 1), 6)), &kept, &raw), "ip i", "a part of an item has no mark");
+        assert_eq!(selected_text((at((2, 1), 0), at((2, 2), 0)), &kept, &raw), "- ship it", "ending where the next piece starts takes none of it");
+        assert_eq!(selected_text((at((2, 0), 0), at((2, 0), 99)), &kept, &raw), "Here is the plan.", "an end past the text is its end");
+    }
+
+    #[test]
+    fn a_reply_lays_out_its_pieces_in_reading_order_and_copies_as_it_reads() {
+        let blocks = markdown::parse("Intro line\n\n- one\n- two\n\n```\nlet a = 1;\n\nlet b = 2;\n```\n\n> quoted");
+        let (runs, _) = with_ui("graphite", 900.0, 900.0, |ui| {
+            let c = Typo::new(ui, 16.0);
+            let mut p = Paint::measuring(1);
+            p.draw = true;
+            p.text.collect = true;
+            p.text.item(4);
+            said(ui, &c, &blocks, Point::new(0.0, 0.0), 600.0, c.text, false, &mut p);
+            std::mem::take(&mut p.text.runs)
+        });
+        let texts: Vec<&str> = runs.iter().map(|r| r.layout.text.as_str()).collect();
+        assert_eq!(texts, ["Intro line", "one", "two", "let a = 1;", "", "let b = 2;", "quoted"]);
+        assert!(runs.iter().enumerate().all(|(n, r)| r.key == (4, n as u32)));
+        assert!(runs.windows(2).all(|w| w[1].at.y > w[0].at.y), "top to bottom");
+        assert_eq!(runs.iter().map(|r| r.gap).collect::<Vec<_>>(), ["\n\n", "\n\n", "\n", "\n\n", "\n", "\n", "\n\n"]);
+        assert_eq!(runs.iter().map(|r| r.lead.as_str()).collect::<Vec<_>>(), ["", "- ", "- ", "", "", "", "> "]);
+        let mut kept = BTreeMap::new();
+        keep_text(&mut kept, &runs);
+        let all = (at((4, 0), 0), at((4, 99), 0));
+        assert_eq!(selected_text(all, &kept, &|_| None), "Intro line\n\n- one\n- two\n\nlet a = 1;\n\nlet b = 2;\n\n> quoted");
+        // the text a drag lands on is the text it copies: from the start of "one" to the middle of "let b"
+        let first = pos_at(&runs, Point::new(runs[1].at.x + 1.0, runs[1].at.y + 4.0)).unwrap();
+        assert_eq!(first, at((4, 1), 0));
+        assert_eq!(selected_text((first, at((4, 5), 5)), &kept, &|_| None), "- one\n- two\n\nlet a = 1;\n\nlet b");
+    }
+
+    #[test]
+    fn a_picture_dropped_or_pasted_over_a_selection_keeps_the_words() {
+        let mut d = crate::focus::Draft::default();
+        d.area.selectable = true;
+        d.area.set_text("compare these two");
+        d.area.select(8, 13);
+        d.attach(PathBuf::from("C:/shots/a.png"));
+        assert_eq!(crate::focus::visible(d.area.text()), "compare these two");
+        assert_eq!(d.attachments.len(), 1);
+    }
+
+    #[test]
+    fn the_reply_box_selects_with_the_keys_and_typing_or_a_paste_replaces_it() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        crate::testkit::isolate();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let svc = crate::services::Services::offline(crate::services::fallback_settings(), tx.clone());
+        let mut app = App::new(svc, tx, crate::app::Opts { demo: true, fixed_demo: true, load_recents: false });
+        let id = app.focused().unwrap();
+        app.focus.on = true;
+        app.focus.draft(id).area.set_text("fix the flaky test");
+        // as wide as a drawn box (home and end go by the rows you see)
+        app.focus.draft(id).cols = 80;
+        for _ in 0..4 {
+            app.focus_key(id, KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        }
+        assert_eq!(app.focus.draft(id).area.selected(), Some("test"));
+        for ch in "bug".chars() {
+            app.focus_key(id, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert_eq!(app.focus.draft(id).area.text(), "fix the flaky bug");
+        app.focus_key(id, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(app.focus.draft(id).area.selected(), Some("fix the flaky bug"), "ctrl+a selects all of it");
+        app.focus_key(id, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let d = app.focus.draft(id);
+        assert_eq!((d.area.selected(), d.area.text()), (None, "fix the flaky bug"), "esc lets go of the selection, not the words");
+        app.focus_key(id, KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT | KeyModifiers::CONTROL));
+        app.focus_paste(id, "race");
+        assert_eq!(app.focus.draft(id).area.text(), "fix the flaky race", "a paste goes over the selection");
+        app.focus_key(id, KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+        app.focus_key(id, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.focus.draft(id).area.text(), "", "backspace takes the selection");
     }
 }

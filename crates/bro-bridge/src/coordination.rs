@@ -139,6 +139,52 @@ fn adapter(session: &crate::model::TerminalSessionSummary) -> core::Adapter {
     }
 }
 
+/// Past this many adapters, pruning also drops sessions this host doesn't list at all (they
+/// ended before it started, or run under a peer bridge sharing the store). Below it only
+/// sessions seen to end here go, so peers don't churn each other's entries every pass.
+/// The store admits 128.
+const ADAPTER_PRUNE_AT: usize = 96;
+
+/// Adapters are recorded as sessions are seen and never expire by themselves, so sessions that
+/// ended while no bridge watched would pile up to the store's admission limit and refuse every
+/// later dispatch. Drops adapters whose session isn't running here and that no live attempt
+/// holds. A session that comes back (here or on a peer) is observed again on the next pass.
+fn prune_adapters(app: &AppState, at: i64) -> Result<(), String> {
+    let snapshot = snapshot_sync(app)?;
+    let sessions = app.summaries();
+    let exits = app.coordination_exits.lock().clone();
+    let crowded = snapshot.adapters.len() >= ADAPTER_PRUNE_AT;
+    for adapter in &snapshot.adapters {
+        let Some(id) = adapter.id.strip_prefix("session-") else {
+            continue;
+        };
+        let listed = sessions.iter().find(|s| s.id == id);
+        if listed.is_some_and(|s| s.status == "running") {
+            continue;
+        }
+        let ended = exits.contains_key(id) || listed.is_some();
+        let held = snapshot
+            .attempts
+            .iter()
+            .any(|a| !a.stopped && a.adapter_id.as_deref() == Some(adapter.id.as_str()));
+        if held || !(ended || crowded) {
+            continue;
+        }
+        // A fresh command id each time: a session id seen again later must be removable again.
+        if let Err(error) = host_execute_at(
+            app,
+            &format!("remove-adapter-{id}-{}", uuid::Uuid::new_v4().simple()),
+            at,
+            Command::RemoveAdapter {
+                adapter_id: adapter.id.clone(),
+            },
+        ) {
+            tracing::warn!("coordination: keeping adapter {}: {error}", adapter.id);
+        }
+    }
+    Ok(())
+}
+
 fn worker_token(app: &AppState, attempt: &core::Attempt) -> String {
     // Bridge token is durable and outside public task state. Plain capabilities appear only in assignment packets.
     core::digest_bytes(

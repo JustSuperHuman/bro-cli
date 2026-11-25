@@ -11,7 +11,8 @@
 //! client takes the connection as lost.
 
 use crate::answer::Profile;
-use crate::wire::{self, Added, Blob, Control, Exit, Hello, Id, Ids, PeersMsg, Refused, Relay, Resize, Set, Spawned};
+use crate::wire::{self, Added, Blob, Control, Exit, Hello, Id, Ids, PeersMsg, Refused, Relay, Resize, Set, SlopAct, Spawned};
+use bro_core::slop::Report;
 use crate::{HostInfo, PROTOCOL, Peers, Role, SessionInfo, SpawnRequest, record};
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -43,6 +44,8 @@ pub enum ClientEvent {
     Unrelayed(Value),
     /// Who's connected changed.
     Peers(Peers),
+    /// The Slop Collector looked (see [`bro_core::slop`]).
+    Slop(Box<Report>),
 }
 
 const CONNECTED: u8 = 0;
@@ -91,6 +94,7 @@ struct Inner {
     listener: Listener,
     values: Mutex<HashMap<String, String>>,
     peers: Mutex<Peers>,
+    slop: Mutex<Option<Report>>,
 }
 
 /// A connection to the session server. Cheap to clone.
@@ -174,6 +178,7 @@ impl Client {
         })?;
         let values = Mutex::new(info.values.clone());
         let peers = Mutex::new(info.peers);
+        let slop = Mutex::new(info.slop.clone());
         let inner = Arc::new(Inner {
             tx,
             info,
@@ -185,6 +190,7 @@ impl Client {
             listener: Box::new(listener),
             values,
             peers,
+            slop,
         });
         let weak = Arc::downgrade(&inner);
         std::thread::Builder::new().name("bro-host-client-in".into()).spawn(move || read_loop(weak, reader))?;
@@ -242,6 +248,17 @@ impl Client {
     /// Who's connected, as the server last said.
     pub fn peers(&self) -> Peers {
         *self.inner.peers.lock()
+    }
+
+    /// The Slop Collector's last report, as the server last said (None: a server from before it).
+    pub fn slop(&self) -> Option<Report> {
+        self.inner.slop.lock().clone()
+    }
+
+    /// Have the Slop Collector look now (settings changed), or end every leftover it lists (`collect`). The report
+    /// arrives as [`ClientEvent::Slop`].
+    pub fn slop_look(&self, collect: bool) {
+        self.send(wire::json(wire::SLOP_ACT, &SlopAct { collect }));
     }
 
     /// A value kept on the server (see [`HostInfo::values`]).
@@ -370,6 +387,23 @@ pub fn stop(dir: &Path, wait: Duration) -> bool {
 /// What the server for `dir` holds, without driving it (`bro host status`).
 pub fn status(dir: &Path) -> Result<HostInfo, ConnectError> {
     open(dir, Role::Query).map(|(_, info)| info)
+}
+
+/// The Slop Collector's report from the server for `dir`, after a fresh look (and after ending every leftover it
+/// lists, `collect`), without driving it (`bro slop`). None: the server is from before the collector.
+pub fn slop(dir: &Path, collect: bool) -> Result<Option<Report>, ConnectError> {
+    let (mut sock, info) = open(dir, Role::Query)?;
+    if info.slop.is_none() {
+        return Ok(None);
+    }
+    wire::write_all(&mut sock, &wire::json(wire::SLOP_ACT, &SlopAct { collect }))?;
+    sock.set_read_timeout(Some(Duration::from_secs(30)))?;
+    loop {
+        let (kind, body) = wire::read_frame(&mut sock)?;
+        if kind == wire::SLOP {
+            return serde_json::from_slice(&body).map(Some).map_err(|e| ConnectError::Refused(e.to_string()));
+        }
+    }
 }
 
 fn kill_pid(pid: u32) {
@@ -519,6 +553,12 @@ fn read_loop(inner: std::sync::Weak<Inner>, mut sock: TcpStream) {
                 if let Ok(p) = serde_json::from_slice::<PeersMsg>(&body) {
                     *inner.peers.lock() = p.peers;
                     (inner.listener)(ClientEvent::Peers(p.peers));
+                }
+            }
+            wire::SLOP => {
+                if let Ok(r) = serde_json::from_slice::<Report>(&body) {
+                    *inner.slop.lock() = Some(r.clone());
+                    (inner.listener)(ClientEvent::Slop(Box::new(r)));
                 }
             }
             _ => {}

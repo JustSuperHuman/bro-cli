@@ -329,7 +329,7 @@ pub(crate) fn click(v: &mut BridgeView, n: usize, _p: Point, _mods: KeyModifiers
         POWER => {
             // the terminal UI's `t`
             let on = !cx.svc.state().bridge.enabled;
-            cx.svc.set_bridge_enabled(on);
+            if on { cx.svc.turn_on_mobile() } else { cx.svc.set_bridge_enabled(false) }
             cx.toast(Kind::Bridge, if on { "starting the bridge…" } else { "bridge off" });
         }
         REVEAL => v.reveal = !v.reveal,

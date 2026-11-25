@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "Translucent",
+  "appearance": "light",
+  "colors": {
+    "canvas": "oklch(62% 0.2 280deg / 50%)",
+    "accent": "#abcd",
+    "focus": "rgb(10 20 30 / 50%)",
+    "error": "hsl(350 80% 50%)",
+    "warning": "hwb(45 10% 20%)",
+    "update": "lab(60% 40 30)",
+    "messageAction": "lch(60% 50 120)",
+    "sidebar": "oklab(0.6 0.1 -0.1)",
+    "terminalCursor": "color(display-p3 0.8 0.2 0.3)",
+    "terminalSelection": "rebeccapurple",
+    "terminalScrollbar": "transparent",
+    "terminalScrollbarHover": "rgb(10 20 30 / none)"
+  }
+}

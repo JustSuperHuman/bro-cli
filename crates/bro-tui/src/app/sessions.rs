@@ -4,7 +4,8 @@
 use super::App;
 use super::overlays::Overlay;
 use crate::alerts::Kind;
-use crate::layout::PaneId;
+use super::Tab;
+use crate::layout::{Dir, Node, PaneId};
 use crate::pane::{Activity, Place, Waker};
 use crate::panes::term::{Meta, Spawn, Term};
 use crate::services::{LaunchRequest, Launched};
@@ -54,6 +55,25 @@ pub(crate) fn create_target(profile_id: Option<&str>) -> Option<(Harness, Option
     }
 }
 
+#[derive(Default)]
+pub(super) struct SidebarCache {
+    frame: Option<Instant>,
+    history_key: Option<(u64, u64)>,
+    history_at: Option<Instant>,
+    history: Vec<PastInfo>,
+    model: Option<std::sync::Arc<SidebarModel>>,
+}
+
+pub(crate) struct SidebarModel {
+    pub live: Vec<LiveInfo>,
+    open: Vec<sidebar::OpenInfo>,
+    state: sidebar::SideState,
+    pub rows: Vec<Row>,
+    pub order: Vec<PaneId>,
+    pub history_at: Instant,
+    pub recent: (Vec<sidebar::OpenInfo>, sidebar::Recent),
+}
+
 impl App {
     /// A launch finished building: open its pane (or report why not).
     pub(super) fn launched(&mut self, l: Launched) {
@@ -98,6 +118,9 @@ impl App {
         }
         let cwd = if cmd.cwd.as_os_str().is_empty() { spec.cwd.clone() } else { cmd.cwd.clone() };
         let label = if cmd.label.is_empty() { crate::services::launch::label_for(&spec) } else { cmd.label.clone() };
+        // a Create Slop launch: one from its tab, or a session continued with the kit it was started with (the
+        // launch names both "slop · …")
+        let studio = spec.studio.is_some() || cmd.label.starts_with("slop · ");
         // the orchestrator's frame already says what it is
         let label = if spec.orchestrator { label.trim_start_matches("orchestrator · ").to_string() } else { label };
         let meta = Meta {
@@ -179,6 +202,11 @@ impl App {
         let here = self.cur;
         let tiles = (self.stack.clone(), self.stack_focus, self.stack_zoom, self.tile_all, self.tile_project.clone());
         let id = self.open(Box::new(term), if self.tabs.is_empty() { Place::Tab } else { place });
+        // a Create Slop session is a studio: its storyboard shares the tab with it
+        if studio {
+            let project = self.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.cwd.clone()).unwrap_or_else(|| spec.cwd.clone());
+            self.open_storyboard(Some(id), project, false);
+        }
         if background {
             // a remote client asked: start it now and stay where you are
             self.start_now(id);
@@ -193,6 +221,97 @@ impl App {
         if let Some(n) = note {
             self.toast(Kind::Info, n);
         }
+    }
+
+    /// Say `text` to the session with this id: typed into it as one message and sent.
+    pub(crate) fn tell_session(&mut self, sid: &str, text: &str) {
+        let Some(pane) = self.term_id(sid) else {
+            self.toast(Kind::Info, "that session has closed · your changes stay on the storyboard");
+            return;
+        };
+        if self.svc.is_demo() {
+            self.toast(Kind::Info, "the demo's agent isn't real · a session would be told to read the storyboard");
+            return;
+        }
+        // the same paced delivery a reply typed in Focus View gets (the text, then Enter once it has landed)
+        if let Some(t) = self.panes.get_mut(&pane).and_then(|p| p.as_term()) {
+            t.submit(text);
+        }
+        self.toast(Kind::Info, "sent to the session · it reads the storyboard on its next turn");
+    }
+
+    /// The Storyboard pane of `project`, when one is open.
+    fn storyboard_of(&mut self, project: &std::path::Path) -> Option<PaneId> {
+        // (the pane inside its box, not the box)
+        self.panes.iter_mut().find_map(|(id, p)| (**p).as_any_mut().downcast_mut::<crate::views::storyboard::StoryboardView>().filter(|v| bro_core::util::same_path(&v.project, project)).map(|_| *id))
+    }
+
+    /// A Storyboard is on screen: the window is a studio, and gives it the sidebar's room.
+    pub(crate) fn studio_front(&self) -> bool {
+        self.visible().iter().any(|id| self.panes.get(id).is_some_and(|p| (**p).as_any().is::<crate::views::storyboard::StoryboardView>()))
+    }
+
+    /// Open the Storyboard of `project` beside pane `from` (its session), sharing the tab with it: the session
+    /// keeps the keyboard unless `focus`. One already open for the project is kept. Returns its pane.
+    pub(crate) fn open_storyboard(&mut self, from: Option<PaneId>, project: PathBuf, focus: bool) -> PaneId {
+        use crate::views::storyboard::StoryboardView;
+        if let Some(id) = self.storyboard_of(&project) {
+            return id;
+        }
+        let term = from.and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref());
+        let sid = term.map(|t| t.meta.sid.clone());
+        let harness = term.and_then(|t| t.meta.harness);
+        let slopcannon = term.and_then(|t| t.launch_spec.as_ref()).and_then(|s| s.studio.as_ref()).is_some_and(|kit| kit.has_tool(bro_core::studio::SLOPCANNON));
+        let view = if self.svc.is_demo() && !bro_core::storyboard::path(&project).is_file() {
+            StoryboardView::demo(project, sid)
+        } else {
+            let mut v = StoryboardView::new(project, sid, harness);
+            v.slopcannon = slopcannon;
+            v
+        };
+        let id = self.add(Box::new(view));
+        match from.and_then(|from| self.tabs.iter().position(|t| t.root.contains(from)).map(|tab| (tab, from))) {
+            Some((tab, from)) => {
+                let tab = &mut self.tabs[tab];
+                // the board gets the wider half: a session's replies wrap, a picture doesn't
+                if tab.root.split(from, id, Dir::Right) {
+                    if let Some(Node::Split { ratio, .. }) = find_split(&mut tab.root, id) {
+                        *ratio = 0.42;
+                    }
+                } else {
+                    tab.root = Node::Split { dir: Dir::Right, ratio: 0.42, a: Box::new(tab.root.clone()), b: Box::new(Node::Leaf(id)) };
+                }
+                tab.zoom = false;
+                if focus {
+                    tab.focus = id;
+                }
+            }
+            None => {
+                let here = self.cur;
+                self.tabs.push(Tab { root: Node::Leaf(id), focus: id, zoom: false });
+                self.cur = if focus { self.tabs.len() - 1 } else { here.min(self.tabs.len() - 1) };
+            }
+        }
+        id
+    }
+
+    /// A project's storyboard changed or should be shown (bro's storyboard tools): its view opens beside the
+    /// session that asked when it isn't open; `focus` brings it to the front, on `scene`.
+    pub(crate) fn show_storyboard(&mut self, session: Option<String>, project: PathBuf, scene: Option<usize>, focus: bool) {
+        let from = session.as_deref().and_then(|sid| self.term_id(sid));
+        let id = self.open_storyboard(from, project, focus);
+        if !focus {
+            return;
+        }
+        if let Some(v) = self.panes.get_mut(&id).and_then(|p| (**p).as_any_mut().downcast_mut::<crate::views::storyboard::StoryboardView>()) {
+            if let Some(scene) = scene {
+                v.sel = scene;
+                v.detail_scroll = 0.0;
+            }
+            v.reveal = true;
+        }
+        self.focus_pane(id);
+        self.leave_sidebar();
     }
 
     /// Spawn a term pane right away at the body size (it isn't on screen yet).
@@ -227,6 +346,20 @@ impl App {
         Some(self.open(Box::new(term), Place::Tab))
     }
 
+    /// Install a tool in a new tab running `bro install <tool>` (Quick Install's way for this system), so its
+    /// installer's output and prompts are visible. `again`: it is installed and stopped; installing over it
+    /// starts it. The Create Slop toolkit finds it the next time it is looked at.
+    pub(crate) fn install_tool(&mut self, tool: bro_core::quick_install::Tool, again: bool) -> Option<PaneId> {
+        if self.svc.is_demo() {
+            self.toast(Kind::Info, "the demo doesn't install anything");
+            return None;
+        }
+        let cwd = self.focused_cwd().or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+        let ids: &[&str] = if again { &[tool.id(), "--force"] } else { &[tool.id()] };
+        let term = crate::views::quick_install::install_term(&self.svc, cwd, ids);
+        Some(self.open(Box::new(term), Place::Tab))
+    }
+
     /// Sign in to Gemini with a Google account (`bro gemini login` in a tab: it opens the browser and waits).
     pub(crate) fn sign_in_gemini(&mut self) -> Option<PaneId> {
         if self.svc.is_demo() {
@@ -251,6 +384,8 @@ impl App {
     /// Execute a command from a remote client.
     pub(super) fn bridge_command(&mut self, c: BridgeCommand) {
         match c {
+            BridgeCommand::BrowserHandoffsChanged => self.sync_browser_handoffs(),
+            BridgeCommand::BrowserResume { id, event_id, text, reply } => self.browser_resume(id, event_id, text, reply),
             BridgeCommand::FocusControls { id, change, reply } => {
                 let result = self.term_id(&id).ok_or_else(|| "The session is no longer available.".to_string())
                     .and_then(|pane| self.focus_remote_controls(pane, change));
@@ -263,6 +398,11 @@ impl App {
                 if let Some(t) = self.term_id(&id).and_then(|pid| self.panes.get_mut(&pid)).and_then(|p| p.as_term()) {
                     t.send(&data);
                 }
+            }
+            BridgeCommand::TypedAgo { id, reply } => {
+                let ago = self.term_id(&id).and_then(|pid| self.panes.get(&pid)).and_then(|p| p.as_term_ref())
+                    .map(|t| t.typed_ago()).ok_or_else(|| "bro has no such session.".to_string());
+                let _ = reply.send(ago);
             }
             BridgeCommand::Write { id, data, reply } => {
                 if reply.is_closed() { return; }
@@ -295,6 +435,7 @@ impl App {
                 }
             }
             BridgeCommand::OpenFile { id, path, line, column } => self.agent_opened_file(&id, path, line, column),
+            BridgeCommand::Storyboard { session, project, scene, focus } => self.show_storyboard(session, project, scene, focus),
             BridgeCommand::Orchestrator(c) => self.orchestrator_command(c),
             BridgeCommand::CoordinationWake {task_id, revision, seq, project, action} => self.coordination_changed(&task_id, revision, seq, &project, &action),
             BridgeCommand::Tile { project } => {
@@ -321,7 +462,11 @@ impl App {
                         // Claude Code on the signed-in Just Superhuman account
                         let jsh = req.profile_id.as_deref() == Some(bro_core::jsh::BRIDGE_PROFILE_ID);
                         // a watchdog's second opinion asks for a model ("opus")
-                        let spec = LaunchSpec { harness, profile_id: if jsh { None } else { profile_id }, provider_id: jsh.then(|| bro_core::jsh::PROVIDER_ID.to_string()), model: req.model.clone().or_else(|| if jsh { bro_core::jsh::default_model() } else { None }), cwd, resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: req.args.clone(), orchestrator: false };
+                        let spec = LaunchSpec { harness, profile_id: if jsh { None } else { profile_id }, provider_id: jsh.then(|| bro_core::jsh::PROVIDER_ID.to_string()), model: req.model.clone().or_else(|| if jsh { bro_core::jsh::default_model() } else { None }), cwd, resume: None, permission: req.permission.unwrap_or(Permission::Skip), browser: BrowserMode::Off, extra_args: req.args.clone(), orchestrator: false, studio: None };
+                        let mut spec = spec;
+                        if let Some(effort) = req.effort.as_deref() {
+                            spec.extra_args.splice(0..0, bro_core::launch::effort_args(harness, effort));
+                        }
                         let mut lr = LaunchRequest::new(spec, Place::Tab);
                         lr.reply = Some(reply);
                         lr.name = req.title.clone();
@@ -464,7 +609,9 @@ impl App {
                     project_root: t.meta.project.root.clone(),
                     activity: p.activity(),
                     done: self.done.contains(id),
+                    background: t.background_work(),
                     note: self.notes.get(id).cloned(),
+                    waiting_since: self.waiting_since(*id),
                     age_secs: t.meta.started.elapsed().as_secs(),
                     seq: self.seqs.get(id).copied().unwrap_or(*id),
                     orchestrator: t.meta.orchestrator,
@@ -568,8 +715,8 @@ impl App {
     /// or worked in, else the focused session's, else the first opened project.
     pub(crate) fn current_project(&self) -> Option<std::path::PathBuf> {
         if self.side_focus {
-            let rows = self.rows();
-            if let Some(root) = rows.get(self.side_sel).and_then(|r| self.row_root(&rows, r)) {
+            let model = self.sidebar_model();
+            if let Some(root) = model.rows.get(self.side_sel).and_then(|r| self.row_root(&model.rows, r)) {
                 return Some(root);
             }
         }
@@ -653,6 +800,14 @@ impl App {
         self.open_launcher(Some(dir), Place::Tab);
     }
 
+    /// Open a project folder: the session dialog with its folder chooser up (the sidebar's + beside the projects).
+    pub(crate) fn open_project_folder(&mut self) {
+        self.open_launcher(None, Place::Tab);
+        if let Overlay::Launcher(l) = &mut self.overlay {
+            l.open_project_picker();
+        }
+    }
+
     /// x on a project row: take it off the sidebar (the folder and its sessions are untouched).
     pub(crate) fn close_project(&mut self, root: std::path::PathBuf, live: usize) {
         if live > 0 {
@@ -687,7 +842,57 @@ impl App {
 
     /// The sidebar rows right now.
     pub(crate) fn rows(&self) -> Vec<Row> {
-        sidebar::build(&self.live_infos(), &self.past_infos(), &self.open_infos(), &self.side)
+        let model = self.sidebar_model();
+        let mut rows = model.rows.clone();
+        for row in &mut rows {
+            match row {
+                Row::Live { info, .. } => {
+                    if let Some(t) = self.panes.get(&info.pane).and_then(|p| p.as_term_ref()) {
+                        info.age_secs = t.meta.started.elapsed().as_secs();
+                    }
+                }
+                Row::Project { last_age: Some(age), .. } => *age += model.history_at.elapsed().as_secs(),
+                _ => {}
+            }
+        }
+        rows
+    }
+
+    pub(crate) fn sidebar_model(&self) -> std::sync::Arc<SidebarModel> {
+        self.sidebar_model_at(None)
+    }
+
+    pub(crate) fn sidebar_model_at(&self, frame: Option<Instant>) -> std::sync::Arc<SidebarModel> {
+        let mut cache = self.sidebar_cache.borrow_mut();
+        if frame.is_some() && cache.frame == frame && let Some(model) = &cache.model {
+            return model.clone();
+        }
+        cache.frame = frame;
+        // Age labels tick separately from the data that determines row order.
+        let key = (self.svc.state().past_revision, self.archive.revision);
+        if cache.history_key != Some(key) {
+            cache.history = self.past_infos();
+            cache.history_key = Some(key);
+            cache.history_at = Some(Instant::now());
+            cache.model = None;
+        }
+        let mut live = self.live_infos();
+        for session in &mut live { session.age_secs = 0; }
+        let open = self.open_infos();
+        if let Some(model) = &cache.model
+            && model.live == live && model.open == open && model.state == self.side
+        {
+            return model.clone();
+        }
+        let model = std::sync::Arc::new(SidebarModel {
+            history_at: cache.history_at.expect("initialized with history"),
+            rows: sidebar::build(&live, &cache.history, &open, &self.side),
+            order: sidebar::live_order(&live, &[], &open),
+            recent: sidebar::recent(&live, &cache.history, &open, &self.side),
+            live, open, state: self.side.clone(),
+        });
+        cache.model = Some(model.clone());
+        model
     }
 
     fn past_session(&self, idx: usize) -> Option<SessionInfo> {
@@ -876,6 +1081,7 @@ impl App {
             harness, profile_id: t.meta.profile.clone(), provider_id: None, model: t.meta.model.clone(),
             cwd: t.meta.cwd.clone(), resume: None, permission: self.svc.settings().permission,
             browser: BrowserMode::Off, extra_args: vec![], orchestrator: t.meta.orchestrator,
+            studio: None,
         });
         let current = spec.provider_id.as_deref().or(spec.profile_id.as_deref());
         let store = t.meta.store.clone();
@@ -922,7 +1128,7 @@ impl App {
                     return;
                 }
                 self.close(pane);
-                let spec = LaunchSpec { harness, profile_id: Some(profile.clone()), provider_id: None, model: None, cwd: cwd.clone(), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false };
+                let spec = LaunchSpec { harness, profile_id: Some(profile.clone()), provider_id: None, model: None, cwd: cwd.clone(), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false, studio: None };
                 let mut req = LaunchRequest::new(spec, Place::Tab);
                 req.name = Some(crate::ui::fit(&title, 28));
                 req.find_live = Some(crate::services::launch::FindLive { harness, store: Some(store), cwd, since, session_id: None });
@@ -951,10 +1157,49 @@ impl App {
         }
     }
 
+    pub(crate) fn supports_conversation_fork(&self, pane: PaneId) -> bool {
+        self.panes.get(&pane).and_then(|p| p.as_term_ref()).is_some_and(super::focus::focusable)
+    }
+
+    pub(crate) fn fork_conversation(&mut self, pane: PaneId) {
+        let Some(t) = self.panes.get(&pane).and_then(|p| p.as_term_ref()).filter(|t| super::focus::focusable(t)) else {
+            self.toast(Kind::Info, "Choose a Claude Code or Codex conversation to fork.");
+            return;
+        };
+        if t.reloading {
+            self.toast(Kind::Info, "Wait for the session to finish reloading before forking.");
+            return;
+        }
+        let Some(session_id) = t.insights().filter(|s| s.transcript.is_some()).and_then(|s| s.session_id) else {
+            self.toast(Kind::Info, "Fork conversation is available once Bro loads the conversation history.");
+            return;
+        };
+        let harness = t.meta.harness.unwrap();
+        let mut spec = t.launch_spec.clone().unwrap_or_else(|| LaunchSpec {
+            harness, profile_id: t.meta.store.clone(), provider_id: None, model: t.meta.model.clone(),
+            cwd: t.meta.cwd.clone(), resume: None, permission: self.svc.settings().permission,
+            browser: BrowserMode::Off, extra_args: vec![], orchestrator: false, studio: None,
+        });
+        // The old command line can contain a one-time prompt or a session id.
+        spec.extra_args.clear();
+        spec.orchestrator = false;
+        spec.cwd = t.meta.cwd.clone();
+        spec.resume = Some(Resume { session_id: session_id.clone(), fork: true });
+        let store = t.meta.store.clone().or_else(|| transcript_store(&spec));
+        let mut req = LaunchRequest::new(spec, Place::Tab);
+        req.name = Some(format!("{} (fork)", t.meta.name.as_deref().unwrap_or(&t.meta.label)));
+        req.find_live = Some(crate::services::launch::FindLive {
+            harness, store, cwd: t.meta.cwd.clone(),
+            since: std::time::SystemTime::now() - t.meta.started.elapsed(), session_id: Some(session_id),
+        });
+        self.svc.launch(req);
+        self.toast(Kind::Info, "Forking conversation…");
+    }
+
     /// Stage `s` into `target` and resume it there as a fork.
     pub(super) fn fork_into(&mut self, s: SessionInfo, target: String) {
         let cwd = s.cwd.clone().or_else(|| s.project.as_ref().map(|p| p.root.clone())).or_else(dirs::home_dir).unwrap_or_default();
-        let spec = LaunchSpec { harness: s.harness, profile_id: Some(target.clone()), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: true }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false };
+        let spec = LaunchSpec { harness: s.harness, profile_id: Some(target.clone()), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: true }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false, studio: None };
         let mut req = LaunchRequest::new(spec, Place::Tab);
         req.name = Some(crate::ui::fit(&s.title, 28));
         req.stage = Some(s);
@@ -1012,6 +1257,54 @@ impl App {
             .or_else(|| pick(&|id| self.done.contains(&id)))
     }
 
+    /// The JustGains showcase, for screenshots: one tab with a Claude session, the new-session page, profile usage
+    /// and tokens side by side. Demo data only; the logins carry JustGains addresses.
+    pub(crate) fn open_showcase(&mut self) {
+        self.svc.update(crate::services::demo::justgains);
+        let cwd = crate::services::demo::root().join("justgains");
+        let meta = Meta {
+            sid: "justgains-showcase".into(),
+            harness: Some(Harness::Claude),
+            profile: Some("claude:work".into()),
+            store: Some("claude:work".into()),
+            model: Some("claude-opus-5".into()),
+            label: "Claude · work · opus 5".into(),
+            name: Some("JustGains".into()),
+            renamed: true,
+            project: self.svc.project_for(&cwd),
+            cwd: cwd.clone(),
+            started: Instant::now() - std::time::Duration::from_secs(1_260),
+            route_id: None,
+            cleanup: vec![],
+            orchestrator: false,
+        };
+        let mut term = Term::scene(meta, |cols, rows| crate::services::demo::justgains_scene(cols, rows), self.svc.clone());
+        term.demo_activity = Some(crate::pane::Activity::Working);
+        let claude = self.new_tab(Box::new(term));
+        let tab = self.cur;
+        let focus = |app: &mut App, id: PaneId| {
+            if let Some(t) = app.tabs.get_mut(tab) {
+                t.focus = id;
+            }
+        };
+        // Claude and the new-session page down the left; usage over tokens down the right
+        if let Some(view) = crate::views::open("usage") {
+            let usage = self.open(view, Place::SplitRight);
+            if let Some(view) = crate::views::open("stats") {
+                self.open(view, Place::SplitDown);
+            }
+            focus(self, claude);
+            let launcher = self.session_launcher(Some(cwd), Place::Tab);
+            self.open(Box::new(crate::views::new_session::NewSessionView::new(launcher)), Place::SplitDown);
+            // the logins take more room than the token tallies
+            if let Some(t) = self.tabs.get_mut(tab) {
+                t.root.resize(usage, crate::layout::Dir::Down, 0.14);
+            }
+        }
+        focus(self, claude);
+        self.leave_sidebar();
+    }
+
     /// `bro --demo`: a few sessions across three projects.
     pub(super) fn open_demo_sessions(&mut self) {
         let root = crate::services::demo::root();
@@ -1064,6 +1357,7 @@ impl App {
                 && let Some(jsonl) = crate::services::demo::conversation(i)
             {
                 term.set_demo_transcript(&jsonl);
+                term.set_demo_subagents(crate::services::demo::subagents(i));
             }
             // the shell shares the first tab as a split; the rest get tabs
             let id = if i == 2 {
@@ -1089,7 +1383,7 @@ impl App {
 /// Resume `s` in its own login, named after it.
 fn resume_request(s: &SessionInfo) -> LaunchRequest {
     let cwd = s.cwd.clone().or_else(|| s.project.as_ref().map(|p| p.root.clone())).or_else(dirs::home_dir).unwrap_or_default();
-    let spec = LaunchSpec { harness: s.harness, profile_id: s.profile_id.clone(), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: false }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false };
+    let spec = LaunchSpec { harness: s.harness, profile_id: s.profile_id.clone(), provider_id: None, model: None, cwd, resume: Some(Resume { session_id: s.id.clone(), fork: false }), permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false, studio: None };
     let mut req = LaunchRequest::new(spec, Place::Tab);
     req.name = Some(crate::ui::fit(&s.title, 28));
     req
@@ -1098,4 +1392,15 @@ fn resume_request(s: &SessionInfo) -> LaunchRequest {
 /// Where a launch keeps its transcript: its own login when it's the harness's kind, else the machine's own.
 pub(crate) fn transcript_store(spec: &LaunchSpec) -> Option<String> {
     crate::services::launch::transcript_store(spec)
+}
+
+/// The split of `root` whose second side is the leaf `id` (the one `Node::split` just made).
+fn find_split(root: &mut Node, id: PaneId) -> Option<&mut Node> {
+    match root {
+        Node::Leaf(_) => None,
+        Node::Split { b, .. } if matches!(**b, Node::Leaf(x) if x == id) => Some(root),
+        Node::Split { a, b, .. } => {
+            if a.contains(id) { find_split(a, id) } else { find_split(b, id) }
+        }
+    }
 }

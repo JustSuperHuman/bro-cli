@@ -556,6 +556,65 @@ async fn supervisor_reconciles_exit_after_unregister_and_skips_noop_ticks() {
         cleaned.seq, idle.seq,
         "quiet supervisor passes must not append journal events"
     );
+    assert!(
+        idle.adapters.is_empty(),
+        "an exited worker's adapter goes once its attempt stopped"
+    );
+}
+
+/// Adapters for sessions this host doesn't list: ended before it started, or a peer's.
+fn observe_unlisted(h: &Harness, n: usize) {
+    let gone = crate::model::TerminalSessionSummary::native(
+        format!("gone-{n}"),
+        "Gone".into(),
+        "claude".into(),
+        h.workspace.path().to_string_lossy().into_owned(),
+        1,
+        80,
+        24,
+    );
+    host_execute(
+        &h.app,
+        &format!("observe-gone-{n}"),
+        Command::RegisterAdapter {
+            adapter: adapter(&gone),
+        },
+    )
+    .unwrap();
+}
+
+fn adapter_ids(snapshot: &Snapshot) -> Vec<&str> {
+    snapshot.adapters.iter().map(|a| a.id.as_str()).collect()
+}
+
+#[tokio::test]
+async fn full_adapter_registry_never_blocks_dispatch() {
+    let h = Harness::new();
+    h.create(None);
+    for n in 0..128 {
+        observe_unlisted(&h, n);
+    }
+    assert_eq!(snapshot_sync(&h.app).unwrap().adapters.len(), 128);
+    assert_eq!(h.dispatch().await["taskSent"], true);
+    assert_eq!(
+        adapter_ids(&snapshot_sync(&h.app).unwrap()),
+        ["session-worker"]
+    );
+}
+
+#[tokio::test]
+async fn supervisor_prunes_unlisted_adapters_only_when_crowded() {
+    let h = Harness::new();
+    for n in 0..3 {
+        observe_unlisted(&h, n);
+    }
+    let quiet = reconcile_once(&h.app, None).unwrap();
+    assert_eq!(quiet.adapters.len(), 4, "a peer's few sessions are left alone");
+    for n in 3..ADAPTER_PRUNE_AT {
+        observe_unlisted(&h, n);
+    }
+    let pruned = reconcile_once(&h.app, Some(&quiet)).unwrap();
+    assert_eq!(adapter_ids(&pruned), ["session-worker"]);
 }
 
 #[tokio::test]

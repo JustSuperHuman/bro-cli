@@ -25,6 +25,8 @@ pub struct Focus {
     pub on: bool,
     /// sessions showing their terminal while focus mode is on
     pub peek: HashSet<PaneId>,
+    /// sessions showing one of their subagents instead of their conversation: the call that started it
+    pub subagent: HashMap<PaneId, String>,
     /// what you're writing to each session
     pub drafts: HashMap<PaneId, Draft>,
     /// lists read off the UI thread: the models a login can switch to, a folder's commands
@@ -37,6 +39,8 @@ pub struct Lists {
     pub models: HashMap<PathBuf, Arc<Vec<ModelChoice>>>,
     /// a provider's models as switch choices, with how many its catalogue listed then
     pub providers: HashMap<String, (usize, Arc<Vec<ModelChoice>>)>,
+    /// Claude Code's models as switch choices, with the list Anthropic gave that they were made from
+    pub claude: Option<(Vec<bro_core::catalogue::ModelRow>, Arc<Vec<ModelChoice>>)>,
     pub commands: HashMap<String, (Instant, Arc<Vec<Command>>)>,
     /// being read now
     pub asking: HashSet<String>,
@@ -61,6 +65,14 @@ pub struct Draft {
     pub cols: usize,
     /// messages on their way: shown at once, until the transcript has them
     pub sent: Vec<Sent>,
+    /// Bro's terminal session: a restarted pane gets fresh controls while keeping its draft.
+    pub owner: Option<String>,
+    /// The conversation these pending messages belong to, once the agent names it.
+    pub session: Option<String>,
+    /// A locally requested reset: messages sent after it belong to the next conversation.
+    pub reset_at: Option<Instant>,
+    /// Last observed settings, kept while a cleared conversation has no transcript yet.
+    pub known: (Option<String>, Option<String>),
     /// pictures going with the next message (pasted, dropped): thumbnails over the text, each held in the text by
     /// its token, in the order they go
     pub attachments: Vec<Attachment>,
@@ -188,6 +200,8 @@ pub fn command_query(text: &str) -> Option<&str> {
 #[derive(Clone, Debug)]
 pub struct Sent {
     pub text: String,
+    /// Submission to the terminal is confirmed separately from the agent's transcript.
+    pub delivery: crate::panes::term::Delivery,
     pub at: Instant,
     /// the conversation's items when it was sent (it lands after them)
     pub after: usize,
@@ -291,7 +305,12 @@ pub fn opens_screen(text: &str) -> bool {
 
 impl Focus {
     pub fn draft(&mut self, id: PaneId) -> &mut Draft {
-        self.drafts.entry(id).or_default()
+        self.drafts.entry(id).or_insert_with(|| {
+            let mut d = Draft::default();
+            // the desktop app draws the box's selection: shift and the mouse select in it
+            d.area.selectable = true;
+            d
+        })
     }
 
     /// Show `id`'s terminal instead of its conversation (or back).
@@ -301,10 +320,23 @@ impl Focus {
         }
     }
 
+    /// Show `id`'s subagent started by `call` instead of its conversation; None: the conversation again.
+    pub fn show_subagent(&mut self, id: PaneId, call: Option<String>) {
+        match call {
+            Some(call) => {
+                self.subagent.insert(id, call);
+            }
+            None => {
+                self.subagent.remove(&id);
+            }
+        }
+    }
+
     /// Forget sessions that closed.
     pub fn retain(&mut self, live: impl Fn(PaneId) -> bool) {
         self.peek.retain(|id| live(*id));
         self.drafts.retain(|id, _| live(*id));
+        self.subagent.retain(|id, _| live(*id));
     }
 }
 
@@ -317,6 +349,22 @@ pub fn holds(said: &str, sent: &str) -> bool {
 }
 
 impl Draft {
+    /// Follow a new conversation without carrying its predecessor's pending messages into it.
+    pub fn follow_session(&mut self, session: Option<&str>) {
+        let Some(session) = session else { return };
+        if self.session.as_deref() == Some(session) { return; }
+        if self.session.is_some() {
+            self.sent.retain(|s| self.reset_at.is_some_and(|at| s.at >= at));
+            for s in &mut self.sent {
+                s.after = 0;
+            }
+            self.reset_at = None;
+            self.recall = None;
+            self.scroll = Some(Scroll::Bottom);
+        }
+        self.session = Some(session.to_string());
+    }
+
     /// Drop the sent messages the transcript now has (`landed`) and those that waited too long.
     pub fn reconcile(&mut self, landed: impl Fn(&Sent) -> bool) {
         let now = Instant::now();
@@ -335,6 +383,8 @@ impl Draft {
         }
         let token = TOKENS.clone().filter_map(char::from_u32).find(|t| !self.attachments.iter().any(|a| a.token == *t) && !self.area.text().contains(*t));
         let Some(token) = token else { return };
+        // a picture goes with the words: what's selected stays (it isn't pasted over)
+        self.area.clear_selection();
         self.area.insert(token.encode_utf8(&mut [0; 4]));
         self.attachments.push(Attachment { path, token });
         self.keep_tokens();

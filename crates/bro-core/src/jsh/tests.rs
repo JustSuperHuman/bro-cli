@@ -257,6 +257,32 @@ fn credits_formatting() {
 }
 
 #[test]
+fn the_month_spent_and_its_dollars() {
+    // the server's own figures, kept in the account cache
+    let a = account();
+    assert_eq!((a.credits.used, a.credits.reserved, a.credits.credits_per_usd), (Some(0), 0, Some(100)));
+    assert_eq!(a.credits.month_used_pct(), None, "one-time credits only: no month to measure");
+    let back: Account = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap();
+    assert_eq!(back, a);
+
+    // an allowance part spent: the server's figure wins
+    let mut c = Credits { available: 2250, granted: 0, monthly_allowance: 3000, resets_at: None, used: Some(700), reserved: 50, credits_per_usd: None };
+    assert_eq!(c.used_this_month(), 700);
+    assert_eq!(c.month_used_pct(), Some(700.0 / 3000.0 * 100.0));
+    // an older server that doesn't send it: what's gone from the allowance, less what's held
+    c.used = None;
+    assert_eq!(c.used_this_month(), 700);
+    c.reserved = 5000;
+    assert_eq!(c.used_this_month(), 0, "never below nothing");
+
+    assert_eq!(c.dollars(2992), "$29.92");
+    assert_eq!(c.dollars(5), "$0.05");
+    assert_eq!(c.dollars(123_456_700), "$1,234,567.00");
+    c.credits_per_usd = Some(1000);
+    assert_eq!(c.dollars(2992), "$2.99");
+}
+
+#[test]
 fn the_token_gets_its_own_file_and_never_reaches_the_config_or_the_account_cache() {
     let sb = sandbox();
     let mut cfg = crate::config::Config::default();
@@ -314,6 +340,7 @@ fn spec(harness: Harness, model: Option<&str>) -> LaunchSpec {
         browser: BrowserMode::Off,
         extra_args: vec![],
         orchestrator: false,
+        studio: None,
     }
 }
 

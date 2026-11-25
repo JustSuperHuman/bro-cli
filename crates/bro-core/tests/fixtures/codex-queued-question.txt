@@ -1,0 +1,11 @@
+• Waiting for background terminal (5s)
+  └ fly auth docker
+
+• Queued follow-up inputs
+  ? 1 question
+    shift+← to answer
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol max · J:\justgains
+  ? for shortcuts

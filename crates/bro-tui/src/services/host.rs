@@ -87,6 +87,8 @@ pub struct HostState {
     pub startup_busy: Option<Instant>,
     /// Who else is connected: the window or background bro driving it, and viewers.
     pub peers: bro_host::Peers,
+    /// The Slop Collector's last report from the server (None: no server, or one from before the collector).
+    pub slop: Option<bro_core::slop::Report>,
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +122,8 @@ pub enum HostEvent {
     Unrelayed(serde_json::Value),
     /// Who's connected changed.
     Peers(bro_host::Peers),
+    /// The Slop Collector looked.
+    Slop(Box<bro_core::slop::Report>),
 }
 
 impl Services {
@@ -187,6 +191,7 @@ impl Services {
                     bro_host::ClientEvent::Relayed(body) => HostEvent::Relayed(body),
                     bro_host::ClientEvent::Unrelayed(body) => HostEvent::Unrelayed(body),
                     bro_host::ClientEvent::Peers(p) => HostEvent::Peers(p),
+                    bro_host::ClientEvent::Slop(r) => HostEvent::Slop(r),
                 };
                 let _ = tx.send(Event::Host(ev));
             };
@@ -216,11 +221,13 @@ impl Services {
         };
         let server = client.as_ref().map(|c| ServerInfo { pid: c.info().pid, version: c.info().version.clone(), started_ms: c.info().started_ms });
         let peers = client.as_ref().map(|c| c.peers()).unwrap_or_default();
+        let slop = client.as_ref().and_then(|c| c.slop());
         *self.inner.host.write() = client;
         self.update(|st| {
             st.host.server = server;
             st.host.problem = problem;
             st.host.peers = peers;
+            st.host.slop = slop;
         });
     }
 
@@ -302,6 +309,42 @@ impl Services {
         }
     }
 
+    /// Demo only: the Slop Collector as a fixture shows it (`off`, `leftovers`, `clear`, `fresh`, `old`), for
+    /// screenshots.
+    pub(crate) fn slop_demo_fixture(&self, fixture: &str) {
+        if !self.is_demo() {
+            return;
+        }
+        let report = super::demo::slop_report(fixture);
+        self.update(|st| {
+            st.settings.slop.on = fixture != "off";
+            st.host.slop = report;
+            if fixture == "old" {
+                st.host.server = Some(ServerInfo { pid: 27616, version: "2.1.23".into(), started_ms: 0 });
+            }
+        });
+    }
+
+    /// Have the Slop Collector look now (its settings changed), or end every leftover it lists (`collect`).
+    pub fn slop_look(&self, collect: bool) {
+        if let Some(h) = self.host() {
+            h.slop_look(collect);
+        }
+    }
+
+    /// The Slop Collector's settings changed: once they're on disk (the server reads them there), have it look.
+    /// Off the UI thread.
+    pub fn slop_settings_changed(&self) {
+        if self.is_demo() || self.host().is_none() {
+            return;
+        }
+        let svc = self.clone();
+        std::thread::spawn(move || {
+            let _ = super::guard::guard_res("config::Settings::save", || svc.persist_current_settings());
+            svc.slop_look(false);
+        });
+    }
+
     /// The connection dropped under this window.
     pub(crate) fn host_lost(&self) {
         {
@@ -314,6 +357,7 @@ impl Services {
         }
         self.update(|st| {
             st.host.server = None;
+            st.host.slop = None;
             if st.host.restarting.is_none() {
                 st.host.problem = Some("lost the session server".into());
             }

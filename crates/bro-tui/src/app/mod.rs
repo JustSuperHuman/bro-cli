@@ -7,10 +7,12 @@
 //! `welcome`), `sessions` (launch results, bridge commands, agent tracking), `overlays`.
 
 mod alt_hints;
+mod browser_handoff;
 mod commands;
 mod draw;
 mod files;
 pub(crate) mod focus;
+pub(crate) mod dictation;
 /// The desktop app (`bro gui`): this workspace drawn on the GPU.
 #[cfg(feature = "gui")]
 pub(crate) mod gui;
@@ -22,12 +24,13 @@ pub(crate) mod inbox_store;
 mod menu;
 mod mouse;
 mod overlays;
-mod orbit_voice;
 mod project_tabs;
 mod screensaver;
 mod sessions;
 mod side_view;
 mod teams;
+mod theme_editor;
+pub(crate) mod tips;
 mod voice;
 mod watchdogs;
 mod welcome;
@@ -118,7 +121,11 @@ pub(crate) enum SideHit {
     Continue,
     TileAll,
     Minimized,
-    /// the project tabs over the sessions
+    /// the window's sidebar's Recent heading: open or fold the projects with no session running
+    Recent,
+    /// a scope in the window's sidebar: every session, or the orchestrators (a project is its row)
+    Scope(project_tabs::StripTab),
+    /// the session tabs over the sessions
     Strip(project_tabs::StripHit),
 }
 
@@ -142,6 +149,7 @@ pub struct App {
     /// launch order per pane (sidebar grouping)
     seqs: HashMap<PaneId, u64>,
     pub(crate) theme: Theme,
+    pub(crate) theme_editor: Option<crate::theme::editor::Editor>,
     pub(crate) keymap: Keymap,
     pub(crate) svc: Services,
     tx: Sender<Event>,
@@ -211,6 +219,7 @@ pub struct App {
     pub(crate) recaps: insights::Recaps,
     pub(crate) recents: Vec<Recent>,
     /// archived earlier sessions (hidden from the sidebar)
+    sidebar_cache: std::cell::RefCell<sessions::SidebarCache>,
     pub(crate) archive: crate::archive::Archive,
     /// write ~/.bro files (off in demo and tests)
     pub(crate) persist: bool,
@@ -238,17 +247,19 @@ pub struct App {
     show_minimized: bool,
     /// The grid shows only this project's sessions (click a project in the sidebar). Only set with `tile_all`.
     pub(crate) tile_project: Option<String>,
-    /// The project tabs as last drawn (height 0 when they're off).
+    /// The session tabs as last drawn (height 0 while nothing is open).
     pub(crate) strip: Rect,
-    /// The project tab that showed in the last draw.
+    /// The scope (every session, the orchestrators, a project) whose grid or lone session showed in the last draw.
     pub(crate) drawn_tab: Option<project_tabs::StripTab>,
-    /// The project tabs have the keyboard (alt+b without a sidebar): the selected tab.
+    /// What the sidebar picked and the session tabs list: every session, the orchestrators, or one project.
+    pub(crate) scope: project_tabs::StripTab,
+    /// The session tabs have the keyboard (alt+b without a sidebar): the selected tab.
     pub(crate) strip_sel: Option<usize>,
     /// When the wheel last switched tabs (a trackpad's burst switches once).
     strip_wheel: Option<Instant>,
-    /// How far along the project tabs are scrolled, when they're more than fit and the setting scrolls them.
+    /// How far along the session tabs are scrolled, when they're more than fit and the setting scrolls them.
     pub(crate) strip_scroll: project_tabs::StripScroll,
-    /// The tab showing now and the one before it, for the last-tab key.
+    /// The scope showing now and the one before it, for the last-tab key.
     tab_now: Option<project_tabs::StripTab>,
     pub(crate) tab_before: Option<project_tabs::StripTab>,
     /// Held tile edges belong to the grid they were dragged in: the others' wait here.
@@ -261,6 +272,7 @@ pub struct App {
     pub(crate) flips: HashMap<PaneId, crate::card::Flip>,
     /// Focus mode (the desktop app): agent sessions as their conversation, with a reply box each
     pub(crate) focus: crate::focus::Focus,
+    pub(crate) dictation: dictation::ComposerDictation,
     /// When alt went down on its own: key hints show once it's been held a moment
     pub(crate) alt_down: Option<Instant>,
     /// Whether the dev servers sessions mention are listening (checked off the UI thread)
@@ -271,6 +283,10 @@ pub struct App {
     pub(crate) last_input: Instant,
     /// The cards the summary screensaver turned over: the next touch turns them back
     pub(crate) saver: Vec<PaneId>,
+    /// The welcome screen's "Did you know?" tips: which one shows and since when
+    pub(crate) tips: tips::Tips,
+    /// The terminal UI's tip as last drawn: its arrows (-1 back, 1 on) and the tip itself (0)
+    tip_hits: Vec<(Rect, i32)>,
     /// The priority grow changed the layout in the last draw (the split dividers aren't where the tree says).
     grown: bool,
     /// Tile edges you dragged in the tiled view: each holds where you left it as the tiles change around it
@@ -302,6 +318,7 @@ pub struct App {
     held: Vec<PaneId>,
     /// push-to-talk messages on their way to the orchestrator, and spoken requests awaiting its answer
     voice: voice::VoiceRoute,
+    browser_handoffs: browser_handoff::State,
     term_focused: bool,
     opts: Opts,
     _theme_watcher: Option<notify::RecommendedWatcher>,
@@ -322,6 +339,7 @@ impl App {
             next_id: 1,
             seqs: HashMap::new(),
             theme,
+            theme_editor: None,
             keymap,
             svc,
             tx: tx.clone(),
@@ -372,6 +390,7 @@ impl App {
             notes: HashMap::new(),
             recaps: insights::Recaps::default(),
             recents: if opts.load_recents { crate::recents::load() } else { vec![] },
+            sidebar_cache: Default::default(),
             archive: if opts.load_recents { crate::archive::Archive::load() } else { Default::default() },
             persist: opts.load_recents,
             guest: false,
@@ -388,6 +407,7 @@ impl App {
             tile_project: None,
             strip: Rect::default(),
             drawn_tab: None,
+            scope: project_tabs::StripTab::All,
             strip_sel: None,
             strip_wheel: None,
             strip_scroll: Default::default(),
@@ -412,6 +432,7 @@ impl App {
             lost: vec![],
             held: vec![],
             voice: Default::default(),
+            browser_handoffs: Default::default(),
             term_focused: true,
             opts,
             _theme_watcher: None,
@@ -421,11 +442,14 @@ impl App {
                 quips: if opts.demo || cfg!(test) { crate::quips::Library::default() } else { crate::quips::Library::load(crate::quips::path()) },
                 ..crate::focus::Focus::default()
             },
+            dictation: dictation::ComposerDictation::default(),
             alt_down: None,
             probe: if cfg!(test) { Default::default() } else { crate::devprobe::Probe::start(tx.clone()) },
             card_links: vec![],
             last_input: Instant::now(),
             saver: vec![],
+            tips: tips::Tips::start(opts.demo),
+            tip_hits: vec![],
         };
         app.seed_projects();
         let t2 = tx.clone();
@@ -436,7 +460,11 @@ impl App {
             app.toast(Kind::Error, e);
         }
         if opts.demo {
-            app.open_demo_sessions();
+            if std::env::var_os("BRO_SHOWCASE").is_some() {
+                app.open_showcase();
+            } else {
+                app.open_demo_sessions();
+            }
         }
         app
     }
@@ -533,9 +561,8 @@ impl App {
         if self.tile_all && self.panes.get(&id).is_some_and(|p| p.is_terminal()) {
             let mut ids = self.tile_ids(self.tile_project.as_deref());
             if !ids.contains(&id) {
-                // a session in another project: its own project's tab when the tabs are on, else widen the grid
-                let key = self.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.key.clone());
-                self.tile_project = key.filter(|_| self.svc.settings().project_tabs);
+                // a session in another project: its own project's grid
+                self.tile_project = self.panes.get(&id).and_then(|p| p.as_term_ref()).map(|t| t.meta.project.key.clone());
                 ids = self.tile_ids(self.tile_project.as_deref());
             }
             self.stack = ids;
@@ -671,6 +698,7 @@ impl App {
 
     /// Close a pane: end its session (bridge, proxy route, staged files) and drop it from its tab.
     pub(crate) fn close(&mut self, id: PaneId) {
+        self.dictation.cancel(id);
         let mut remaining = None;
         let orchestrator_cwd = self.panes.get(&id).and_then(|p| p.as_term_ref()).filter(|t| t.meta.orchestrator).map(|t| t.meta.cwd.clone());
         self.minimized.retain(|pane| *pane != id);
@@ -801,6 +829,8 @@ impl App {
     }
 
     pub(crate) fn set_theme(&mut self, name: &str, save: bool) {
+        // An explicit theme selection supersedes an unfinished preview and its queued workers.
+        self.theme_editor = None;
         self.theme = theme::get(name);
         crate::icons::retint(self.theme.is_light());
         // programs that ask their terminal its colours get the new ones (the desktop app says so itself)
@@ -853,8 +883,10 @@ impl App {
                 Action::Toast(k, s) => self.toast(k, s),
                 Action::LaunchUsage(h, profile) => self.launch_usage(h, profile),
                 Action::GeminiSignIn => { self.sign_in_gemini(); }
+                Action::ThemeControl(which) => match which { 0=>self.open_theme_editor(),1=>self.run_palette(crate::palette::Cmd::ImportTheme),3=>self.open_aurora_editor(),_=>self.run_palette(crate::palette::Cmd::ExportTheme) },
                 Action::Run(a) => self.run_act(a),
                 Action::Preview(path) => self.preview_file(path),
+                Action::Tell(sid, text) => self.tell_session(&sid, &text),
             }
         }
     }
@@ -934,7 +966,7 @@ impl App {
             if busy {
                 idle_since = None;
             } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= BACKGROUND_IDLE {
-                if !self.svc.host_resident() && !self.svc.orbit_background_wanted() {
+                if !self.svc.host_resident() {
                     break;
                 }
                 idle_since = None;
@@ -960,6 +992,7 @@ impl App {
         let focused = self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|t| t.meta.sid.clone());
         self.svc.set_focused_session(focused.as_deref());
         self.reap();
+        self.sync_browser_handoffs();
         self.track_agents();
         self.tick_watchdogs();
         self.update_insights();
@@ -967,7 +1000,6 @@ impl App {
         self.publish_projects();
         self.publish_task_context();
         self.pump_voice();
-        self.publish_orbit_context();
         self.toasts.expire();
     }
 
@@ -1017,12 +1049,16 @@ impl App {
     /// Sleep until the soonest thing that needs a redraw without an event.
     fn next_deadline(&self) -> Duration {
         let mut d = Duration::from_secs(30);
-        let spinning = self.panes.values().any(|p| p.activity() == Some(Activity::Working))
+        let spinning = self.panes.values().any(|p| p.activity() == Some(Activity::Working) || p.as_term_ref().is_some_and(|t| t.booting()))
             || matches!(self.overlay, Overlay::Watchdog(_))
             || self.svc.state().watchdogs.values().any(|d| d.running.is_some());
         // the rainbow only plays on the welcome logo
         if (self.theme.animated && self.tabs.is_empty()) || spinning {
             d = d.min(Duration::from_millis(125));
+        }
+        // the welcome screen's world keeps turning
+        if self.tabs.is_empty() {
+            d = d.min(Duration::from_millis(100));
         }
         // digital rain keeps moving
         let own = self.theme.skin.backdrop;
@@ -1051,15 +1087,44 @@ impl App {
         if let Some(t) = self.screensaver_wake() {
             d = d.min(t);
         }
-        // terminals tick even when hidden, so agents in other tabs still turn "done"
-        let ids: Vec<PaneId> = self.panes.iter().filter(|(id, p)| p.is_terminal() || self.visible().contains(id)).map(|(id, _)| *id).collect();
-        for id in ids {
-            if let Some(every) = self.panes.get(&id).and_then(|p| p.tick_every()) {
-                let last = self.last_tick.get(&id).copied().unwrap_or(self.start);
-                d = d.min(every.saturating_sub(last.elapsed()));
-            }
+        d.min(self.pane_poll_wait()).max(Duration::from_millis(4))
+    }
+
+    /// Time until an actual pane poll is due, independent of visual timers.
+    fn pane_poll_wait(&self) -> Duration {
+        let visible = self.visible();
+        self.panes.iter()
+            .filter(|(id, p)| p.is_terminal() || visible.contains(id))
+            .filter_map(|(id, p)| {
+                let every = p.tick_every()?;
+                Some(every.saturating_sub(self.last_tick.get(id).copied().unwrap_or(self.start).elapsed()))
+            })
+            .min().unwrap_or(Duration::from_secs(30))
+    }
+
+    /// Terminal output and transcript changes have their own wakeups. A quiet
+    /// process poll only needs another GUI frame if it changed displayed state.
+    fn poll_panes(&mut self, observe: bool) -> bool {
+        let mut changed = !self.resume_queue.waiting.is_empty() || self.resume_queue.starting.is_some();
+        self.pump_resumes();
+        let due: Vec<_> = self.panes.iter().filter_map(|(&id, p)| {
+            let every = p.tick_every()?;
+            self.last_tick.get(&id).is_none_or(|last| last.elapsed() >= every).then_some(id)
+        }).collect();
+        let visible = self.visible();
+        for id in due {
+            self.last_tick.insert(id, Instant::now());
+            changed |= self.with_pane(id, |p, cx| {
+                if observe && let Some(t) = p.as_term() {
+                    let before = t.poll_display();
+                    t.poll(cx);
+                    return before != t.poll_display();
+                }
+                p.poll(cx);
+                observe && visible.contains(&id)
+            }).unwrap_or(false);
         }
-        d.max(Duration::from_millis(4))
+        changed
     }
 
     /// [`Self::handle`], timed for the slow-pass log.
@@ -1120,20 +1185,12 @@ impl App {
                 self.with_pane(wake.id, |p, cx| p.poll(cx));
             }
             Event::Tick => {
-                self.pump_resumes();
-                let ids: Vec<PaneId> = self.panes.keys().copied().collect();
-                for id in ids {
-                    let due = match self.panes.get(&id).and_then(|p| p.tick_every()) {
-                        Some(every) => self.last_tick.get(&id).map(|t| t.elapsed() >= every).unwrap_or(true),
-                        None => false,
-                    };
-                    if due {
-                        self.last_tick.insert(id, Instant::now());
-                        self.with_pane(id, |p, cx| p.poll(cx));
-                    }
-                }
+                self.poll_panes(false);
             }
             Event::Services => {
+                if self.dictation.active() && !self.svc.settings().voice.dictation.enabled {
+                    self.dictation.cancel_all();
+                }
                 if !self.setup_offered {
                     self.offer_setup();
                 }
@@ -1212,16 +1269,21 @@ impl App {
             Event::FolderCreated(request, result) => self.project_folder_created(request, result),
             Event::Watchdog(u) => self.watchdog_event(u),
             Event::Voice(m) => self.voice_message(*m),
-            Event::OrbitVoice(generation, command) => {
-                if generation == self.svc.orbit_generation() {
-                    self.orbit_command(command);
-                }
-            }
+            Event::Dictation(id, event) => self.dictation_event(id, event),
             Event::CoordinationTaskAction {task_id, revision, action} => self.coordination_task_action(&task_id, revision, &action),
             Event::OrchestratorInbox(update) => self.inbox_update(*update),
             Event::Host(e) => self.host_event(e),
+            Event::ThemeEditor(reply) => self.theme_editor_reply(*reply),
+            Event::ThemeImported(result) => match result {
+                Ok((name, has_css)) => {
+                    self.set_theme(&name, true);
+                    let label = theme::label(&self.theme);
+                    self.toast(Kind::Info, if has_css { format!("Imported {label}. Browser CSS is kept for export; it does not change this window.") } else { format!("Imported {label}") });
+                }
+                Err(why) => self.toast(Kind::Error, format!("Could not import theme: {why}")),
+            },
             Event::ThemeFilesChanged => {
-                if theme::is_custom(&self.theme.name) {
+                if self.theme_editor.is_none() && theme::is_custom(&self.theme.name) {
                     let name = self.theme.name.clone();
                     self.set_theme(&name, false);
                     if let Some(p) = theme::problems(&name).into_iter().next() {
@@ -1234,6 +1296,7 @@ impl App {
 
     fn paste(&mut self, s: &str) {
         self.clipboard_request = None;
+        if let Some(editor)=&mut self.theme_editor {if editor.field!=theme::editor::Field::None && !editor.minimized {editor.paste(s);return;}}
         self.sel = None;
         match &mut self.overlay {
             Overlay::Launcher(l) => return l.paste(s),
@@ -1267,6 +1330,9 @@ impl App {
         if let Some(id) = self.focused() {
             if self.focus_view(id) {
                 return self.focus_paste(id, s);
+            }
+            if self.dictation.phase(id).is_some() && self.can_dictate(id) {
+                return;
             }
             if self.terminal_quip_paste(id, s) { return; }
             self.with_pane(id, |p, cx| p.paste(s, cx));

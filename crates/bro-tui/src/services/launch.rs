@@ -73,6 +73,10 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
     let mut note = None;
     let mut route_id = None;
     let result = (|| -> Result<CommandSpec, String> {
+        // the project keeps what it cooked with: the Create Slop tab opens on it next time
+        if let Some(kit) = &spec.studio {
+            svc.remember_studio(spec.cwd.clone(), kit.clone());
+        }
         if svc.is_demo() {
             let label = label_for(&spec);
             return Ok(super::demo::shell_command(Some(spec.harness), &label, spec.cwd.clone()));
@@ -100,6 +104,7 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
             let bro_bin = std::env::current_exe().ok();
             let peon = st.settings.peon.clone();
             let shared_logins = st.settings.proxy.shared;
+            let automation = Some(st.settings.automation.clone());
             match st.proxy.status.ready() {
                 Some(p) => LaunchCtx {
                     proxy_base: Some(p.base.clone()),
@@ -116,14 +121,20 @@ pub(super) fn run(svc: &Services, req: LaunchRequest) {
                     bro_bin,
                     peon,
                     shared_logins,
+                    automation,
+                    // a Create Slop launch looks at the machine as it builds: JustImagine may have started since
+                    studio_facts: None,
                 },
-                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, bro_open_off, skill_repos, bridge_url, claude_mod, bro_bin, peon, shared_logins, ..LaunchCtx::default() },
+                None => LaunchCtx { claude_env, caveman, justtools_skill, justwatch_skill, bro_open_off, skill_repos, bridge_url, claude_mod, bro_bin, peon, shared_logins, automation, ..LaunchCtx::default() },
             }
         };
         let mut cmd = match guard("launch::build", || with_proxy_retry(svc, &mut ctx, |ctx| bro_core::launch::build(&spec, ctx))) {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => return Err(format!("{e:#}")),
             Err(panic) => {
+                if bro_core::automation::Active::for_launch(&ctx).managed() {
+                    return Err(format!("Could not prepare Bro's browser and computer tools: {panic}. Try launching the session again."));
+                }
                 note = Some(format!("{panic} — used the built-in launcher"));
                 fallback_command(&spec, &svc.state())?
             }
@@ -152,7 +163,8 @@ fn prepare_live_resume(spec: &mut LaunchSpec, f: FindLive) -> Result<Option<Sess
     .flatten()
     .ok_or("couldn't find this session's transcript — the agent needs to answer at least once")?;
     let same = transcript_store(spec) == f.store;
-    spec.resume = Some(bro_core::launch::Resume { session_id: found.id.clone(), fork: !same });
+    let fork = !same || spec.resume.as_ref().is_some_and(|r| r.fork);
+    spec.resume = Some(bro_core::launch::Resume { session_id: found.id.clone(), fork });
     Ok((!same).then_some(found))
 }
 
@@ -165,7 +177,7 @@ pub fn transcript_store(spec: &LaunchSpec) -> Option<String> {
     match spec.harness {
         Harness::Claude => Some(own("claude:")),
         Harness::Codex => Some(own("codex:")),
-        Harness::Pi | Harness::Omp => None,
+        Harness::Pi | Harness::Omp | Harness::Antigravity => None,
     }
 }
 
@@ -210,6 +222,9 @@ pub fn label_for(spec: &LaunchSpec) -> String {
     let mut parts = vec![spec.harness.label().to_string()];
     if spec.orchestrator {
         parts.insert(0, "orchestrator".into());
+    }
+    if spec.studio.is_some() {
+        parts.insert(0, "slop".into());
     }
     if let Some(p) = spec.provider_id.as_deref().or(spec.profile_id.as_deref()) {
         parts.push(match p {
@@ -341,8 +356,12 @@ pub fn fallback_command(spec: &LaunchSpec, st: &State) -> Result<CommandSpec, St
                     args.push("--fork-session".into());
                 }
             }
-            Harness::Codex => args.extend(["resume".into(), r.session_id.clone()]),
+            Harness::Codex => args.extend([if r.fork { "fork" } else { "resume" }.into(), r.session_id.clone()]),
             Harness::Pi | Harness::Omp => args.extend(["--resume".into(), r.session_id.clone()]),
+            Harness::Antigravity => {
+                if r.fork { return Err("Antigravity can resume a conversation by ID.".into()); }
+                args.extend(["--conversation".into(), r.session_id.clone()]);
+            }
         }
     }
     if let Some(m) = &spec.model {
@@ -353,10 +372,11 @@ pub fn fallback_command(spec: &LaunchSpec, st: &State) -> Result<CommandSpec, St
         (Permission::Skip, Harness::Claude) => args.push("--dangerously-skip-permissions".into()),
         (Permission::Skip, Harness::Codex) => args.push("--yolo".into()),
         (Permission::Skip, Harness::Omp) => args.push("--yolo".into()),
+        (permission, Harness::Antigravity) => args.extend(bro_core::launch::antigravity_permission_args(permission).iter().map(|arg| (*arg).to_owned())),
         _ => {}
     }
     args.extend(spec.extra_args.iter().cloned());
-    Ok(CommandSpec { program: h.label().into(), args, env, env_remove: vec![], cwd: spec.cwd.clone(), label: label_for(spec), route: None, cleanup: vec![], caveman: None, store: None })
+    Ok(CommandSpec { program: h.program().into(), args, env, env_remove: vec![], cwd: spec.cwd.clone(), label: label_for(spec), route: None, cleanup: vec![], caveman: None, store: None })
 }
 
 #[cfg(test)]
@@ -384,6 +404,10 @@ mod tests {
         assert!(prepare_live_resume(&mut launch, find()).unwrap().is_none());
         assert_eq!(launch.resume.as_ref().unwrap().session_id, id);
         assert!(!launch.resume.as_ref().unwrap().fork, "same profile resumes the existing conversation");
+        launch.resume.as_mut().unwrap().fork = true;
+        assert!(prepare_live_resume(&mut launch, find()).unwrap().is_none());
+        assert!(launch.resume.as_ref().unwrap().fork, "an explicit fork keeps the same store and creates a branch");
+        launch.resume = None;
         launch.profile_id = Some("claude:another".into());
         assert_eq!(prepare_live_resume(&mut launch, find()).unwrap().unwrap().id, id);
         assert!(launch.resume.as_ref().unwrap().fork, "a different profile gets a copy");
@@ -462,7 +486,7 @@ mod tests {
     }
 
     fn spec(h: Harness) -> LaunchSpec {
-        LaunchSpec { harness: h, profile_id: Some("claude:work".into()), provider_id: None, model: Some("claude-opus-5".into()), cwd: PathBuf::from("."), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false }
+        LaunchSpec { harness: h, profile_id: Some("claude:work".into()), provider_id: None, model: Some("claude-opus-5".into()), cwd: PathBuf::from("."), resume: None, permission: Permission::Skip, browser: BrowserMode::Off, extra_args: vec![], orchestrator: false, studio: None }
     }
 
     #[test]

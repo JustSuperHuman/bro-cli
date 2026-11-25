@@ -35,7 +35,19 @@ fn builtins() -> Vec<Quip> {
         ("make-a-plan", "Make a Plan", "Give me a practical plan before doing the work. Include the main steps, assumptions, and any decisions I need to make. Do not make changes or take external actions yet."),
         ("second-look", "Second Look", "Review your answer or work before finishing. Check for mistakes, missing details, and weak assumptions. Fix what you can and tell me about any remaining uncertainty."),
         ("check-the-facts", "Check the Facts", "Verify factual claims with reliable sources when tools are available. Link the sources you actually checked, distinguish facts from assumptions, and say clearly what you could not verify. Never invent sources."),
+        ("remotion-update", "Remotion Update", "Make a Remotion video that walks me through the work done here, for someone who wasn't watching. Cover the goal, what you changed and why, what now works differently, and what I need to know: decisions for me, risks, anything untested, and next steps. Use real details from the work, such as file names, commands, results and screenshots, and state only what you actually did or checked. Give each scene one idea, with short on-screen text that matches the narration, and keep the video as short as the work allows. For the voice-over, use ElevenLabs if you have access to it, otherwise JustImagine if it is available. Write the script first, generate the narration, and time each scene to its audio. If neither voice service is available, use captions alone and tell me. Reuse the project's Remotion setup if it has one; otherwise create one in its own folder so the project's code stays untouched. Render an MP4, check the frames and audio before you finish, and give me the file path."),
     ].into_iter().map(|(trigger, name, instructions)| Quip { trigger: trigger.into(), name: name.into(), instructions: instructions.into() }).collect()
+}
+
+/// Starters added after people began saving their own libraries. A saved library gets each of these once, at the
+/// end; deleting one afterwards sticks.
+const LATER: &[&str] = &["remotion-update"];
+
+/// Which later starters a saved library has already been given, beside the library file.
+fn offered_path(library: &std::path::Path) -> PathBuf { library.with_file_name("quips-offered.json") }
+
+fn offered(library: &std::path::Path) -> Vec<String> {
+    std::fs::read(offered_path(library)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 pub fn summary(trigger: &str) -> &'static str {
@@ -48,6 +60,7 @@ pub fn summary(trigger: &str) -> &'static str {
         "make-a-plan" => "See the approach before any work begins.",
         "second-look" => "Check the work for mistakes and loose ends.",
         "check-the-facts" => "Verify claims and show the sources.",
+        "remotion-update" => "A narrated video of what changed and what matters.",
         _ => "Your own instructions, ready when you need them.",
     }
 }
@@ -61,7 +74,14 @@ impl Library {
                     let mut seen = std::collections::HashSet::new();
                     if items.iter().any(|q| validate(q).is_err() || !seen.insert(q.trigger.clone())) {
                         lib.error = Some("Your Quips file has an invalid or duplicate shortcut. Fix it before saving.".into());
-                    } else { lib.items = items; }
+                    } else {
+                        lib.items = items;
+                        let given = offered(&path);
+                        let new: Vec<Quip> = builtins().into_iter()
+                            .filter(|b| LATER.contains(&b.trigger.as_str()) && !given.contains(&b.trigger) && !lib.items.iter().any(|q| q.trigger == b.trigger))
+                            .collect();
+                        lib.items.extend(new);
+                    }
                 }
                 Err(e) => lib.error = Some(format!("Couldn't read your Quips: {e}")),
             },
@@ -81,6 +101,13 @@ impl Library {
         }
         if let Some(path) = &self.path {
             crate::util::write_json_pretty(path, &items).map_err(|e| format!("Couldn't save your Quips: {e}"))?;
+            // The library is saved either way; at worst a deleted later starter comes back once.
+            let mut given = offered(path);
+            let missing: Vec<String> = LATER.iter().filter(|t| !given.iter().any(|g| g == *t)).map(|t| t.to_string()).collect();
+            if !missing.is_empty() {
+                given.extend(missing);
+                let _ = crate::util::write_json_pretty(&offered_path(path), &given);
+            }
         }
         self.items = items;
         Ok(())
@@ -165,8 +192,46 @@ fn escape(s: &str) -> String { s.replace('&', "&amp;").replace('<', "&lt;").repl
 
 /// Restore the short form even after the Quip has been edited or removed locally.
 pub fn collapse(text: &str) -> String {
+    expansion_tags().replace_all(text, ":$1").into_owned()
+}
+
+fn expansion_tags() -> &'static regex::Regex {
     static TAG: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    TAG.get_or_init(|| regex::Regex::new(r#"(?s)<bro-quip name="([a-zA-Z0-9-]+)">.*?</bro-quip>"#).unwrap()).replace_all(text, ":$1").into_owned()
+    TAG.get_or_init(|| regex::Regex::new(r#"(?s)<bro-quip name="([a-zA-Z0-9-]+)">(.*?)</bro-quip>"#).unwrap())
+}
+
+/// A displayed shortcut and the instructions stored with that occurrence in the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Expansion {
+    pub range: Range<usize>,
+    pub instructions: String,
+}
+
+/// Collapse a message for display, retaining the original expansion for badge previews.
+pub fn collapse_with_expansions(text: &str) -> (String, Vec<Expansion>) {
+    let mut short = String::with_capacity(text.len());
+    let mut expansions = vec![];
+    let mut at = 0;
+    for cap in expansion_tags().captures_iter(text) {
+        let tag = cap.get(0).unwrap();
+        short.push_str(&text[at..tag.start()]);
+        let start = short.len();
+        short.push(':');
+        short.push_str(&cap[1]);
+        let instructions = cap[2].replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&");
+        expansions.push(Expansion { range: start..short.len(), instructions });
+        at = tag.end();
+    }
+    short.push_str(&text[at..]);
+    // Expansion deduplicates repeated shortcuts; all occurrences preview the same saved instructions.
+    for i in 0..expansions.len() {
+        if expansions[i].instructions.is_empty()
+            && let Some(saved) = expansions.iter().find(|e| !e.instructions.is_empty() && short[e.range.clone()].eq_ignore_ascii_case(&short[expansions[i].range.clone()]))
+        {
+            expansions[i].instructions = saved.instructions.clone();
+        }
+    }
+    (short, expansions)
 }
 
 /// Explicit shortcuts only, outside code, escaped text, URLs, and path components.
@@ -212,6 +277,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn badge_previews_preserve_sent_instructions_and_repeated_unicode_ranges() {
+        let mut lib = Library::default();
+        lib.items.push(Quip { name: "Custom".into(), trigger: "custom".into(), instructions: "Keep <tags> & literal &lt; text.\nThen verify.".into() });
+        let wire = lib.expand("Café :custom, then :CUSTOM.").unwrap();
+        lib.items.clear();
+        let (short, badges) = collapse_with_expansions(&wire);
+        assert_eq!(short, "Café :custom, then :CUSTOM.");
+        assert_eq!(short, collapse(&wire));
+        assert_eq!(badges.len(), 2);
+        for badge in &badges {
+            assert_eq!(badge.instructions, "Keep <tags> & literal &lt; text.\nThen verify.");
+            assert!(short[badge.range.clone()].eq_ignore_ascii_case(":custom"));
+        }
+        assert!(collapse_with_expansions("a literal :custom or `:custom`").1.is_empty());
+    }
+
+    #[test]
     fn expands_only_explicit_tokens_and_preserves_the_short_transcript() {
         let lib = Library::default();
         let source = "Café :Full-Send, then :plain-english. :Full-Send";
@@ -253,5 +335,30 @@ mod tests {
         let mut broken = Library::load(path.clone());
         assert!(broken.save_items(vec![]).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "broken");
+    }
+
+    #[test]
+    fn a_saved_library_gets_later_starters_once_and_a_deletion_sticks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quips.json");
+        // Saved before Remotion Update existed: a deleted starter and a custom one.
+        let mine = Quip { trigger: "new-creator".into(), name: "New Creator".into(), instructions: "Mine.".into() };
+        let before: Vec<Quip> = builtins().into_iter().filter(|q| q.trigger == "full-send").chain([mine.clone()]).collect();
+        std::fs::write(&path, serde_json::to_vec(&before).unwrap()).unwrap();
+        let mut lib = Library::load(path.clone());
+        let triggers: Vec<&str> = lib.items.iter().map(|q| q.trigger.as_str()).collect();
+        assert_eq!(triggers, ["full-send", "new-creator", "remotion-update"], "new starters arrive at the end; deleted ones stay gone");
+        assert!(lib.expand(":remotion-update").unwrap().contains("Remotion video"));
+        // Deleting it is remembered, even though it is still a starter.
+        let kept: Vec<Quip> = lib.items.iter().filter(|q| q.trigger != "remotion-update").cloned().collect();
+        lib.save_items(kept.clone()).unwrap();
+        assert_eq!(Library::load(path.clone()).items, kept);
+        // A fresh library already has it, and a custom Quip with the same shortcut is never doubled.
+        assert!(Library::default().items.iter().any(|q| q.trigger == "remotion-update"));
+        let other = dir.path().join("other").join("quips.json");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        let own = Quip { trigger: "remotion-update".into(), name: "My Video".into(), instructions: "My way.".into() };
+        std::fs::write(&other, serde_json::to_vec(&[own.clone()]).unwrap()).unwrap();
+        assert_eq!(Library::load(other).items, [own]);
     }
 }

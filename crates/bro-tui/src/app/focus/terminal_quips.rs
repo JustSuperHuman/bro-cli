@@ -58,7 +58,10 @@ impl App {
         if self.focus.draft(id).terminal_quips.query.is_some() {
             let rows = self.terminal_quip_rows(id);
             let state = &mut self.focus.draft(id).terminal_quips;
-            let selected = state.selected.min(rows.len().saturating_sub(1));
+            // Past the matches, "New…": the arrows reach it only when something matches, so a colon in ordinary
+            // text keeps Enter for sending.
+            let count = rows.len() + 1;
+            let selected = state.selected.min(rows.len());
             match key.code {
                 KeyCode::Char(c) if plain && (c.is_ascii_alphanumeric() || c == '-') && state.query.as_ref().is_some_and(|q| q.len() < 48) => {
                     state.query.as_mut().unwrap().push(c);
@@ -71,11 +74,14 @@ impl App {
                     return true;
                 }
                 KeyCode::Up | KeyCode::Down if plain && !rows.is_empty() => {
-                    state.selected = if key.code == KeyCode::Up { (selected + rows.len() - 1) % rows.len() } else { (selected + 1) % rows.len() };
+                    state.selected = if key.code == KeyCode::Up { (selected + count - 1) % count } else { (selected + 1) % count };
                     return true;
                 }
                 KeyCode::Tab | KeyCode::Enter if key.modifiers.is_empty() && !rows.is_empty() => {
-                    self.terminal_add_quip(id, rows[selected]);
+                    match rows.get(selected) {
+                        Some(&index) => self.terminal_add_quip(id, index),
+                        None => self.quip_create(id),
+                    }
                     return true;
                 }
                 KeyCode::Char(' ') if plain => {

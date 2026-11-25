@@ -245,7 +245,7 @@ impl Pane for QuickInstallView {
                 self.started.remove(&Tool::JustImagine);
                 cx.svc.check_justimagine(true);
             }
-            for tool in [Tool::JustBrowse, Tool::AgentDesktop] {
+            for tool in [Tool::JustBrowse, Tool::Cua, Tool::AgentDesktop] {
                 if self.started.contains(&tool) && self.installed(tool, cx) {
                     self.started.remove(&tool);
                     cx.svc.rescan_skills();
@@ -336,7 +336,7 @@ impl Pane for QuickInstallView {
                 Span::styled(format!(" {}", ui::pad(&detail, 16)), if installed { fg(t.inline) } else { muted(t) }),
                 Span::styled(format!(" {}", tool.blurb()), muted(t)),
             ]));
-            if sel && matches!(tool, Tool::JustBrowse | Tool::AgentDesktop)
+            if sel && matches!(tool, Tool::JustBrowse | Tool::Cua | Tool::AgentDesktop)
                 && let Some(setup) = quick_install::after_install(tool)
             {
                 for line in setup.lines() {

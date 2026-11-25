@@ -126,7 +126,7 @@ pub(crate) fn draw(v: &mut QuickInstallView, ui: &mut Ui, area: Rect, cx: &mut C
         ui.rich(&[(lead, Style::new(size::SMALL, weight::MEDIUM, t.muted)), (h.clone(), Style::mono(size::SMALL, t.text.mix(t.muted, 0.2)))], size::SMALL, Some(inner_w), true, Some(2))
     });
     let setup = match v.row() {
-        Row::Tool(tool @ (Tool::JustBrowse | Tool::AgentDesktop)) => bro_core::quick_install::after_install(tool)
+        Row::Tool(tool @ (Tool::JustBrowse | Tool::Cua | Tool::AgentDesktop)) => bro_core::quick_install::after_install(tool)
             .map(|s| ui.para(&s, Style::new(size::SMALL, weight::REGULAR, t.text), inner_w, None)),
         _ => None,
     };
@@ -381,6 +381,7 @@ fn tool_mark(tool: Tool) -> Mark {
         Tool::JustWatch => "\u{F13B4}",
         Tool::JustImagine => "\u{F0E0C}",
         Tool::JustBrowse => "\u{F059F}",
+        Tool::Cua => "\u{F0379}",
         Tool::AgentDesktop => "\u{F0379}",
         Tool::Git => "\u{F02A2}",
         Tool::GitHubCli => "\u{F02A4}",
@@ -425,7 +426,7 @@ pub(crate) fn click(v: &mut QuickInstallView, n: usize, _p: Point, _mods: KeyMod
         TICK_NONE => KeyCode::Char('n'),
         LOOK => KeyCode::Char('r'),
         EXTENSION_FOLDER => {
-            if let Err(e) = crate::panes::links::open(&bro_core::justbrowse::extension_dir().to_string_lossy()) {
+            if let Err(e) = crate::panes::links::open(&bro_core::justbrowse::shown_folder().to_string_lossy()) {
                 cx.toast(crate::alerts::Kind::Error, format!("Couldn't open the extension folder: {e}"));
             }
             return;

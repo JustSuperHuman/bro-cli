@@ -437,7 +437,7 @@ fn tail(s: &str, w: usize) -> String {
 }
 
 /// Word-wrap to `w` columns in at most `max` lines, ending in `…` when there's more.
-fn wrap(text: &str, w: usize, max: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, w: usize, max: usize) -> Vec<String> {
     if w == 0 || max == 0 {
         return vec![];
     }

@@ -97,17 +97,18 @@ pub fn draw(ui: &mut Ui, band: Rect, focused: bool, maximized: bool) {
         let held = press == id && lit;
         let close = id == 3;
         // close lights up in Windows' red, the others in a wash of the text colour
-        let fill = match (close, lit, held) {
-            (true, true, false) => Some(Color::hex(0xc42b1c)),
-            (true, true, true) => Some(Color::hex(0xc42b1c).with_alpha(0.9)),
-            (false, true, false) => Some(t.text.with_alpha(if t.light { 0.06 } else { 0.08 })),
-            (false, true, true) => Some(t.text.with_alpha(if t.light { 0.04 } else { 0.05 })),
-            _ => None,
+        // the fill fades in and out with the pointer (Windows' own are instant; ours are ~120 ms)
+        let amt = ui.ease(("caption", id), if lit { 1.0 } else { 0.0 }, 120.0);
+        let fill = match (close, held) {
+            (true, false) => Color::hex(0xc42b1c),
+            (true, true) => Color::hex(0xc42b1c).with_alpha(0.9),
+            (false, false) => t.text.with_alpha(if t.light { 0.06 } else { 0.08 }),
+            (false, true) => t.text.with_alpha(if t.light { 0.04 } else { 0.05 }),
         };
-        if let Some(c) = fill {
-            ui.fill(r, c);
+        if amt > 0.005 {
+            ui.fill(r, fill.fade(amt));
         }
-        let ink = if close && lit { Color::WHITE } else if held { ink.mix(t.faint, 0.4) } else { ink };
+        let ink = if close { ink.mix(Color::WHITE, amt) } else if held { ink.mix(t.faint, 0.4) } else { ink };
         ui.icon(r, glyph, 16.0, ink);
     }
 }

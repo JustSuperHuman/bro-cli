@@ -12,7 +12,7 @@ fn gemini_api_profiles_route_every_harness_without_putting_the_key_in_the_comman
     let _sandbox = setup();
     let p = profiles::create(profiles::ProfileKind::GeminiApi, "work").unwrap();
     crate::gemini_api::save_key(&p.dir, "private-test-key").unwrap();
-    for harness in Harness::ALL {
+    for harness in Harness::ALL.into_iter().filter(|h| *h != Harness::Antigravity) {
         let command = build(&spec(harness, Some("gemini:work"), None, Some("gemini-text")), &ctx()).unwrap();
         let route = command.route.as_ref().expect("every harness translates through Bro");
         assert_eq!(route.upstream, "gemini:work");
@@ -32,7 +32,7 @@ fn gemini_subscription_profiles_route_every_harness_to_google_sign_in() {
     assert_eq!(profile.id, "gemini-sub:local");
     assert!(profile.is_local());
     assert!(!profile.is_gemini_api());
-    for harness in Harness::ALL {
+    for harness in Harness::ALL.into_iter().filter(|h| *h != Harness::Antigravity) {
         let missing = build(&spec(harness, Some(&profile.id), None, Some("gemini-4-argon-high")), &LaunchCtx::default()).unwrap_err();
         assert!(missing.is::<ProxyRequired>(), "the host must be able to start a missing proxy: {missing:#}");
         let command = build(&spec(harness, Some(&profile.id), None, Some("gemini-4-argon-high")), &ctx()).unwrap();
@@ -45,6 +45,24 @@ fn gemini_subscription_profiles_route_every_harness_to_google_sign_in() {
         assert!(matches!(resolve_upstream(&route.upstream, route.model.as_deref(), &crate::config::Config::default()).unwrap(), UpstreamTarget::GeminiCodeAssist { creds_file } if creds_file == path));
     }
     assert!(profiles::remove(&profile.id).is_err());
+}
+
+#[test]
+fn antigravity_launches_the_native_cli_and_resumes_by_conversation_id() {
+    let _sb = setup();
+    let mut launch = spec(Harness::Antigravity, None, None, Some("gemini"));
+    launch.resume = Some(Resume { session_id: "conversation-42".into(), fork: false });
+    let command = build(&launch, &ctx()).unwrap();
+    assert!(std::path::Path::new(&command.program).file_stem().is_some_and(|p| p == "agy"));
+    assert_eq!(command.args, ["--model", "gemini", "--conversation", "conversation-42"]);
+    assert_eq!(command.cwd, launch.cwd);
+    assert!(command.route.is_none());
+    launch.permission = Permission::Auto;
+    assert_eq!(&build(&launch, &ctx()).unwrap().args[..2], ["--mode", "auto"]);
+    launch.permission = Permission::Skip;
+    assert_eq!(build(&launch, &ctx()).unwrap().args[0], "--dangerously-skip-permissions");
+    launch.profile_id = Some("gemini-sub:local".into());
+    assert!(build(&launch, &ctx()).is_err());
 }
 
 /// Focus view and spinner tips at Claude's defaults, so `--settings` only shows up in the tests about it.
@@ -68,6 +86,7 @@ fn spec(harness: Harness, profile: Option<&str>, provider: Option<&str>, model: 
         browser: BrowserMode::Off,
         extra_args: vec![],
         orchestrator: false,
+        studio: None,
     }
 }
 
@@ -126,6 +145,7 @@ fn installed_justbrowse_reaches_local_and_pooled_sessions_without_a_browser_togg
     for profile in [None, Some("codex:smol")] {
         let command = build(&spec(Harness::Codex, profile, None, None), &ctx()).unwrap();
         assert!(command.args.iter().any(|a| a == "mcp_servers.justbrowse.url=\"http://127.0.0.1:12306/mcp\""));
+        assert!(has_seq(&command.args, &["--disable", "computer_use"]));
         let home = profile.map_or_else(crate::paths::codex_local_dir, |_| crate::paths::codex_profiles_dir().join("smol"));
         assert!(home.join("skills/justbrowse-browser/.bro-managed").is_file());
     }
@@ -137,6 +157,182 @@ fn installed_justbrowse_reaches_local_and_pooled_sessions_without_a_browser_togg
     atomic_write(&sb.home().join(".claude.json"), br#"{"mcpServers":{"justbrowse":{"command":"custom-bridge"}},"disabledMcpServers":["justbrowse"]}"#).unwrap();
     let command = build(&spec(Harness::Claude, None, None, None), &ctx()).unwrap();
     assert!(!command.args.iter().any(|a| a.ends_with("justbrowse-mcp.json")), "preserve the user's own browser MCP and disabled setting");
+}
+
+#[test]
+fn a_bridge_registered_from_a_checkout_reaches_every_session_once() {
+    let sb = setup();
+    use crate::util::atomic_write;
+    // No Quick Install: the browser runs the bridge from a source checkout.
+    let root = sb.home().join("src/JustBrowseMCP");
+    let host = root.join("app/native-server/dist/run_host.bat");
+    atomic_write(&host, b"@echo off").unwrap();
+    atomic_write(&root.join("skills/justbrowse-browser/SKILL.md"), b"---\nname: justbrowse-browser\n---\n").unwrap();
+    let manifest = if cfg!(windows) {
+        sb.home().join("AppData/Roaming/Google/Chrome")
+    } else if cfg!(target_os = "macos") {
+        sb.home().join("Library/Application Support/Google/Chrome")
+    } else {
+        sb.home().join(".config/google-chrome")
+    };
+    crate::util::write_json_pretty(&manifest.join("NativeMessagingHosts/com.chromemcp.nativehost.json"), &json!({ "path": host })).unwrap();
+    assert!(!crate::justbrowse::installed().unwrap().quick_install());
+    crate::tool_skills::refresh_browser().unwrap();
+
+    for profile in [None, Some("claude:work")] {
+        let command = build(&spec(Harness::Claude, profile, None, None), &ctx()).unwrap();
+        assert!(command.args.iter().any(|a| a.ends_with("justbrowse-mcp.json")));
+    }
+    for profile in [None, Some("codex:smol")] {
+        let command = build(&spec(Harness::Codex, profile, None, None), &ctx()).unwrap();
+        assert!(command.args.iter().any(|a| a == "mcp_servers.justbrowse.url=\"http://127.0.0.1:12306/mcp\""));
+        let home = profile.map_or_else(crate::paths::codex_local_dir, |_| crate::paths::codex_profiles_dir().join("smol"));
+        assert!(home.join("skills/justbrowse-browser/.bro-managed").is_file());
+    }
+
+    // Installed Bro tools supersede the old launcher path: one MCP registration is enough.
+    let browser = crate::browser::browser_root();
+    atomic_write(&browser.join("state.json"), json!({ "enabled": true, "backend": "mcp-chrome" }).to_string().as_bytes()).unwrap();
+    let mut s = spec(Harness::Claude, None, None, None);
+    s.browser = BrowserMode::Auto;
+    let command = build(&s, &ctx()).unwrap();
+    assert!(!command.args.iter().any(|a| a.ends_with("browser-mcp.json")));
+    assert!(command.args.iter().any(|a| a.ends_with("justbrowse-mcp.json")));
+}
+
+fn install_fake_cua(sb: &Sandbox) -> PathBuf {
+    let binary = sb.home().join("CUA Driver/bin/cua-driver.exe");
+    crate::util::atomic_write(&binary, b"driver").unwrap();
+    unsafe { std::env::set_var("BRO_CUA_DRIVER", &binary); }
+    let skill = crate::tool_skills::cache_dir(crate::cua::SKILL);
+    crate::util::atomic_write(&skill.join("SKILL.md"), b"---\nname: cua-driver\n---\nUse CUA").unwrap();
+    crate::util::atomic_write(&skill.join("WINDOWS.md"), b"complete platform guide").unwrap();
+    binary
+}
+
+#[test]
+fn cua_wires_every_harness_and_supersedes_saved_native_browser_choices() {
+    let sb = setup();
+    let binary = install_fake_cua(&sb);
+    crate::util::atomic_write(&crate::browser::browser_root().join("state.json"), br#"{"enabled":true,"backend":"claude"}"#).unwrap();
+    crate::util::atomic_write(&crate::paths::codex_profiles_dir().join("smol/config.toml"), b"developer_instructions = 'Keep my instructions'\n").unwrap();
+    for (harness, profile) in [(Harness::Claude, Some("claude:work")), (Harness::Codex, Some("codex:smol")), (Harness::Pi, None), (Harness::Omp, None)] {
+        let mut s = spec(harness, profile, None, None);
+        s.browser = BrowserMode::Chrome;
+        s.resume = Some(Resume { session_id: "existing-session".into(), fork: false });
+        s.extra_args = vec!["--".into(), "literal --chrome prompt".into()];
+        if harness == Harness::Claude {
+            s.extra_args.splice(0..0, ["--chrome".into(), "--disallowedTools=WebFetch".into()]);
+        }
+        let command = build(&s, &ctx()).unwrap();
+        assert_eq!(&command.args[command.args.len() - 2..], ["--", "literal --chrome prompt"]);
+        let home = match harness {
+            Harness::Claude => crate::paths::claude_accounts_dir().join("work"),
+            Harness::Codex => crate::paths::codex_profiles_dir().join("smol"),
+            Harness::Pi => crate::paths::pi_agent_dir(),
+            Harness::Omp => crate::paths::omp_agent_dir(),
+            Harness::Antigravity => unreachable!("this test covers the existing automation installers"),
+        };
+        assert!(home.join("skills/cua-driver/WINDOWS.md").is_file());
+        match harness {
+            Harness::Claude => {
+                assert!(command.args.contains(&"--no-chrome".into()));
+                assert!(!command.args.contains(&"--chrome".into()));
+                assert_eq!(env(&command, "CLAUDE_CODE_ENABLE_CFC"), Some("false"));
+                let deny = command.args.iter().find(|s| s.starts_with("--disallowedTools=")).unwrap();
+                assert!(deny.contains("WebFetch") && deny.contains("mcp__computer") && !deny.contains("mcp__cua-driver"));
+                let rules: Vec<&str> = deny.strip_prefix("--disallowedTools=").unwrap().split(',').collect();
+                assert!(!rules.contains(&"Computer") && !rules.contains(&"computer"));
+                let config = home.join("bro-browser/cua-mcp.json");
+                let json = crate::util::read_json(&config).unwrap();
+                assert_eq!(json["mcpServers"]["cua-driver"]["command"], binary.to_string_lossy().as_ref());
+                assert_eq!(json["mcpServers"]["cua-driver"]["args"], json!(["mcp"]));
+            }
+            Harness::Codex => {
+                for setting in ["features.computer_use=false", "features.browser_use=false", "plugins.\"unified-computer-use@openai-bundled\".enabled=false"] {
+                    assert!(command.args.iter().any(|s| s == setting));
+                }
+                assert!(command.args.iter().any(|s| s.starts_with("mcp_servers.cua-driver.command=")));
+                assert!(command.args.iter().any(|s| s.contains("Keep my instructions") && s.contains("Bro manages browser")));
+            }
+            _ => {
+                assert!(env(&command, "PATH").unwrap().contains("CUA Driver"));
+                let file = command.args.iter().find_map(|s| s.strip_prefix("--append-system-prompt=")).map(PathBuf::from)
+                    .or_else(|| command.args.windows(2).find(|s| s[0] == "--append-system-prompt").map(|s| PathBuf::from(&s[1]))).unwrap();
+                assert!(std::fs::read_to_string(file).unwrap().contains("cua-driver call"));
+            }
+        }
+    }
+    assert!(!sb.home().join(".claude.json").exists());
+    assert_eq!(std::fs::read_to_string(crate::paths::codex_profiles_dir().join("smol/config.toml")).unwrap(), "developer_instructions = 'Keep my instructions'\n");
+}
+
+#[test]
+fn disabling_bro_tools_disables_existing_mcp_entries_and_keeps_native_tools_off() {
+    let sb = setup();
+    install_fake_cua(&sb);
+    crate::util::atomic_write(&crate::justbrowse::extension_dir().join("manifest.json"), b"{}").unwrap();
+    crate::util::atomic_write(&crate::justbrowse::install_dir().join("bridge/dist/cli.js"), b"// bridge").unwrap();
+    let mut settings = crate::config::Settings::default();
+    settings.automation.justbrowse = false;
+    settings.automation.cua = false;
+    settings.save().unwrap();
+    let command = build(&spec(Harness::Codex, None, None, None), &ctx()).unwrap();
+    for value in ["mcp_servers.justbrowse.enabled=false", "mcp_servers.cua-driver.enabled=false", "features.computer_use=false"] {
+        assert!(command.args.iter().any(|s| s == value));
+    }
+    assert!(!command.args.iter().any(|s| s.starts_with("mcp_servers.justbrowse.url=") || s.starts_with("mcp_servers.cua-driver.command=")));
+    let command = build(&spec(Harness::Claude, None, None, None), &ctx()).unwrap();
+    assert!(command.args.contains(&"--no-chrome".into()));
+    assert!(command.args.iter().any(|s| s.starts_with("--disallowedTools=") && s.contains("mcp__justbrowse") && s.contains("mcp__cua-driver")));
+    assert!(!command.args.iter().any(|s| s.ends_with("cua-mcp.json") || s.ends_with("justbrowse-mcp.json")));
+}
+
+#[test]
+fn pi_and_omp_get_session_scoped_justbrowse_cli_instructions() {
+    let _sb = setup();
+    crate::util::atomic_write(&crate::justbrowse::extension_dir().join("manifest.json"), b"{}").unwrap();
+    crate::util::atomic_write(&crate::justbrowse::install_dir().join("bridge/dist/cli.js"), b"// bridge").unwrap();
+    for harness in [Harness::Pi, Harness::Omp] {
+        let command = build(&spec(harness, None, None, None), &ctx()).unwrap();
+        let file = command.args.iter().find_map(|s| s.strip_prefix("--append-system-prompt=")).map(PathBuf::from)
+            .or_else(|| command.args.windows(2).find(|s| s[0] == "--append-system-prompt").map(|s| PathBuf::from(&s[1]))).unwrap();
+        let prompt = std::fs::read_to_string(file).unwrap();
+        assert!(prompt.contains("bro browse") && prompt.contains("BRO_SESSION_ID"));
+    }
+}
+
+#[test]
+fn launch_uses_the_windows_current_settings_before_background_persistence() {
+    let sb = setup();
+    install_fake_cua(&sb);
+    crate::util::atomic_write(&crate::justbrowse::extension_dir().join("manifest.json"), b"{}").unwrap();
+    crate::util::atomic_write(&crate::justbrowse::install_dir().join("bridge/dist/cli.js"), b"// bridge").unwrap();
+    let context = LaunchCtx { automation: Some(crate::automation::Settings { justbrowse: false, cua: false }), ..ctx() };
+    for harness in Harness::ALL {
+        let command = build(&spec(harness, None, None, None), &context).unwrap();
+        assert_eq!(env(&command, "BRO_BROWSER_PROVIDER"), Some("off"));
+        assert!(!command.args.iter().any(|s| s.ends_with("cua-mcp.json") || s.ends_with("justbrowse-mcp.json") || s.starts_with("mcp_servers.cua-driver.command=")));
+    }
+}
+
+#[test]
+fn custom_mcp_configuration_coexists_with_bro_tools_without_duplicate_transports() {
+    let sb = setup();
+    install_fake_cua(&sb);
+    crate::util::atomic_write(&crate::justbrowse::extension_dir().join("manifest.json"), b"{}").unwrap();
+    crate::util::atomic_write(&crate::justbrowse::install_dir().join("bridge/dist/cli.js"), b"// bridge").unwrap();
+    let mut s = spec(Harness::Claude, None, None, None);
+    s.extra_args = vec![r#"--mcp-config={"mcpServers":{"other":{"command":"other"}}}"#.into()];
+    let command = build(&s, &ctx()).unwrap();
+    assert!(command.args.iter().any(|s| s.ends_with("justbrowse-mcp.json")));
+    assert!(command.args.iter().any(|s| s.ends_with("cua-mcp.json")));
+    s.extra_args = vec![r#"--mcp-config={"mcpServers":{"justbrowse":{"command":"mine"},"cua-driver":{"command":"mine"}}}"#.into()];
+    let command = build(&s, &ctx()).unwrap();
+    assert!(!command.args.iter().any(|s| s.ends_with("justbrowse-mcp.json") || s.ends_with("cua-mcp.json")));
+    crate::util::atomic_write(&crate::paths::codex_local_dir().join("config.toml"), b"[mcp_servers.cua-driver]\nurl='http://127.0.0.1:1234/mcp'\nenabled=false\n").unwrap();
+    let command = build(&spec(Harness::Codex, None, None, None), &ctx()).unwrap();
+    assert!(!command.args.iter().any(|s| s.starts_with("mcp_servers.cua-driver.")));
 }
 
 #[test]
@@ -238,6 +434,7 @@ fn claude_anthropic_provider_direct() {
     assert_eq!(env(&c, "ANTHROPIC_AUTH_TOKEN"), Some("z-key"));
     assert_eq!(env(&c, "ANTHROPIC_API_KEY"), Some(""));
     assert_eq!(env(&c, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), Some("1"));
+    assert_eq!(env(&c, "ENABLE_CLAUDEAI_MCP_SERVERS"), Some("false"));
     assert!(!removes(&c, "ANTHROPIC_BASE_URL"));
     assert!(c.route.is_none());
     assert_eq!(c.label, "claude · zai · glm-5.3");
@@ -254,6 +451,7 @@ fn claude_native_login_leaves_model_slots_alone() {
     for k in claude::MODEL_VARS {
         assert!(removes(&c, k) && env(&c, k).is_none(), "{k}");
     }
+    assert!(env(&c, "ENABLE_CLAUDEAI_MCP_SERVERS").is_none());
 }
 
 #[test]
@@ -954,6 +1152,139 @@ fn orchestrator_pi_and_omp_get_the_ctl_brief() {
     assert!(body.contains("You are the bro orchestrator") && body.contains("# Caveman mode"));
 }
 
+/// A Create Slop launch: Claudia and a roster character, SLOPCANNON switched on, on a machine with nothing else.
+fn slop(harness: Harness) -> LaunchSpec {
+    use crate::studio::{Character, Kit, Source};
+    let bone = Character { source: Source::Slop, slug: "chinese-bone-b6b8d48b5a2f".into(), name: "Chinese Bone".into(), ..Character::claudia() };
+    LaunchSpec { studio: Some(Kit { cast: vec![bone, Character::claudia()], tools: vec![crate::studio::SLOPCANNON.into()] }), ..spec(harness, None, None, None) }
+}
+
+fn slop_ctx() -> LaunchCtx {
+    LaunchCtx { studio_facts: Some(crate::studio::Facts::default()), ..ctx() }
+}
+
+#[test]
+fn create_slop_claude_gets_the_cast_the_tools_and_the_brief() {
+    let _sb = setup();
+    let c = build(&slop(Harness::Claude), &slop_ctx()).unwrap();
+    assert_eq!(env(&c, "BRO_CREATE_SLOP"), Some("1"));
+    assert!(c.label.starts_with("slop · claude"), "{}", c.label);
+    let brief = std::fs::read_to_string(arg_after(&c.args, "--append-system-prompt-file").unwrap()).unwrap();
+    assert!(brief.starts_with("# Create Slop") && brief.contains("MCP server `claudia`, read-only.") && brief.contains("MCP server `slopcannon`."), "{brief}");
+    let mcp: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--mcp-config").unwrap()).unwrap()).unwrap();
+    assert_eq!(mcp["mcpServers"]["chinese-bone-b6b8d48b5a2f"]["url"], "https://character.slop.cc/characters/chinese-bone-b6b8d48b5a2f/mcp?version=1");
+    assert_eq!(mcp["mcpServers"]["claudia"], json!({ "type": "http", "url": "https://claudia.gallery/mcp" }));
+    assert_eq!(mcp["mcpServers"]["slopcannon"]["url"], "https://api.slop.cc/mcp");
+    // reading a character never asks; SLOPCANNON spends, so it keeps the session's permission mode
+    assert!(has_seq(&c.args, &["--allowedTools", "mcp__chinese-bone-b6b8d48b5a2f", "mcp__claudia", "--mcp-config"]), "{:?}", c.args);
+    // the variadic options come last, after every other option
+    let tools_at = c.args.iter().position(|a| a == "--allowedTools").unwrap();
+    assert!(c.args[..tools_at].iter().any(|a| a == "--append-system-prompt-file"));
+    // bro names the session, and keeps the kit under that name
+    let id = arg_after(&c.args, "--session-id").unwrap().to_string();
+    assert!(uuid::Uuid::parse_str(&id).is_ok(), "{id}");
+    assert_eq!(crate::studio::session_kit(&id), slop(Harness::Claude).studio);
+
+    // a literal prompt stays last, with the options ahead of the `--`
+    let mut s = slop(Harness::Claude);
+    s.extra_args = vec!["--".into(), "make me a film".into()];
+    let c = build(&s, &slop_ctx()).unwrap();
+    let end = c.args.iter().position(|a| a == "--").unwrap();
+    assert!(c.args[..end].iter().any(|a| a == "--mcp-config") && c.args[..end].iter().any(|a| a == "--append-system-prompt-file"), "{:?}", c.args);
+    assert_eq!(c.args.last().map(String::as_str), Some("make me a film"));
+
+    // --strict-mcp-config keeps the brief and takes no servers
+    let mut s = slop(Harness::Claude);
+    s.extra_args = vec!["--strict-mcp-config".into()];
+    let c = build(&s, &slop_ctx()).unwrap();
+    assert!(!c.args.iter().any(|a| a == "--mcp-config" || a == "--allowedTools"), "{:?}", c.args);
+    assert!(std::fs::read_to_string(arg_after(&c.args, "--append-system-prompt-file").unwrap()).unwrap().contains("As JSON: https://claudia.gallery/api/canon.json"));
+
+    // A plain launch gets none of it.
+    let c = build(&spec(Harness::Claude, None, None, None), &slop_ctx()).unwrap();
+    assert!(env(&c, "BRO_CREATE_SLOP").is_none() && !c.args.iter().any(|a| a == "--mcp-config" || a == "--append-system-prompt-file"), "{:?}", c.args);
+}
+
+#[test]
+fn resuming_a_create_slop_session_brings_its_kit_back() {
+    let _sb = setup();
+    let first = build(&slop(Harness::Claude), &slop_ctx()).unwrap();
+    let id = arg_after(&first.args, "--session-id").unwrap().to_string();
+    // continued from the Continue tab: a plain resume of that id, with no kit named
+    let mut resume = spec(Harness::Claude, None, None, None);
+    resume.resume = Some(Resume { session_id: id.clone(), fork: false });
+    let c = build(&resume, &slop_ctx()).unwrap();
+    assert!(c.label.starts_with("slop · claude"), "{}", c.label);
+    assert!(has_seq(&c.args, &["--resume", &id]), "{:?}", c.args);
+    assert!(!c.args.iter().any(|a| a == "--session-id"), "it keeps its own id: {:?}", c.args);
+    let mcp: Value = serde_json::from_str(&std::fs::read_to_string(arg_after(&c.args, "--mcp-config").unwrap()).unwrap()).unwrap();
+    assert!(mcp["mcpServers"].get("claudia").is_some() && mcp["mcpServers"].get("slopcannon").is_some());
+    assert!(std::fs::read_to_string(arg_after(&c.args, "--append-system-prompt-file").unwrap()).unwrap().contains("# Create Slop"));
+
+    // a fork is a new conversation: it gets an id of its own, kept with the same kit
+    resume.resume = Some(Resume { session_id: id.clone(), fork: true });
+    let c = build(&resume, &slop_ctx()).unwrap();
+    let forked = arg_after(&c.args, "--session-id").unwrap().to_string();
+    assert_ne!(forked, id);
+    assert!(c.args.iter().any(|a| a == "--fork-session"));
+    assert_eq!(crate::studio::session_kit(&forked), crate::studio::session_kit(&id));
+
+    // any other session resumes as it always did
+    resume.resume = Some(Resume { session_id: "11111111-2222-3333-4444-555555555555".into(), fork: false });
+    let c = build(&resume, &slop_ctx()).unwrap();
+    assert!(!c.args.iter().any(|a| a == "--mcp-config" || a == "--append-system-prompt-file"), "{:?}", c.args);
+    assert!(env(&c, "BRO_CREATE_SLOP").is_none());
+}
+
+#[test]
+fn create_slop_claude_merges_with_caveman() {
+    let _sb = setup();
+    let mut cx = caveman_ctx(crate::caveman::Level::Caveman);
+    cx.studio_facts = Some(crate::studio::Facts::default());
+    let c = build(&slop(Harness::Claude), &cx).unwrap();
+    assert_eq!(c.args.iter().filter(|a| *a == "--append-system-prompt-file").count(), 1, "{:?}", c.args);
+    let merged = std::fs::read_to_string(arg_after(&c.args, "--append-system-prompt-file").unwrap()).unwrap();
+    assert!(merged.contains("# Create Slop") && merged.contains("# Caveman mode"), "{merged}");
+}
+
+#[test]
+fn create_slop_codex_gets_the_servers_that_need_no_sign_in() {
+    let _sb = setup();
+    let home = crate::paths::codex_local_dir();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "developer_instructions = \"Use tabs.\"\n").unwrap();
+    let c = build(&slop(Harness::Codex), &slop_ctx()).unwrap();
+    assert!(c.label.starts_with("slop · codex"), "{}", c.label);
+    assert!(has_seq(&c.args, &["-c", "mcp_servers.claudia.url=\"https://claudia.gallery/mcp\""]), "{:?}", c.args);
+    assert!(has_seq(&c.args, &["-c", "mcp_servers.chinese-bone-b6b8d48b5a2f.url=\"https://character.slop.cc/characters/chinese-bone-b6b8d48b5a2f/mcp?version=1\""]), "{:?}", c.args);
+    assert!(!c.args.iter().any(|a| a.starts_with("mcp_servers.slopcannon.")), "Codex signs in to a server from its own config: {:?}", c.args);
+    let all: Vec<&String> = c.args.iter().filter(|a| a.starts_with("developer_instructions=")).collect();
+    assert_eq!(all.len(), 1);
+    let parsed: toml::Table = format!("v = {}", all[0].strip_prefix("developer_instructions=").unwrap()).parse().unwrap();
+    let text = parsed["v"].as_str().unwrap();
+    assert!(text.starts_with("Use tabs.\n\n# Create Slop"), "{text}");
+    assert!(text.contains("Not connected in this session. Its MCP server is https://api.slop.cc/mcp."));
+
+    // one you added to this home yourself stays yours, and counts as connected
+    std::fs::write(home.join("config.toml"), "[mcp_servers.slopcannon]\nurl = \"https://api.slop.cc/mcp\"\n\n[mcp_servers.claudia]\nurl = \"https://claudia.gallery/mcp\"\n").unwrap();
+    let c = build(&slop(Harness::Codex), &slop_ctx()).unwrap();
+    assert!(!c.args.iter().any(|a| a.starts_with("mcp_servers.claudia.") || a.starts_with("mcp_servers.slopcannon.")), "{:?}", c.args);
+    let text = c.args.iter().find_map(|a| a.strip_prefix("developer_instructions=")).unwrap();
+    assert!(text.contains("MCP server `slopcannon`."), "{text}");
+}
+
+#[test]
+fn create_slop_pi_and_omp_get_the_brief_with_plain_json() {
+    let _sb = setup();
+    let c = build(&slop(Harness::Pi), &slop_ctx()).unwrap();
+    let body = std::fs::read_to_string(arg_after(&c.args, "--append-system-prompt").unwrap()).unwrap();
+    assert!(body.contains("# Create Slop") && body.contains("This harness has no MCP") && body.contains("character.json?version=1"), "{body}");
+    let c = build(&slop(Harness::Omp), &slop_ctx()).unwrap();
+    let flag = c.args.iter().find(|a| a.starts_with("--append-system-prompt=")).unwrap();
+    assert!(std::fs::read_to_string(flag.strip_prefix("--append-system-prompt=").unwrap()).unwrap().contains("# Create Slop"));
+    assert!(c.label.starts_with("slop · omp"), "{}", c.label);
+}
+
 #[test]
 fn gemini_needs_a_google_sign_in_then_routes_every_harness_through_the_proxy() {
     let _sb = setup();
@@ -1452,4 +1783,32 @@ fn proxy_mode_shares_logins_across_families_and_with_pi() {
     assert_eq!(pi.label, "pi · claude logins · claude-sonnet-5");
     // Pi's own login stays its own
     assert!(build(&spec(Harness::Pi, None, None, None), &shared_ctx()).unwrap().route.is_none());
+}
+
+#[test]
+fn effort_reaches_each_harness_its_own_way() {
+    let _sb = setup();
+    assert_eq!(effort_args(Harness::Claude, "high"), ["--effort", "high"]);
+    assert_eq!(effort_args(Harness::Codex, "medium"), ["-c", "model_reasoning_effort=\"medium\""]);
+    assert_eq!(effort_args(Harness::Codex, "none"), ["-c", "model_reasoning_effort=\"low\""]);
+    assert!(effort_args(Harness::Pi, "low").is_empty() && effort_args(Harness::Omp, "low").is_empty());
+    assert!(effort_args(Harness::Claude, "bogus").is_empty());
+
+    let mut s = spec(Harness::Claude, None, None, None);
+    s.extra_args = effort_args(Harness::Claude, "low");
+    let c = build(&s, &ctx()).unwrap();
+    assert!(has_seq(&c.args, &["--effort", "low"]), "{:?}", c.args);
+    assert_eq!(env(&c, "MAX_THINKING_TOKENS"), None);
+
+    // none: lowest Claude level, extended thinking off for this process only
+    s.extra_args = effort_args(Harness::Claude, "none");
+    let c = build(&s, &ctx()).unwrap();
+    assert!(has_seq(&c.args, &["--effort", "low"]), "{:?}", c.args);
+    assert!(!c.args.iter().any(|a| a == "none"));
+    assert_eq!(env(&c, "MAX_THINKING_TOKENS"), Some("0"));
+
+    let mut s = spec(Harness::Codex, None, None, None);
+    s.extra_args = effort_args(Harness::Codex, "none");
+    let c = build(&s, &ctx()).unwrap();
+    assert!(has_seq(&c.args, &["-c", "model_reasoning_effort=\"low\""]), "{:?}", c.args);
 }

@@ -32,6 +32,8 @@ chrono.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+jsonc-parser = { version = "0.34", features = ["serde"] }
+csscolorparser = "0.9.1"
 toml.workspace = true
 dirs.workspace = true
 parking_lot.workspace = true
@@ -41,6 +43,7 @@ crossterm.workspace = true
 portable-pty.workspace = true
 vt100.workspace = true
 notify.workspace = true
+tempfile.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
 png.workspace = true
@@ -70,10 +73,12 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std"
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"
+# `bro agent run`: Bro as a Windows service on computers the RMM manages
+windows-service = "0.8"
 # an MCP app's page clipped to the conversation as it scrolls: wry's own WebView2 controller and window
 webview2-com = { version = "0.39", optional = true }
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"], optional = true }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_HiDpi"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_Controls_Dialogs", "Win32_System_Com", "Win32_UI_HiDpi"] }
 
 [dev-dependencies]
 tempfile.workspace = true

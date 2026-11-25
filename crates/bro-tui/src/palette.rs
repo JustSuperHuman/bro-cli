@@ -17,7 +17,12 @@ use ratatui::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
     Act(Act),
+    Automation,
+    Browser,
     Theme(String),
+    CustomizeTheme,
+    ImportTheme,
+    ExportTheme,
     /// Switch the Claude env preset (`claude_env::PRESETS` id).
     ClaudePreset(String),
     /// Caveman mode for new sessions: a level, or None for off.
@@ -27,6 +32,10 @@ pub enum Cmd {
     Recent(usize),
     /// Tile one project's sessions (its key), or every session (None).
     Tiles(Option<String>),
+    /// Go to a session (the session tabs' "+N" lists them).
+    Session(crate::pane::PaneId),
+    /// The JustGains showcase for screenshots: a Claude session, usage, new session and tokens in splits.
+    Showcase,
 }
 
 /// One entry.
@@ -65,6 +74,7 @@ fn icon_for(a: Act) -> &'static str {
         Profiles => "account",
         Proxy => "proxy",
         Bridge => "bridge",
+        Computers => "remote",
         Settings | QuickInstall => "settings",
         Sounds => "sound",
         Skills | Quips => "skills",
@@ -82,6 +92,9 @@ impl Palette {
     /// Every action (with its live key), recent launches, then every theme.
     pub fn new(km: &Keymap, recents: &[Recent], themes: &[String], current_theme: &str, query: &str) -> Palette {
         let mut items = vec![];
+        items.push(Item { icon: "split", label: "JustGains showcase: Claude, profile usage, new session and tokens in split panes (screenshots)".into(), hint: String::new(), cmd: Cmd::Showcase, swatch: None });
+        items.push(Item { icon: "remote", label: "Browser: control your signed-in tabs".into(), hint: String::new(), cmd: Cmd::Browser, swatch: None });
+        items.push(Item { icon: "remote", label: "Browser and computer: install and configure JustBrowse and CUA".into(), hint: String::new(), cmd: Cmd::Automation, swatch: None });
         for (i, r) in recents.iter().take(5).enumerate() {
             let who = r.provider_id.clone().or_else(|| r.profile_id.clone()).unwrap_or_default();
             items.push(Item {
@@ -98,13 +111,16 @@ impl Palette {
             }
             items.push(Item { icon: icon_for(a), label: a.describe(), hint: km.primary(a), cmd: Cmd::Act(a), swatch: None });
         }
+        items.push(Item { icon: "theme", label: "theme customize · create a live custom theme…".into(), hint: String::new(), cmd: Cmd::CustomizeTheme, swatch: None });
+        items.push(Item { icon: "theme", label: "theme import · T3 Code or VS Code JSON…".into(), hint: String::new(), cmd: Cmd::ImportTheme, swatch: None });
+        items.push(Item { icon: "theme", label: "theme export · save a T3 Code JSON copy".into(), hint: String::new(), cmd: Cmd::ExportTheme, swatch: None });
         for t in themes {
             let mine = if crate::theme::is_custom(t) { " · yours" } else { "" };
             let now = if t == current_theme { " · current" } else { "" };
             let th = crate::theme::get(t);
             let kind = if th.is_light() { " · light" } else if th.painted() { " · dark" } else { "" };
             let swatch = Some((th.bg, th.swatch()));
-            items.push(Item { icon: "theme", label: format!("theme {t}{kind}{mine}{now}"), hint: String::new(), cmd: Cmd::Theme(t.clone()), swatch });
+            items.push(Item { icon: "theme", label: format!("theme {}{kind}{mine}{now}", crate::theme::label(&th)), hint: if th.imported.is_some() { t.clone() } else { String::new() }, cmd: Cmd::Theme(t.clone()), swatch });
         }
         Palette { query: query.to_string(), sel: 0, items, theme_before: current_theme.to_string() }
     }
@@ -170,15 +186,25 @@ impl Palette {
         self
     }
 
+    /// One "session" entry per session the session tabs list, last: (pane, its name, its project).
+    pub fn with_sessions(mut self, sessions: &[(crate::pane::PaneId, String, String)]) -> Palette {
+        let items = sessions.iter().map(|(id, name, project)| Item { icon: "window", label: format!("session {name} — {project}"), hint: String::new(), cmd: Cmd::Session(*id), swatch: None });
+        self.items.extend(items);
+        self
+    }
+
     /// Indices of matching items, best first.
     pub fn matches(&self) -> Vec<usize> {
         // the theme picker ("theme ") lists every theme in its own order: neutral, painted, accent, yours
         if self.query.trim() == "theme" {
             return self.items.iter().enumerate().filter(|(_, i)| matches!(i.cmd, Cmd::Theme(_))).map(|(n, _)| n).collect();
         }
-        // the project tabs' "+N" opens on every project's tiles
+        // every project's tiles, or (the session tabs' "+N") every session they list
         if self.query.trim() == "tiles" {
             return self.items.iter().enumerate().filter(|(_, i)| matches!(i.cmd, Cmd::Tiles(_))).map(|(n, _)| n).collect();
+        }
+        if self.query.trim() == "sessions" {
+            return self.items.iter().enumerate().filter(|(_, i)| matches!(i.cmd, Cmd::Session(_))).map(|(n, _)| n).collect();
         }
         fuzzy::filter(&self.query, &self.items, |i| format!("{} {}", i.label, i.hint))
     }

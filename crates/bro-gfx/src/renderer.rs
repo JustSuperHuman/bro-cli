@@ -24,13 +24,74 @@ const BLOOM: &str = include_str!("shaders/bloom.wgsl");
 const BLOOM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// How the window's drawing surface is set up.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Options {
     /// wait for the display (no tearing)
     pub vsync: bool,
     /// the window can be see-through: a swap chain with alpha (on Windows a DX12 DirectComposition one). Falls
     /// back to an opaque one when the system can't; [`Renderer::see_through`] tells.
     pub transparent: bool,
+    /// graphics APIs not to start (one whose driver crashed bro before), unless that leaves none to try.
+    /// `WGPU_BACKEND` overrides it.
+    pub skip: wgpu::Backends,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        // (wgpu's own default for `Backends` is all of them)
+        Options { vsync: false, transparent: false, skip: wgpu::Backends::empty() }
+    }
+}
+
+/// What the renderer is starting, as it starts it: told to the hook [`on_start`] sets.
+#[derive(Clone, Copy, Debug)]
+pub struct Starting<'a> {
+    /// the graphics APIs being started (more than one where wgpu picks among them)
+    pub backends: wgpu::Backends,
+    /// the GPU picked, once it is
+    pub adapter: Option<&'a wgpu::AdapterInfo>,
+}
+
+static ON_START: std::sync::OnceLock<fn(Starting<'_>)> = std::sync::OnceLock::new();
+
+/// Have `hook` told of each graphics API the renderer starts, before it starts it and again once it has picked
+/// a GPU there. A driver can crash the process while it starts; whatever `hook` writes down is the evidence.
+/// Set once; later calls are ignored.
+pub fn on_start(hook: fn(Starting<'_>)) {
+    let _ = ON_START.set(hook);
+}
+
+fn starting(backends: wgpu::Backends, adapter: Option<&wgpu::AdapterInfo>) {
+    if let Some(hook) = ON_START.get() {
+        hook(Starting { backends, adapter });
+    }
+}
+
+/// The graphics APIs in `b`, as `WGPU_BACKEND` names them (`dx12,vulkan`).
+pub fn backend_names(b: wgpu::Backends) -> String {
+    NAMES.iter().filter(|(flag, ..)| b.contains(*flag)).map(|(_, name, _)| *name).collect::<Vec<_>>().join(",")
+}
+
+/// The graphics APIs in `b`, for people (`DX12 or Vulkan`).
+pub fn backend_titles(b: wgpu::Backends) -> String {
+    NAMES.iter().filter(|(flag, ..)| b.contains(*flag)).map(|(.., title)| *title).collect::<Vec<_>>().join(" or ")
+}
+
+const NAMES: [(wgpu::Backends, &str, &str); 4] =
+    [(wgpu::Backends::DX12, "dx12", "DX12"), (wgpu::Backends::VULKAN, "vulkan", "Vulkan"), (wgpu::Backends::METAL, "metal", "Metal"), (wgpu::Backends::GL, "gl", "OpenGL")];
+
+/// The graphics APIs to start, one after another until one draws. `WGPU_BACKEND` names its own (started
+/// together, wgpu picks among them). On Windows DX12, then Vulkan, then OpenGL, each started alone: DX12 is part
+/// of Windows, and a Vulkan driver is an extra that GPU makers ship with less care (Intel's crashes as it starts
+/// over Remote Desktop, which no error handling can catch, and merely starting Vulkan beside DX12 loads it).
+/// Elsewhere wgpu's own choice of all it has. `skip` drops some, unless that leaves none.
+pub fn attempts(skip: wgpu::Backends) -> Vec<wgpu::Backends> {
+    if let Some(asked) = wgpu::Backends::from_env() {
+        return vec![asked];
+    }
+    let order = if cfg!(windows) { vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN, wgpu::Backends::GL] } else { vec![wgpu::Backends::all()] };
+    let left: Vec<_> = order.iter().map(|b| *b - skip).filter(|b| !b.is_empty()).collect();
+    if left.is_empty() { order } else { left }
 }
 
 /// Whole-screen effects (a theme's skin), applied after the scene is drawn.
@@ -172,7 +233,7 @@ impl Rebuilds {
 
 /// The GPU to draw with: the one `WGPU_POWER_PREF` asks for; else the one driving the window's display (`display`,
 /// see [`crate::display`]) when it can draw to `surface`; else the low-power one (a laptop's integrated GPU, which
-/// usually drives its own screen). Of a GPU's backends the usual first (Vulkan, then DX12) wins, as below.
+/// usually drives its own screen). Where the instance has more than one backend, wgpu's order among a GPU's wins.
 fn pick_adapter(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>, display: Option<(u32, u32)>) -> Result<wgpu::Adapter, String> {
     let preference = wgpu::PowerPreference::from_env();
     if preference.is_none()
@@ -195,6 +256,18 @@ fn pick_adapter(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>, display:
     .map_err(|e| format!("no graphics adapter: {e}"))
 }
 
+/// Where the GPU's part of the last frame went. A frame that stalls is stuck in one of these, and which one says
+/// what kind of stall it is: waiting for an image to draw on, or waiting to hand the finished one over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameTimes {
+    /// getting the swapchain's next image
+    pub acquire: Duration,
+    /// uploading what changed, encoding the scene and submitting it
+    pub draw: Duration,
+    /// handing the frame to the window system
+    pub present: Duration,
+}
+
 /// Why a frame wasn't drawn.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FrameError {
@@ -215,6 +288,8 @@ pub struct Renderer {
     quad_pipe: wgpu::RenderPipeline,
     /// quads painted into the window's glass (see [`crate::scene::Layer::glass`])
     glass_pipe: wgpu::RenderPipeline,
+    /// quads that wipe what's under them (see [`crate::scene::Layer::cut`])
+    cut_pipe: wgpu::RenderPipeline,
     shadow_pipe: wgpu::RenderPipeline,
     glyph_pipe: wgpu::RenderPipeline,
     /// glyphs with subpixel text among them (dual-source blending), when the GPU has it
@@ -256,31 +331,45 @@ pub struct Renderer {
     rebuilds: Rebuilds,
     /// The swapchain was rebuilt for being suboptimal at this size: one the driver still calls that is drawn to as it is.
     suboptimal_rebuilt: bool,
+    /// How the last frame's GPU time split (see [`FrameTimes`]).
+    pub last_frame: FrameTimes,
 }
 
 impl Renderer {
     /// Set up the GPU for `target` (a window) of `width`×`height` physical pixels.
-    pub fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, width: u32, height: u32, vsync: bool) -> Result<Renderer, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        Self::build(instance, target, width, height, Options { vsync, transparent: false })
+    pub fn new(target: impl Into<wgpu::SurfaceTarget<'static>> + Clone, width: u32, height: u32, vsync: bool) -> Result<Renderer, String> {
+        Self::with_options(target, width, height, Options { vsync, ..Options::default() })
     }
 
-    /// [`Renderer::new`] with more say: a see-through window. When the see-through set-up can't start (no DX12
-    /// on this PC), the usual one is used instead.
+    /// [`Renderer::new`] with more say: a see-through window, graphics APIs to leave alone. The APIs are tried in
+    /// [`attempts`]' order until one draws; when the see-through set-up can't start (no DX12 on this PC), the usual
+    /// one is used instead.
     pub fn with_options(target: impl Into<wgpu::SurfaceTarget<'static>> + Clone, width: u32, height: u32, options: Options) -> Result<Renderer, String> {
-        let usual = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        // Windows composes a window's alpha only from a DirectComposition swap chain: DX12's (unless WGPU_BACKEND
-        // asks for another API)
-        if options.transparent && cfg!(windows) && std::env::var_os("WGPU_BACKEND").is_none() {
+        let mut failed = vec![];
+        for backends in attempts(options.skip) {
             let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-            desc.backends = wgpu::Backends::DX12;
-            desc.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+            desc.backends = backends;
+            // Windows composes a window's alpha only from a DirectComposition swap chain: DX12's
+            if options.transparent && cfg!(windows) && backends.contains(wgpu::Backends::DX12) {
+                let mut visual = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+                visual.backends = wgpu::Backends::DX12;
+                visual.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+                starting(visual.backends, None);
+                match Self::build(wgpu::Instance::new(visual), target.clone(), width, height, options) {
+                    Ok(r) => return Ok(r),
+                    Err(e) => log::warn!("gpu: no see-through swap chain ({e}), drawing opaque"),
+                }
+            }
+            starting(backends, None);
             match Self::build(wgpu::Instance::new(desc), target.clone(), width, height, options) {
                 Ok(r) => return Ok(r),
-                Err(e) => log::warn!("gpu: no see-through swap chain ({e}), drawing opaque"),
+                Err(e) => {
+                    log::warn!("gpu: {} didn't start: {e}", backend_titles(backends));
+                    failed.push(format!("{}: {e}", backend_titles(backends)));
+                }
             }
         }
-        Self::build(wgpu::Instance::new(usual), target, width, height, options)
+        Err(failed.join("; "))
     }
 
     fn build(instance: wgpu::Instance, target: impl Into<wgpu::SurfaceTarget<'static>>, width: u32, height: u32, options: Options) -> Result<Renderer, String> {
@@ -290,6 +379,7 @@ impl Renderer {
         let surface = instance.create_surface(target).map_err(|e| format!("couldn't create a drawing surface: {e}"))?;
         let adapter = pick_adapter(&instance, &surface, display)?;
         let adapter_info = adapter.get_info();
+        starting(adapter_info.backend.into(), Some(&adapter_info));
         // subpixel text blends each colour channel by its own coverage: two outputs into one target
         let dual_source = adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -307,7 +397,17 @@ impl Renderer {
         // blend in sRGB space (like browsers): a non-sRGB view of the swapchain
         let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
         let view_format = format.remove_srgb_suffix();
-        let present_mode = if vsync {
+        // `BRO_GPU_PRESENT=mailbox|immediate|fifo` picks how frames are handed over, where the GPU offers it: for
+        // comparing them on one machine (a frame's `acquire` time in v2-perf.log is where a wait for the display shows)
+        let asked = std::env::var("BRO_GPU_PRESENT").ok().and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "mailbox" => Some(wgpu::PresentMode::Mailbox),
+            "immediate" => Some(wgpu::PresentMode::Immediate),
+            "fifo" => Some(wgpu::PresentMode::Fifo),
+            _ => None,
+        });
+        let present_mode = if let Some(mode) = asked.filter(|m| caps.present_modes.contains(m)) {
+            mode
+        } else if vsync {
             wgpu::PresentMode::Fifo
         } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
@@ -387,6 +487,11 @@ impl Renderer {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::DstAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
         };
+        // a cut: nothing painted, the destination (colour and alpha) scaled down by the quad's alpha
+        let cut_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+        };
         // premultiplied colour, each channel over the destination by its own coverage (the second output)
         let lcd_blend = wgpu::BlendState {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrc1, operation: wgpu::BlendOperation::Add },
@@ -422,6 +527,7 @@ impl Renderer {
         let image_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4];
         let quad_pipe = pipeline("quads", &plain_layout, &quad_mod, "vs_quad", "fs_quad", std::mem::size_of::<QuadInstance>(), &quad_attrs);
         let glass_pipe = blended("glass", &plain_layout, &quad_mod, "vs_quad", "fs_quad_glass", std::mem::size_of::<QuadInstance>(), &quad_attrs, glass_blend);
+        let cut_pipe = blended("cut", &plain_layout, &quad_mod, "vs_quad", "fs_quad", std::mem::size_of::<QuadInstance>(), &quad_attrs, cut_blend);
         let shadow_pipe = pipeline("shadows", &plain_layout, &shadow_mod, "vs_shadow", "fs_shadow", std::mem::size_of::<ShadowInstance>(), &shadow_attrs);
         let glyph_pipe = pipeline("glyphs", &atlas_pipe_layout, &glyph_mod, "vs_glyph", "fs_glyph", std::mem::size_of::<GlyphInstance>(), &glyph_attrs);
         let lcd_pipe = (!dual_source.is_empty()).then(|| {
@@ -502,6 +608,7 @@ impl Renderer {
             globals_bind,
             quad_pipe,
             glass_pipe,
+            cut_pipe,
             shadow_pipe,
             glyph_pipe,
             lcd_pipe,
@@ -537,6 +644,7 @@ impl Renderer {
             stalls: 0,
             rebuilds: Rebuilds::default(),
             suboptimal_rebuilt: false,
+            last_frame: FrameTimes::default(),
         })
     }
 
@@ -713,9 +821,14 @@ impl Renderer {
     /// `Window::pre_present_notify`, which on Wayland holds the next redraw until the compositor wants a frame (and
     /// none comes while the window is off screen).
     pub fn render_with(&mut self, scene: &Scene, text: &mut Text, pre_present: impl FnOnce()) -> Result<(), FrameError> {
+        let started = Instant::now();
         self.sync_atlas(text);
+        let uploaded = started.elapsed();
         let lcd = text.antialias() != Antialias::Grayscale;
-        let (frame, suboptimal) = match self.surface.get_current_texture() {
+        let acquiring = Instant::now();
+        let acquired = self.surface.get_current_texture();
+        self.last_frame = FrameTimes { acquire: acquiring.elapsed(), draw: uploaded, present: Duration::ZERO };
+        let (frame, suboptimal) = match acquired {
             wgpu::CurrentSurfaceTexture::Success(f) => (f, false),
             // draw this one; rebuild once it's presented (never while a frame is held)
             wgpu::CurrentSurfaceTexture::Suboptimal(f) => (f, true),
@@ -730,10 +843,14 @@ impl Renderer {
             other => return self.rebuild(&format!("{other:?}")),
         };
         self.stalls = 0;
+        let drawing = Instant::now();
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(self.view_format), ..Default::default() });
         self.compose(&view, scene, lcd);
+        self.last_frame.draw += drawing.elapsed();
         pre_present();
+        let presenting = Instant::now();
         self.queue.present(frame);
+        self.last_frame.present = presenting.elapsed();
         // once per size: a fresh swapchain the driver still calls suboptimal is drawn to as it is
         if suboptimal && !std::mem::replace(&mut self.suboptimal_rebuilt, true) {
             self.surface.configure(&self.device, &self.config);
@@ -962,7 +1079,7 @@ impl Renderer {
         Some((w, h, out))
     }
 
-    /// Draw the scene's layers into `view`: per layer glass, shadows, quads, images, quads over the images,
+    /// Draw the scene's layers into `view`: per layer cuts, glass, shadows, quads, images, quads over the images,
     /// glyphs, top quads, then top glass. `lcd`: the glyphs include subpixel text (drawn by the dual-source
     /// pipeline when there is one).
     fn draw_into(&mut self, view: &wgpu::TextureView, scene: &Scene, lcd: bool) {
@@ -983,6 +1100,8 @@ impl Renderer {
         let mut images: Vec<ImageInstance> = Vec::new();
         let mut plan = vec![];
         for l in layers {
+            let cut = quads.len() as u32..(quads.len() + l.cut.len()) as u32;
+            quads.extend_from_slice(&l.cut);
             let gl0 = quads.len() as u32..(quads.len() + l.glass.len()) as u32;
             quads.extend_from_slice(&l.glass);
             let s = shadows.len() as u32..(shadows.len() + l.shadows.len()) as u32;
@@ -1006,7 +1125,7 @@ impl Renderer {
             quads.extend_from_slice(&l.top);
             let tg = quads.len() as u32..(quads.len() + l.top_glass.len()) as u32;
             quads.extend_from_slice(&l.top_glass);
-            plan.push((gl0, s, q, im, m, gl, t, tg));
+            plan.push((cut, gl0, s, q, im, m, gl, t, tg));
         }
         self.quads.write(&self.device, &self.queue, bytemuck::cast_slice(&quads));
         self.shadows.write(&self.device, &self.queue, bytemuck::cast_slice(&shadows));
@@ -1027,7 +1146,12 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.globals_bind, &[]);
-            for (gl0, s, q, im, m, gl, t, tg) in plan {
+            for (cut, gl0, s, q, im, m, gl, t, tg) in plan {
+                if !cut.is_empty() {
+                    pass.set_pipeline(&self.cut_pipe);
+                    pass.set_vertex_buffer(0, self.quads.buf.slice(..));
+                    pass.draw(0..4, cut);
+                }
                 if !gl0.is_empty() {
                     pass.set_pipeline(&self.glass_pipe);
                     pass.set_vertex_buffer(0, self.quads.buf.slice(..));
@@ -1110,5 +1234,27 @@ mod tests {
         // ten quiet minutes: the next one goes at once again
         assert!(r.allow(at(t + 600.0)));
         assert!(!r.allow(at(t + 600.5)));
+    }
+
+    #[test]
+    fn graphics_apis_go_in_order_and_a_crashed_one_is_skipped() {
+        use wgpu::Backends as B;
+        if std::env::var_os("WGPU_BACKEND").is_some() {
+            return;
+        }
+        assert_eq!(Options::default().skip, B::empty(), "nothing skipped unless asked (wgpu's default Backends is all)");
+        if cfg!(windows) {
+            assert_eq!(attempts(B::empty()), [B::DX12, B::VULKAN, B::GL], "DX12 first: Vulkan isn't even loaded unless DX12 fails");
+            assert_eq!(attempts(B::VULKAN), [B::DX12, B::GL]);
+            assert_eq!(attempts(B::DX12 | B::VULKAN), [B::GL]);
+        } else {
+            assert_eq!(attempts(B::empty()), [B::all()]);
+            assert_eq!(attempts(B::VULKAN), [B::all() - B::VULKAN]);
+        }
+        // every one skipped would leave nothing to draw with: try them all again
+        assert_eq!(attempts(B::all()), attempts(B::empty()));
+        assert_eq!(backend_names(B::DX12 | B::VULKAN), "dx12,vulkan");
+        assert_eq!(B::from_comma_list(&backend_names(B::VULKAN | B::GL)), B::VULKAN | B::GL, "names read back as WGPU_BACKEND reads them");
+        assert_eq!(backend_titles(B::VULKAN), "Vulkan");
     }
 }

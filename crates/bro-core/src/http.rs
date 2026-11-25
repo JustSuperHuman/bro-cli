@@ -2,14 +2,40 @@
 //! per-call global timeout and no status-as-error (callers branch on status).
 use anyhow::Context;
 use serde_json::Value;
+use std::sync::OnceLock;
 use std::time::Duration;
 
-fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .http_status_as_error(false)
-        .build()
-        .into()
+/// The process's one HTTP agent. Its pool keeps a host's connection (and the TLS session on it) open between
+/// calls, so a poll, a refresh or the second request of a pair doesn't pay for a new handshake each time.
+/// Timeouts are set per request ([`Scoped`]).
+pub fn shared() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            // a server may close an idle connection a moment before the next call lands on it: keep ours for
+            // less time than the servers bro talks to keep theirs
+            .max_idle_age(Duration::from_secs(50))
+            .build()
+            .into()
+    })
+}
+
+/// The shared agent with one call's timeout: `agent(t).get(url)…` reads as it did when each call had its own.
+struct Scoped(Duration);
+
+fn agent(timeout: Duration) -> Scoped {
+    Scoped(timeout)
+}
+
+impl Scoped {
+    fn get(&self, url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        shared().get(url).config().timeout_global(Some(self.0)).build()
+    }
+
+    fn post(&self, url: &str) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
+        shared().post(url).config().timeout_global(Some(self.0)).build()
+    }
 }
 
 /// A response: HTTP status plus the body parsed as JSON (`Value::Null` when the body

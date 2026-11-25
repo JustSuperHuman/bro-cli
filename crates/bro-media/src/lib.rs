@@ -34,7 +34,7 @@ pub use ffmpeg::{ffmpeg_available, set_search_dirs};
 pub use kind::{MediaKind, is_executable, kind_of};
 pub use pdf::load_pdf_page;
 pub use player::Player;
-pub use still::{Image, is_animated, load_image};
+pub use still::{Image, is_animated, load_image, svg_thumbnail};
 
 /// Straight-alpha RGBA8, sRGB.
 #[derive(Clone, Default, PartialEq, Eq)]

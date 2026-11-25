@@ -21,14 +21,14 @@ impl App {
                     let act = self.menu.hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, act)| *act);
                     self.prefix_armed = false;
                     if let Some(act) = act {
-                        self.run_act(act);
+                        self.run_menu_act(act);
                     }
                 }
                 MouseEventKind::ScrollDown => self.menu_move(1),
                 MouseEventKind::ScrollUp => self.menu_move(-1),
                 MouseEventKind::Moved => {
                     if let Some((_, act)) = self.menu.hits.iter().find(|(r, _)| r.contains(pos)) {
-                        self.menu.sel = self.keymap.prefix_actions().iter().position(|(_, a)| a == act).unwrap_or(0);
+                        self.menu.sel = self.menu_actions().iter().position(|(_, a)| a == act).unwrap_or(0);
                     }
                 }
                 MouseEventKind::Down(MouseButton::Right) => self.prefix_armed = false,
@@ -111,6 +111,11 @@ impl App {
                             self.overlay = Overlay::None;
                             self.sign_in_gemini();
                         }
+                        crate::launcher::Outcome::InstallTool(tool, again) => {
+                            self.overlay = Overlay::None;
+                            self.install_tool(tool, again);
+                        }
+                        crate::launcher::Outcome::SaveKey(tool, key) => self.svc.save_studio_key(tool, key),
                     }
                     return;
                 }
@@ -198,7 +203,7 @@ impl App {
             }
             return;
         }
-        // the wheel over the project tabs scrolls them when they're more than fit, else switches them
+        // the wheel over the session tabs scrolls them when they're more than fit, else switches them
         if self.strip.contains(pos) && matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp) {
             if !self.overlay.is_open() {
                 self.strip_wheel(if matches!(m.kind, MouseEventKind::ScrollDown) { 1.0 } else { -1.0 });
@@ -260,6 +265,8 @@ impl App {
                         SideHit::Continue => self.open_continue(),
                         SideHit::TileAll => self.run_act(crate::keymap::Act::TileAll),
                         SideHit::Minimized => self.toggle_minimized_visibility(),
+                        SideHit::Recent => self.toggle_recent(),
+                        SideHit::Scope(tab) => self.show_tab(tab),
                         SideHit::Strip(hit) => self.strip_click(hit, false),
                     }
                     if self.overlay.is_open() {
@@ -287,6 +294,17 @@ impl App {
         }
         if self.overlay.is_open() {
             return;
+        }
+        // the welcome screen's tip: an arrow moves through them, a click on the tip goes on, and so does the wheel
+        if self.tabs.is_empty()
+            && let Some(&(_, by)) = self.tip_hits.iter().find(|(r, _)| r.contains(pos))
+        {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => return self.tip_step(if by == 0 { 1 } else { by }),
+                MouseEventKind::ScrollDown => return self.tip_wheel(1),
+                MouseEventKind::ScrollUp => return self.tip_wheel(-1),
+                _ => {}
+            }
         }
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
             if let Some(&(_, id)) = self.pane_minimize.iter().find(|(r, _)| r.contains(pos)) {
@@ -487,7 +505,7 @@ impl App {
         }
     }
 
-    /// A sidebar project row changes the launch folder; project tabs navigate
+    /// A sidebar project row changes the launch folder; the session tabs and the sidebar's scopes navigate
     /// out of the launcher. New / Continue switch its tab, and toggles keep it open.
     pub(crate) fn launcher_side_click(&mut self, hit: &SideHit) -> bool {
         if !matches!(self.overlay, Overlay::Launcher(_)) {
@@ -514,8 +532,9 @@ impl App {
                 }
                 true
             }
-            SideHit::Strip(super::project_tabs::StripHit::Tab(_)) => false,
-            SideHit::Fable | SideHit::UsageToggle | SideHit::Minimized | SideHit::Strip(super::project_tabs::StripHit::Minimized | super::project_tabs::StripHit::Scroll(_)) => false,
+            // (going to sessions leaves the launcher on its own)
+            SideHit::Scope(_) | SideHit::Strip(super::project_tabs::StripHit::Grid | super::project_tabs::StripHit::Session(_)) => false,
+            SideHit::Fable | SideHit::UsageToggle | SideHit::Minimized | SideHit::Recent | SideHit::Strip(super::project_tabs::StripHit::Minimized | super::project_tabs::StripHit::Scroll(_)) => false,
             _ => {
                 self.overlay = Overlay::None;
                 false

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 pub(super) fn spawn_all(svc: &Services) {
     spawn_usage_loop(svc);
     spawn_data(svc);
+    spawn_model_refresher(svc);
     spawn_coauthor_sync(svc.settings().claude_env.coauthor_hidden());
     svc.check_justtools();
     svc.spawn_update_checks();
@@ -25,15 +26,62 @@ pub(super) fn spawn_all(svc: &Services) {
     } else {
         svc.update(|st| st.proxy.status = Avail::Unavailable("turned off in settings".into()));
     }
-    if s.bridge.enabled || s.orbit_voice.enabled {
+    if s.bridge.enabled || bro_core::justconnect::load().enabled {
         spawn_bridge(svc);
-        // Orbit's authenticated local integration is independent of LAN access.
     } else {
         svc.update(|st| st.bridge.status = Avail::Unavailable("turned off in settings".into()));
     }
-    svc.start_orbit_relay();
-    svc.start_orbit_voice(false);
+    if svc.runs_voice() {
+        spawn_voice(svc);
+    }
     spawn_jsh(svc);
+    let connected = svc.clone();
+    std::thread::spawn(move || {
+        let mut adding = SessionsReach::default();
+        while !connected.inner.stopping.load(Ordering::Acquire) {
+            if !connected.is_demo() {
+                adding.tick();
+            }
+            if bro_core::justconnect::load().enabled && !connected.bridge_running() {
+                spawn_bridge(&connected);
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+}
+
+/// Signed in to Just Superhuman: put this computer on the account for the person's own Bro sessions, so the phone
+/// they sign in on lists it (`bro_core::justconnect::add_for_sessions`). Asked again later, less often each time,
+/// while the account server can't be reached or refuses.
+#[derive(Default)]
+struct SessionsReach {
+    next: Option<Instant>,
+    failures: u32,
+}
+
+impl SessionsReach {
+    fn tick(&mut self) {
+        use bro_core::{jsh, justconnect as jc};
+        if self.next.is_some_and(|at| Instant::now() < at) || jc::agent::elsewhere() {
+            return;
+        }
+        let (Some(stored), Some((account, _))) = (jsh::stored(), jsh::cached_account()) else { return };
+        if !jc::wants_sessions(&jc::load(), &stored.origin, &account.organization.id, &account.user.id) {
+            self.failures = 0;
+            return;
+        }
+        match jc::add_for_sessions() {
+            Ok(_) => {
+                self.failures = 0;
+                self.next = None;
+            }
+            Err(_) => {
+                self.failures += 1;
+                let wait = Duration::from_secs(30).saturating_mul(1 << self.failures.min(6)).min(Duration::from_secs(30 * 60));
+                self.next = Some(Instant::now() + wait);
+            }
+        }
+    }
 }
 
 /// Just Superhuman: a sign-in (from the window, the phone or `bro jsh`) or a new reading of the credits puts the
@@ -43,6 +91,7 @@ fn spawn_jsh(svc: &Services) {
     bro_core::jsh::login().on_change(move || {
         let s = s.clone();
         std::thread::spawn(move || {
+            read_jsh(&s);
             let cfg = s.state().config.clone().unwrap_or_default();
             let providers = guard("providers::load", || bro_core::providers::load(&cfg));
             s.update(|st| st.providers = avail(providers, &mut st.issues));
@@ -53,19 +102,30 @@ fn spawn_jsh(svc: &Services) {
     bro_core::jsh::spawn_refresher();
 }
 
+/// Put the sign-in and its credits as they stand into the state (the usage view, the sidebar and the launcher
+/// show them from there). A reading never replaces a newer one.
+fn read_jsh(svc: &Services) {
+    static SHOWN: AtomicU64 = AtomicU64::new(0);
+    let login = bro_core::jsh::login();
+    let generation = login.generation() + 1;
+    let snap = login.snapshot();
+    if SHOWN.fetch_max(generation, Ordering::AcqRel) <= generation && svc.state().jsh != snap {
+        svc.update(|st| st.jsh = snap);
+    }
+}
+
 /// What a second bro runs (see `Services::start_guest`): data and usage, with its proxy started on demand.
 /// The existing bro retains the phone bridge and hotkey.
 pub(super) fn spawn_guest(svc: &Services) {
     spawn_usage_loop(svc);
     spawn_data(svc);
+    spawn_model_refresher(svc);
     svc.check_justtools();
     let note = "your other bro runs it";
     svc.update(|st| {
         st.proxy.status = Avail::Unavailable(note.into());
         st.bridge.status = Avail::Unavailable(note.into());
-        st.orbit_voice.status = "Your primary window owns the Orbit Voice connection.".into();
     });
-    svc.start_orbit_relay();
 }
 
 /// Every Claude login's settings.json follows the co-author knob ([`bro_core::coauthor`]), so sessions started
@@ -122,38 +182,98 @@ pub(super) fn load_data(svc: &Services) {
 /// Re-scan earlier sessions (cheap once the on-disk caches are warm) and publish them.
 pub(super) fn load_past(svc: &Services) {
     let past = guard("sessions::list", || bro_core::sessions::list(&ListOpts { limit: 400, harnesses: vec![] }));
-    svc.update(|st| st.past = avail(past, &mut st.issues));
+    svc.update(|st| {
+        st.past = avail(past, &mut st.issues);
+        st.past_revision += 1;
+    });
     svc.push_known_folders();
 }
 
-/// Model lists for the launcher; then, off the critical path, refresh the OpenRouter catalogue when it's
-/// older than six hours and publish again.
-pub(super) fn load_models(svc: &Services) {
-    let publish = |svc: &Services| {
-        let (providers, profiles, previous) = {
-            let st = svc.state();
-            (st.providers.ready().cloned().unwrap_or_default(), st.profiles.ready().cloned().unwrap_or_default(), st.models.clone())
-        };
-        let models = guard("catalogue", || {
-            use bro_core::catalogue;
-            let mut m = std::collections::BTreeMap::new();
-            for p in &providers {
-                m.insert(p.id.clone(), catalogue::provider_models(p));
+/// How old a cached list may get before bro asks again: OpenRouter's catalogue, and the Claude models Anthropic
+/// lists (a new Claude model shows in every picker within hours of coming out, with no restart).
+const OPENROUTER_EVERY: Duration = Duration::from_secs(6 * 3600);
+const CLAUDE_MODELS_EVERY: Duration = Duration::from_secs(3 * 3600);
+
+/// While bro runs, look every half hour for a cached list that has gone stale (see [`refresh_stale_models`]).
+pub(super) fn spawn_model_refresher(svc: &Services) {
+    let svc = svc.clone();
+    std::thread::spawn(move || {
+        let mut slept = Duration::ZERO;
+        while !svc.inner.stopping.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_secs(5));
+            slept += Duration::from_secs(5);
+            if slept >= Duration::from_secs(30 * 60) {
+                slept = Duration::ZERO;
+                refresh_stale_models(&svc);
             }
-            for p in profiles.iter().filter(|p| p.is_gemini()) {
-                let fallback = ["gemini-3.8-flash"].iter().map(|id| catalogue::ModelRow { id: (*id).into(), name: "Gemini Flash (offline fallback)".into(), context: None, pricing: None, reasoning: true, created: None }).collect();
-                m.insert(p.id.clone(), previous.get(&p.id).cloned().unwrap_or(fallback));
-            }
-            m.insert("codex".to_string(), catalogue::codex_models(&bro_core::paths::codex_local_dir()));
-            let claude = providers.iter().find(|p| p.id == "anthropic").map(catalogue::provider_models).unwrap_or_default();
-            m.insert("claude".to_string(), claude);
-            m
-        });
-        if let Ok(m) = models {
-            svc.update(|st| st.models = m);
         }
+    });
+}
+
+/// Off the caller's thread: refresh OpenRouter's catalogue and the Claude models when their caches are stale
+/// (or missing), each publishing the model lists again when it got something new.
+fn refresh_stale_models(svc: &Services) {
+    use bro_core::catalogue;
+    let stale = |age: Option<u64>, every: Duration| age.is_none_or(|a| a > every.as_secs());
+    if guard("catalogue::openrouter_cached", || stale(catalogue::openrouter_cached().map(|(_, a)| a), OPENROUTER_EVERY)).unwrap_or(false) {
+        let svc = svc.clone();
+        std::thread::spawn(move || {
+            if guard_res("catalogue::refresh_openrouter", catalogue::refresh_openrouter).is_ok() {
+                publish_models(&svc);
+            }
+        });
+    }
+    if guard("catalogue::claude_models_cached", || stale(catalogue::claude_models_cached().map(|(_, a)| a), CLAUDE_MODELS_EVERY)).unwrap_or(false) {
+        // any signed-in Claude login can ask; the machine's own first
+        let mut logins: Vec<_> = svc.state().profiles.ready().into_iter().flatten().filter(|p| p.is_claude() && p.authenticated).cloned().collect();
+        logins.sort_by_key(|p| p.kind != bro_core::profiles::ProfileKind::ClaudeLocal);
+        if logins.is_empty() {
+            return;
+        }
+        let svc = svc.clone();
+        std::thread::spawn(move || {
+            let before = catalogue::claude_models_cached().map(|(rows, _)| rows);
+            // a login that can't (signed out since, offline) hands over to the next
+            if logins.iter().any(|p| guard_res("catalogue::refresh_claude_models", || catalogue::refresh_claude_models(&p.dir)).is_ok())
+                && catalogue::claude_models_cached().map(|(rows, _)| rows) != before
+            {
+                publish_models(&svc);
+            }
+        });
+    }
+}
+
+/// Every model list the launcher and focus mode pick from, into the state. Blocking (reads caches and
+/// catalogues).
+fn publish_models(svc: &Services) {
+    let (providers, profiles, previous) = {
+        let st = svc.state();
+        (st.providers.ready().cloned().unwrap_or_default(), st.profiles.ready().cloned().unwrap_or_default(), st.models.clone())
     };
-    publish(svc);
+    let models = guard("catalogue", || {
+        use bro_core::catalogue;
+        let mut m = std::collections::BTreeMap::new();
+        for p in &providers {
+            m.insert(p.id.clone(), catalogue::provider_models(p));
+        }
+        for p in profiles.iter().filter(|p| p.is_gemini()) {
+            let fallback = ["gemini-3.8-flash"].iter().map(|id| catalogue::ModelRow { id: (*id).into(), name: "Gemini Flash (offline fallback)".into(), context: None, pricing: None, reasoning: true, created: None }).collect();
+            m.insert(p.id.clone(), previous.get(&p.id).cloned().unwrap_or(fallback));
+        }
+        m.insert("codex".to_string(), catalogue::codex_models(&bro_core::paths::codex_local_dir()));
+        // what Anthropic lists for your Claude login (else bro's own list), for Claude Code and cross-login picks
+        m.insert("claude".to_string(), catalogue::claude_models());
+        m
+    });
+    if let Ok(m) = models {
+        svc.update(|st| st.models = m);
+    }
+}
+
+/// Model lists for the launcher; then, off the critical path, refresh the OpenRouter catalogue and the Claude
+/// models when they're stale and publish again.
+pub(super) fn load_models(svc: &Services) {
+    publish_models(svc);
     let gemini = svc.clone();
     std::thread::spawn(move || {
         let profiles = gemini.state().profiles.ready().cloned().unwrap_or_default();
@@ -166,15 +286,7 @@ pub(super) fn load_models(svc: &Services) {
             }
         }
     });
-    let stale = guard("catalogue::openrouter_cached", || bro_core::catalogue::openrouter_cached().is_none_or(|(_, age)| age > 6 * 3600)).unwrap_or(false);
-    if stale {
-        let svc = svc.clone();
-        std::thread::spawn(move || {
-            if guard_res("catalogue::refresh_openrouter", bro_core::catalogue::refresh_openrouter).is_ok() {
-                publish(&svc);
-            }
-        });
-    }
+    refresh_stale_models(svc);
 }
 
 fn note(st: &mut super::State, e: &str) {
@@ -204,6 +316,7 @@ fn spawn_usage_loop(svc: &Services) {
     svc.set_usage_kick(ktx);
     let svc = svc.clone();
     std::thread::spawn(move || {
+        read_jsh(&svc);
         loop {
             let min_age = match krx.recv_timeout(Duration::from_secs(60)) {
                 Ok(()) => MANUAL_MIN_AGE,
@@ -211,6 +324,12 @@ fn spawn_usage_loop(svc: &Services) {
                 Err(RecvTimeoutError::Disconnected) => break,
             };
             while krx.try_recv().is_ok() {} // collapse a burst of kicks
+            // the Just Superhuman credits alongside: asked again when kicked (at most every `MANUAL_MIN_AGE`),
+            // and the files looked at every round (another bro or `bro jsh` may have signed in or out)
+            if bro_core::jsh::signed_in() && min_age == MANUAL_MIN_AGE {
+                std::thread::spawn(move || bro_core::jsh::login().refresh_if_stale(MANUAL_MIN_AGE));
+            }
+            read_jsh(&svc);
             fetch_usage(&svc, min_age);
         }
     });
@@ -467,7 +586,7 @@ pub(super) fn spawn_voice(svc: &Services) {
     std::thread::spawn(move || {
         let generation = svc.voice_generation();
         let s = svc.settings().voice;
-        if !s.enabled || svc.is_demo() {
+        if !s.enabled || !svc.runs_voice() {
             svc.update(|st| st.voice.running = None);
             return;
         }
@@ -588,18 +707,17 @@ pub(super) fn spawn_bridge(svc: &Services) {
         let starting = svc.inner.workspace_reconcile.lock();
         if svc.inner.stopping.load(Ordering::Acquire) { return; }
         let s = svc.settings().bridge;
+        let bind = if s.enabled { s.bind.clone() } else { "127.0.0.1".into() };
         let existing = { svc.inner.bridge.read().clone() };
         if let Some(existing) = existing {
-            if existing.local_url().is_some() == s.enabled { return; }
+            if existing.bind_address() == bind { return; }
             existing.shutdown();
             svc.set_bridge(None);
         }
-        let cfg = bro_bridge::BridgeConfig { port: s.port, automatic_port: s.automatic_port, bind: s.bind.clone(), data_root: crate::util::bro_dir().join("bridge"), web_interface: s.web_interface };
+        let cfg = bro_bridge::BridgeConfig { port: s.port, automatic_port: s.automatic_port, bind, data_root: crate::util::bro_dir().join("bridge"), web_interface: s.web_interface };
         let cmd_svc = svc.clone();
         let started = guard_res("bridge::start", || {
-            let sink: Box<dyn Fn(bro_bridge::BridgeCommand) + Send + Sync> = Box::new(move |c| cmd_svc.send(Event::Bridge(c)));
-            if s.enabled { bro_bridge::Bridge::start(cfg, sink) }
-            else { bro_bridge::Bridge::start_local(cfg, sink) }
+            bro_bridge::Bridge::start(cfg, Box::new(move |c| cmd_svc.send(Event::Bridge(c))))
         });
         let b = match started {
             Ok(b) => b,
@@ -622,7 +740,6 @@ pub(super) fn spawn_bridge(svc: &Services) {
                 bro_bridge::OrchestratorUpdate::Reply { text, tag: Some(id) } => o_svc.voice_delegation_result(&id, if text.trim().is_empty() { "Done." } else { text.trim() }),
                 bro_bridge::OrchestratorUpdate::Failed { message, tag: Some(id) } => o_svc.voice_delegation_result(&id, &format!("That didn't work: {message}")),
                 bro_bridge::OrchestratorUpdate::Step { summary, tag: Some(id) } => o_svc.voice_delegation_progress(&id, &summary),
-                bro_bridge::OrchestratorUpdate::TaskOutcome { origin_request_id, task_id, revision, text } => o_svc.orbit_task_outcome(&origin_request_id, &task_id, revision, &text),
                 bro_bridge::OrchestratorUpdate::Reply { text, tag: None } if !text.trim().is_empty() => o_svc.send(Event::Toast(Kind::Info, format!("Hugh: {}", super::brief(&text)))),
                 bro_bridge::OrchestratorUpdate::Failed { message, tag: None } => o_svc.send(Event::Toast(Kind::Error, format!("Hugh: {message}"))),
                 _ => {}
@@ -631,6 +748,8 @@ pub(super) fn spawn_bridge(svc: &Services) {
         // panels, schedules and stop / fresh start go to bro's orchestrator session, not Hugh's own Claude Code
         let _ = guard("bridge::route_orchestrator", || b.route_orchestrator(true));
         let _ = guard("bridge::set_media_anywhere", || b.set_media_anywhere(!s.protect_media));
+        let voice = super::live_voice::bridge_config(&svc.settings().voice);
+        let _ = guard("bridge::set_voice_config", || b.set_voice_config(voice));
         let mut disk_mobile = std::fs::read_to_string(bro_core::paths::settings_path()).ok()
             .and_then(|text| toml::from_str::<bro_core::config::Settings>(&text).ok()).map(|settings| settings.mobile_companion);
         let _ = guard("bridge::set_rmm_settings", || b.set_rmm_settings(svc.settings().mobile_companion));
@@ -644,6 +763,7 @@ pub(super) fn spawn_bridge(svc: &Services) {
         svc.send(Event::BridgeStarted);
         drop(starting);
         // poll status while this bridge is the live one
+        let mut polls = 0u32;
         loop {
             if svc.inner.stopping.load(Ordering::Acquire) || svc.inner.bridge.read().as_ref().is_none_or(|current| !current.same_service(&b)) { break; }
             // Secondary windows save the same settings file. Observe changes to this
@@ -664,9 +784,15 @@ pub(super) fn spawn_bridge(svc: &Services) {
                         .into_iter()
                         .map(|p| super::ClientProject { key: svc.project_for(&p.cwd).key, name: p.name, order: p.order })
                         .collect();
+                    let calls = guard("bridge::voice_calls", || b.voice_calls()).unwrap_or_default();
+                    // The key lookup may read the registry: every 10 s, on this thread.
+                    let ready = (polls % 5 == 0).then(|| guard("bridge::voice_ready", || b.voice_ready()).unwrap_or_else(Err));
+                    polls = polls.wrapping_add(1);
                     svc.update(|st| {
                         st.bridge.status = if s.enabled { Avail::Ready(status) } else { Avail::Unavailable("LAN access is off · local workspace available".into()) };
                         st.bridge.projects = projects;
+                        st.bridge.voice_calls = calls;
+                        if let Some(ready) = ready { st.bridge.voice_ready = Some(ready); }
                     });
                 }
                 Err(e) => {
@@ -675,7 +801,7 @@ pub(super) fn spawn_bridge(svc: &Services) {
                 }
             }
             std::thread::sleep(Duration::from_secs(2));
-            if !svc.bridge_running() || !(svc.state().bridge.enabled || svc.settings().orbit_voice.enabled) {
+            if !svc.bridge_running() || (!svc.state().bridge.enabled && !bro_core::justconnect::load().enabled) {
                 break;
             }
         }

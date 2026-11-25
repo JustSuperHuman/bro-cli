@@ -13,6 +13,8 @@ pub struct Archive {
     /// batches archived this run, newest last, for undo
     #[serde(skip)]
     undo: Vec<Vec<String>>,
+    #[serde(skip)]
+    pub(crate) revision: u64,
 }
 
 pub fn path() -> PathBuf {
@@ -35,13 +37,16 @@ impl Archive {
         let n = batch.len();
         if n > 0 {
             self.undo.push(batch);
+            self.revision += 1;
         }
         n
     }
 
     /// Bring sessions back.
     pub fn remove(&mut self, ids: &[String]) -> usize {
-        ids.iter().filter(|id| self.ids.remove(*id)).count()
+        let count = ids.iter().filter(|id| self.ids.remove(*id)).count();
+        self.revision += u64::from(count > 0);
+        count
     }
 
     /// Undo the most recent batch. Returns how many came back.
@@ -59,7 +64,7 @@ impl Archive {
         }
         let ids = self.ids.clone();
         std::thread::spawn(move || {
-            if let Ok(s) = serde_json::to_vec_pretty(&Archive { ids, undo: vec![] }) {
+            if let Ok(s) = serde_json::to_vec_pretty(&Archive { ids, ..Default::default() }) {
                 let _ = crate::util::atomic_write(&path(), &s);
             }
         });

@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en" class="sh">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f7f8fa">
+  <script>try{var t=localStorage.getItem('sh-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+  <link rel="icon" href="superhuman/mark.svg" type="image/svg+xml">
+  <link rel="preload" href="superhuman/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="superhuman/superhuman.css">
+  <script src="superhuman/shell.js" defer></script>
+  <title>T3 Code deep dive · bro</title>
+  <style>
+    .rp-page { max-width: 1080px; margin: 0 auto; padding: 40px 24px 96px; }
+    .rp-head h1 { margin: 6px 0 10px; }
+    .rp-lede { font-size: 16px; line-height: 1.6; color: var(--sh-ink-2); max-width: 760px; margin: 0; }
+    .rp-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+    .rp-toc { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 28px 0 0; padding: 14px 0; border-top: 1px solid var(--sh-line); border-bottom: 1px solid var(--sh-line); font-size: 13px; }
+    .rp-toc a { color: var(--sh-ink-2); text-decoration: none; }
+    .rp-toc a:hover { color: var(--sh-ink); }
+    .rp-section { margin-top: 56px; }
+    .rp-section > h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin: 6px 0 8px; }
+    .rp-section > p, .rp-prose p { max-width: 760px; color: var(--sh-ink-2); line-height: 1.65; margin: 0 0 12px; }
+    .rp-section h3 { font-size: 15px; font-weight: 600; margin: 32px 0 8px; }
+    .rp-prose ul { max-width: 760px; margin: 0 0 12px; padding-left: 20px; color: var(--sh-ink-2); line-height: 1.65; }
+    .rp-prose li { margin: 4px 0; }
+    .rp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin: 16px 0; }
+    .rp-card h3 { margin: 0 0 6px; font-size: 14px; }
+    .rp-card p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--sh-ink-2); }
+    .rp-table td, .rp-table th { vertical-align: top; }
+    .rp-table td { line-height: 1.55; }
+    .rp-table td:first-child { font-weight: 550; color: var(--sh-ink); width: 22%; }
+    .rp-table .rp-status { white-space: nowrap; width: 1%; }
+    .rp-table code, .rp-prose code, .rp-card code { font-family: var(--sh-mono, ui-monospace, monospace); font-size: 12px; background: var(--sh-surface-3); padding: 1px 5px; border-radius: 5px; }
+    .rp-shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin: 16px 0 8px; }
+    .rp-shot { margin: 0; }
+    .rp-shot img { display: block; width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--sh-line); box-shadow: var(--sh-shadow-sm); }
+    .rp-shot figcaption { font-size: 12.5px; color: var(--sh-muted); margin-top: 8px; line-height: 1.5; }
+    .rp-term { background: #0b0d10; color: #d7dce4; font-family: var(--sh-mono, ui-monospace, monospace); font-size: 12.5px; line-height: 1.6; padding: 16px 18px; border-radius: 12px; overflow-x: auto; margin: 12px 0 16px; white-space: pre-wrap; }
+    .rp-term .dim { color: #8b93a1; }
+    .rp-num { font-variant-numeric: tabular-nums; }
+    @media (max-width: 720px) { .rp-shots { grid-template-columns: 1fr; } .rp-table td:first-child { width: auto; } }
+  </style>
+</head>
+<body>
+<main class="rp-page">
+
+  <header class="rp-head">
+    <span class="sh-eyebrow">bro · research and changes · 10 November 2026</span>
+    <h1>T3 Code deep dive</h1>
+    <p class="rp-lede">I read T3 Code's source for how it reaches other machines, where it spends effort on speed, and the small behaviours it gets right, then checked each against bro's code. The biggest gaps were in how bro reaches a computer through your Just Superhuman account, and in something bro's own log showed that T3 Code's list did not: frames that block the app's main thread. Both are changed in bro 2.1.49.</p>
+    <div class="rp-meta">
+      <span class="sh-pill">T3 Code at commit 047d492</span>
+      <span class="sh-pill sh-pill--ok sh-pill--dot">Installed as bro 2.1.49</span>
+      <span class="sh-pill sh-pill--warn">Account server change not deployed</span>
+    </div>
+    <nav class="rp-toc" aria-label="Sections">
+      <a href="#remote">Remote computers</a>
+      <a href="#speed">Speed</a>
+      <a href="#small">Small things</a>
+      <a href="#checked">How it was checked</a>
+      <a href="#next">What's left</a>
+    </nav>
+  </header>
+
+  <!-- ───────────────────────── Remote ───────────────────────── -->
+  <section class="rp-section" id="remote">
+    <span class="sh-eyebrow">1 · Remote computers</span>
+    <h2>Everything remote goes through the account, and it now behaves like a live connection.</h2>
+    <p>T3 Code calls a machine an environment and lets a client reach it over several routes: the local network, Tailscale, an SSH tunnel it sets up itself, or T3 Connect, which is their account-based path. One supervisor per environment owns reconnecting. Our equivalent of T3 Connect is JustConnect: a computer is reachable when it is on your Just Superhuman account. I kept that as the only remote path, as you asked, and brought over what makes theirs feel solid.</p>
+
+    <h3>What bro did before, and what it does now</h3>
+    <div class="sh-table-wrap">
+      <table class="sh-table rp-table">
+        <thead><tr><th>Area</th><th>Before</th><th>Now</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Getting work to a computer</td>
+            <td>Bro on the target looked for work every 5 seconds, so a request waited 2.5 seconds on average before anything happened.</td>
+            <td>The target's request is kept open by the account server until there is work, so it starts about one round trip after it is asked. A server that doesn't hold requests yet is asked on a clock: every quarter second for 10 seconds after work arrived, easing back to 5 seconds when idle.</td>
+          </tr>
+          <tr>
+            <td>Hearing the result</td>
+            <td>The asking side checked once a second.</td>
+            <td>Its read is held until the job settles. Against an older server it checks after 80 ms, then a little less often each time, up to once a second.</td>
+          </tr>
+          <tr>
+            <td>Connections</td>
+            <td>Every request opened a new encrypted connection: a fresh handshake for the submit, each check and each poll.</td>
+            <td>One shared connection pool for the whole app, so a job's submit, result and the next poll reuse the same session. The same pool carries everything that goes through bro's shared HTTP helpers (sign-in, the account, usage lookups, downloads). Remote desktop set-up, voice, <code>browse.rs</code> and the sound-pack registry still build their own client.</td>
+          </tr>
+          <tr>
+            <td>More than one thing at once</td>
+            <td>One job at a time. Listing sessions waited behind a slow start, such as opening a session that first installs its agent.</td>
+            <td>Up to four at once. Lists and reads run side by side. Typing into a session, pressing keys, answering a prompt and closing it still run in the order asked, one at a time per session.</td>
+          </tr>
+          <tr>
+            <td>When the account server is down</td>
+            <td>Tried again every 5 seconds, forever, at the same instant as every other computer.</td>
+            <td>Waits 1 second, then 2, 4, up to a minute, with half of each wait random so an account's computers don't all return together.</td>
+          </tr>
+          <tr>
+            <td>A lost answer</td>
+            <td>A submit whose answer was lost failed. Running it again made a second job.</td>
+            <td>Repeated up to four times with the same request ID, which the server answers with the job it already made. The work runs once.</td>
+          </tr>
+          <tr>
+            <td>Turning access off</td>
+            <td>Noticed at the next poll.</td>
+            <td>A request the server is holding is hung up within 2 seconds, so no work is handed to a computer that won't run it.</td>
+          </tr>
+          <tr>
+            <td>Why it failed</td>
+            <td>The server's sentence, or a dump of the job as JSON.</td>
+            <td>The first link that failed, named, with what fixes it. Details below.</td>
+          </tr>
+          <tr>
+            <td>In the app</td>
+            <td>A switch in Settings. Everything else was the command line.</td>
+            <td>A Computers view, and a line under the switch saying where this computer's own connection stands.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>The Computers view</h3>
+    <p>Open the palette and search “computers”. The list shows every computer on the account with a dot for whether it can run sessions right now. Picking one shows either its sessions or the reason it can't be reached.</p>
+    <div class="rp-shots">
+      <figure class="rp-shot"><img src="img/computers-sessions.png" alt="The Computers view with a laptop picked, showing three sessions: one waiting on an answer, one working, one finished" loading="lazy"><figcaption>A computer that is ready: its sessions, the one waiting on someone first, and how long a request there and back took.</figcaption></figure>
+      <figure class="rp-shot"><img src="img/computers-closed.png" alt="The Computers view with a build machine picked, showing four checks, three passed and Bro there failed, and three steps to fix it" loading="lazy"><figcaption>A computer whose Bro is closed: three links answer, the fourth doesn't, and the steps say what to do. Only the actions that can work are offered.</figcaption></figure>
+      <figure class="rp-shot"><img src="img/computers-unreachable.png" alt="The Computers view with a notice that this computer couldn't reach Just Superhuman above the list from three minutes ago" loading="lazy"><figcaption>The account can't be reached: a notice says so, and the list from three minutes ago stays. T3 Code keeps “is the connection up” and “how old is this data” as separate facts; so does this.</figcaption></figure>
+      <figure class="rp-shot"><img src="img/computers-signed-out.png" alt="The Computers view signed out, with one card explaining what it is for and a button to sign in" loading="lazy"><figcaption>Signed out: what the view is for and the one thing to do next. No disabled controls.</figcaption></figure>
+    </div>
+
+    <h3>Failures are explained link by link</h3>
+    <p>This is T3 Code's best idea in this area. A request crosses four links in order: this computer, Just Superhuman, the other computer, and Bro running there. The diagnosis names the first one that fails and leaves the later ones unjudged, because nothing is known about them. The same diagnosis is used by the view, <code>bro computers</code>, and a remote <code>bro ctl</code>.</p>
+<div class="rp-term"><span class="dim">$ bro computers doctor c3e5a7b9-…</span>
+Bro is closed on Build box.
+
+  ✓ This computer    signed in and online
+  ✓ Just Superhuman  answering
+  ✓ Build box        on your account, access on
+  ✗ Bro there        closed · last open 2 hr ago
+
+What to do
+  1. Open Bro on Build box. Sessions run inside it, so it has to be running to start or follow one.
+  2. Can't get to it? Open its desktop from here: its screen comes up in your browser, and you can start Bro there.
+  3. To keep it reachable with its window closed, turn on "Keep working while bro is closed" under Settings, Session server, on that computer.
+
+From a terminal here
+  bro computers desktop c3e5a7b9-…</div>
+    <div class="rp-prose">
+      <p>When every link answers, <code>doctor</code> sends one small request and reports how long it took there and back. Work that didn't finish now says what became of it: the tool's own reason when it ran and failed, “never delivered” when Bro there didn't pick it up, and a warning to check before repeating when it was handed over and no result came back.</p>
+    </div>
+
+    <h3>One thing needs you: deploying the account server change</h3>
+    <div class="sh-alert sh-alert--warn"><div>The held requests are written and tested in <code>F:\JustSuperHuman\JustSuperServer\src\justconnect.js</code> but not deployed. I did not push to production. Until it is deployed, bro uses the clock described above and everything else in the table still applies.</div></div>
+    <div class="rp-prose">
+      <p>The change is backwards compatible in both directions. An older Bro never asks to wait, so nothing changes for it. A newer Bro against the current server sees an immediate answer and falls back by itself.</p>
+      <ul>
+        <li><strong>A cap, because of how Fly counts.</strong> <code>fly.toml</code> limits the Machine by open requests (soft limit 200), and a held request is an open request. At most 64 are held at once; past that, requests are answered straight away. <code>JUSTCONNECT_HELD_MAX</code> changes the cap and 0 turns holding off.</li>
+        <li><strong>Checked again after the wait.</strong> A poll that was waiting when access was turned off is refused, not handed work. A worker that hung up is handed nothing.</li>
+        <li><strong>The web console can use it too.</strong> It polls a job every 700 ms today; adding <code>?wait=20</code> to that read would make it instant. I left the console alone.</li>
+      </ul>
+    </div>
+
+    <h3>What T3 Code does that I did not copy</h3>
+    <div class="sh-table-wrap">
+      <table class="sh-table rp-table">
+        <thead><tr><th>T3 Code</th><th>Why not here</th></tr></thead>
+        <tbody>
+          <tr><td>SSH and Tailscale routes</td><td>You asked for the account connection only. Their SSH path installs a server on the remote machine through a piped shell script; ours installs through the account's management service.</td></tr>
+          <tr><td>A live socket to the remote machine</td><td>Their client streams a remote session's output over a WebSocket. Ours reads it through jobs, which is enough to list and follow sessions but not to show a live terminal. Doing it properly means a relay in the account server. It is the largest item in “What's left”.</td></tr>
+          <tr><td>Pairing secret in the URL fragment</td><td>T3 Code puts the pairing token after <code>#</code> so it never reaches a server log. bro's pairing URL carries it as <code>?token=</code>. Changing that needs the phone app and the web client to change in step, so I've listed it and not touched it.</td></tr>
+          <tr><td>Short-lived socket tickets, per-call permission scopes</td><td>Real hardening, and a design decision about the phone bridge that deserves its own pass.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── Speed ───────────────────────── -->
+  <section class="rp-section" id="speed">
+    <span class="sh-eyebrow">2 · Speed</span>
+    <h2>The slowest thing in bro today is not on T3 Code's list. It is in bro's own log.</h2>
+    <p>Before copying techniques I read <code>~/.bro/v2-perf.log</code>, where bro writes down every pass of its main loop that takes over 50 ms. Between 9:11 pm on 9 November and 11:40 am on 10 November it recorded <span class="rp-num">2,405</span> slow passes.</p>
+    <div class="sh-table-wrap">
+      <table class="sh-table rp-table">
+        <thead><tr><th>Where the time went</th><th class="num">Passes</th><th class="num">Typical</th><th class="num">9 in 10 under</th><th class="num">Worst</th></tr></thead>
+        <tbody>
+          <tr><td>Handing the frame to the GPU</td><td class="num">1,844</td><td class="num">67 ms</td><td class="num">115 ms</td><td class="num">9,338 ms</td></tr>
+          <tr><td>Laying the frame out</td><td class="num">366</td><td class="num">69 ms</td><td class="num">134 ms</td><td class="num">1,624 ms</td></tr>
+          <tr><td>Not attributed to any step</td><td class="num">188</td><td class="num">64 ms</td><td class="num">182 ms</td><td class="num">9,895 ms</td></tr>
+          <tr><td>Housekeeping between events</td><td class="num">5</td><td class="num">67 ms</td><td class="num">119 ms</td><td class="num">119 ms</td></tr>
+          <tr><td>Handling an event</td><td class="num">2</td><td class="num">211 ms</td><td class="num">211 ms</td><td class="num">211 ms</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="rp-prose">
+      <p>Three quarters of the slow passes are the app waiting on the graphics system, and several of those waits ran for seconds: 9.3, 6.8, 5.6, 4.9. That wait happens on the thread that also takes keys and the phone's input. A session's output reaches the phone from its own thread, so a watching phone keeps updating, but anything the phone sends waits until the frame lets go.</p>
+    </div>
+
+    <h3>What I measured</h3>
+    <p>I split the GPU's part of a frame into its three steps and ran the demo window for 40 seconds with every frame logged, once in today's mode and once in the mode that never waits for the display's refresh.</p>
+    <div class="sh-table-wrap">
+      <table class="sh-table rp-table">
+        <thead><tr><th>Mode</th><th class="num">Frames</th><th class="num">Typical</th><th class="num">99 in 100 under</th><th class="num">Worst</th><th>Where the worst one stalled</th></tr></thead>
+        <tbody>
+          <tr><td>fifo (today)</td><td class="num">1,522</td><td class="num">1.2 ms</td><td class="num">4.3 ms</td><td class="num">55.0 ms</td><td>Getting the next image to draw on: 53.2 ms</td></tr>
+          <tr><td>mailbox</td><td class="num">1,506</td><td class="num">1.1 ms</td><td class="num">4.1 ms</td><td class="num">71.8 ms</td><td>Handing the finished frame over: 70.6 ms</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="rp-prose">
+      <p>Switching modes does not remove the stall. It moves it from one step to the other, and in the second run it came back about every two seconds. So the cause is outside bro's choice of mode, and I left the mode alone. I don't know yet what the cause is. My guess is that something else on this machine uses the display on that rhythm.</p>
+      <p>One limit on this comparison: both runs were bro's demo, which drew on the RTX 4090 through Vulkan. Your own window uses Acrylic, so it draws through DX12, and the comparison has not been repeated there. Its log gives a first reading, taken at 14:47 on 10 November: in the first 40 minutes on 2.1.49, 66 of 77 waits on graphics were in the hand-over step, and the longest was 97 ms. That is too little to settle it.</p>
+    </div>
+
+    <h3>What changed</h3>
+    <div class="rp-grid">
+      <section class="sh-card sh-card-pad rp-card"><h3>A blocked frame no longer repeats itself</h3><p>After a frame that blocks the loop for 400 ms or more, bro draws nothing for four times as long as it took, longer for each one in a row, at most 30 seconds. The loop stays free for keys and the phone. Any key, click or pointer move ends the hold at once. The log notes each hold.</p></section>
+      <section class="sh-card sh-card-pad rp-card"><h3>The log now says which step stalled</h3><p>Each slow pass ends with <code>(acquire … · draw … · present …)</code>. The next time the log fills up it will show whether the seconds-long stalls are waiting for an image or handing one over, which narrows the cause.</p></section>
+      <section class="sh-card sh-card-pad rp-card"><h3>Two switches for measuring</h3><p><code>BRO_PERF_SLOW_MS=0</code> writes every pass down. <code>BRO_GPU_PRESENT=mailbox</code>, <code>immediate</code> or <code>fifo</code> picks the mode, to compare them on another machine.</p></section>
+    </div>
+
+    <h3>T3 Code's techniques, checked against bro</h3>
+    <p>“Has it” means I read the bro code that does it. “Not checked” means I did not get to it, so it is neither a gap nor a pass.</p>
+    <div class="sh-table-wrap">
+      <table class="sh-table rp-table">
+        <thead><tr><th>Technique</th><th>T3 Code</th><th>bro</th><th class="rp-status">Status</th></tr></thead>
+        <tbody>
+          <tr><td>Reuse connections</td><td>One socket per environment.</td><td>A new HTTP client per call. One pool now carries the account path and bro's shared HTTP helpers; remote desktop set-up, voice and two smaller callers still build their own.</td><td class="rp-status"><span class="sh-pill sh-pill--ok">Mostly fixed</span></td></tr>
+          <tr><td>Notice clients that vanish</td><td>Pings every 5 s; 15 s of silence drops the socket.</td><td>A phone that left without closing stayed counted as a viewer until the system gave up on it, which with nothing being sent could be never.</td><td class="rp-status"><span class="sh-pill sh-pill--ok">Fixed</span></td></tr>
+          <tr><td>Attach with a snapshot, then live output</td><td>Subscribe, send a snapshot, replay only what is newer.</td><td>The same, by sequence number. The snapshot is rebuilt from the screen model, so old terminal queries are never replayed.</td><td class="rp-status"><span class="sh-pill">Has it</span></td></tr>
+          <tr><td>A client that falls behind</td><td>An 8 MiB queue per subscriber; overflow drops the backlog and sends a new snapshot.</td><td>A 4,096-event channel; falling behind sends the session list and a new snapshot of each watched screen.</td><td class="rp-status"><span class="sh-pill">Has it</span></td></tr>
+          <tr><td>Don't stream what isn't watched</td><td>One subscription per viewed thread.</td><td>Output goes only to clients watching that session. The rest get a small “something happened” note twice a second.</td><td class="rp-status"><span class="sh-pill">Has it</span></td></tr>
+          <tr><td>Draw less for what isn't in focus</td><td>Hidden terminals don't render.</td><td>The focused session draws at once; others on screen at most every 33 ms; off-screen ones every 250 ms. The focused session's reader thread runs at higher priority.</td><td class="rp-status"><span class="sh-pill">Has it</span></td></tr>
+          <tr><td>Cheap git lookups</td><td>Caches with expiry, and failure back-off.</td><td>The branch is read from <code>.git/HEAD</code> directly, no process started. Project roots are cached.</td><td class="rp-status"><span class="sh-pill">Has it</span></td></tr>
+          <tr><td>Compress the socket</td><td>Per-message compression on every frame.</td><td>Ordinary HTTP answers are gzipped; the socket that carries terminal output is not. Terminal output compresses well, so this matters on a phone connection.</td><td class="rp-status"><span class="sh-pill sh-pill--warn">Gap</span></td></tr>
+          <tr><td>Split large frames</td><td>Messages over 48 KiB go in parts so a slow link doesn't trip the liveness timer.</td><td>A snapshot with 1,000 rows of history goes as one message.</td><td class="rp-status"><span class="sh-pill sh-pill--warn">Gap</span></td></tr>
+          <tr><td>Flow control on terminal streams</td><td>At most 8 chunks or 64 KiB in flight until the client acknowledges.</td><td>None; relies on the catch-up snapshot above.</td><td class="rp-status"><span class="sh-pill sh-pill--warn">Gap</span></td></tr>
+          <tr><td>Delay the PTY resize while dragging</td><td>150 ms, flushed on release.</td><td></td><td class="rp-status"><span class="sh-pill">Not checked</span></td></tr>
+          <tr><td>Streaming replies redraw only the last block</td><td>Splits the text at closed blocks and re-renders only the open one.</td><td>366 slow passes were layout, up to 1.6 s, so this is worth checking in the conversation view.</td><td class="rp-status"><span class="sh-pill">Not checked</span></td></tr>
+          <tr><td>Background work only while someone is watching</td><td>Clients report visibility; the server pauses polling for scopes nobody has open.</td><td>The new view follows this: it refreshes while open and less often without the keyboard.</td><td class="rp-status"><span class="sh-pill">Not checked elsewhere</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── Small things ───────────────────────── -->
+  <section class="rp-section" id="small">
+    <span class="sh-eyebrow">3 · Small things</span>
+    <h2>Two fixed, the rest listed with what I know.</h2>
+    <div class="rp-grid">
+      <section class="sh-card sh-card-pad rp-card"><h3>A settings file bro can't read is no longer lost</h3><p>A stray character in <code>v2.toml</code> made bro start on its defaults without saying so, and the next setting you changed wrote those defaults over your file. Now bro says the file couldn't be read and why, and the first change keeps your file beside the new one as <code>v2.toml.unreadable-&lt;when&gt;</code>. T3 Code's rule is that setup never overwrites settings it couldn't read.</p></section>
+      <section class="sh-card sh-card-pad rp-card"><h3>Phones that left stop counting</h3><p>The bridge pings each connection every 30 seconds, gives up on a send that takes over 30 seconds, and closes a connection that answers nothing for 10 minutes. The limit is long on purpose: a phone back within minutes resumes on the connection it had, which is the fast path you already built.</p></section>
+    </div>
+
+    <h3>Worth doing next, in the order I'd do them</h3>
+    <div class="sh-table-wrap">
+      <table class="sh-table rp-table">
+        <thead><tr><th>T3 Code does this</th><th>What it is</th><th class="rp-status">In bro</th></tr></thead>
+        <tbody>
+          <tr><td>Undo for sidebar actions</td><td>Archive, pin, snooze and discard each show a 5-second Undo, and the shortcut works even from the reply box until you type.</td><td class="rp-status"><span class="sh-pill">Not checked</span></td></tr>
+          <tr><td>Toasts wait for you</td><td>A toast's timer only runs while the window is visible and focused, so one that appeared while you were away is still there when you return.</td><td class="rp-status"><span class="sh-pill">Not checked</span></td></tr>
+          <tr><td>Don't announce what you stopped</td><td>A run you interrupted yourself never produces a “finished” notification. Neither does the first sighting of a session.</td><td class="rp-status"><span class="sh-pill">Not checked</span></td></tr>
+          <tr><td>Lists hold still while open</td><td>A picker freezes its order while it is open, so a row doesn't move under the pointer.</td><td class="rp-status"><span class="sh-pill">Not checked</span></td></tr>
+          <tr><td>Big pastes become attachments</td><td>32 KiB or more is attached as a file, with a modified paste to keep it inline.</td><td class="rp-status"><span class="sh-pill">Not checked</span></td></tr>
+          <tr><td>Prompt stash</td><td>One key saves the half-written prompt and its attachments; the same key on an empty box brings it back.</td><td class="rp-status"><span class="sh-pill">Not checked</span></td></tr>
+          <tr><td>Wait before saying “disconnected”</td><td>A status is shown only after 400 ms and then kept for 400 ms, so brief blips never flicker.</td><td class="rp-status"><span class="sh-pill sh-pill--ok">In the new view</span></td></tr>
+          <tr><td>Say when the other machine is behind</td><td>“X runs an older version” with an update action.</td><td class="rp-status"><span class="sh-pill sh-pill--ok">In the new view</span></td></tr>
+          <tr><td>Tell the user why the host dropped</td><td>The server reports its last freeze on connect, so the client can say “froze for 12 s”.</td><td class="rp-status"><span class="sh-pill sh-pill--warn">Gap</span></td></tr>
+          <tr><td>Restart loop guard</td><td>A recovery page that won't offer a version that already failed to start.</td><td class="rp-status"><span class="sh-pill">Not checked</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── Checked ───────────────────────── -->
+  <section class="rp-section" id="checked">
+    <span class="sh-eyebrow">4 · How it was checked</span>
+    <h2>Tests, a stand-in server, and the real window. Not two real computers.</h2>
+    <div class="sh-table-wrap">
+      <table class="sh-table rp-table">
+        <thead><tr><th>What</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>bro-core</td><td>493 passed, 27 skipped (network). New: the link-by-link diagnosis, and the settings safeguard.</td></tr>
+          <tr><td>bro-bridge</td><td>249 passed, 9 skipped. New: the worker run end to end against a stand-in account server in both modes, per-session ordering, and a silent client being dropped while one that answers stays.</td></tr>
+          <tr><td>Desktop app</td><td>704 passed, 2 failed. Both failures come from another session's uncommitted edits in this working tree, not from this work: a demo shortcut in <code>views/stats.rs</code> skips the scan that <code>usage_info_icon_opens_token_stats_in_two_tabs</code> waits for, and <code>panes/auto_resume.rs</code> has an in-progress change.</td></tr>
+          <tr><td>Account server</td><td>22 passed across the JustConnect and sign-up tests. Three are new: a waiting worker woken by new work and a waiting reader hearing the result, a worker that hung up being handed nothing, and access turned off ending both kinds of wait.</td></tr>
+          <tr><td>The installed build</td><td><code>bro computers list</code> and <code>bro computers doctor</code> run against the live account from the 2.1.49 binary. <code>doctor</code> on an ID that isn't on the account answered “That computer isn't on your account” with the first two links passed and the third failed, from the server's real refusal.</td></tr>
+          <tr><td>The window</td><td>The Computers view in dark and light, with a ready computer, a closed Bro, access off, an unreachable account, signed out and empty. Two 40-second measured runs for the frame timings.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="sh-alert" style="margin-top:16px"><div>Not tested with two real computers. This account has no computers on it yet, and adding one installs a system service with administrator permission, which I didn't do without you. The worker, the server and the view were each tested, and the worker against a stand-in for the server, but nobody has yet watched a real job cross from one machine to another on this build.</div></div>
+  </section>
+
+  <!-- ───────────────────────── Next ───────────────────────── -->
+  <section class="rp-section" id="next">
+    <span class="sh-eyebrow">5 · What's left</span>
+    <h2>In the order I'd take them.</h2>
+    <div class="sh-table-wrap">
+      <table class="sh-table rp-table">
+        <thead><tr><th>Next</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>Deploy the account server change</td><td>It turns “within a few seconds” into “at once” for every computer. Run <code>node --test test/justconnect.test.js</code> in JustSuperServer first.</td></tr>
+          <tr><td>Try it between two real computers</td><td><code>bro computers enable</code> on a second machine, then <code>bro computers doctor &lt;id&gt;</code> from this one prints the real round-trip time.</td></tr>
+          <tr><td>Read the log again in a day</td><td>The new step names will show whether the seconds-long stalls are in getting an image or handing one over, and whether the hold is catching them.</td></tr>
+          <tr><td>Open and reply to a remote session from the view</td><td>The view lists a remote computer's sessions but can't start one or type into one yet. The tools exist (<code>open_session</code>, <code>send_input</code>); the view needs a composer.</td></tr>
+          <tr><td>A relay for live remote terminals</td><td>The one place T3 Code is ahead in kind, not degree. The account server would pass a WebSocket between the viewer and the computer's Bro.</td></tr>
+          <tr><td>Compress the phone's socket, and split large snapshots</td><td>The two transport gaps above. Both matter most on a weak phone connection.</td></tr>
+          <tr><td>Move the pairing token to the URL fragment</td><td>Needs the phone app, the web client and the bridge to change together.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Where the changes are</h3>
+    <div class="sh-table-wrap">
+      <table class="sh-table rp-table">
+        <thead><tr><th>File</th><th>What</th></tr></thead>
+        <tbody>
+          <tr><td><code>bro-core/src/http.rs</code></td><td>The shared connection pool.</td></tr>
+          <tr><td><code>bro-core/src/justconnect.rs</code></td><td>Held calls, retry pacing, repeat-safe submits, typed refusals.</td></tr>
+          <tr><td><code>bro-core/src/justconnect/health.rs</code></td><td>The link-by-link diagnosis and its wording.</td></tr>
+          <tr><td><code>bro-bridge/src/justconnect.rs</code></td><td>The worker: held polls, parallel reads, per-session order, connection status.</td></tr>
+          <tr><td><code>bro-bridge/src/ws.rs</code></td><td>Pings, the send limit and the silence limit for phone and web clients.</td></tr>
+          <tr><td><code>bro-tui/src/services/computers.rs</code>, <code>views/computers.rs</code>, <code>views/computers/gui.rs</code></td><td>The Computers view, in the terminal UI and the desktop app.</td></tr>
+          <tr><td><code>bro-tui/src/computers_cmd.rs</code></td><td><code>bro computers doctor</code>, clearer status and failures.</td></tr>
+          <tr><td><code>bro-tui/src/app/gui/redraw.rs</code>, <code>mod.rs</code>, <code>perf.rs</code>, <code>bro-gfx/src/renderer.rs</code></td><td>The hold after a blocked frame, the step timings, the two measuring switches.</td></tr>
+          <tr><td><code>bro-core/src/config.rs</code></td><td>The settings safeguard.</td></tr>
+          <tr><td><code>JustSuperServer/src/justconnect.js</code>, <code>config.js</code>, tests and docs</td><td>Held requests on the account server. Not deployed.</td></tr>
+          <tr><td><code>docs/justconnect.md</code> here and in the Tactical RMM repository</td><td>The view, <code>doctor</code>, how work is delivered, and the <code>wait</code> parameter.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+</body>
+</html>

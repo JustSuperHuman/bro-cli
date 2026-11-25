@@ -79,6 +79,7 @@ pub struct FileCache {
 /// A locked view for one render: answer lookups, then [`Lookup::finish`] starts a worker for what's unknown.
 pub struct Lookup<'a> {
     cache: &'a FileCache,
+    pub(crate) expires: Option<Instant>,
     shared: parking_lot::MutexGuard<'a, Shared>,
 }
 
@@ -92,7 +93,7 @@ impl FileCache {
     }
 
     pub fn lookup(&self) -> Lookup<'_> {
-        Lookup { cache: self, shared: self.shared.lock() }
+        Lookup { cache: self, shared: self.shared.lock(), expires: None }
     }
 
     /// Paths are waiting to be checked, or a worker is checking them (the desktop app looks again after).
@@ -174,6 +175,9 @@ impl Lookup<'_> {
         if !e.queued && e.checked.is_none_or(|at| at.elapsed() >= ttl) {
             e.queued = true;
             s.queue.push(m.path.clone());
+        } else if !e.queued && let Some(checked) = e.checked {
+            let at = checked + ttl;
+            self.expires = Some(self.expires.map_or(at, |prior| prior.min(at)));
         }
         let file = e.file.as_deref()?;
         super::links::file_uri(file, m.line, m.column).map(Arc::from)

@@ -102,10 +102,6 @@ impl Pages {
         Ok(show)
     }
 
-    /// Native placement/visibility errors are not yet an enforceable exclusion contract.
-    pub fn stage_obscured(&self) -> bool {
-        self.view.as_ref().is_some_and(|v| v.shown())
-    }
 
     /// A page said its document is ready: true when it's the one asked for (it can show now).
     pub fn ready(&mut self, url: &str) -> bool {
@@ -154,7 +150,7 @@ impl Pages {
 
     /// When the loop has to come back for the view: a page due to show anyway, or an idle one due to go.
     pub fn next_wake(&self) -> Option<Instant> {
-        self.view.as_ref().and_then(imp::View::waiting_until).or(self.hidden_at.map(|t| t + IDLE))
+        self.hidden_at.map(|t| t + IDLE).or_else(|| self.view.as_ref().filter(|v| !v.shown()).and_then(imp::View::waiting_until))
     }
 }
 

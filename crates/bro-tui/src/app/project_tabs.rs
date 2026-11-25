@@ -1,13 +1,16 @@
-//! The project tabs (a setting): a strip across the top of the sessions, beside the sidebar rather than in it.
-//! All tiles every session the way the tile-all shortcut does; the orchestrator, when one runs, has its own ★ tab;
-//! each project with running sessions has a tab in its own color that tiles just that project's sessions.
+//! The session tabs: a strip across the top of the sessions, one tab per session in what the sidebar picked (its
+//! scope: one project, or the orchestrators). It opens with that project's name (and in the window its icon),
+//! then its All tab, which tiles every session in it the way the tile-all shortcut does; a session's tab shows
+//! that session on its own. Every session (the sidebar's All sessions) is their grid, with no strip: going to one
+//! of them on its own lists its project's. The scope is the one you picked until you go to a session outside it
+//! (a key, an ask in the sidebar), which brings its own project.
 //!
-//! A tab's first glyph is its color and what its agents are doing (◐ working, ○ idle); after the name come its
-//! session count and what wants you, each its own shape (● waiting on you, ✓ finished unseen). A tab is never
-//! narrower than [`TAB_MIN`] nor its name cut below [`MIN_NAME`]: names shorten first, then the tabs that still
-//! don't fit scroll (arrows at either end page through them, the wheel too) or, with the stack setting, wrap onto
-//! more rows. The strip's right end holds the minimized sessions' switch and +, a new session. A tab under the
-//! mouse shows a × that closes its project (after a confirm).
+//! A tab's first glyph is what its agent is doing (◐ working, ○ idle) in its project's colour; after the name, what
+//! wants you, each its own shape (● waiting on you, ✓ finished unseen). A tab is never narrower than [`TAB_MIN`]
+//! nor its name cut below [`MIN_NAME`]: names shorten first, then the tabs that still don't fit scroll (arrows at
+//! either end page through them, the wheel too) or, with the stack setting, wrap onto more rows. The strip's right
+//! end holds the minimized sessions' switch and +, a new session. A tab under the mouse shows a × that closes its
+//! session (asking first while its agent works).
 
 use super::{App, SideHit};
 use crate::alerts::Kind;
@@ -23,37 +26,64 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::Span,
 };
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// A project's name never shrinks below this many columns to make room for the others…
+/// A session's name never shrinks below this many columns to make room for the others…
 const MIN_NAME: usize = 10;
 /// …nor takes more than this many, so one long name can't push the others (or the showing tab) off.
 const MAX_NAME: usize = 24;
-/// A project tab's least width, so a short name still makes a tab you can hit.
-const TAB_MIN: u16 = 16;
+/// A session tab's least width, so a short name still makes a tab you can hit.
+const TAB_MIN: u16 = 14;
 /// Room an arrow ("◂2", "3▸") or a "+N" fold takes.
 const MORE_W: u16 = 6;
+/// The most of the strip the project's name, its heading, takes.
+const HEAD_NAME: usize = 20;
 /// A trackpad's burst of wheel events switches one tab.
 const WHEEL_GAP: Duration = Duration::from_millis(150);
 
-/// A tab.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// What the sidebar picks and the strip lists the sessions of: every session, the orchestrators, or one project.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum StripTab {
-    /// every session tiled
+    /// every session
+    #[default]
     All,
     /// Every project orchestrator and the root Orchestrator.
     Orchestrator,
-    /// one project's sessions tiled (its key)
+    /// one project's sessions (its key)
     Project(String),
+}
+
+impl StripTab {
+    /// The key the grid of this scope tiles by (see [`App::tile_ids`]).
+    pub(crate) fn tile_key(&self) -> Option<&str> {
+        match self {
+            StripTab::All => None,
+            StripTab::Orchestrator => Some(crate::panes::term::ORCHESTRATOR_KEY),
+            StripTab::Project(key) => Some(key),
+        }
+    }
+}
+
+/// A tab on the strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SessionTab {
+    /// the scope's All: every session in it tiled
+    Grid,
+    /// one session, on its own
+    Session(PaneId),
 }
 
 /// Something to click on the strip.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum StripHit {
-    Tab(StripTab),
-    /// a project tab's × (its key): close the project, after a confirm
-    Close(String),
-    /// a "+N" fold: every tab in the palette
+    /// the scope's All tab
+    Grid,
+    /// a session's tab
+    Session(PaneId),
+    /// a session tab's × (or a middle click on it): close the session, asking first while its agent works
+    Close(PaneId),
+    /// a "+N" fold: every session in the palette
     More,
     /// an arrow at an end of the strip: scroll the tabs on (true) or back
     Scroll(bool),
@@ -63,7 +93,28 @@ pub(crate) enum StripHit {
     New,
 }
 
-/// The project tabs' sideways scroll, once they're more than fit (and the setting scrolls them), in the drawing's
+/// One session's tab, as both drawings read it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SessionTabInfo {
+    pub id: PaneId,
+    /// what to call it: your name, the agent's title, else its login · model
+    pub label: String,
+    pub project_key: String,
+    pub project_name: String,
+    pub project_root: PathBuf,
+    /// bro's orchestrator over every project (it has no project of its own)
+    pub global: bool,
+    /// its agent (or its subagents, its background tasks) at work
+    pub working: bool,
+    /// it waits on you: a permission to give, a question its turn ended on
+    pub asks: bool,
+    /// it finished while you weren't looking
+    pub done: bool,
+    /// kept out of the grid
+    pub minimized: bool,
+}
+
+/// The session tabs' sideways scroll, once they're more than fit (and the setting scrolls them), in the drawing's
 /// own units: tabs in the terminal (the first one shown), logical pixels in the window.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct StripScroll {
@@ -76,7 +127,7 @@ pub(crate) struct StripScroll {
     /// where each tab starts and ends along them, so an arrow pages to whole tabs
     pub spans: Vec<(f32, f32)>,
     /// the tab last brought into view: when the one showing (or the keys' pick) changes, the new one is
-    pub revealed: Option<StripTab>,
+    pub revealed: Option<SessionTab>,
 }
 
 impl StripScroll {
@@ -114,7 +165,7 @@ impl StripScroll {
     }
 }
 
-/// Stack tabs `widths` wide into rows, `gap` apart: the first row `first_room` wide (it follows All and ★), the rest
+/// Stack tabs `widths` wide into rows, `gap` apart: the first row `first_room` wide (it follows All), the rest
 /// `room`, at most `max_rows` of them. Each tab that fits: its row and its x from that row's start. When some don't,
 /// the last row keeps `fold` free at its end for the "+N" they fold into. A tab wider than a whole row still gets
 /// one (cut at its end).
@@ -148,9 +199,10 @@ pub(crate) fn stack_rows(widths: &[f32], first_room: f32, room: f32, gap: f32, m
 }
 
 impl App {
-    /// The setting is on and something is open.
+    /// Something is open and the tabs list a project's sessions or the orchestrators: the strip shows. Every
+    /// session (their grid) has none: the sidebar's All sessions is all the heading it needs.
     pub(super) fn strip_on(&self) -> bool {
-        !self.tabs.is_empty() && self.svc.settings().project_tabs
+        !self.tabs.is_empty() && self.scope != StripTab::All
     }
 
     /// Projects with running sessions, in sidebar order, with the order and names the phone / web gave them.
@@ -169,8 +221,8 @@ impl App {
         tabs
     }
 
-    /// Every tab, left to right.
-    pub(crate) fn strip_items(&self, tabs: &[ProjectTab]) -> Vec<StripTab> {
+    /// Every scope the keys step through, in order: All, the orchestrators while one runs, then each project.
+    pub(crate) fn scope_items(&self, tabs: &[ProjectTab]) -> Vec<StripTab> {
         let mut v = vec![StripTab::All];
         if !self.orchestrator_panes().is_empty() {
             v.push(StripTab::Orchestrator);
@@ -179,7 +231,47 @@ impl App {
         v
     }
 
-    /// The tab that matches what's on screen: the grid you tiled, the orchestrator alone, or a project whose
+    /// The sessions in the scope, in sidebar order (minimized ones too: they're still yours to go to).
+    pub(crate) fn session_tabs(&self) -> Vec<SessionTabInfo> {
+        let live = self.live_infos();
+        let order = crate::sidebar::live_order(&live, &[], &self.open_infos());
+        order
+            .into_iter()
+            .filter_map(|id| {
+                let l = live.iter().find(|l| l.pane == id)?;
+                let inside = match &self.scope {
+                    StripTab::All => true,
+                    StripTab::Orchestrator => l.orchestrator,
+                    StripTab::Project(key) => l.project_key == *key,
+                };
+                let asks = crate::sidebar::needs_you(l);
+                inside.then(|| SessionTabInfo {
+                    id,
+                    label: crate::sidebar::session_label(l),
+                    project_key: l.project_key.clone(),
+                    project_name: l.project_name.clone(),
+                    project_root: l.project_root.clone(),
+                    global: l.orchestrator && l.project_key == crate::panes::term::ORCHESTRATOR_KEY,
+                    working: !asks && (l.activity == Some(Activity::Working) || l.background.0 + l.background.1 > 0),
+                    asks,
+                    done: l.done && !asks,
+                    minimized: self.minimized.contains(&id),
+                })
+            })
+            .collect()
+    }
+
+    /// Every tab on the strip, left to right: All (once there are two sessions to tile), then each session.
+    pub(crate) fn strip_items(&self, tabs: &[SessionTabInfo]) -> Vec<SessionTab> {
+        let mut v = Vec::with_capacity(tabs.len() + 1);
+        if tabs.len() >= 2 {
+            v.push(SessionTab::Grid);
+        }
+        v.extend(tabs.iter().map(|t| SessionTab::Session(t.id)));
+        v
+    }
+
+    /// The scope that matches what's on screen: the grid you tiled, the orchestrator alone, or a project whose
     /// every session is on screen and nothing else. None for anything else (a mix you stacked, a view).
     pub(crate) fn showing_tab(&self) -> Option<StripTab> {
         if self.tile_all {
@@ -203,20 +295,94 @@ impl App {
         (only_it && all_of_it).then_some(StripTab::Project(key))
     }
 
-    /// Show `tab` (nothing changes when it's showing already).
+    /// The strip's tab that's on screen: All while the scope's grid shows, else the focused session's.
+    pub(crate) fn showing_session(&self) -> Option<SessionTab> {
+        if self.tile_all && !self.stack_zoom && self.stack.len() >= 2 {
+            return Some(SessionTab::Grid);
+        }
+        let id = self.focused()?;
+        self.panes.get(&id).is_some_and(|p| p.is_terminal()).then_some(SessionTab::Session(id))
+    }
+
+    /// The scope a session belongs to on its own: its project, or the orchestrators for the one over them all.
+    fn own_scope(&self, id: PaneId) -> Option<StripTab> {
+        let t = self.panes.get(&id)?.as_term_ref()?;
+        Some(if t.meta.project.key == crate::panes::term::ORCHESTRATOR_KEY { StripTab::Orchestrator } else { StripTab::Project(t.meta.project.key.clone()) })
+    }
+
+    /// The session is one the scope lists.
+    fn in_scope(&self, id: PaneId, scope: &StripTab) -> bool {
+        let Some(t) = self.panes.get(&id).and_then(|p| p.as_term_ref()) else { return false };
+        match scope {
+            StripTab::All => true,
+            StripTab::Orchestrator => t.meta.orchestrator,
+            StripTab::Project(key) => t.meta.project.key == *key,
+        }
+    }
+
+    /// Keep the strip's scope with what you look at: a grid is its own scope (every session's only while their grid
+    /// shows); a session on its own, or one outside the scope (you went to it with a key, from an ask, from the
+    /// phone), brings its project; on a view, a scope with nothing left gives way to the project you're in.
+    pub(crate) fn follow_scope(&mut self) {
+        if self.tile_all {
+            self.scope = match self.tile_project.as_deref() {
+                Some(crate::panes::term::ORCHESTRATOR_KEY) => StripTab::Orchestrator,
+                Some(key) => StripTab::Project(key.to_string()),
+                None => StripTab::All,
+            };
+            return;
+        }
+        if let Some(id) = self.focused().filter(|id| self.panes.get(id).is_some_and(|p| p.is_terminal())) {
+            if (self.scope == StripTab::All || !self.in_scope(id, &self.scope))
+                && let Some(own) = self.own_scope(id)
+            {
+                self.scope = own;
+            }
+            return;
+        }
+        let scope = self.scope.clone();
+        if scope == StripTab::All || !self.panes.keys().any(|id| self.in_scope(*id, &scope)) {
+            let here = self.cur_project.as_ref().map(|root| StripTab::Project(self.svc.project_for(root).key));
+            self.scope = here.filter(|s| self.panes.keys().any(|id| self.in_scope(*id, s))).unwrap_or(StripTab::All);
+        }
+    }
+
+    /// The strip's heading, before All: the project the tabs list (its name as the phone gave it, and its key and
+    /// folder for its icon), or the orchestrators. None for every session, which has no strip.
+    pub(crate) fn scope_heading(&self) -> Option<(String, Option<(String, PathBuf)>)> {
+        match &self.scope {
+            StripTab::All => None,
+            StripTab::Orchestrator => Some(("Orchestrators".into(), None)),
+            StripTab::Project(key) => {
+                let (name, root) = match self.project_tabs().into_iter().find(|t| t.key == *key) {
+                    Some(t) => (t.name, t.root),
+                    None => self.open_infos().into_iter().find(|o| o.key == *key).map(|o| (o.name, o.root))?,
+                };
+                Some((name, Some((key.clone(), root))))
+            }
+        }
+    }
+
+    /// Show `tab`'s sessions: its grid, or its one session (nothing changes when it's showing already). It
+    /// becomes the scope the strip lists.
     pub(crate) fn show_tab(&mut self, tab: StripTab) {
         self.dismiss_session_screen();
         if tab != StripTab::Orchestrator && self.showing_tab().as_ref() == Some(&tab) {
+            self.scope = tab;
             self.leave_sidebar();
             return;
         }
         match tab {
-            StripTab::All => self.toggle_tiles(),
+            StripTab::All => {
+                self.scope = StripTab::All;
+                self.toggle_tiles();
+            }
             StripTab::Orchestrator => {
                 let ids = self.orchestrator_panes();
                 if ids.is_empty() {
                     self.open_orchestrator();
                 } else {
+                    self.scope = StripTab::Orchestrator;
                     self.minimized.retain(|id| !ids.contains(id));
                     self.stack_focus = self.focused().filter(|id| ids.contains(id)).or_else(|| ids.first().copied());
                     self.stack = ids;
@@ -233,6 +399,7 @@ impl App {
                 };
                 // new sessions start where you're looking
                 self.pick_project(root);
+                self.scope = StripTab::Project(key.clone());
                 self.show_project_tiles(&key, None);
             }
         }
@@ -248,20 +415,35 @@ impl App {
         }
     }
 
-    /// A click (or ⏎) on a tab. All again goes back to the session you're on, like the tile-all shortcut.
-    pub(crate) fn click_tab(&mut self, tab: StripTab) {
+    /// A click (or ⏎) on a tab of the strip: a session's shows it on its own; All tiles the scope, and again goes
+    /// back to the session you're on, like the tile-all shortcut.
+    pub(crate) fn click_session_tab(&mut self, tab: SessionTab) {
         let dismissed = self.dismiss_session_screen();
-        if !dismissed && tab == StripTab::All && self.showing_tab() == Some(StripTab::All) {
-            self.toggle_tiles();
-        } else {
-            self.show_tab(tab);
+        let showing = self.showing_session();
+        match tab {
+            SessionTab::Grid if !dismissed && showing == Some(SessionTab::Grid) => {
+                let focus = self.focused();
+                self.clear_stack();
+                if let Some(id) = focus {
+                    self.focus_pane(id);
+                }
+            }
+            SessionTab::Grid => self.show_tab(self.scope.clone()),
+            SessionTab::Session(id) if !self.panes.contains_key(&id) => {}
+            SessionTab::Session(id) => {
+                if showing != Some(tab) || self.stacked() {
+                    self.clear_stack();
+                    self.focus_pane(id);
+                }
+            }
         }
+        self.leave_sidebar();
     }
 
-    /// The next (`d` = 1) or previous tab, wrapping; the orchestrator's only with `orchestrator`.
+    /// The next (`d` = 1) or previous scope, wrapping; the orchestrators' only with `orchestrator`.
     pub(crate) fn step_tab(&mut self, d: i32, orchestrator: bool) {
         let tabs = self.project_tabs();
-        let items: Vec<StripTab> = self.strip_items(&tabs).into_iter().filter(|t| *t != StripTab::Orchestrator || (orchestrator && !self.orchestrator_panes().is_empty())).collect();
+        let items: Vec<StripTab> = self.scope_items(&tabs).into_iter().filter(|t| *t != StripTab::Orchestrator || (orchestrator && !self.orchestrator_panes().is_empty())).collect();
         let i = self.showing_tab().and_then(|s| items.iter().position(|t| *t == s));
         let next = match i {
             Some(i) => (i as i32 + d).rem_euclid(items.len() as i32) as usize,
@@ -269,6 +451,21 @@ impl App {
             None => items.len() - 1,
         };
         self.show_tab(items[next].clone());
+    }
+
+    /// The next (`d` = 1) or previous tab of the strip, wrapping.
+    fn step_session_tab(&mut self, d: i32) {
+        let items = self.strip_items(&self.session_tabs());
+        if items.is_empty() {
+            return;
+        }
+        let i = self.showing_session().and_then(|s| items.iter().position(|t| *t == s));
+        let next = match i {
+            Some(i) => (i as i32 + d).rem_euclid(items.len() as i32) as usize,
+            None if d > 0 => 0,
+            None => items.len() - 1,
+        };
+        self.click_session_tab(items[next]);
     }
 
     /// The sidebar is on but the window is too narrow to draw it.
@@ -279,15 +476,18 @@ impl App {
     /// Keys go to the strip: ← → pick a tab, ⏎ shows it.
     pub(crate) fn focus_strip(&mut self) {
         self.leave_sidebar();
-        let items = self.strip_items(&self.project_tabs());
-        self.strip_sel = Some(self.showing_tab().and_then(|s| items.iter().position(|t| *t == s)).unwrap_or(0));
+        let items = self.strip_items(&self.session_tabs());
+        self.strip_sel = Some(self.showing_session().and_then(|s| items.iter().position(|t| *t == s)).unwrap_or(0));
     }
 
     /// Keys while the strip has them.
     pub(crate) fn strip_key(&mut self, k: KeyEvent) {
-        let tabs = self.project_tabs();
-        let items = self.strip_items(&tabs);
+        let items = self.strip_items(&self.session_tabs());
         let n = items.len();
+        if n == 0 {
+            self.strip_sel = None;
+            return;
+        }
         let sel = self.strip_sel.unwrap_or(0).min(n - 1);
         match k.code {
             KeyCode::Left => self.strip_sel = Some((sel + n - 1) % n),
@@ -300,11 +500,11 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 self.leave_sidebar();
-                self.click_tab(items[sel].clone());
+                self.click_session_tab(items[sel]);
             }
             KeyCode::Delete => {
-                if let StripTab::Project(key) = &items[sel] {
-                    self.close_project_tab(key);
+                if let SessionTab::Session(id) = items[sel] {
+                    self.ask_close(id);
                 }
             }
             KeyCode::Esc | KeyCode::Down | KeyCode::Up | KeyCode::Tab => self.strip_sel = None,
@@ -312,24 +512,18 @@ impl App {
         }
     }
 
-    /// A click on the strip: a tab's × (or a middle click on it) closes the project.
+    /// A click on the strip: a tab's × (or a middle click on it) closes its session.
     pub(crate) fn strip_click(&mut self, hit: StripHit, middle: bool) {
         match hit {
-            StripHit::Close(key) => self.close_project_tab(&key),
-            StripHit::Tab(StripTab::Project(key)) if middle => self.close_project_tab(&key),
+            StripHit::Close(id) => self.ask_close(id),
+            StripHit::Session(id) if middle => self.ask_close(id),
             _ if middle => {}
-            StripHit::Tab(tab) => self.click_tab(tab),
-            StripHit::More => self.open_palette("tiles "),
+            StripHit::Grid => self.click_session_tab(SessionTab::Grid),
+            StripHit::Session(id) => self.click_session_tab(SessionTab::Session(id)),
+            StripHit::More => self.open_palette("sessions "),
             StripHit::Scroll(on) => self.strip_scroll.page(on),
             StripHit::Minimized => self.toggle_minimized_visibility(),
             StripHit::New => self.open_launcher(None, Place::Tab),
-        }
-    }
-
-    /// Close a project tab's project; its running sessions ask first.
-    fn close_project_tab(&mut self, key: &str) {
-        if let Some(tab) = self.project_tabs().into_iter().find(|t| t.key == key) {
-            self.close_project(tab.root, tab.live + tab.hidden);
         }
     }
 
@@ -344,12 +538,13 @@ impl App {
             return;
         }
         self.strip_wheel = Some(Instant::now());
-        self.step_tab(if delta > 0.0 { 1 } else { -1 }, true);
+        self.step_session_tab(if delta > 0.0 { 1 } else { -1 });
     }
 
-    /// After each batch of events: remember the tab you left (the last-tab key), and give each grid back the
-    /// tile edges you held in it.
+    /// After each batch of events: keep the scope with what you look at, remember the scope you left (the last-tab
+    /// key), and give each grid back the tile edges you held in it.
     pub(super) fn follow_tab(&mut self) {
+        self.follow_scope();
         let now = self.showing_tab();
         if now != self.tab_now {
             if let Some(old) = self.tab_now.take()
@@ -375,23 +570,23 @@ impl App {
         }
     }
 
-    /// Rows the strip takes at `r`'s width (`r` is its first row): one, or when they stack as many as the project
+    /// Rows the strip takes at `r`'s width (`r` is its first row): one, or when they stack as many as the session
     /// tabs need, up to `max_rows`.
     pub(super) fn strip_rows(&mut self, r: Rect, max_rows: u16) -> u16 {
         if self.svc.settings().tab_overflow != TabOverflow::Stack {
             return 1;
         }
-        let tabs = self.project_tabs();
-        let ends = self.strip_ends(r);
+        let tabs = self.session_tabs();
+        let ends = self.strip_ends(r, &tabs);
+        let (names, extra) = dims(&tabs);
         match ends.start {
-            Some(start) => self.lay_tabs(&tabs, start, ends.end, r, None, max_rows as usize).rows,
+            Some(start) => self.lay_tabs(&names, &extra, start, ends.end, r, None, max_rows as usize).rows,
             None => 1,
         }
     }
 
-    /// The strip's fixed parts in `r` (its first row): + and the minimized switch at the right end, All and ★ at
-    /// the left.
-    fn strip_ends(&self, r: Rect) -> Ends {
+    /// The strip's fixed parts in `r` (its first row): + and the minimized switch at the right end, All at the left.
+    fn strip_ends(&self, r: Rect, tabs: &[SessionTabInfo]) -> Ends {
         let mut end = r.right();
         let mut plus = None;
         if r.width >= 40 {
@@ -408,34 +603,40 @@ impl App {
             }
         }
         let end = end.saturating_sub(1);
-        let all_text = format!(" ▦ All {} ", self.tile_ids(None).len());
-        let all = Rect { x: r.x, width: (ui::width(&all_text) as u16).min(end.saturating_sub(r.x)), ..r };
-        let ids = self.orchestrator_panes();
-        let blocked = ids.iter().filter(|id| self.panes.get(id).and_then(|p| p.activity()) == Some(Activity::Blocked)).count();
-        let done = ids.iter().filter(|id| self.done.contains(id) && self.panes.get(id).and_then(|p| p.activity()) != Some(Activity::Blocked)).count();
-        let star_text = format!(" ★ Orchestrators {} ", ids.len());
-        let sx = all.right() + 1;
-        let star_w = ui::width(&star_text) as u16 + 2 + badges_width(blocked, done) as u16;
-        let star = (!ids.is_empty()).then(|| (
-            Rect { x: sx, width: star_w.min(end.saturating_sub(sx)), ..r },
-            star_text,
-            blocked,
-            done,
-            ids.iter().any(|id| self.panes.get(id).and_then(|p| p.activity()) == Some(Activity::Working)),
-        ));
-        let fixed_end = star.as_ref().map_or(all.right(), |(r, ..)| r.right());
-        let start = (end.saturating_sub(fixed_end) >= 3).then_some(fixed_end + 3);
-        Ends { plus, minimized, end, all: (all, all_text), star, start }
+        // what the tabs list first, then a rule
+        let heading = self.scope_heading().map(|(name, project)| {
+            let text = match &project {
+                Some(_) => format!(" {} ", ui::fit(&name, HEAD_NAME)),
+                None => format!(" ★ {name} "),
+            };
+            let color = match &project {
+                Some((key, _)) => self.project_color(key),
+                None => crate::theme::gold(&self.theme),
+            };
+            (Rect { x: r.x, width: (ui::width(&text) as u16).min(end.saturating_sub(r.x)), ..r }, text, color)
+        });
+        let x0 = heading.as_ref().map_or(r.x, |(b, ..)| (b.right() + 3).min(end));
+        let grid = (tabs.len() >= 2).then(|| {
+            let text = format!(" ▦ All {} ", self.tile_ids(self.scope.tile_key()).len());
+            (Rect { x: x0, width: (ui::width(&text) as u16).min(end.saturating_sub(x0)), ..r }, text)
+        });
+        let start = match &grid {
+            Some((b, _)) => (end.saturating_sub(b.right()) >= 3).then_some(b.right() + 3),
+            None => (end > x0).then_some(x0),
+        };
+        Ends { plus, minimized, end, heading, grid, start }
     }
 
-    /// Where the project tabs go, from column `start` of the strip's first row `r` to `end` (and the full width of
-    /// the rows under it, when they stack), `anchor` (the tab the keys picked, else the one showing) kept in view.
-    /// Names shorten first; then they scroll (the arrows page, keeping `strip_scroll` in tabs) or stack.
-    fn lay_tabs(&mut self, tabs: &[ProjectTab], start: u16, end: u16, r: Rect, anchor: Option<StripTab>, max_rows: usize) -> Laid {
-        let n = tabs.len();
+    /// Where the session tabs go, from column `start` of the strip's first row `r` to `end` (and the full width of
+    /// the rows under it, when they stack), `anchor` (the tab the keys picked, else the one showing: its index and
+    /// tab) kept in view. Each tab is its name (`names` columns, cut to a shared cap) and `extra` around it. Names
+    /// shorten first; then they scroll (the arrows page, keeping `strip_scroll` in tabs) or stack.
+    #[allow(clippy::too_many_arguments)]
+    fn lay_tabs(&mut self, names: &[usize], extra: &[usize], start: u16, end: u16, r: Rect, anchor: Option<(usize, SessionTab)>, max_rows: usize) -> Laid {
+        let n = names.len();
         let room = end.saturating_sub(start);
-        let widths = |cap: usize| tabs.iter().map(|tab| tab_width(tab, cap)).collect::<Vec<u16>>();
-        let longest = tabs.iter().map(|tab| ui::width(&tab.name)).max().unwrap_or(0).clamp(MIN_NAME, MAX_NAME);
+        let widths = |cap: usize| (0..n).map(|i| tab_width(names[i], extra[i], cap)).collect::<Vec<u16>>();
+        let longest = names.iter().copied().max().unwrap_or(0).clamp(MIN_NAME, MAX_NAME);
         let mut laid = Laid { cap: longest, tabs: vec![], arrows: vec![], rows: 1 };
         if n == 0 {
             return laid;
@@ -475,8 +676,9 @@ impl App {
         laid.cap = cap;
         let w = widths(cap);
         let mut s = std::mem::take(&mut self.strip_scroll);
+        let anchor_tab = anchor.map(|(_, tab)| tab);
         let (first, hi) = if total(cap) <= room {
-            s = StripScroll { revealed: anchor, ..Default::default() };
+            s = StripScroll { revealed: anchor_tab, ..Default::default() };
             (0, n)
         } else {
             // the tabs that fit from `lo`, with an arrow before them when some are past it and one after likewise
@@ -484,16 +686,15 @@ impl App {
             let hi_from = |lo: usize| (lo + 1..=n).rev().find(|&hi| fits(lo, hi)).unwrap_or(lo + 1);
             let max_first = (0..n).find(|&lo| hi_from(lo) == n).unwrap_or(n - 1);
             let mut first = (s.offset.max(0.0) as usize).min(max_first);
-            if anchor != s.revealed {
-                let at = anchor.as_ref().and_then(|a| tabs.iter().position(|t| matches!(a, StripTab::Project(k) if *k == t.key)));
-                if let Some(a) = at {
+            if anchor_tab != s.revealed {
+                if let Some((a, _)) = anchor {
                     if a < first {
                         first = a;
                     } else if a >= hi_from(first) {
                         first = (first..=a).find(|&lo| hi_from(lo) > a).unwrap_or(a);
                     }
                 }
-                s.revealed = anchor;
+                s.revealed = anchor_tab;
             }
             let first = first.min(max_first);
             let hi = hi_from(first);
@@ -519,23 +720,23 @@ impl App {
         laid
     }
 
-    /// The strip at `r` (its height the rows it takes): All, the orchestrators' ★, a rule, then a tab per project;
-    /// the new-session + and the minimized switch on the right of the first row. Names shorten before the tabs
-    /// scroll (arrows at either end page through them) or, with the stack setting, wrap onto more rows.
-    pub(super) fn draw_project_tabs(&mut self, f: &mut Frame, r: Rect) {
+    /// The strip at `r` (its height the rows it takes): the scope's All, a rule, then a tab per session; the
+    /// new-session + and the minimized switch on the right of the first row. Names shorten before the tabs scroll
+    /// (arrows at either end page through them) or, with the stack setting, wrap onto more rows.
+    pub(super) fn draw_session_tabs(&mut self, f: &mut Frame, r: Rect) {
         let t = self.theme.clone();
         let time = self.start.elapsed().as_secs_f64();
-        let tabs = self.project_tabs();
+        let tabs = self.session_tabs();
         let items = self.strip_items(&tabs);
         if let Some(sel) = self.strip_sel {
-            self.strip_sel = Some(sel.min(items.len() - 1));
+            self.strip_sel = Some(sel.min(items.len().saturating_sub(1)));
         }
-        let selected = self.strip_sel.and_then(|i| items.get(i)).cloned();
-        let showing = self.drawn_tab.clone();
+        let selected = self.strip_sel.and_then(|i| items.get(i)).copied();
+        let showing = self.showing_session();
         let hover = self.hover;
-        let focus_key = self.focused().and_then(|id| self.panes.get(&id)).and_then(|p| p.as_term_ref()).map(|term| term.meta.project.key.clone());
+        let focused = self.focused();
         let first_row = Rect { height: 1, ..r };
-        let ends = self.strip_ends(first_row);
+        let ends = self.strip_ends(first_row, &tabs);
 
         // the right end: the minimized sessions' switch, then + (a new session)
         if let Some(b) = ends.plus {
@@ -549,59 +750,67 @@ impl App {
             self.side_hits.push((*b, SideHit::Strip(StripHit::Minimized)));
         }
 
-        // All: every session the grid would show
-        let (b, text) = &ends.all;
-        if b.width > 0 {
-            let style = tab_style(t.accent, showing == Some(StripTab::All), b.contains(hover), selected == Some(StripTab::All), &t).add_modifier(Modifier::BOLD);
-            ui::line(f, *b, vec![Span::styled(text.clone(), style)]);
-            self.side_hits.push((*b, SideHit::Strip(StripHit::Tab(StripTab::All))));
+        // what the tabs list: the project's name in its colour (the orchestrators' ★ in gold), then a rule
+        if let Some((b, text, color)) = &ends.heading
+            && b.width > 0
+        {
+            let style = Style::default().fg(*color).add_modifier(Modifier::BOLD);
+            ui::line(f, *b, vec![Span::styled(text.clone(), if b.contains(hover) { style.add_modifier(Modifier::UNDERLINED) } else { style })]);
+            ui::line(f, Rect { x: b.right(), width: 3.min(ends.end.saturating_sub(b.right())), ..first_row }, vec![Span::styled(" │ ", fg(t.frame))]);
+            self.side_hits.push((*b, SideHit::Scope(self.scope.clone())));
         }
-        // every coordinator, with what they're doing and what wants you
-        if let Some((b, label, blocked, done, working)) = &ends.star && b.width > 0 {
-            let gold = crate::theme::gold(&t);
-            let on = showing == Some(StripTab::Orchestrator);
-            let base = tab_style(gold, on, b.contains(hover), selected == Some(StripTab::Orchestrator), &t);
-            let activity = working.then_some(Activity::Working);
-            let mut spans = vec![Span::styled(label.clone(), base.add_modifier(Modifier::BOLD)), Span::styled(activity_glyph(activity, time), glyph_style(base, gold, on))];
-            spans.extend(badges(*blocked, *done, base, on, &t));
-            spans.push(Span::styled(" ", base));
-            ui::line(f, *b, spans);
-            self.side_hits.push((*b, SideHit::Strip(StripHit::Tab(StripTab::Orchestrator))));
+        // All: every session in the scope, tiled
+        if let Some((b, text)) = &ends.grid
+            && b.width > 0
+        {
+            let color = match &self.scope {
+                StripTab::Project(key) => self.project_color(key),
+                StripTab::Orchestrator => crate::theme::gold(&t),
+                StripTab::All => t.accent,
+            };
+            let style = tab_style(color, showing == Some(SessionTab::Grid), b.contains(hover), selected == Some(SessionTab::Grid), &t).add_modifier(Modifier::BOLD);
+            ui::line(f, *b, vec![Span::styled(text.clone(), style)]);
+            self.side_hits.push((*b, SideHit::Strip(StripHit::Grid)));
         }
         let Some(start) = ends.start.filter(|_| !tabs.is_empty()) else { return };
-        ui::line(f, Rect { x: start - 3, width: 3, ..first_row }, vec![Span::styled(" │ ", fg(t.frame))]);
+        if ends.grid.is_some() {
+            ui::line(f, Rect { x: start - 3, width: 3, ..first_row }, vec![Span::styled(" │ ", fg(t.frame))]);
+        }
 
-        let anchor = selected.clone().filter(|s| matches!(s, StripTab::Project(_))).or_else(|| showing.clone().filter(|s| matches!(s, StripTab::Project(_))));
-        let laid = self.lay_tabs(&tabs, start, ends.end, first_row, anchor, r.height.max(1) as usize);
+        let anchor = selected.filter(|s| matches!(s, SessionTab::Session(_))).or_else(|| showing.filter(|s| matches!(s, SessionTab::Session(_))));
+        let anchor = anchor.and_then(|a| tabs.iter().position(|tab| SessionTab::Session(tab.id) == a).map(|i| (i, a)));
+        let (names, extra) = dims(&tabs);
+        let laid = self.lay_tabs(&names, &extra, start, ends.end, first_row, anchor, r.height.max(1) as usize);
         let cap = laid.cap;
         // what each tab looks like: (on, hot, picked)
         let looks: Vec<(bool, bool, bool)> = laid
             .tabs
             .iter()
             .map(|(i, b)| {
-                let key = StripTab::Project(tabs[*i].key.clone());
-                (showing.as_ref() == Some(&key), b.contains(hover), selected.as_ref() == Some(&key))
+                let tab = Some(SessionTab::Session(tabs[*i].id));
+                (showing == tab, b.contains(hover), selected == tab)
             })
             .collect();
         for (k, &(i, b)) in laid.tabs.iter().enumerate() {
             let tab = &tabs[i];
-            let key = StripTab::Project(tab.key.clone());
-            let color = self.project_color(&tab.key);
+            let color = if tab.global { crate::theme::gold(&t) } else { self.project_color(&tab.project_key) };
             let (on, hot, picked) = looks[k];
-            let base = tab_style(color, on, hot, picked, &t);
-            let name_style = if on || focus_key.as_deref() == Some(tab.key.as_str()) { base.add_modifier(Modifier::BOLD) } else { base };
-            let lead = if tab.working > 0 { Some(Activity::Working) } else { Some(Activity::Idle) };
+            let mut base = tab_style(color, on, hot, picked, &t);
+            if tab.minimized && !on {
+                base = base.add_modifier(Modifier::DIM);
+            }
+            let name_style = if on || focused == Some(tab.id) { base.add_modifier(Modifier::BOLD) } else { base };
+            let lead = if tab.working { Some(Activity::Working) } else { Some(Activity::Idle) };
             let mut spans = vec![
                 Span::styled(" ", base),
                 Span::styled(activity_glyph(lead, time), glyph_style(base, color, on)),
                 Span::styled(" ", base),
-                Span::styled(ui::fit(&tab.name, cap), name_style),
-                Span::styled(format!(" {}", tab.live), if on { base } else { base.fg(t.muted) }),
+                Span::styled(ui::fit(&tab.label, cap), name_style),
             ];
-            spans.extend(badges(tab.blocked, tab.done, base, on, &t));
+            spans.extend(badge(tab, base, on, &t));
             // a short name's tab is padded to the least width, before the ×
             let used: u16 = spans.iter().map(|s| ui::width(&s.content) as u16).sum::<u16>() + 3;
-            let full = tab_width(tab, cap);
+            let full = tab_width(names[i], extra[i], cap);
             if full > used {
                 spans.push(Span::styled(" ".repeat((full - used) as usize), base));
             }
@@ -617,9 +826,9 @@ impl App {
                 ui::line(f, b, spans);
                 // the first hit that matches wins: the × before its tab
                 if close.right() <= b.right() {
-                    self.side_hits.push((close, SideHit::Strip(StripHit::Close(tab.key.clone()))));
+                    self.side_hits.push((close, SideHit::Strip(StripHit::Close(tab.id))));
                 }
-                self.side_hits.push((b, SideHit::Strip(StripHit::Tab(key))));
+                self.side_hits.push((b, SideHit::Strip(StripHit::Session(tab.id))));
             }
             // a hairline between two quiet tabs on a row, so they read apart
             let quiet = |l: (bool, bool, bool)| !(l.0 || l.1 || l.2);
@@ -636,7 +845,7 @@ impl App {
         // past it wants you
         for (b, hit, range) in laid.arrows {
             let folded = &tabs[range];
-            let dot = folded.iter().any(ProjectTab::attention);
+            let dot = folded.iter().any(|tab| tab.asks || tab.done);
             let n = folded.len();
             let (lead, tail) = match hit {
                 StripHit::Scroll(false) => (format!(" ◂{n}"), " "),
@@ -667,14 +876,15 @@ struct Ends {
     minimized: Option<(Rect, String)>,
     /// where the tabs stop on the first row
     end: u16,
-    all: (Rect, String),
-    /// ★ while an orchestrator is open: where, its label, waiting on you, finished unseen, working
-    star: Option<(Rect, String, usize, usize, bool)>,
-    /// the first project tab's column (after the rule), when there's room for any
+    /// what the tabs list (the project, or the orchestrators): where, its label, its colour
+    heading: Option<(Rect, String, Color)>,
+    /// the scope's All, once it has two sessions: where, and its label
+    grid: Option<(Rect, String)>,
+    /// the first session tab's column (after the rule), when there's room for any
     start: Option<u16>,
 }
 
-/// The project tabs, laid out (see [`App::lay_tabs`]).
+/// The session tabs, laid out (see [`App::lay_tabs`]).
 struct Laid {
     /// the most columns a name takes
     cap: usize,
@@ -685,7 +895,12 @@ struct Laid {
     rows: u16,
 }
 
-/// What a tab's agents are doing, as one glyph: a spinner while any works, else a ring.
+/// Each tab's name width and the room around it: " ◐ name ● × ".
+fn dims(tabs: &[SessionTabInfo]) -> (Vec<usize>, Vec<usize>) {
+    tabs.iter().map(|tab| (ui::width(&tab.label), 3 + if tab.asks || tab.done { 2 } else { 0 } + 3)).unzip()
+}
+
+/// What a tab's agent is doing, as one glyph: a spinner while it works, else a ring.
 fn activity_glyph(a: Option<Activity>, time: f64) -> &'static str {
     match a {
         Some(Activity::Working) => ["◐", "◓", "◑", "◒"][(time * 6.0) as usize % 4],
@@ -698,28 +913,22 @@ fn glyph_style(base: Style, color: Color, on: bool) -> Style {
     if on { base } else { base.fg(color).add_modifier(Modifier::BOLD) }
 }
 
-/// " ●2" for sessions waiting on you, " ✓1" for ones that finished unseen: shape says which, so they read
-/// without color too.
-fn badges(blocked: usize, done: usize, base: Style, on: bool, t: &Theme) -> Vec<Span<'static>> {
+/// " ●" for a session waiting on you, " ✓" for one that finished unseen: shape says which, so they read without
+/// color too.
+fn badge(tab: &SessionTabInfo, base: Style, on: bool, t: &Theme) -> Option<Span<'static>> {
     let tone = |c: Color| if on { base } else { base.fg(c).add_modifier(Modifier::BOLD) };
-    let mut v = vec![];
-    if blocked > 0 {
-        v.push(Span::styled(format!(" ●{blocked}"), tone(t.danger)));
+    if tab.asks {
+        Some(Span::styled(" ●", tone(t.danger)))
+    } else if tab.done {
+        Some(Span::styled(" ✓", tone(t.good)))
+    } else {
+        None
     }
-    if done > 0 {
-        v.push(Span::styled(format!(" ✓{done}"), tone(t.good)));
-    }
-    v
 }
 
-fn badges_width(blocked: usize, done: usize) -> usize {
-    let one = |n: usize| if n > 0 { 2 + n.to_string().len() } else { 0 };
-    one(blocked) + one(done)
-}
-
-/// A project tab's width with its name cut to `cap` columns: " ◐ name 3 ●1 ✓1 × ", never under [`TAB_MIN`].
-fn tab_width(tab: &ProjectTab, cap: usize) -> u16 {
-    ((3 + ui::width(&tab.name).min(cap) + 1 + tab.live.to_string().len() + badges_width(tab.blocked, tab.done) + 3) as u16).max(TAB_MIN)
+/// A tab's width with its name (`name` columns) cut to `cap` and `extra` around it, never under [`TAB_MIN`].
+fn tab_width(name: usize, extra: usize, cap: usize) -> u16 {
+    ((name.min(cap) + extra) as u16).max(TAB_MIN)
 }
 
 /// The showing tab is solid in its color; one under the mouse or picked with the keys takes a tint of it (an
@@ -745,7 +954,7 @@ mod tests {
 
     #[test]
     fn stacked_tabs_wrap_into_rows_and_fold_what_the_rows_cant_hold() {
-        // a 50 wide first row after All and ★, 100 wide rows under it, tabs 30 wide a gap of 2 apart
+        // a 50 wide first row after All, 100 wide rows under it, tabs 30 wide a gap of 2 apart
         let w = [30.0; 7];
         let rows = stack_rows(&w, 50.0, 100.0, 2.0, 3, 6.0);
         assert_eq!(rows, vec![(0, 0.0), (1, 0.0), (1, 32.0), (1, 64.0), (2, 0.0), (2, 32.0), (2, 64.0)]);
@@ -797,5 +1006,11 @@ mod tests {
         let mut s = StripScroll { max: 900.0, view: 250.0, spans: vec![(0.0, 600.0), (604.0, 1000.0)], ..Default::default() };
         s.page(true);
         assert_eq!(s.offset, 250.0);
+    }
+
+    #[test]
+    fn a_tab_keeps_its_least_width_and_names_cut_to_the_cap() {
+        assert_eq!(tab_width(3, 6, MAX_NAME), TAB_MIN);
+        assert_eq!(tab_width(40, 8, 20), 28);
     }
 }

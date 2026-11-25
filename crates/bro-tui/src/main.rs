@@ -17,8 +17,11 @@ mod clip;
 mod console_nav;
 mod editor;
 mod env_cmd;
+mod firewall_cmd;
 mod gemini_cmd;
 mod jsh_cmd;
+mod agent_cmd;
+mod computers_cmd;
 mod file_view;
 mod focus;
 mod folder;
@@ -45,6 +48,7 @@ mod proxy_cmd;
 mod panes;
 mod orchestrator_state;
 mod recents;
+mod rune;
 mod services;
 mod sidebar;
 mod team_board;
@@ -151,7 +155,12 @@ fn main() -> ExitCode {
         }
         Ok(cli::Command::Ctl(args)) => {
             let ctx = open_cmd::Context::from_env();
-            match ctl_cmd::run(&args, ctx.bridge.as_deref()) {
+            let selected = bro_core::justconnect::selected();
+            // Managed agents use explicit computer IDs through MCP, so a user's CLI selection cannot silently redirect them.
+            let result = if std::env::var_os("BRO_TASK_TOKEN").is_none() && selected.is_some() {
+                computers_cmd::remote_ctl(&args, selected.as_deref().unwrap())
+            } else { ctl_cmd::run(&args, ctx.bridge.as_deref()) };
+            match result {
                 Ok(out) => {
                     println!("{}", out.trim_end());
                     ExitCode::SUCCESS
@@ -184,6 +193,19 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("bro env: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(cli::Command::RemoteDesktopPermissions) => {
+            // everywhere but macOS nothing needs allowing
+            let here = bro_core::rmm::mac_permissions_here().unwrap_or(bro_core::rmm::MacPermissions { screen: true, accessibility: true });
+            println!("{}", bro_core::rmm::permissions_line(here));
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Command::Firewall(cmd)) => match firewall_cmd::run(cmd) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bro firewall: {e}");
                 ExitCode::FAILURE
             }
         },
@@ -234,6 +256,14 @@ fn main() -> ExitCode {
             print!("{}", jsh_cmd::HELP);
             ExitCode::SUCCESS
         }
+        Ok(cli::Command::Computers(args)) => match computers_cmd::run(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => { eprintln!("bro computers: {error}"); ExitCode::FAILURE }
+        },
+        Ok(cli::Command::Agent(args)) => match agent_cmd::run(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => { eprintln!("bro agent: {error:#}"); ExitCode::FAILURE }
+        },
         Ok(cli::Command::Jsh(cmd)) => match jsh_cmd::run(cmd) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -245,25 +275,17 @@ fn main() -> ExitCode {
             print!("{}", install_cmd::HELP);
             ExitCode::SUCCESS
         }
-        Ok(cli::Command::OrbitHelp) => {
-            println!("bro orbit register <electron-executable> <application-directory>\n\nValidates the installed Orbit build and records its launch paths independently of settings saves.\nIn your primary window, enable Settings → Orbit Voice or choose Try connection.\nNo sessions are restarted, no credentials are imported, and no microphone is opened.");
+        Ok(cli::Command::BrowseHelp) => {
+            println!("bro browse — JustBrowse tools for this Bro session\n\n  bro browse                         list tools and their JSON schemas\n  bro browse <tool> key=value …       call a tool\n  bro browse <tool> '<JSON object>'   pass a JSON argument object\n\nRun inside Bro. Tabs stay owned by this session across calls. Screenshots are saved to files.");
             ExitCode::SUCCESS
         }
-        Ok(cli::Command::OrbitRegister { executable, application_dir }) => {
-            let selection = bro_core::config::OrbitSettings {
-                executable: Some(executable), application_dir: Some(application_dir), ..Default::default()
-            };
-            match bro_core::orbit_voice::register_installed_preview(&selection) {
-                Ok(preview) => {
-                    println!("Registered Orbit build {}.\nEnable Settings → Orbit Voice or choose Try connection in your primary window.", preview.version);
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("bro orbit: {error:#}");
-                    ExitCode::FAILURE
-                }
+        Ok(cli::Command::Browse(args)) => match bro_core::browse::call(args.tool.as_deref(), args.arguments) {
+            Ok(result) => {
+                println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+                if result["isError"].as_bool() == Some(true) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
             }
-        }
+            Err(e) => { eprintln!("bro browse: {e:#}"); ExitCode::FAILURE }
+        },
         Ok(cli::Command::Update { check_only }) => match install_cmd::update(check_only) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -425,6 +447,10 @@ fn run_tui(demo: bool, new: bool, dir: Option<std::path::PathBuf>) -> anyhow::Re
     if viewer && svc.host().is_none() {
         drop(svc);
         anyhow::bail!("there's no session server to watch (is bro running, with Keep sessions running on?)");
+    }
+    if !(demo || viewer) {
+        // the rules a phone needs, asked for while someone's at the PC (once)
+        svc.firewall_on_open();
     }
 
     terminal::enable_raw_mode()?;

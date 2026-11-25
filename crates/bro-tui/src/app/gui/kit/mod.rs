@@ -6,6 +6,10 @@
 //! are; the mouse is matched against the last frame's [`Hit`]s.
 
 pub mod brand;
+pub(crate) mod breadcrumbs;
+pub mod group;
+pub mod motion;
+pub mod rune;
 pub mod widgets;
 
 use super::actions::Action;
@@ -20,6 +24,8 @@ use std::time::Instant;
 #[derive(Clone, Debug)]
 pub struct Tokens {
     pub light: bool,
+    /// Native palette roles remain available to section-specific surfaces.
+    pub palette: Option<Arc<crate::theme::import::Imported>>,
     /// the window behind everything
     pub bg: Color,
     /// session cards and panels
@@ -154,8 +160,9 @@ impl Tokens {
         // white on an accent it reads on (3:1, a bold label), else a dark ink: pastel accents (Dracula's purple,
         // Catppuccin's mauve, SynthWave's pink) get dark labels
         let on_accent = if accent.contrast(Color::WHITE) >= 3.0 || accent.contrast(Color::WHITE) >= accent.contrast(Color::hex(0x0c0d10)) { Color::WHITE } else { Color::hex(0x0c0d10) };
-        Tokens {
+        let mut tokens = Tokens {
             light,
+            palette: t.imported.clone(),
             bg,
             surface,
             window: bg,
@@ -191,7 +198,76 @@ impl Tokens {
             ansi,
             cursor: t.cursor.map(c).unwrap_or(accent.mix(text, 0.35)),
             selection: accent.with_alpha(if light { 0.28 } else { 0.34 }),
+        };
+        if tokens.palette.is_some() {
+            // Map actual roles, never regenerate an imported palette from a handful of accents.
+            tokens.bg = tokens.role("canvas", tokens.bg);
+            tokens.window = tokens.bg;
+            tokens.surface = tokens.role("surface", tokens.surface);
+            tokens.raised = tokens.role("surfaceOverlay", tokens.raised);
+            tokens.sunken = tokens.role("surfaceRaised", tokens.sunken);
+            tokens.hover = tokens.role("muted", tokens.hover);
+            tokens.selected = tokens.role("accentSurface", tokens.selected);
+            tokens.control = tokens.role("secondary", tokens.control);
+            tokens.control_hover = tokens.role("toolbarControlHover", tokens.control_hover);
+            tokens.control_pressed = tokens.role("muted", tokens.control_pressed);
+            tokens.stroke = tokens.role("input", tokens.stroke);
+            tokens.field_focus = tokens.role("surfaceRaised", tokens.field_focus);
+            tokens.layer = tokens.bg;
+            tokens.hairline = tokens.role("border", tokens.hairline);
+            tokens.border = tokens.role("border", tokens.border);
+            tokens.text = tokens.role("text", tokens.text);
+            tokens.muted = tokens.role("textMuted", tokens.muted);
+            tokens.faint = tokens.role("placeholder", tokens.faint);
+            tokens.accent = tokens.role("accent", tokens.accent);
+            tokens.on_accent = tokens.role("accentForeground", tokens.on_accent);
+            tokens.shine = tokens.role("focus", tokens.shine);
+            tokens.inline = tokens.role("warningForeground", tokens.inline);
+            tokens.good = tokens.role("updateForeground", tokens.good);
+            tokens.danger = tokens.role("errorForeground", tokens.danger);
+            tokens.warn = tokens.role("warningForeground", tokens.warn);
+            tokens.term_fg = tokens.role("terminalForeground", tokens.term_fg);
+            tokens.term_bg = tokens.role("terminalBackground", tokens.term_bg);
+            tokens.cursor = tokens.role("terminalCursor", tokens.cursor);
+            tokens.selection = tokens.role("terminalSelection", tokens.selection);
         }
+        tokens
+    }
+
+    /// Literal role including alpha; unrelated / unavailable roles use Bro's existing token.
+    pub fn role(&self, role: &str, fallback: Color) -> Color {
+        self.palette.as_ref().and_then(|p| p.colors.get(role)).map(|c| Color::rgba(c.r, c.g, c.b, c.a)).unwrap_or(fallback)
+    }
+
+    /// A section's own palette without changing the global theme or deriving replacement colors.
+    pub fn sidebar(&self) -> Self {
+        if self.palette.is_none() { return self.clone(); }
+        let mut t = self.clone();
+        t.bg = self.role("sidebar", self.bg);
+        t.window = t.bg.with_alpha(self.window.a);
+        t.text = self.role("sidebarForeground", self.text);
+        t.muted = self.role("sidebarMutedForeground", self.muted);
+        t.faint = t.muted;
+        t.control = self.role("sidebarControlSurface", self.control);
+        t.hover = self.role("sidebarRowHover", self.hover);
+        t.selected = self.role("sidebarRowSelected", self.selected);
+        t.border = self.role("sidebarBorder", self.border);
+        t.hairline = t.border;
+        t
+    }
+
+    pub fn toolbar(&self) -> Self {
+        if self.palette.is_none() { return self.clone(); }
+        let mut t = self.clone();
+        t.bg = self.role("toolbar", self.bg);
+        t.surface = t.bg;
+        t.text = self.role("toolbarForeground", self.text);
+        t.control = self.role("toolbarControl", self.control);
+        t.on_accent = self.role("toolbarControlForeground", self.on_accent);
+        t.control_hover = self.role("toolbarControlHover", self.control_hover);
+        t.border = self.role("toolbarBorder", self.border);
+        t.hairline = t.border;
+        t
     }
 
     /// Over a see-through window: the window at `alpha`, and with it every glass surface. Everything else, text,
@@ -204,6 +280,25 @@ impl Tokens {
     /// A project's colour (the same one the terminal UI uses).
     pub fn project(&self, key: &str, t: &crate::theme::Theme) -> Color {
         color(crate::theme::project_color(key, t), self.accent, &self.ansi)
+    }
+
+    /// The label on a pink or red button (Create Slop's start, a destructive action): white. These two are white
+    /// by choice, whatever the contrast pick would be; [`Tokens::bold_fill`] keeps it readable.
+    pub fn on_bold(&self) -> Color {
+        Color::WHITE
+    }
+
+    /// A pink or red button's fill: `c`, deepened just enough for its white label to read (3.3:1) when the
+    /// theme's red, or Create Slop's pink, is a light one.
+    pub fn bold_fill(&self, c: Color) -> Color {
+        let mut fill = c.with_alpha(1.0);
+        for _ in 0..14 {
+            if fill.contrast(Color::WHITE) >= 3.3 {
+                break;
+            }
+            fill = fill.mix(Color::BLACK, 0.04);
+        }
+        fill.with_alpha(c.a)
     }
 
     /// Text that reads on a solid `fill`: whichever of a dark ink or white contrasts more (WCAG), as the terminal
@@ -265,8 +360,13 @@ pub enum Cursor {
 #[derive(Default)]
 pub struct Anims {
     values: HashMap<u64, (f32, Instant)>,
+    pub(super) wake_at: Option<Instant>,
+    /// Last frame’s clipped hover regions, including labels with no click action.
+    pub(super) hover_regions: std::cell::RefCell<Vec<Rect>>,
     /// something is still moving: draw another frame
     pub moving: bool,
+    /// springs, glides and rolling labels ([`motion`])
+    pub motion: motion::Motion,
 }
 
 impl Anims {
@@ -287,6 +387,7 @@ impl Anims {
     /// Forget values not touched for a while.
     pub fn sweep(&mut self, now: Instant) {
         self.values.retain(|_, (_, at)| now.saturating_duration_since(*at).as_secs() < 30);
+        self.motion.sweep(now);
     }
 }
 
@@ -358,6 +459,18 @@ pub struct Ui<'a> {
 }
 
 impl<'a> Ui<'a> {
+    /// Reborrow the drawing context for a section with its own role palette.
+    pub fn with_tokens<R>(&mut self, tokens: &Tokens, draw: impl FnOnce(&mut Ui<'_>) -> R) -> R {
+        let mut section = Ui {
+            scene: self.scene, text: self.text, t: tokens, theme: self.theme, scale: self.scale,
+            pointer: self.pointer, pressing: self.pressing, hits: self.hits, top_layer: self.top_layer,
+            anim: self.anim, now: self.now, time: self.time, ticking: self.ticking, screen: self.screen,
+        };
+        let result = draw(&mut section);
+        self.ticking |= section.ticking;
+        result
+    }
+
     // ------------------------------------------------------------------ geometry
 
     /// Logical → physical, snapped to whole pixels.
@@ -386,6 +499,12 @@ impl<'a> Ui<'a> {
         self.scene.pop_clip();
     }
 
+    /// A stable semantic color target for the theme editor, clipped to its visible use.
+    pub fn theme_region(&self, r: Rect, role: &'static str) {
+        let clip=self.scene.clip().rect.scale(1.0/self.scale);
+        super::theme_editor::region(r.intersect(&clip),role);
+    }
+
     /// Make `r` clickable with `action` (topmost wins).
     pub fn hit(&mut self, r: Rect, action: Action) {
         self.hit_with(r, action, Cursor::Pointer);
@@ -402,10 +521,18 @@ impl<'a> Ui<'a> {
         self.hit_with(r, Action::None, Cursor::Default);
     }
 
+    /// Request a single frame when a displayed value will next change.
+    pub fn wake_after(&mut self, delay: std::time::Duration) {
+        let at = self.now + delay;
+        self.anim.wake_at = Some(self.anim.wake_at.map_or(at, |old| old.min(at)));
+    }
+
     /// The pointer is over `r` and nothing drawn on a higher layer covers it.
     pub fn hovered(&self, r: Rect) -> bool {
         let clip = self.scene.clip().rect.scale(1.0 / self.scale);
-        self.pointer.is_some_and(|p| r.contains(p) && clip.contains(p)) && self.scene.layer_index() >= self.top_layer
+        let region = r.intersect(&clip);
+        self.anim.hover_regions.borrow_mut().push(region);
+        self.pointer.is_some_and(|p| region.contains(p)) && self.scene.layer_index() >= self.top_layer
     }
 
     /// 0..1 hover amount for `key` over `r`, eased.
@@ -448,6 +575,21 @@ impl<'a> Ui<'a> {
         self.glass_round(r, radius, fill);
         // the same whole-pixel edge as `panel`
         self.outline(r, radius, self.scale.round().max(1.0) / self.scale, border);
+    }
+
+    /// A page laid over what's already drawn (the launcher over the sessions): what the layers below drew under
+    /// it is wiped, then `fill` goes on exactly as see-through as the window, inside a hairline `border`. So over
+    /// a see-through window the desktop shows through the page as it does through the rest of the window, and
+    /// nothing else does (a glass fill would leave the sessions' solid text standing out against it). Over a solid
+    /// window it's a solid panel. Call it first in its layer.
+    pub fn sheet(&mut self, r: Rect, radius: f32, fill: Color, border: Color) {
+        let p = self.px(r);
+        let w = self.scale.round().max(1.0);
+        // the wipe stops a pixel inside the page, under its border: both soften their edge, and one soft edge over
+        // the other would leave the page's rim thinner than the window (a dark line on a solid one)
+        let inside = Rect::new(p.x + w, p.y + w, (p.w - 2.0 * w).max(0.0), (p.h - 2.0 * w).max(0.0));
+        self.scene.cut_quad(Quad::new(inside, Color::BLACK).radius((radius * self.scale - w).max(0.0)));
+        self.scene.quad(Quad::new(p, fill.with_alpha(fill.a * self.t.window.a)).radius(radius * self.scale).border(w, border));
     }
 
     /// A rounded rectangle with a hairline border.
@@ -606,6 +748,37 @@ impl<'a> Ui<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_roles_reach_ui_sections_without_terminal_color_leaks() {
+        let source = r##"{"version":1,"name":"Role mapping","appearance":"light","colors":{
+            "canvas":"#112233","text":"#445566","textMuted":"#556677","accent":"#778899","accentForeground":"#abcdef",
+            "sidebar":"#123456","sidebarForeground":"#654321","sidebarRowHover":"#334455","sidebarBorder":"#456789",
+            "toolbar":"#223344","toolbarForeground":"#667788","toolbarBorder":"#8899aa",
+            "terminalBackground":"#010203","terminalForeground":"#fafbfc","terminalCursor":"#ff0011","terminalSelection":"#10203080",
+            "codeBackground":"#203040","codeForeground":"#e0e1e2","messageSurface":"#304050","messageForeground":"#e3e4e5"
+        }}"##;
+        let theme = crate::theme::import::parse(source, "roles", None).unwrap().theme("roles");
+        let t = Tokens::from_theme(&theme);
+        let close = |a: Color, b: Color| {
+            for (a,b) in [a.r,a.g,a.b,a.a].into_iter().zip([b.r,b.g,b.b,b.a]) { assert!((a-b).abs() < 0.0001, "{a} != {b}"); }
+        };
+        assert!(t.light, "appearance follows metadata, not terminal or canvas luminance");
+        close(t.bg, Color::hex(0x112233));
+        close(t.text, Color::hex(0x445566));
+        close(t.on_accent, Color::hex(0xabcdef));
+        close(t.term_bg, Color::hex(0x010203));
+        close(t.term_fg, Color::hex(0xfafbfc));
+        close(t.cursor, Color::hex(0xff0011));
+        close(t.selection, Color::hex(0x102030).with_alpha(128.0/255.0));
+        close(t.sidebar().bg, Color::hex(0x123456));
+        close(t.sidebar().text, Color::hex(0x654321));
+        close(t.sidebar().hover, Color::hex(0x334455));
+        close(t.toolbar().bg, Color::hex(0x223344));
+        close(t.toolbar().text, Color::hex(0x667788));
+        close(t.role("codeBackground", Color::BLACK), Color::hex(0x203040));
+        close(t.role("messageForeground", Color::BLACK), Color::hex(0xe3e4e5));
+    }
 
     #[test]
     fn ink_on_picks_the_higher_contrast_like_the_terminal_ui() {

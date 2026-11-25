@@ -10,6 +10,10 @@
 //!   answers one; 404 when the session has no such job (never asked, already answered, or timed out). The body
 //!   may be up to [`MAX_ANSWER_BYTES`]: a widget's HTML runs to several MB.
 //!
+//! * `GET /api/mod/{session}/typed` answers `{ "idleMs": 1234 }`, how long ago the person last typed into the
+//!   session (keys, a paste, the phone; not bro typing for them), or `{ "idleMs": null }` before they have; 404
+//!   for a session bro doesn't have. The mod's question timer stops while they answer (`questions/`).
+//!
 //! Only callers on this machine get in, token or not: the mod runs here. A job nobody takes within
 //! [`Timing::pickup`] (10 s) fails, because the session's mod isn't there to take it; one taken but not answered
 //! within [`Timing::answer`] (90 s) times out. Every reply runs exactly once: answered, failed, or failed when
@@ -330,6 +334,7 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/mod/{session}/jobs", get(poll))
         .route("/api/mod/{session}/jobs/{id}", post(answer))
+        .route("/api/mod/{session}/typed", get(typed))
         .route_layer(middleware::from_fn(local_only))
         .layer(DefaultBodyLimit::max(MAX_ANSWER_BYTES + 1024))
 }
@@ -368,6 +373,20 @@ async fn poll(State(state): State<AppState>, Path(session): Path<String>) -> Jso
             _ = tokio::time::sleep_until(until) => return Json(json!({ "jobs": [] })),
             _ = shutdown.wait_for(|stopped| *stopped) => return Json(json!({ "jobs": [] })),
         }
+    }
+}
+
+/// `GET /api/mod/{session}/typed`: how long since the person last typed into the session, asked of bro.
+async fn typed(State(state): State<AppState>, Path(session): Path<String>) -> Response {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    state.send_command(crate::BridgeCommand::TypedAgo { id: session, reply });
+    match tokio::time::timeout(Duration::from_secs(3), answer).await {
+        Ok(Ok(Ok(ago))) => {
+            let idle = ago.map(|ago| u64::try_from(ago.as_millis()).unwrap_or(u64::MAX));
+            Json(json!({ "idleMs": idle })).into_response()
+        }
+        Ok(Ok(Err(message))) => api_error(StatusCode::NOT_FOUND, message),
+        _ => api_error(StatusCode::GATEWAY_TIMEOUT, "bro didn't say in time."),
     }
 }
 

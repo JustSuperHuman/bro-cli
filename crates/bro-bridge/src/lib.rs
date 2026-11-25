@@ -29,6 +29,7 @@
 //! | `orchestrator` | Hugh, the built-in agent over every session: a headless Claude Code process using the tools at `/mcp` |
 //! | `watchdog` | per-session watchdogs: milestones, a log, and a fresh reviewer agent per wake-up on the same tools |
 //! | `mod_jobs` | MCP work for a session's Claude Code mod (`/api/mod/*`): bro asks, the mod polls, does it, answers |
+//! | `relay` | the account relay's computer half: a tunnel dialed out to the account server, its streams served by the same router, so a phone signed in to the person's account reaches this Bro from anywhere |
 //!
 //! # Data root
 //!
@@ -43,13 +44,19 @@
 
 mod agents;
 mod apps;
+mod browser;
+pub use browser::Handoff as BrowserHandoff;
 mod alerts;
 mod auth;
 mod commands;
+mod justconnect;
+pub use justconnect::{Link as JustConnectLink, LinkPhase as JustConnectPhase, link as justconnect_link};
+pub use commands::input_submit_delay;
 mod coordination;
 mod coordination_evidence;
 mod coordination_worktrees;
 mod conversation;
+pub mod devices;
 pub mod file_links;
 pub mod file_preview;
 pub mod insights;
@@ -60,13 +67,15 @@ mod jsh;
 mod media;
 mod mod_jobs;
 mod model;
+mod relay;
+pub use relay::{RelayPeer, is_relay_address};
 mod net;
 mod notifications;
 mod orchestrator;
-pub mod orbit_voice;
 pub mod schedule;
 mod output_filter;
 mod profiles;
+mod project_icons;
 mod project_store;
 mod projects;
 mod prompt;
@@ -81,6 +90,7 @@ mod session;
 pub mod slash_commands;
 mod focus_controls;
 mod state;
+pub mod voice;
 mod vt_stream;
 pub mod watchdog;
 mod ws;
@@ -183,6 +193,7 @@ pub struct SessionMeta {
 /// Remote client wants a new session (POST /api/sessions or ws `create`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateRequest {
+    pub permission: Option<bro_core::launch::Permission>,
     pub title: Option<String>,
     pub profile_id: Option<String>,
     pub shell: Option<String>,
@@ -192,6 +203,9 @@ pub struct CreateRequest {
     /// Model for an agent session ("opus"); None = the login's default.
     #[serde(default)]
     pub model: Option<String>,
+    /// Reasoning effort for a Claude Code / Codex session ("none", "low", "medium", "high"); None = the agent's own.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// A model or thinking choice from the phone.
@@ -204,6 +218,10 @@ pub enum FocusControlChange {
 
 /// Commands the bridge asks bro to execute on its PTYs.
 pub enum BridgeCommand {
+    /// The desktop's pending browser requests changed. No focus change is implied.
+    BrowserHandoffsChanged,
+    /// Resume the owning agent after browser handoff, when its editor can take a message.
+    BrowserResume { id: String, event_id: String, text: String, reply: tokio::sync::oneshot::Sender<Result<bool, String>> },
     /// A durable task needs its coordinator. The inbox deduplicates this task/revision/action.
     CoordinationWake { task_id: String, revision: u64, seq: u64, project: PathBuf, action: String },
     /// The desktop and phone share the model and thinking controls, including changes waiting for a turn to end.
@@ -216,6 +234,12 @@ pub enum BridgeCommand {
     Input {
         id: String,
         data: Vec<u8>,
+    },
+    /// How long ago the person last typed into the session (`None`: not yet), for its Claude mod's question
+    /// timer (`GET /api/mod/{session}/typed`). An error when bro has no such session.
+    TypedAgo {
+        id: String,
+        reply: tokio::sync::oneshot::Sender<Result<Option<std::time::Duration>, String>>,
     },
     /// Composed input waits until bro has handed the bytes to the session before pacing the next write.
     Write {
@@ -273,6 +297,9 @@ pub enum BridgeCommand {
     Tile {
         project: Option<PathBuf>,
     },
+    /// A project's storyboard changed, or should be shown (bro's storyboard tools): its view opens beside
+    /// `session` when it isn't showing; `focus` brings it to the front, on `scene` (its place in the film).
+    Storyboard { session: Option<String>, project: PathBuf, scene: Option<usize>, focus: bool },
 }
 
 /// What bro's orchestrator session is asked to do, once [`Bridge::route_orchestrator`] hands it everything
@@ -294,6 +321,8 @@ pub enum OrchestratorCommand {
 impl std::fmt::Debug for BridgeCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::BrowserHandoffsChanged => f.write_str("BrowserHandoffsChanged"),
+            Self::BrowserResume { id, event_id, .. } => f.debug_struct("BrowserResume").field("id", id).field("event_id", event_id).finish(),
             Self::CoordinationWake { task_id, revision, seq, project, action } => f.debug_struct("CoordinationWake").field("task_id", task_id).field("revision", revision).field("seq", seq).field("project", project).field("action", action).finish(),
             Self::FocusControls { id, change, .. } => f.debug_struct("FocusControls").field("id", id).field("change", change).finish(),
             Self::Seen { id, event_id } => f.debug_struct("Seen").field("id", id).field("event_id", event_id).finish(),
@@ -302,6 +331,7 @@ impl std::fmt::Debug for BridgeCommand {
                 .field("id", id)
                 .field("bytes", &data.len())
                 .finish(),
+            Self::TypedAgo { id, .. } => f.debug_struct("TypedAgo").field("id", id).finish(),
             Self::Write { id, data, .. } => f
                 .debug_struct("Write")
                 .field("id", id)
@@ -331,6 +361,7 @@ impl std::fmt::Debug for BridgeCommand {
                 .finish(),
             Self::Orchestrator(c) => f.debug_tuple("Orchestrator").field(c).finish(),
             Self::Tile { project } => f.debug_struct("Tile").field("project", project).finish(),
+            Self::Storyboard { session, project, scene, focus } => f.debug_struct("Storyboard").field("session", session).field("project", project).field("scene", scene).field("focus", focus).finish(),
             Self::OpenInEditor { id, path, line, column } => f
                 .debug_struct("OpenInEditor")
                 .field("id", id)
@@ -395,6 +426,9 @@ pub struct BridgeStatus {
     pub token: String,
     pub clients: usize,
     pub error: Option<String>,
+    /// Who those clients are (phones, browsers), in the order they connected.
+    #[serde(default)]
+    pub devices: Vec<devices::Device>,
 }
 
 /// Cheap-to-clone handle; the host runs on its own tokio runtime thread.
@@ -433,24 +467,6 @@ impl Bridge {
         options: StartOptions,
         on_command: Box<dyn Fn(BridgeCommand) + Send + Sync>,
     ) -> anyhow::Result<Bridge> {
-        Self::start_service(cfg, options, on_command, true)
-    }
-
-    /// Canonical workspace/tool service without any HTTP listener or LAN access.
-    /// The same handle feeds the session registry used by the optional bridge.
-    pub fn start_local(
-        cfg: BridgeConfig,
-        on_command: Box<dyn Fn(BridgeCommand) + Send + Sync>,
-    ) -> anyhow::Result<Bridge> {
-        Self::start_service(cfg, StartOptions { import_legacy_token: false }, on_command, false)
-    }
-
-    fn start_service(
-        cfg: BridgeConfig,
-        options: StartOptions,
-        on_command: Box<dyn Fn(BridgeCommand) + Send + Sync>,
-        listen: bool,
-    ) -> anyhow::Result<Bridge> {
         std::fs::create_dir_all(&cfg.data_root)?;
         let legacy = if options.import_legacy_token {
             auth::legacy_token_candidates()
@@ -477,17 +493,9 @@ impl Bridge {
                     }
                 };
                 let _ = host_state.runtime.set(runtime.handle().clone());
-                if listen {
-                    runtime.spawn(schedule::run(host_state.clone()));
-                    runtime.block_on(run_host(host_state, cfg, ready_tx));
-                } else {
-                    // No network/token discovery/schedule workers in local-only mode.
-                    runtime.block_on(async {
-                        let mut stopped = host_state.shutdown.subscribe();
-                        let _ = ready_tx.send(Ok(()));
-                        let _ = stopped.wait_for(|value| *value).await;
-                    });
-                }
+                runtime.spawn(schedule::run(host_state.clone()));
+                runtime.spawn(project_icons::watch(host_state.clone()));
+                runtime.block_on(run_host(host_state, cfg, ready_tx));
                 runtime.shutdown_timeout(Duration::from_secs(1));
             })?;
         match ready_rx.recv() {
@@ -508,6 +516,8 @@ impl Bridge {
         }
     }
 
+
+
     fn state(&self) -> &AppState {
         &self.inner.state
     }
@@ -515,9 +525,14 @@ impl Bridge {
     /// Identity of the shared local service, independent of transport status.
     pub fn same_service(&self, other: &Bridge) -> bool { Arc::ptr_eq(&self.inner, &other.inner) }
 
+    /// Used when switching between LAN access and the local JustConnect worker.
+    pub fn bind_address(&self) -> String { self.state().inner.lock().host.to_string() }
+
     pub fn set_rmm_settings(&self, settings: bro_core::rmm::Settings) { self.state().rmm.configure(settings); }
     pub fn rmm_status(&self) -> rmm::Status { self.state().rmm.status() }
     pub fn rmm_retry(&self) { self.state().rmm.retry(); }
+    /// Look for a newer Bro RMM; viewers stay connected unless one installs (see [`rmm::Rmm::check_update`]).
+    pub fn rmm_check_update(&self) { self.state().rmm.check_update(); }
     pub fn rmm_disconnect(&self) { self.state().rmm.stop(); let settings = self.state().rmm.config_settings(); self.state().rmm.configure(settings); }
 
     pub fn register(&self, meta: SessionMeta) {
@@ -537,17 +552,6 @@ impl Bridge {
         self.state().register(summary, project, hint);
     }
 
-    /// Native publication only: bind the voice snapshot to these exact registry lifetimes.
-    /// This does no I/O and is not exposed through MCP/HTTP arguments.
-    pub fn bind_voice_generations(&self, generations: &[(&str, &str)]) {
-        let mut inner = self.state().inner.lock();
-        for (id, generation) in generations {
-            if let Some(session) = inner.sessions.get_mut(*id)
-                && session.summary.voice_generation.as_deref() != Some(*generation) {
-                session.summary.voice_generation = Some((*generation).to_owned());
-            }
-        }
-    }
 
     /// Raw PTY output bytes, in order.
     pub fn output(&self, id: &str, data: &[u8]) {
@@ -720,6 +724,79 @@ impl Bridge {
         self.state().orchestrator.on_update(Arc::from(f));
     }
 
+    /// Live voice settings ([`voice::VoiceConfig`]); applies to calls started afterwards.
+    pub fn set_voice_config(&self, config: voice::VoiceConfig) {
+        self.state().voice.set_config(config);
+    }
+
+    /// Whether calls can start, why not, and the live calls (what `GET /api/voice` returns).
+    pub fn voice_status(&self) -> serde_json::Value {
+        self.state().voice.status()
+    }
+
+    /// The browser voice client on this computer (`/voice`), when the bridge listens.
+    pub fn voice_page_url(&self) -> Option<String> {
+        self.local_url().map(|url| format!("{url}/voice"))
+    }
+
+    /// Paired viewer for the same signed-in tab used by the browser tools.
+    pub fn browser_page_url(&self) -> Option<String> {
+        self.local_url().map(|url| format!("{url}/browser?theme=dark#token={}", self.state().token))
+    }
+
+    /// Cached by the native browser watcher; never does network work on the UI thread.
+    pub fn browser_handoffs(&self) -> Vec<BrowserHandoff> {
+        self.state().browser_handoff_pending.lock().clone()
+    }
+
+    pub fn return_browser_handoff(&self, tab_id: u32, id: String, reply: Box<dyn FnOnce(Result<(), String>) + Send>) {
+        let state = self.state().clone();
+        let Some(runtime) = state.runtime.get().cloned() else {
+            reply(Err("The browser bridge is not running.".into()));
+            return;
+        };
+        {
+            let mut pending = state.browser_handoff_pending.lock();
+            let Some(handoff) = pending.iter_mut().find(|h| h.id == id && h.tab_id == tab_id) else {
+                reply(Err("This handoff changed. Refresh Bro and try again.".into()));
+                return;
+            };
+            if handoff.returning { return; }
+            handoff.returning = true;
+        }
+        state.send_command(BridgeCommand::BrowserHandoffsChanged);
+        runtime.spawn(async move {
+            let result = browser::call(&serde_json::json!({"action":"resume", "tabId":tab_id, "handoffId":id})).await
+                .map(|_| ()).map_err(|(_, body)| body.0["message"].as_str().unwrap_or("Could not return browser control. Try again.").to_owned());
+            {
+                let mut pending = state.browser_handoff_pending.lock();
+                if result.is_ok() { pending.retain(|h| h.id != id); }
+                else if let Some(handoff) = pending.iter_mut().find(|h| h.id == id) { handoff.returning = false; }
+            }
+            state.browser_handoff_changed.notify_one();
+            state.send_command(BridgeCommand::BrowserHandoffsChanged);
+            reply(result);
+        });
+    }
+
+    /// Live voice calls right now (cheap: no key lookup, fine to poll).
+    pub fn voice_calls(&self) -> Vec<voice::LiveCall> {
+        self.state().voice.live_calls()
+    }
+
+    /// `Err(why)` when a call couldn't start now (voice off, no OpenAI key). Blocking: it may read
+    /// the user's saved environment variables, so keep it off the UI thread.
+    pub fn voice_ready(&self) -> Result<(), String> {
+        self.state().voice.unavailable().map_or(Ok(()), Err)
+    }
+
+    /// Ends every live voice call (the phone and pages see `ended`).
+    pub fn voice_hangup_all(&self) {
+        for call in self.state().voice.calls() {
+            call.send(voice::Input::Hangup);
+        }
+    }
+
     /// Start a watchdog on session `id` (replacing one it had). bro wakes it with [`Bridge::watchdog_wake`].
     pub fn watchdog_start(&self, id: &str, plan: WatchdogPlan) -> WatchdogSnapshot {
         self.state().watchdogs.start(id, plan)
@@ -840,6 +917,7 @@ impl Bridge {
             token: state.token.as_ref().clone(),
             clients: state.clients.load(Ordering::Relaxed),
             error: state.last_error.lock().clone(),
+            devices: state.devices.list(),
         }
     }
 

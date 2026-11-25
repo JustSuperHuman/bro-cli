@@ -6,6 +6,29 @@ use super::kit::Ui;
 use crate::skin::Backdrop;
 use bro_gfx::{Color, Rect};
 
+/// The bundled Aurora stylesheet's native counterpart: palette-driven ambient color, with no CSS execution.
+///
+/// Each glow is one radial gradient, fading evenly from its centre to its edge: the same light 24 faint rings
+/// stacked on each other gave, at one quad instead of 24 (each of them as big as the card, every frame).
+pub fn aurora(ui: &mut Ui, area: Rect) {
+    if !ui.theme.aurora() {
+        return;
+    }
+    let t = ui.t;
+    ui.clip(area, 0.0);
+    ui.glass(area, bro_gfx::Corners::all(0.0), t.role("canvas", t.bg));
+    // what 24 rings of this alpha add up to at the centre, where they all overlap
+    let ring = if t.light { 0.004f32 } else { 0.007 };
+    let peak = 1.0 - (1.0 - ring).powi(24);
+    let radius = area.w.max(area.h) * 0.64;
+    for (cx, cy, color) in [(area.x + area.w * 0.08, area.y, t.accent), (area.right(), area.bottom(), t.role("messageAction", t.shine))] {
+        let r = ui.px(Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0));
+        let fill = bro_gfx::Fill::Radial(color.with_alpha(peak), color.with_alpha(0.0));
+        ui.scene.quad(bro_gfx::Quad::new(r, fill).radius(r.w / 2.0));
+    }
+    ui.unclip();
+}
+
 const KANA: &[&str] = &[
     "ｱ", "ｲ", "ｳ", "ｴ", "ｵ", "ｶ", "ｷ", "ｸ", "ｹ", "ｺ", "ｻ", "ｼ", "ｽ", "ｾ", "ｿ", "ﾀ", "ﾁ", "ﾂ", "ﾃ", "ﾄ", "ﾅ", "ﾆ", "ﾇ", "ﾈ", "ﾊ", "ﾋ",
     "ﾌ", "ﾍ", "ﾎ", "ﾏ", "ﾐ", "ﾑ", "ﾒ", "ﾓ", "ﾔ", "ﾕ", "ﾗ", "ﾘ", "ﾜ", "0", "1", "2", "3", "4", "5", "7", "8", "9", "Z", ":", "=",
@@ -63,6 +86,7 @@ pub fn draw(ui: &mut Ui, area: Rect, bd: Backdrop, ink: Color) {
     match bd {
         Backdrop::None => {}
         Backdrop::Stars => {
+            ui.wake_after(std::time::Duration::from_millis(400));
             for y in 0..rows {
                 for x in 0..cols {
                     let h = hash(x, y, 7);
@@ -97,6 +121,7 @@ pub fn draw(ui: &mut Ui, area: Rect, bd: Backdrop, ink: Color) {
             }
         }
         Backdrop::Rain => {
+            ui.wake_after(std::time::Duration::from_millis(110));
             let h_ = rows as i64;
             for x in 0..cols {
                 let h = hash(x, 0, 41);

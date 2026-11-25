@@ -1,7 +1,8 @@
 //! Skills attached to installed browser/desktop tools. Bro owns one complete cached tree per skill,
 //! refreshes it off the UI thread, and fans it out to agent homes (including new profiles at launch).
 //! Personal skills and links of the same name are never adopted or overwritten.
-use crate::{agent_desktop, justbrowse, managed_skill, skill_repos};
+use crate::util::{home_dir, same_path};
+use crate::{agent_desktop, justbrowse, managed_skill, paths, skill_repos};
 use std::path::{Path, PathBuf};
 
 pub const BROWSER: &str = "justbrowse-browser";
@@ -22,16 +23,48 @@ pub fn cache(name: &str, source: &Path) -> Result<(), String> {
 
 /// Fan out an existing cache without downloading anything (also used with auto-sync off).
 pub fn publish(name: &str) -> Result<(), String> {
-    for home in crate::justimagine::skill_homes() {
-        managed_skill::write_tree(&home, name, &cache_dir(name)).map_err(|e| format!("writing {name} into {}: {e}", home.display()))?;
+    let mut homes = crate::justimagine::skill_homes();
+    // `~/.agents` before the Codex homes, which only need a copy while it has none.
+    homes.sort_by_key(|h| is_codex_home(h));
+    for home in homes {
+        write_home(&home, name).map_err(|e| format!("writing {name} into {}: {e}", home.display()))?;
     }
     Ok(())
 }
 
+fn is_codex_home(home: &Path) -> bool {
+    same_path(home, &paths::codex_local_dir()) || home.parent().is_some_and(|p| same_path(p, &paths::codex_profiles_dir()))
+}
+
+/// Codex reads `~/.agents/skills` whatever its CODEX_HOME, so with a copy there one in a Codex home
+/// lists the skill twice. Bro's own copy steps aside; a personal one stays. A Codex `skills` folder
+/// linked to `~/.agents/skills` is that same folder and is written as usual.
+fn write_home(home: &Path, name: &str) -> std::io::Result<bool> {
+    let agents = home_dir().join(".agents").join("skills");
+    let canonical = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    if is_codex_home(home) && agents.join(name).join("SKILL.md").is_file() && !same_path(&canonical(home.join("skills")), &canonical(agents)) {
+        managed_skill::remove(home, name);
+        return Ok(false);
+    }
+    managed_skill::write_tree(home, name, &cache_dir(name))
+}
+
 /// No network at launch. A tool that's absent does not add a stale skill to a new home.
 pub fn write_cached(home: &Path) {
-    if justbrowse::installed().is_some() {
-        let _ = managed_skill::write_tree(home, BROWSER, &cache_dir(BROWSER));
+    let active = crate::automation::Active::load();
+    write_configured(home, &active);
+}
+
+pub fn write_configured(home: &Path, active: &crate::automation::Active) {
+    if active.browser {
+        let _ = write_home(home, BROWSER);
+    } else {
+        managed_skill::remove(home, BROWSER);
+    }
+    if active.desktop.is_some() {
+        let _ = write_home(home, crate::cua::SKILL);
+    } else {
+        managed_skill::remove(home, crate::cua::SKILL);
     }
     write_desktop_cached(home);
 }
@@ -40,16 +73,16 @@ pub fn write_cached(home: &Path) {
 pub fn write_desktop_cached(home: &Path) {
     if agent_desktop::installed().is_some() {
         for name in agent_desktop::skill_names() {
-            let _ = managed_skill::write_tree(home, name, &cache_dir(name));
+            let _ = write_home(home, name);
         }
     }
 }
 
-/// Refresh the browser skill from its release bundle (older installs fall back to GitHub).
-/// No global agent configuration edits.
+/// Refresh the browser skill from the install itself: Quick Install's release bundle or the checkout
+/// the registered bridge runs from. Installs that ship none fall back to GitHub (needs Git and the
+/// network). No global agent configuration edits.
 pub fn refresh_browser() -> Result<(), String> {
-    let shipped = justbrowse::install_dir().join("skills").join(BROWSER);
-    if shipped.join("SKILL.md").is_file() {
+    if let Some(shipped) = justbrowse::installed().and_then(|found| found.skill) {
         return cache(BROWSER, &shipped);
     }
     // Earlier upstream installers copied only into the local agent homes. Bring those installs
@@ -104,5 +137,45 @@ mod tests {
         let new_home = sb.home().join("new-profile");
         assert!(managed_skill::write_tree(&new_home, "example", &cache_dir("example")).unwrap());
         assert!(new_home.join("skills/example/references/guide.md").is_file());
+    }
+
+    #[test]
+    fn codex_homes_lean_on_the_shared_agents_folder() {
+        let sb = sandbox();
+        let source = sb.home().join("source");
+        atomic_write(&source.join("SKILL.md"), b"---\nname: example\n---\n").unwrap();
+        let (claude, codex, profile) = (paths::claude_local_dir(), paths::codex_local_dir(), paths::codex_profiles_dir().join("smol"));
+        for home in [&claude, &codex, &profile] {
+            std::fs::create_dir_all(home).unwrap();
+        }
+        // Without `~/.agents/skills` every home gets its own copy.
+        cache("example", &source).unwrap();
+        assert!([&claude, &codex, &profile].iter().all(|h| h.join("skills/example/.bro-managed").is_file()));
+
+        // With it, Codex reads that one copy: bro's own copies in Codex homes step aside, Claude keeps its.
+        std::fs::create_dir_all(sb.home().join(".agents/skills")).unwrap();
+        atomic_write(&profile.join("skills/mine/SKILL.md"), b"personal").unwrap();
+        cache("example", &source).unwrap();
+        assert!(sb.home().join(".agents/skills/example/.bro-managed").is_file());
+        assert!(claude.join("skills/example/.bro-managed").is_file());
+        assert!(!codex.join("skills/example").exists() && !profile.join("skills/example").exists());
+        write_home(&profile, "example").unwrap();
+        assert!(!profile.join("skills/example").exists(), "a launch doesn't add it back");
+        assert!(profile.join("skills/mine/SKILL.md").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_codex_skills_folder_linked_to_agents_is_written_not_emptied() {
+        let sb = sandbox();
+        let source = sb.home().join("source");
+        atomic_write(&source.join("SKILL.md"), b"---\nname: example\n---\n").unwrap();
+        let agents = sb.home().join(".agents/skills");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::create_dir_all(paths::codex_local_dir()).unwrap();
+        std::os::unix::fs::symlink(&agents, paths::codex_local_dir().join("skills")).unwrap();
+        cache("example", &source).unwrap();
+        cache("example", &source).unwrap();
+        assert!(agents.join("example/SKILL.md").is_file());
     }
 }

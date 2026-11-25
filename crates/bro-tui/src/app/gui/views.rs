@@ -6,6 +6,8 @@ use super::kit::Ui;
 use crate::app::App;
 use crate::pane::{Cx, PaneId};
 use crate::views::coordination::CoordinationView;
+use crate::views::automation::AutomationView;
+use crate::views::computers::ComputersView;
 use crate::views::{bridge::BridgeView, profiles::ProfilesView, proxy::ProxyView, quick_install::QuickInstallView, settings::SettingsView, setup::SetupView, skills::SkillsView, sounds::SoundsView, stats::StatsView, usage::UsageView};
 use bro_gfx::{Point, Rect};
 use crossterm::event::KeyModifiers;
@@ -28,11 +30,30 @@ fn with_view<R>(app: &mut App, id: PaneId, focused: bool, f: impl FnOnce(&mut dy
     Some(r)
 }
 
+/// The Storyboard, which draws pictures from the window's media cache: true when pane `id` is one (and was
+/// drawn).
+pub fn draw_storyboard(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, focused: bool, media: &mut super::media::Media) -> bool {
+    with_view(app, id, focused, |any, cx| match any.downcast_mut::<crate::views::storyboard::StoryboardView>() {
+        Some(v) => crate::views::storyboard::gui::draw(v, ui, area, cx, media),
+        None => false,
+    })
+    .unwrap_or(false)
+}
+
 /// Draw view pane `id` natively in `area`. False when its module doesn't (yet): the caller paints the terminal
 /// UI's drawing instead.
 pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, focused: bool) -> bool {
+    // the new-session page is the launcher's own drawing, needing the keymap a view's context doesn't carry
+    if app.panes.get(&id).is_some_and(|p| p.view() == Some("new-session")) {
+        let time = app.start.elapsed().as_secs_f64();
+        let cx = super::surface::Cx { svc: &app.svc, keymap: &app.keymap, time, focused, alt: false };
+        let Some(v) = app.panes.get_mut(&id).and_then(|p| p.as_any_mut().downcast_mut::<crate::views::new_session::NewSessionView>()) else { return false };
+        return crate::launcher::gui::draw(&mut v.launcher, ui, area, &cx);
+    }
     with_view(app, id, focused, |any, cx| {
-        if let Some(v) = any.downcast_mut::<CoordinationView>() {
+        if let Some(v) = any.downcast_mut::<AutomationView>() {
+            crate::views::automation::gui::draw(v, ui, area, cx)
+        } else if let Some(v) = any.downcast_mut::<CoordinationView>() {
             crate::views::coordination::gui::draw(v, ui, area, cx)
         } else if let Some(v) = any.downcast_mut::<SettingsView>() {
             crate::views::settings::gui::draw(v, ui, area, cx)
@@ -46,6 +67,8 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, focused: bool) -
             crate::views::proxy::gui::draw(v, ui, area, cx)
         } else if let Some(v) = any.downcast_mut::<BridgeView>() {
             crate::views::bridge::gui::draw(v, ui, area, cx)
+        } else if let Some(v) = any.downcast_mut::<ComputersView>() {
+            crate::views::computers::gui::draw(v, ui, area, cx)
         } else if let Some(v) = any.downcast_mut::<QuickInstallView>() {
             crate::views::quick_install::gui::draw(v, ui, area, cx)
         } else if let Some(v) = any.downcast_mut::<SetupView>() {
@@ -65,7 +88,11 @@ pub fn draw(app: &mut App, ui: &mut Ui, id: PaneId, area: Rect, focused: bool) -
 pub fn click(app: &mut App, id: PaneId, n: usize, p: Point, m: KeyModifiers, count: u32) {
     app.settle_task_context(id);
     with_view(app, id, true, |any, cx| {
-        if let Some(v) = any.downcast_mut::<CoordinationView>() {
+        if let Some(v) = any.downcast_mut::<crate::views::storyboard::StoryboardView>() {
+            crate::views::storyboard::gui::click(v, n, p, m, count, cx)
+        } else if let Some(v) = any.downcast_mut::<AutomationView>() {
+            crate::views::automation::gui::click(v, n, cx)
+        } else if let Some(v) = any.downcast_mut::<CoordinationView>() {
             crate::views::coordination::gui::click(v, n, p, m, count, cx)
         } else if let Some(v) = any.downcast_mut::<SettingsView>() {
             crate::views::settings::gui::click(v, n, p, m, count, cx)
@@ -79,6 +106,8 @@ pub fn click(app: &mut App, id: PaneId, n: usize, p: Point, m: KeyModifiers, cou
             crate::views::proxy::gui::click(v, n, p, m, count, cx)
         } else if let Some(v) = any.downcast_mut::<BridgeView>() {
             crate::views::bridge::gui::click(v, n, p, m, count, cx)
+        } else if let Some(v) = any.downcast_mut::<ComputersView>() {
+            crate::views::computers::gui::click(v, n, p, m, count, cx)
         } else if let Some(v) = any.downcast_mut::<QuickInstallView>() {
             crate::views::quick_install::gui::click(v, n, p, m, count, cx)
         } else if let Some(v) = any.downcast_mut::<SetupView>() {
@@ -103,7 +132,11 @@ pub fn context(app: &mut App, id: PaneId, n: usize, p: Point) {
 /// The wheel over view pane `id` (`n`: the target under the pointer, if any).
 pub fn wheel(app: &mut App, id: PaneId, n: Option<usize>, down: bool) {
     with_view(app, id, true, |any, cx| {
-        if let Some(v) = any.downcast_mut::<CoordinationView>() {
+        if let Some(v) = any.downcast_mut::<crate::views::storyboard::StoryboardView>() {
+            crate::views::storyboard::gui::wheel(v, n, down, cx)
+        } else if let Some(v) = any.downcast_mut::<AutomationView>() {
+            crate::views::automation::gui::wheel(v, down)
+        } else if let Some(v) = any.downcast_mut::<CoordinationView>() {
             crate::views::coordination::gui::wheel(v, n, down, cx)
         } else if let Some(v) = any.downcast_mut::<SettingsView>() {
             crate::views::settings::gui::wheel(v, n, down, cx)
@@ -117,6 +150,8 @@ pub fn wheel(app: &mut App, id: PaneId, n: Option<usize>, down: bool) {
             crate::views::proxy::gui::wheel(v, n, down, cx)
         } else if let Some(v) = any.downcast_mut::<BridgeView>() {
             crate::views::bridge::gui::wheel(v, n, down, cx)
+        } else if let Some(v) = any.downcast_mut::<ComputersView>() {
+            crate::views::computers::gui::wheel(v, n, down, cx)
         } else if let Some(v) = any.downcast_mut::<QuickInstallView>() {
             crate::views::quick_install::gui::wheel(v, n, down, cx)
         } else if let Some(v) = any.downcast_mut::<SetupView>() {

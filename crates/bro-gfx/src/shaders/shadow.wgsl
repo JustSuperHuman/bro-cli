@@ -24,7 +24,7 @@ struct ShadowOut {
 fn vs_shadow(@builtin(vertex_index) vi: u32, s: ShadowIn) -> ShadowOut {
     let pad = s.params.x * 3.0;
     let r = vec4<f32>(s.rect.xy - vec2<f32>(pad, pad), s.rect.zw + vec2<f32>(pad * 2.0, pad * 2.0));
-    let p = r.xy + corner(vi) * r.zw;
+    let p = clip_point(r.xy + corner(vi) * r.zw, s.clip);
     var o: ShadowOut;
     o.pos = to_clip(p);
     o.p = p;

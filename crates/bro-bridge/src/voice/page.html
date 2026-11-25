@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Talk to bro</title>
+<style>
+  :root {
+    --bg: #202020; --surface: #2b2b2b; --surface-alt: #323232; --surface-hi: #3a3a3a;
+    --border: rgba(255,255,255,.08); --border-strong: rgba(255,255,255,.17);
+    --fg: #ffffff; --fg2: #cecece; --muted: #9d9d9d; --faint: #6f6f6f;
+    --accent: #d9dde4; --accent-fg: #16171a; --mint: #8fcf9c; --amber: #e3c27d; --coral: #ef7b7b; --cyan: #9fb4cc;
+    --font: Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+  body { display: flex; flex-direction: column; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  header { display: flex; align-items: center; gap: 12px; padding: 18px 22px 0; }
+  .mark { font-weight: 700; letter-spacing: -.02em; font-size: 18px; }
+  .mark small { font-weight: 500; color: var(--muted); font-size: 13px; margin-left: 8px; letter-spacing: 0; }
+  .pill { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; padding: 5px 11px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); color: var(--fg2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .dot.live { background: var(--mint); box-shadow: 0 0 0 4px rgba(143,207,156,.14); }
+  main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 18px; padding: 18px 22px 22px; min-height: 0; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { max-height: 38vh; } }
+  .stage { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 0; border-radius: 8px; background: radial-gradient(120% 90% at 50% 40%, #262626 0%, #1c1c1c 70%); border: 1px solid var(--border); overflow: hidden; }
+  canvas { width: min(46vh, 380px); height: min(46vh, 380px); }
+  .status { margin-top: 6px; font-size: 22px; font-weight: 600; letter-spacing: -.01em; min-height: 32px; }
+  .hint { color: var(--muted); font-size: 14px; margin-top: 4px; min-height: 20px; text-align: center; padding: 0 24px; }
+  .captions { width: min(720px, 92%); margin-top: 22px; min-height: 96px; display: flex; flex-direction: column; gap: 6px; }
+  .line { font-size: 16.5px; line-height: 1.5; color: var(--fg); transition: opacity .4s; }
+  .line.you { color: var(--fg2); }
+  .line.you::before { content: "You  "; color: var(--faint); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; font-weight: 600; }
+  .line.old { opacity: .45; }
+  .controls { display: flex; gap: 12px; margin-top: 26px; }
+  .btn { display: inline-flex; align-items: center; gap: 9px; padding: 11px 20px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface); font-weight: 600; font-size: 14.5px; transition: background .15s, transform .1s; }
+  .btn:hover { background: var(--surface-alt); }
+  .btn:active { transform: scale(.98); }
+  .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; padding: 14px 30px; font-size: 16px; }
+  .btn.primary:hover { background: #ffffff; }
+  .btn.danger { background: rgba(239,123,123,.14); border-color: rgba(239,123,123,.35); color: #ffd0d0; }
+  .btn.on { background: rgba(227,194,125,.16); border-color: rgba(227,194,125,.4); color: #f4dfae; }
+  .btn svg { width: 17px; height: 17px; }
+  .setup { display: flex; flex-direction: column; align-items: center; gap: 16px; margin-top: 18px; width: min(560px, 92%); }
+  .setup p { margin: 0; color: var(--fg2); text-align: center; font-size: 15px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+  .chip { padding: 6px 13px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--fg2); font-size: 13px; text-transform: capitalize; }
+  .chip[aria-pressed="true"] { background: var(--surface-hi); border-color: var(--border-strong); color: var(--fg); }
+  .label { color: var(--faint); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; font-weight: 600; }
+  aside { display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); }
+  aside h2 { margin: 0; padding: 14px 16px 10px; font-size: 13px; font-weight: 600; color: var(--fg2); display: flex; align-items: center; justify-content: space-between; }
+  aside h2 span { color: var(--faint); font-weight: 500; }
+  .feed { flex: 1; overflow-y: auto; padding: 0 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .empty { color: var(--faint); font-size: 13.5px; padding: 6px 8px; line-height: 1.55; }
+  .item { display: grid; grid-template-columns: 18px 1fr; gap: 10px; padding: 9px 10px; border-radius: 6px; background: rgba(255,255,255,.025); font-size: 13.5px; color: var(--fg2); }
+  .item b { color: var(--fg); font-weight: 600; }
+  .item time { display: block; color: var(--faint); font-size: 11.5px; margin-top: 2px; }
+  .icon { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; margin-top: 1px; }
+  .icon.run { border: 2px solid var(--cyan); border-right-color: transparent; animation: spin 1s linear infinite; }
+  .icon.ok { background: rgba(143,207,156,.18); color: var(--mint); }
+  .icon.bad { background: rgba(239,123,123,.18); color: var(--coral); }
+  .icon.note { background: rgba(159,180,204,.16); color: var(--cyan); }
+  .icon.ask { background: rgba(227,194,125,.18); color: var(--amber); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .confirm { margin: 0 10px 12px; padding: 14px; border-radius: 8px; border: 1px solid rgba(227,194,125,.45); background: rgba(227,194,125,.08); }
+  .confirm .q { font-weight: 600; margin-bottom: 4px; }
+  .confirm .sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .confirm .row { justify-content: flex-start; }
+  .error { margin-top: 18px; padding: 12px 16px; border-radius: 8px; border: 1px solid rgba(239,123,123,.4); background: rgba(239,123,123,.08); color: #ffd6d6; max-width: 560px; text-align: center; font-size: 14px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="mark">bro<small>voice</small></div>
+  <div class="pill"><span class="dot" id="dot"></span><span id="clock">Not connected</span></div>
+</header>
+<main>
+  <section class="stage">
+    <canvas id="orb" width="760" height="760" aria-hidden="true"></canvas>
+    <div class="status" id="status">Talk to your agents</div>
+    <div class="hint" id="hint">Put your headphones on. Ask what anyone is doing, tell an agent what to do next, start new work. bro speaks up when agents finish or need you.</div>
+
+    <div class="setup" id="setup">
+      <button class="btn primary" id="start">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        Start talking
+      </button>
+      <div class="label">Voice</div>
+      <div class="row" id="voices"></div>
+      <div class="label">Speak up when</div>
+      <div class="row" id="announce">
+        <button class="chip" data-mode="all" aria-pressed="true">Any agent finishes or needs me</button>
+        <button class="chip" data-mode="asked" aria-pressed="false">Only agents I talk to</button>
+        <button class="chip" data-mode="off" aria-pressed="false">Only when I ask</button>
+      </div>
+    </div>
+
+    <div class="captions" id="captions" hidden></div>
+    <div class="controls" id="controls" hidden>
+      <button class="btn" id="mute">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        <span>Mute</span>
+      </button>
+      <button class="btn danger" id="end">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 15c4-4 12-4 16 0l-2 3-3-1v-2.5a9 9 0 0 0-6 0V17l-3 1z"/></svg>
+        End
+      </button>
+    </div>
+    <div class="error" id="error" hidden></div>
+  </section>
+
+  <aside>
+    <h2>What's happening <span id="count"></span></h2>
+    <div id="confirmations"></div>
+    <div class="feed" id="feed">
+      <div class="empty" id="empty">Everything bro does for you shows up here: messages it sends, sessions it opens, agents that finish or ask for you.</div>
+    </div>
+  </aside>
+</main>
+
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const token = params.get("token") || "";
+  const withToken = (path) => token ? path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token) : path;
+  const $ = (id) => document.getElementById(id);
+  const STATES = {
+    connecting: ["Connecting", "Getting the line ready…"],
+    listening: ["Listening", "Go ahead. Ask, tell, or start something."],
+    hearing: ["Hearing you", ""],
+    thinking: ["On it", "Checking with your agents…"],
+    speaking: ["Speaking", "Talk over me any time to interrupt."],
+    ended: ["Call ended", "Start again whenever you like."],
+  };
+  let voice = "marin", announce = "all";
+  let pc = null, stream = null, ws = null, callId = null, startedAt = 0, muted = false, state = "idle";
+  let micLevel = 0, outLevel = 0, micAnalyser = null, outAnalyser = null, audioCtx = null, timer = null;
+  const lines = new Map();
+  let items = 0;
+
+  function setState(next) {
+    state = next;
+    const [title, hint] = STATES[next] || ["", ""];
+    $("status").textContent = title;
+    if (hint !== undefined) $("hint").textContent = hint;
+    $("dot").classList.toggle("live", next !== "ended" && next !== "idle");
+  }
+  function showError(message) {
+    $("error").textContent = message;
+    $("error").hidden = !message;
+  }
+  function time() { return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+
+  async function loadStatus() {
+    try {
+      const res = await fetch(withToken("/api/voice"));
+      const body = await res.json();
+      voice = body.voice || voice;
+      announce = body.announce || announce;
+      $("voices").innerHTML = "";
+      for (const name of body.voices || []) {
+        const chip = document.createElement("button");
+        chip.className = "chip"; chip.textContent = name;
+        chip.setAttribute("aria-pressed", String(name === voice));
+        chip.onclick = () => { voice = name; for (const c of $("voices").children) c.setAttribute("aria-pressed", String(c === chip)); };
+        $("voices").appendChild(chip);
+      }
+      for (const c of $("announce").children) c.setAttribute("aria-pressed", String(c.dataset.mode === announce));
+      if (!body.available) showError(body.reason || "Voice isn't available right now.");
+    } catch {
+      showError("bro isn't reachable from this page. Open it from bro, or check the bridge is running.");
+    }
+  }
+  for (const chip of $("announce").children) {
+    chip.onclick = async () => {
+      announce = chip.dataset.mode;
+      for (const c of $("announce").children) c.setAttribute("aria-pressed", String(c === chip));
+      if (callId) post(`/api/voice/calls/${callId}/context`, { announce });
+    };
+  }
+
+  function post(path, body) {
+    return fetch(withToken(path), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+  }
+
+  function analyser(source) {
+    const node = audioCtx.createAnalyser();
+    node.fftSize = 512;
+    source.connect(node);
+    return node;
+  }
+  function level(node) {
+    if (!node) return 0;
+    const data = new Uint8Array(node.fftSize);
+    node.getByteTimeDomainData(data);
+    let sum = 0;
+    for (const v of data) { const x = (v - 128) / 128; sum += x * x; }
+    return Math.min(1, Math.sqrt(sum / data.length) * 4);
+  }
+
+  async function start() {
+    showError("");
+    $("setup").hidden = true;
+    $("captions").hidden = false; $("controls").hidden = false;
+    $("captions").innerHTML = ""; lines.clear();
+    setState("connecting");
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      micAnalyser = analyser(audioCtx.createMediaStreamSource(stream));
+      pc = new RTCPeerConnection();
+      const out = new Audio(); out.autoplay = true;
+      pc.ontrack = (event) => {
+        out.srcObject = event.streams[0];
+        outAnalyser = analyser(audioCtx.createMediaStreamSource(event.streams[0]));
+      };
+      pc.addTrack(stream.getAudioTracks()[0], stream);
+      const channel = pc.createDataChannel("oai-events");
+      channel.onopen = () => { if (callId) post(`/api/voice/calls/${callId}/context`, { ready: true }); };
+      pc.onconnectionstatechange = () => { if (["failed", "closed"].includes(pc?.connectionState)) finish("The audio connection dropped."); };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      openSocket();
+      const res = await post("/api/voice/calls", { sdp: offer.sdp, voice, announce, client: "web" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.message || `bro couldn't start the call (${res.status}).`);
+      callId = body.callId;
+      await pc.setRemoteDescription({ type: "answer", sdp: body.sdp });
+      startedAt = Date.now();
+      timer = setInterval(tickClock, 1000); tickClock();
+      setState("listening");
+    } catch (error) {
+      finish(error?.name === "NotAllowedError" ? "bro needs the microphone. Allow it in the address bar and try again." : (error?.message || String(error)));
+    }
+  }
+
+  function tickClock() {
+    const s = Math.floor((Date.now() - startedAt) / 1000);
+    $("clock").textContent = `Live · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  function openSocket() {
+    const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${withToken("/ws")}`;
+    ws = new WebSocket(url);
+    ws.onmessage = (message) => {
+      let data; try { data = JSON.parse(message.data); } catch { return; }
+      if (data.type !== "voice" || !callId || data.callId !== callId) return;
+      handle(data);
+    };
+    ws.onclose = () => { if (callId) setTimeout(() => callId && openSocket(), 1500); };
+  }
+
+  function caption(role, id, text, final) {
+    const key = role + id;
+    let el = lines.get(key);
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "line" + (role === "user" ? " you" : "");
+      lines.set(key, el);
+      $("captions").appendChild(el);
+      const all = [...$("captions").children];
+      all.forEach((node, index) => node.classList.toggle("old", index < all.length - 2));
+      while ($("captions").children.length > 5) $("captions").firstChild.remove();
+    }
+    el.textContent = final ? text : (el.textContent + text);
+  }
+
+  function addItem(kind, html, id) {
+    $("empty")?.remove();
+    let el = id && document.querySelector(`[data-id="${CSS.escape(id)}"]`);
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "item";
+      if (id) el.dataset.id = id;
+      $("feed").prepend(el);
+      items++; $("count").textContent = items;
+    }
+    const glyph = { run: "", ok: "✓", bad: "!", note: "•", ask: "?" }[kind];
+    el.innerHTML = `<div class="icon ${kind}">${glyph}</div><div>${html}<time>${time()}</time></div>`;
+  }
+  const esc = (text) => String(text ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  function handle(event) {
+    switch (event.event) {
+      case "state": setState(event.state); break;
+      case "transcript": caption(event.role, event.itemId, event.final ? event.text : event.delta || "", !!event.final); break;
+      case "tool": {
+        const kind = event.status === "running" ? "run" : event.status === "done" ? "ok" : "bad";
+        const detail = event.status === "failed" && event.result ? `<br>${esc(event.result)}` : "";
+        addItem(kind, `<b>${esc(event.summary)}</b>${detail}`, "tool-" + event.id);
+        break;
+      }
+      case "notice": addItem(event.kind === "input" ? "ask" : "note", esc(event.text)); break;
+      case "progress": addItem("note", `Hugh: ${esc(event.text)}`); break;
+      case "confirm": showConfirm(event.actionId, event.text); break;
+      case "confirm_resolved": document.querySelector(`[data-action="${CSS.escape(event.actionId)}"]`)?.remove(); break;
+      case "error": addItem("bad", esc(event.message)); break;
+      case "ended": finish(event.reason || ""); break;
+    }
+  }
+
+  function showConfirm(actionId, text) {
+    const card = document.createElement("div");
+    card.className = "confirm"; card.dataset.action = actionId;
+    card.innerHTML = `<div class="q">${esc(text)}?</div><div class="sub">Say yes or no, or decide here.</div><div class="row"><button class="btn primary" style="padding:8px 18px;font-size:14px">Do it</button><button class="btn">Leave it</button></div>`;
+    const [go, stop] = card.querySelectorAll("button");
+    go.onclick = () => { post(`/api/voice/calls/${callId}/confirm`, { actionId, approve: true }); card.remove(); };
+    stop.onclick = () => { post(`/api/voice/calls/${callId}/confirm`, { actionId, approve: false }); card.remove(); };
+    $("confirmations").prepend(card);
+  }
+
+  function finish(reason) {
+    const id = callId; callId = null;
+    if (id) post(`/api/voice/calls/${id}/hangup`).catch(() => {});
+    try { pc?.close(); } catch {}
+    stream?.getTracks().forEach((track) => track.stop());
+    try { ws?.close(); } catch {}
+    try { audioCtx?.close(); } catch {}
+    pc = null; stream = null; ws = null; micAnalyser = null; outAnalyser = null; audioCtx = null;
+    clearInterval(timer);
+    $("clock").textContent = "Not connected";
+    $("controls").hidden = true; $("setup").hidden = false;
+    $("confirmations").innerHTML = "";
+    setState("ended");
+    if (reason) showError(reason);
+  }
+
+  $("start").onclick = start;
+  $("end").onclick = () => finish("");
+  $("mute").onclick = () => {
+    muted = !muted;
+    stream?.getAudioTracks().forEach((track) => (track.enabled = !muted));
+    $("mute").classList.toggle("on", muted);
+    $("mute").querySelector("span").textContent = muted ? "Unmute" : "Mute";
+    $("hint").textContent = muted ? "Muted. bro can still talk to you." : (STATES[state]?.[1] || "");
+  };
+  window.addEventListener("beforeunload", () => { if (callId) navigator.sendBeacon?.(withToken(`/api/voice/calls/${callId}/hangup`)); });
+
+  // The orb: rings that breathe with your voice (cool) and bro's (warm).
+  const canvas = $("orb"), ctx = canvas.getContext("2d");
+  let phase = 0;
+  function draw() {
+    micLevel += (level(micAnalyser) * (muted ? 0 : 1) - micLevel) * 0.25;
+    outLevel += (level(outAnalyser) - outLevel) * 0.25;
+    phase += 0.012 + outLevel * 0.05;
+    const w = canvas.width, h = canvas.height, cx = w / 2, cy = h / 2;
+    ctx.clearRect(0, 0, w, h);
+    const live = state !== "idle" && state !== "ended";
+    const base = w * 0.2 * (1 + outLevel * 0.35 + micLevel * 0.18);
+    const glow = ctx.createRadialGradient(cx, cy, base * 0.2, cx, cy, base * 1.9);
+    const warm = outLevel > micLevel;
+    glow.addColorStop(0, live ? (warm ? "rgba(217,221,228,.30)" : "rgba(143,207,156,.26)") : "rgba(217,221,228,.12)");
+    glow.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(cx, cy, base * 1.9, 0, Math.PI * 2); ctx.fill();
+    for (let ring = 0; ring < 4; ring++) {
+      ctx.beginPath();
+      const r = base * (0.72 + ring * 0.13);
+      for (let a = 0; a <= Math.PI * 2 + 0.01; a += Math.PI / 90) {
+        const wobble = Math.sin(a * (3 + ring) + phase * (1.4 + ring * 0.3)) * (4 + outLevel * 26 + micLevel * 18) * (live ? 1 : 0.3);
+        const x = cx + Math.cos(a) * (r + wobble), y = cy + Math.sin(a) * (r + wobble);
+        a === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = `rgba(${warm ? "217,221,228" : "143,207,156"},${0.55 - ring * 0.11})`;
+      ctx.lineWidth = 2.2 - ring * 0.35;
+      ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(cx, cy, base * 0.55, 0, Math.PI * 2);
+    ctx.fillStyle = state === "thinking" ? "rgba(159,180,204,.20)" : "rgba(255,255,255,.06)"; ctx.fill();
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+  loadStatus().then(() => { if (params.has("autostart")) start(); });
+})();
+</script>
+</body>
+</html>

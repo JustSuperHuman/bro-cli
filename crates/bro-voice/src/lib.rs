@@ -20,6 +20,7 @@
 
 mod audio;
 pub mod cue;
+mod dictation;
 mod hotkey;
 mod live;
 mod playback;
@@ -28,6 +29,7 @@ mod transcribe;
 mod worker;
 
 pub use live::{DEFAULT_LIVE_MODEL, DEFAULT_LIVE_URL, DEFAULT_LIVE_VOICE, LiveConfig};
+pub use dictation::{Dictation, clean_transcript};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -144,6 +146,16 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    fn new(cfg: VoiceConfig, on_event: OnEvent) -> Arc<Self> {
+        Arc::new(Self {
+            prompt: Mutex::new(cfg.prompt.clone()),
+            keywords: Mutex::new(cfg.keywords.clone()),
+            cfg,
+            stopped: AtomicBool::new(false),
+            on_event,
+        })
+    }
+
     /// One line in the diagnostic trace, if one is configured. Never fails.
     pub(crate) fn log(&self, line: impl AsRef<str>) {
         let Some(path) = &self.cfg.log else { return };
@@ -206,13 +218,7 @@ impl Voice {
     /// key and microphone are checked per take and reported as `Error` events.
     pub fn start(cfg: VoiceConfig, on_event: Box<dyn Fn(VoiceEvent) + Send + Sync>) -> anyhow::Result<Voice> {
         let vk = Self::parse_hotkey(&cfg.hotkey).ok_or_else(|| anyhow::anyhow!("unknown voice hotkey {:?}", cfg.hotkey))?;
-        let shared = Arc::new(Shared {
-            prompt: Mutex::new(cfg.prompt.clone()),
-            keywords: Mutex::new(cfg.keywords.clone()),
-            cfg,
-            stopped: AtomicBool::new(false),
-            on_event,
-        });
+        let shared = Shared::new(cfg, on_event);
         Self::start_platform(shared, vk)
     }
 

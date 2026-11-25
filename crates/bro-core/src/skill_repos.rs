@@ -3,12 +3,15 @@
 //!
 //! A repo can also be watched for one skill in it (`owner/repo#name`, or `owner/repo#path/to/folder`): how
 //! Skill Issue installs ([`crate::skill_market`]). A name is the folder of that name holding a SKILL.md anywhere
-//! in the repo; a folder that isn't a skill itself brings the skills in it.
+//! in the repo; a folder that isn't a skill itself brings the skills in it, however deep (`#skills/dcc`, or by
+//! its name alone, `#blender`). A GitHub link to a folder (`…/tree/main/skills/dcc/blender`) watches that folder.
 //!
 //! Each repo is a shallow clone in `~/.bro/skill-repos/<owner>-<repo>` (override `BRO_SKILL_REPOS_DIR`),
 //! pulled again on every sync. A skill is a folder holding a `SKILL.md`: the repo's root itself, a folder at
-//! its root, or a folder under its `skills/`. Only those folders are checked out when git can (a partial,
-//! sparse clone), so a big repo with one skill in it stays small.
+//! its root, or a folder anywhere under its `skills/`, families of them in folders of their own
+//! (`skills/dcc/blender/<name>`, its [`Found::group`] `dcc/blender`). A SKILL.md inside another skill's folder is
+//! part of that skill, and a name two folders share comes once, the shallowest. Only those folders are checked out
+//! when git can (a partial, sparse clone), so a big repo with one skill in it stays small.
 //!
 //! Watching a repo installs nothing: its skills are listed ([`cached`]) and you install the ones you want
 //! ([`install`]), everywhere (every home agents read skills from, [`crate::justimagine::skill_homes`]) or into a
@@ -33,16 +36,19 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// A clone or pull that takes longer than this is given up on.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// A repo as typed ("https://github.com/t3dotgg/tstack", "github.com/t3dotgg/tstack/tree/main/skills",
-/// "t3dotgg/tstack", "git@github.com:t3dotgg/tstack.git") in the form bro keeps: "owner/repo" for GitHub,
-/// otherwise the URL without a trailing `.git` or `/`; then `#` and the skill when it names one
-/// ("owner/repo#council", "owner/repo#skills/council"). None when it isn't a repo.
+/// A repo as typed ("https://github.com/t3dotgg/tstack", "t3dotgg/tstack", "git@github.com:t3dotgg/tstack.git") in
+/// the form bro keeps: "owner/repo" for GitHub, otherwise the URL without a trailing `.git` or `/`; then `#` and the
+/// skill when it names one ("owner/repo#council", "owner/repo#skills/council"). A GitHub link into the repo names
+/// its folder ("github.com/o/r/tree/main/skills/dcc" is "o/r#skills/dcc"; a file's link, its folder's). None when it
+/// isn't a repo.
 pub fn normalize(input: &str) -> Option<String> {
-    let input = input.trim();
+    let input = github_page(input.trim());
+    let input = input.as_str();
     if let Some((repo, pick)) = input.rsplit_once('#') {
         let pick = pick.trim().trim_matches('/');
         let segment_ok = |p: &str| !p.is_empty() && p != "." && p != ".." && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
-        let repo = normalize(repo)?;
+        // what follows the `#` wins over a folder the link went into
+        let repo = base(&normalize(repo)?).to_string();
         return match pick {
             "" => Some(repo),
             _ => pick.split('/').all(segment_ok).then(|| format!("{repo}#{pick}")),
@@ -56,9 +62,22 @@ pub fn normalize(input: &str) -> Option<String> {
         .or_else(|| ["https://", "http://", ""].iter().find_map(|scheme| s.strip_prefix(scheme).and_then(|r| r.strip_prefix("github.com/").or_else(|| r.strip_prefix("www.github.com/")))));
     let name_ok = |p: &str| !p.is_empty() && p != "." && p != ".." && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
     if let Some(path) = github {
-        let mut parts = path.split('/');
-        let (owner, repo) = (parts.next()?, parts.next()?.trim_end_matches(".git"));
-        return (name_ok(owner) && name_ok(repo)).then(|| format!("{owner}/{repo}"));
+        let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+        let (owner, repo) = (*parts.first()?, parts.get(1)?.trim_end_matches(".git"));
+        if !(name_ok(owner) && name_ok(repo)) {
+            return None;
+        }
+        // a link into it (`tree/<ref>/<folder>`, `blob/<ref>/<file>`): that folder (a file's, its folder)
+        let inside: &[&str] = match parts.get(2..) {
+            Some([kind @ ("tree" | "blob"), _, rest @ ..]) if !rest.is_empty() => if *kind == "blob" { &rest[..rest.len() - 1] } else { rest },
+            _ => &[],
+        };
+        return Some(match inside {
+            [] => format!("{owner}/{repo}"),
+            _ if inside.iter().all(|p| name_ok(p)) => format!("{owner}/{repo}#{}", inside.join("/")),
+            // a folder bro couldn't name: the repo, its skills to pick from
+            _ => format!("{owner}/{repo}"),
+        });
     }
     if s.contains("://") || s.starts_with("git@") {
         return (!s.contains(char::is_whitespace)).then(|| s.to_string());
@@ -67,6 +86,25 @@ pub fn normalize(input: &str) -> Option<String> {
     let mut parts = s.split('/');
     let (owner, repo) = (parts.next()?, parts.next()?);
     (parts.next().is_none() && name_ok(owner) && name_ok(repo)).then(|| format!("{owner}/{repo}"))
+}
+
+/// A GitHub address without what the page adds to it, which names no skill: its query (`?tab=readme-ov-file`) and
+/// its own anchors (`#readme`, `#license-ov-file`, a line's `#L12-L20`).
+fn github_page(input: &str) -> String {
+    if !input.contains("github.com") {
+        return input.to_string();
+    }
+    let (address, anchor) = input.split_once('#').map_or((input, None), |(a, h)| (a, Some(h)));
+    let address = address.split_once('?').map_or(address, |(a, _)| a);
+    let page_anchor = |h: &str| {
+        let h = h.to_ascii_lowercase();
+        let line = |p: &str| p.strip_prefix('l').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        h.starts_with("readme") || h.ends_with("-ov-file") || h.split('-').all(line)
+    };
+    match anchor {
+        Some(h) if !page_anchor(h) => format!("{address}#{h}"),
+        _ => address.to_string(),
+    }
 }
 
 /// The repo of a watched spec ("owner/repo#council" → "owner/repo").
@@ -144,27 +182,75 @@ pub struct Found {
     pub name: String,
     /// the folder that holds its SKILL.md, inside the clone
     pub dir: PathBuf,
+    /// the family of skills it's kept with in the repo: the folders between where the repo keeps its skills and its
+    /// own ("dcc/blender" for `skills/dcc/blender/<name>`); empty for one kept with the rest
+    pub group: String,
 }
 
-/// The folders under the repo root that are skills, as git paths ("", "council", "skills/council"), given
-/// every file path in the repo. The repo itself is one when its root holds a SKILL.md. A repo with none there
-/// keeps them where agents' own tools look ([`deeper_paths`]).
+/// How many folders under `skills/` a skill may be (`skills/<category>/<family>/<name>` is three).
+const SKILLS_DEPTH: usize = 6;
+/// How deep a skill may be anywhere else, when a repo keeps none where bro looks first.
+const ANY_DEPTH: usize = 8;
+
+/// The folders of `files` (git paths) that hold a SKILL.md: "" for the root.
+fn skill_dirs<'a>(files: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    files.into_iter().filter_map(|f| f.strip_suffix("SKILL.md").map(|d| d.trim_end_matches('/')).filter(|d| d.is_empty() || f.ends_with("/SKILL.md"))).collect()
+}
+
+/// A folder (git path) with no hidden folder in it (`.github`, `.claude`…).
+fn shown(dir: &str) -> bool {
+    !dir.split('/').any(|p| p.starts_with('.'))
+}
+
+/// `dirs` without those inside another skill's folder (a skill's examples and templates are part of it). The root,
+/// and a `skills` folder that holds a SKILL.md, hold other skills all the same.
+fn outermost<'a>(dirs: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let dirs: Vec<&str> = dirs.into_iter().collect();
+    dirs.iter().copied().filter(|d| !dirs.iter().any(|o| !o.is_empty() && *o != "skills" && d.len() > o.len() && d.starts_with(o) && d.as_bytes()[o.len()] == b'/')).collect()
+}
+
+/// One folder per name (they all go into one `skills/<name>` once installed): the shallowest, then the first.
+fn one_per_name(mut dirs: Vec<String>) -> Vec<String> {
+    dirs.sort_by_key(|d| (d.split('/').count(), d.clone()));
+    let mut names = std::collections::HashSet::new();
+    let mut out: Vec<String> = dirs.into_iter().filter(|d| d.is_empty() || names.insert(d.rsplit('/').next().unwrap_or(d).to_ascii_lowercase())).collect();
+    out.sort();
+    out
+}
+
+/// The family a skill folder (a git path) is kept with: the folders between where the repo keeps its skills
+/// (its root, `skills/`, a plugin's `skills/`) and its own. "skills/dcc/blender/x" is "dcc/blender", "skills/x"
+/// and "x" are "", "plugins/web/skills/x" is "plugins/web".
+pub fn group_of(dir: &str) -> String {
+    let parent = dir.rsplit_once('/').map_or("", |(p, _)| p);
+    let parent = parent.strip_prefix("skills/").unwrap_or(if parent == "skills" { "" } else { parent });
+    parent.strip_suffix("/skills").unwrap_or(parent).to_string()
+}
+
+/// The folders under the repo root that are skills, as git paths ("", "council", "skills/council",
+/// "skills/dcc/blender/scenario-blender-expert"), given every file path in the repo. The repo itself is one when its
+/// root holds a SKILL.md. A repo with none there keeps them where agents' own tools look ([`deeper_paths`]), or
+/// anywhere it likes.
 fn skill_paths<'a>(files: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let dirs: Vec<&str> = files.into_iter().filter_map(|f| f.strip_suffix("SKILL.md").map(|d| d.trim_end_matches('/')).filter(|d| d.is_empty() || f.ends_with("/SKILL.md"))).collect();
-    let mut out: Vec<String> = dirs
-        .iter()
-        .filter(|dir| {
-            let depth = if dir.is_empty() { 0 } else { dir.split('/').count() };
-            depth == 0 || (depth == 1 && !dir.starts_with('.')) || (depth == 2 && dir.starts_with("skills/"))
-        })
-        .map(|d| d.to_string())
-        .collect();
+    let dirs = skill_dirs(files);
+    let usual = |dir: &&str| {
+        let parts: Vec<&str> = if dir.is_empty() { vec![] } else { dir.split('/').collect() };
+        shown(dir)
+            && match parts[..] {
+                [] | [_] => true,
+                ["skills", ref rest @ ..] => rest.len() <= SKILLS_DEPTH,
+                _ => false,
+            }
+    };
+    let mut out: Vec<String> = outermost(dirs.iter().copied().filter(usual)).into_iter().map(str::to_string).collect();
     if out.is_empty() {
         out = deeper_paths(&dirs);
     }
-    out.sort();
-    out.dedup();
-    out
+    if out.is_empty() {
+        // a layout of its own (`<category>/<name>`): any skill folder that isn't hidden
+        out = outermost(dirs.iter().copied().filter(|d| shown(d) && d.split('/').count() <= ANY_DEPTH)).into_iter().map(str::to_string).collect();
+    }
+    one_per_name(out)
 }
 
 /// Skill folders in the other places skill repos keep them: `.claude/skills/<x>`, `.agents/skills/<x>`,
@@ -200,35 +286,71 @@ fn paths_for<'a>(spec: &str, files: impl IntoIterator<Item = &'a str>, named: Na
     }
 }
 
+/// The skills under `folder` (a git path, "" for the root) of those in `dirs`, however deep (a skill's own
+/// folders aside), one per name.
+fn skills_under(folder: &str, dirs: &[&str]) -> Vec<String> {
+    let under = format!("{folder}/");
+    let inside = dirs.iter().copied().filter(|d| d.strip_prefix(&under).is_some_and(|rest| shown(rest) && rest.split('/').count() <= ANY_DEPTH));
+    one_per_name(outermost(inside).into_iter().map(str::to_string).collect())
+}
+
 /// The folders `pick` names in a repo of `files`: a path is that folder when it holds a SKILL.md, else the skills
-/// under it (up to two folders down); a name is the shallowest folder of that name holding one, wherever it is,
-/// else the one whose SKILL.md is `name:`d so (as skills.sh lists them), else the repo itself when its root holds
-/// the only SKILL.md (the skill is the repo).
+/// under it, however deep (a link's branch can hold a slash, so a path that isn't there is tried without its
+/// first folders); a name is the shallowest folder of that name holding one, wherever it is, else the one whose
+/// SKILL.md is `name:`d so (as skills.sh lists them), else the skills under the shallowest folder of that name (a
+/// family, `blender`, or a category, `dcc`), else the repo itself when its root holds the only SKILL.md (the skill
+/// is the repo).
 fn picked_paths<'a>(pick: &str, files: impl IntoIterator<Item = &'a str>, named: Named) -> Vec<String> {
-    let dirs: Vec<&str> = files.into_iter().filter_map(|f| f.strip_suffix("SKILL.md").map(|d| d.trim_end_matches('/')).filter(|d| d.is_empty() || f.ends_with("/SKILL.md"))).collect();
+    let dirs = skill_dirs(files);
     if dirs.contains(&pick) {
         return vec![pick.to_string()];
     }
     if pick.contains('/') {
-        let under = format!("{pick}/");
-        let mut out: Vec<String> = dirs.iter().filter(|d| d.strip_prefix(&under).is_some_and(|rest| rest.split('/').count() <= 2)).map(|d| d.to_string()).collect();
-        out.sort();
-        return out;
+        let mut path = pick;
+        loop {
+            if dirs.contains(&path) {
+                return vec![path.to_string()];
+            }
+            let out = skills_under(path, &dirs);
+            if !out.is_empty() {
+                return out;
+            }
+            match path.split_once('/') {
+                Some((_, rest)) => path = rest,
+                None => return vec![],
+            }
+        }
     }
     let shallowest = |d: &&&str| (d.split('/').count(), d.len());
     let by_folder = dirs.iter().filter(|d| d.rsplit('/').next() == Some(pick)).min_by_key(shallowest);
     let by_name = || dirs.iter().filter(|d| named(d).is_some_and(|n| n.eq_ignore_ascii_case(pick))).min_by_key(shallowest);
-    match by_folder.or_else(by_name) {
-        Some(d) => vec![d.to_string()],
+    if let Some(d) = by_folder.or_else(by_name) {
+        return vec![d.to_string()];
+    }
+    // a folder of skills by its name: the shallowest one there are skills under
+    let mut folders: Vec<&str> = dirs
+        .iter()
+        .flat_map(|d| d.match_indices('/').map(|(i, _)| &d[..i]))
+        .filter(|f| f.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(pick)) && shown(f))
+        .collect();
+    folders.sort_by_key(|f| (f.split('/').count(), f.len()));
+    match folders.first() {
+        Some(f) => skills_under(f, &dirs),
         None if dirs == [""] => vec![String::new()],
         None => vec![],
     }
 }
 
-/// Every file path under `root`, relative and with `/` (no `.git`), `max` folders down at most.
+/// The file paths under `root` that tell where its skills are, relative and with `/` (no `.git`, no
+/// `node_modules`), `max` folders down at most: every file outside a skill's folder, and a skill's SKILL.md (what
+/// else a skill holds says nothing about where the others are, and a skill can hold thousands of files).
 fn files_under(root: &Path, max: usize) -> Vec<String> {
     fn walk(dir: &Path, rel: &str, out: &mut Vec<String>, depth: usize, max: usize) {
         if depth > max {
+            return;
+        }
+        if !rel.is_empty() && rel != "skills" && dir.join("SKILL.md").is_file() {
+            out.push(format!("{rel}/SKILL.md"));
             return;
         }
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -246,12 +368,12 @@ fn files_under(root: &Path, max: usize) -> Vec<String> {
     out
 }
 
-/// The skills in a checkout: its root, each folder at its root and each folder under `skills/` that holds a
-/// SKILL.md; or the one `repo` picks ([`picked_paths`]). A root skill is named by its SKILL.md's `name:`, else after
-/// the repo.
+/// The skills in a checkout: its root, each folder at its root and each folder anywhere under `skills/` that holds
+/// a SKILL.md; or the ones `repo` picks ([`picked_paths`]). A root skill is named by its SKILL.md's `name:`, else
+/// after the repo.
 pub fn discover(root: &Path, repo: &str) -> Vec<Found> {
     // a pick may be anywhere in the repo (its checkout holds little else)
-    let files = files_under(root, if pick(repo).is_some() { 12 } else { 4 });
+    let files = files_under(root, if pick(repo).is_some() { 12 } else { ANY_DEPTH + 1 });
     let named = |dir: &str| frontmatter_name(&root.join(dir).join("SKILL.md"));
     paths_for(repo, files.iter().map(String::as_str), &named)
         .into_iter()
@@ -262,7 +384,7 @@ pub fn discover(root: &Path, repo: &str) -> Vec<Found> {
                 None => frontmatter_name(&dir.join("SKILL.md")).unwrap_or_else(|| base(repo).rsplit('/').next().unwrap_or(repo).to_string()),
             };
             let safe = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) && !name.starts_with('.');
-            safe.then_some(Found { name, dir })
+            safe.then(|| Found { name, dir, group: group_of(&p) })
         })
         .collect()
 }
@@ -602,6 +724,8 @@ pub struct RepoSkill {
     pub description: Option<String>,
     /// the folder holding its SKILL.md, in the clone
     pub dir: PathBuf,
+    /// the family it's kept with in the repo ("dcc/blender"; empty: with the rest), [`Found::group`]
+    pub group: String,
 }
 
 /// What a repo holds as bro last saw it.
@@ -632,7 +756,7 @@ fn listing(repo: &str, dir: &Path) -> RepoSkills {
     RepoSkills {
         commit: head_commit(dir),
         skills: found.iter().map(|f| f.name.clone()).collect(),
-        found: found.into_iter().map(|f| RepoSkill { description: description(&f.dir.join("SKILL.md")), name: f.name, dir: f.dir }).collect(),
+        found: found.into_iter().map(|f| RepoSkill { description: description(&f.dir.join("SKILL.md")), name: f.name, dir: f.dir, group: f.group }).collect(),
         taken,
     }
 }
@@ -791,9 +915,23 @@ mod tests {
 
     #[test]
     fn normalizes_what_people_paste() {
-        for s in ["https://github.com/t3dotgg/tstack", "https://github.com/t3dotgg/tstack/", "github.com/t3dotgg/tstack", "t3dotgg/tstack", "git@github.com:t3dotgg/tstack.git", "https://github.com/t3dotgg/tstack/tree/main/skills", "https://www.github.com/t3dotgg/tstack.git"] {
+        for s in ["https://github.com/t3dotgg/tstack", "https://github.com/t3dotgg/tstack/", "github.com/t3dotgg/tstack", "t3dotgg/tstack", "git@github.com:t3dotgg/tstack.git", "https://github.com/t3dotgg/tstack/tree/main", "https://www.github.com/t3dotgg/tstack.git"] {
             assert_eq!(normalize(s).as_deref(), Some("t3dotgg/tstack"), "{s}");
         }
+        // a link into the repo watches the folder it shows (a file's link, its folder)
+        assert_eq!(normalize("https://github.com/t3dotgg/tstack/tree/main/skills").as_deref(), Some("t3dotgg/tstack#skills"));
+        assert_eq!(normalize("https://github.com/scenario-labs/skills/tree/main/skills/dcc/blender/").as_deref(), Some("scenario-labs/skills#skills/dcc/blender"));
+        assert_eq!(normalize("github.com/scenario-labs/skills/blob/main/skills/dcc/blender/scenario-blender-expert/SKILL.md").as_deref(), Some("scenario-labs/skills#skills/dcc/blender/scenario-blender-expert"));
+        assert_eq!(normalize("https://github.com/scenario-labs/skills/blob/main/README.md").as_deref(), Some("scenario-labs/skills"));
+        assert_eq!(normalize("https://github.com/o/r/tree/main/skills#council").as_deref(), Some("o/r#council"), "what follows the # wins");
+        assert_eq!(normalize("https://github.com/o/r/tree/main/odd%20folder").as_deref(), Some("o/r"), "a folder bro can't name: the repo");
+        // what a GitHub page adds to its address names no skill
+        assert_eq!(normalize("https://github.com/scenario-labs/skills#readme").as_deref(), Some("scenario-labs/skills"));
+        assert_eq!(normalize("https://github.com/scenario-labs/skills?tab=readme-ov-file#readme").as_deref(), Some("scenario-labs/skills"));
+        assert_eq!(normalize("https://github.com/o/r/tree/main/skills/dcc?tab=readme-ov-file").as_deref(), Some("o/r#skills/dcc"));
+        assert_eq!(normalize("https://github.com/o/r/blob/main/skills/x/SKILL.md#L12-L20").as_deref(), Some("o/r#skills/x"));
+        assert_eq!(normalize("https://github.com/o/r#license-ov-file").as_deref(), Some("o/r"));
+        assert_eq!(normalize("https://github.com/o/r#council").as_deref(), Some("o/r#council"), "bro's own # still picks a skill");
         assert_eq!(normalize("https://gitlab.com/me/skills.git").as_deref(), Some("https://gitlab.com/me/skills"));
         for bad in ["", "tstack", "a/b/c", "has space/repo", "https://github.com/onlyowner", "../x"] {
             assert_eq!(normalize(bad), None, "{bad}");
@@ -882,7 +1020,7 @@ names: a
         assert_eq!(picked_paths("react-state-management", files, &none), ["plugins/frontend/skills/react-state-management"]);
         // a path to the skill, or to a folder of them
         assert_eq!(picked_paths("skills/godot", files, &none), ["skills/godot"]);
-        assert_eq!(picked_paths("skills", files, &none), Vec::<String>::new());
+        assert_eq!(picked_paths("skills", files, &none), ["skills/godot", "skills/unity"], "a folder of them by its name: the shallowest");
         assert_eq!(picked_paths("plugins/frontend", files, &none), ["plugins/frontend/skills/react-state-management"]);
         assert_eq!(picked_paths("missing", files, &none), Vec::<String>::new());
         // a name only a SKILL.md gives (skills.sh lists them so)
@@ -892,6 +1030,79 @@ names: a
         assert_eq!(picked_paths("tidy", ["SKILL.md", "README.md"], &none), [""]);
         // the whole repo still only looks where it always did
         assert_eq!(paths_for("o/r", files, &none), ["skills/godot", "skills/unity"]);
+    }
+
+    /// scenario-labs/skills as its file list has it (a few of its 167 skills): skills of their own under `skills/`,
+    /// families of them in category folders (`skills/dcc/blender/<name>`), its own dev skills under `.agents`.
+    const FAMILIES: &[&str] = &[
+        "README.md",
+        ".claude-plugin/marketplace.json",
+        ".agents/skills/pr-summary/SKILL.md",
+        "skills/scenario/SKILL.md",
+        "skills/scenario-image-gen/SKILL.md",
+        "skills/scenario-image-gen/references/models.md",
+        "skills/dcc/blender/README.md",
+        "skills/dcc/blender/scenario-blender-expert/SKILL.md",
+        "skills/dcc/blender/scenario-blender-expert/scripts/bx_core.py",
+        "skills/dcc/blender/scenario-blender-animation/SKILL.md",
+        "skills/dcc/maya/scenario-maya-expert/SKILL.md",
+        "skills/game-engines/godot/scenario-godot-expert/SKILL.md",
+        "skills/game-engines/roblox/scenario-roblox-expert/SKILL.md",
+        // a template a skill ships is part of it
+        "skills/game-engines/roblox/scenario-roblox-expert/scripts/templates/arena/fixtures/door/SKILL.md",
+        "tests/scenario-roblox-expert/evidence/run.mp4",
+    ];
+
+    #[test]
+    fn finds_skills_kept_in_families_however_deep_under_skills() {
+        let none = |_: &str| None;
+        let all = ["skills/dcc/blender/scenario-blender-animation", "skills/dcc/blender/scenario-blender-expert", "skills/dcc/maya/scenario-maya-expert", "skills/game-engines/godot/scenario-godot-expert", "skills/game-engines/roblox/scenario-roblox-expert", "skills/scenario", "skills/scenario-image-gen"];
+        assert_eq!(skill_paths(FAMILIES.iter().copied()), all, "its own dev skills and a skill's templates stay out");
+        assert_eq!(paths_for("scenario-labs/skills", FAMILIES.iter().copied(), &none), all);
+        let groups: Vec<String> = all.iter().map(|p| group_of(p)).collect();
+        assert_eq!(groups, ["dcc/blender", "dcc/blender", "dcc/maya", "game-engines/godot", "game-engines/roblox", "", ""]);
+        assert_eq!((group_of("council"), group_of("plugins/web/skills/x"), group_of("")), (String::new(), "plugins/web".to_string(), String::new()));
+
+        // a family or a category, by its path (a GitHub link to it) or its name alone
+        let pick = |p: &str| picked_paths(p, FAMILIES.iter().copied(), &none);
+        let blender = ["skills/dcc/blender/scenario-blender-animation", "skills/dcc/blender/scenario-blender-expert"];
+        assert_eq!(pick("skills/dcc/blender"), blender);
+        assert_eq!(pick("blender"), blender);
+        assert_eq!(pick("skills/dcc"), ["skills/dcc/blender/scenario-blender-animation", "skills/dcc/blender/scenario-blender-expert", "skills/dcc/maya/scenario-maya-expert"]);
+        assert_eq!(pick("dcc"), pick("skills/dcc"));
+        assert_eq!(pick("game-engines").len(), 2);
+        assert_eq!(pick("skills").len(), 7, "the skills folder by its name: all of them, its own dev skills aside");
+        assert_eq!(pick("scenario-blender-expert"), ["skills/dcc/blender/scenario-blender-expert"], "a skill by its name, as before");
+        // a link whose branch holds a slash (tree/feature/x/skills/dcc/blender) still finds the folder
+        assert_eq!(pick("x/skills/dcc/blender"), blender);
+        assert_eq!(pick("skills/dcc/houdini"), Vec::<String>::new());
+
+        // two families with a skill of the same name: one goes in (they'd share skills/<name> once installed)
+        let twice = ["skills/dcc/maya/shared-tools/SKILL.md", "skills/game-engines/unity/shared-tools/SKILL.md", "skills/zeta/SKILL.md"];
+        assert_eq!(skill_paths(twice), ["skills/dcc/maya/shared-tools", "skills/zeta"]);
+        // a repo of its own layout, nothing where bro looks first: any skill folder that isn't hidden
+        assert_eq!(skill_paths(["dcc/blender/expert/SKILL.md", "dcc/blender/expert/scripts/x.py", ".vscode/ci/SKILL.md"]), ["dcc/blender/expert"]);
+    }
+
+    #[test]
+    fn a_checkout_with_families_is_read_without_walking_its_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let expert = root.join("skills").join("dcc").join("blender").join("scenario-blender-expert");
+        skill(&expert, "---\nname: scenario-blender-expert\ndescription: \"Use when doing any 3D work in Blender\"\nlicense: MIT\n---\n");
+        // deep inside a skill: a template that is itself a SKILL.md (part of the skill)
+        skill(&expert.join("scripts").join("templates").join("a").join("b"), "---\nname: template\n---\n");
+        skill(&root.join("skills").join("dcc").join("blender").join("scenario-blender-animation"), "---\nname: scenario-blender-animation\n---\n");
+        skill(&root.join("skills").join("scenario"), "---\nname: scenario\n---\n");
+        std::fs::write(root.join("skills").join("dcc").join("blender").join("README.md"), "the Blender family").unwrap();
+        let found = discover(root, "scenario-labs/skills");
+        let got: Vec<(&str, &str)> = found.iter().map(|f| (f.name.as_str(), f.group.as_str())).collect();
+        assert_eq!(got, [("scenario-blender-animation", "dcc/blender"), ("scenario-blender-expert", "dcc/blender"), ("scenario", "")]);
+        assert_eq!(description(&expert.join("SKILL.md")).as_deref(), Some("Use when doing any 3D work in Blender"));
+        assert!(!files_under(root, 9).iter().any(|f| f.contains("templates")), "a skill's own files aren't walked");
+        // the family picked: its skills only
+        let picked: Vec<String> = discover(root, "scenario-labs/skills#blender").into_iter().map(|f| f.name).collect();
+        assert_eq!(picked, ["scenario-blender-animation", "scenario-blender-expert"]);
     }
 
     #[test]
@@ -1000,6 +1211,29 @@ names: a
         }
     }
 
+    /// scenario-labs/skills as bro watches it: its skills in families under `skills/dcc` and `skills/game-engines`,
+    /// and a link to one family. `BRO_TEST_PATH` is the PATH git is found on.
+    #[test]
+    #[ignore = "network: clones scenario-labs/skills"]
+    fn scenario_labs_families_are_found() {
+        let _sb = sandbox();
+        // SAFETY: the sandbox holds the env lock
+        unsafe { std::env::set_var("PATH", std::env::var_os("BRO_TEST_PATH").unwrap_or_default()) };
+        let whole = sync("scenario-labs/skills", &[]).unwrap();
+        let mut groups: Vec<&str> = whole.found.iter().map(|f| f.group.as_str()).collect();
+        groups.dedup();
+        println!("{} skills in {} groups: {groups:?}", whole.skills.len(), groups.len());
+        assert!(whole.skills.len() >= 160, "{}", whole.skills.len());
+        let expert = whole.found.iter().find(|f| f.name == "scenario-blender-expert").expect("the Blender lead");
+        assert_eq!(expert.group, "dcc/blender");
+        assert!(expert.dir.join("scripts").is_dir(), "its scripts are checked out");
+        assert!(!whole.skills.iter().any(|s| s == "pr-summary"), "the repo's own dev skills stay out");
+        let link = normalize("https://github.com/scenario-labs/skills/tree/main/skills/dcc/blender").unwrap();
+        let family = sync(&link, &[]).unwrap();
+        println!("{link}: {:?}", family.skills);
+        assert!(family.skills.len() >= 14 && family.skills.iter().all(|s| s.contains("blender")), "{:?}", family.skills);
+    }
+
     #[test]
     fn watching_installs_nothing_until_asked_then_keeps_what_was_installed_in_step() {
         let sb = sandbox();
@@ -1085,5 +1319,24 @@ names: a
         assert!(picked.join("SKILL.md").is_file() && !claude.join("sol-loop").exists());
         assert_eq!(owner(&picked).as_deref(), Some(pick.as_str()));
         assert!(sync(&format!("{repo}#nope"), &[]).unwrap_err().contains("no skill nope"));
+
+        // a family of skills in a category folder: listed with the rest, watched by its folder or its name, and
+        // installed whole, its scripts and all
+        let blender = src.join("skills").join("dcc").join("blender");
+        skill(&blender.join("blender-expert"), "---\nname: blender-expert\n---\n");
+        std::fs::create_dir_all(blender.join("blender-expert").join("scripts")).unwrap();
+        std::fs::write(blender.join("blender-expert").join("scripts").join("bx_core.py"), "print('core')\n").unwrap();
+        skill(&blender.join("blender-animation"), "---\nname: blender-animation\n---\n");
+        std::fs::write(blender.join("README.md"), "the Blender family").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "five"]);
+        let whole = sync(&repo, &[]).unwrap();
+        assert!(whole.skills.contains(&"blender-expert".to_string()) && whole.skills.contains(&"blender-animation".to_string()), "{:?}", whole.skills);
+        assert_eq!(whole.found.iter().find(|f| f.name == "blender-expert").map(|f| f.group.as_str()), Some("dcc/blender"));
+        let family = format!("{repo}#skills/dcc/blender");
+        assert_eq!(sync(&family, &[]).unwrap().skills, ["blender-animation", "blender-expert"]);
+        install(&family, &[], &Target::Everywhere).unwrap();
+        assert!(claude.join("blender-expert").join("scripts").join("bx_core.py").is_file() && claude.join("blender-animation").join("SKILL.md").is_file());
+        assert_eq!(sync(&format!("{repo}#dcc"), &[]).unwrap().skills, ["blender-animation", "blender-expert"]);
     }
 }

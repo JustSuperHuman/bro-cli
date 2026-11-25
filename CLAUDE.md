@@ -16,4 +16,5 @@ Rules
 - Nothing slow on the TUI thread: background threads publish state and wake the loop.
 - Tests must not touch the real `~/.bro`, `~/.claude`, `~/.codex`: point `BRO_DIR`, `CLAUDE_POOL_DIR`, `BRO_CODEX_PROFILES_DIR`, `HOME`/`USERPROFILE` at a tempdir. Network tests are `#[ignore]`.
 - Atomic writes (temp + rename) for every file bro shares with v1.
+- Focus View (desktop, phone, web): read `FocusViewRules.md` before changing it, and update that file in the same change.
 - Build a single crate with its own target dir when working in parallel: `CARGO_TARGET_DIR=target-<crate> cargo test -p <crate>`.

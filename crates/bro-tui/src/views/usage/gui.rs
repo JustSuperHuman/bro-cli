@@ -16,6 +16,8 @@ use bro_gfx::{Color, Fill, Point, Quad, Rect};
 use crossterm::event::KeyModifiers;
 use std::collections::BTreeMap;
 
+mod jsh;
+
 /// The view's background (wheel, focus).
 const BODY: usize = 0;
 const REFRESH: usize = 1;
@@ -43,6 +45,16 @@ struct Snap {
     profiles: Result<Vec<Profile>, String>,
     usage: BTreeMap<String, UsageEntry>,
     picks: (Option<String>, Option<String>),
+    /// The Just Superhuman account while signed in: the first card.
+    jsh: Option<bro_core::jsh::Snapshot>,
+}
+
+/// A card in the grid.
+#[derive(Clone, Copy)]
+enum Card<'a> {
+    Jsh(&'a bro_core::jsh::Snapshot),
+    /// profile `i`
+    Login(usize, &'a Profile),
 }
 
 fn snapshot(cx: &Cx) -> Snap {
@@ -52,7 +64,8 @@ fn snapshot(cx: &Cx) -> Snap {
         Some(s) => format!("refreshed {} ago", crate::util::short_dur(s)),
         None => "not refreshed yet".into(),
     };
-    Snap { ago, profiles: st.profiles.ready().cloned().ok_or_else(|| st.profiles.why()), usage: st.usage.clone(), picks: st.picks.clone() }
+    let jsh = Some(st.jsh.clone()).filter(|j| j.signed_in);
+    Snap { ago, profiles: st.profiles.ready().cloned().ok_or_else(|| st.profiles.why()), usage: st.usage.clone(), picks: st.picks.clone(), jsh }
 }
 
 fn harness(p: &Profile) -> Harness {
@@ -162,8 +175,8 @@ pub(crate) fn icon_text_button(ui: &mut Ui, r: Rect, glyph: &str, label: &str, k
             if down { t.on_accent.fade(0.8) } else { t.on_accent }
         }
         widgets::Kind::Danger => {
-            ui.round(r, radius::CONTROL, if down { t.danger.fade(0.8) } else { t.danger.fade(1.0 - 0.1 * hot) });
-            t.ink_on(t.danger)
+            ui.round(r, radius::CONTROL, if down { t.bold_fill(t.danger).fade(0.8) } else { t.bold_fill(t.danger).fade(1.0 - 0.1 * hot) });
+            t.on_bold()
         }
         widgets::Kind::Secondary => {
             widgets::control(ui, r, if down { t.control_pressed } else { t.control.mix(t.control_hover, hot) });
@@ -253,23 +266,34 @@ pub(crate) fn draw(v: &mut super::UsageView, ui: &mut Ui, area: Rect, cx: &mut C
     hints(ui, Point::new(page.x, foot_y), &[("r", "refresh"), ("j/k", "scroll"), ("alt+o", "profiles")]);
 
     let grid = Rect::new(page.x, head.bottom() + 22.0, page.w, (foot_y - 14.0 - head.bottom() - 22.0).max(0.0));
+    let none = vec![];
     let profiles = match &snap.profiles {
         Ok(p) => p,
+        // the team account still shows while the logins can't be read
+        Err(_) if snap.jsh.is_some() => &none,
         Err(why) => {
             empty(ui, grid, "\u{F029A}", &format!("profiles {why}"));
             return true;
         }
     };
-    if profiles.is_empty() {
+    if profiles.is_empty() && snap.jsh.is_none() {
         empty(ui, grid, "\u{F0004}", "no profiles yet — alt+o to add a Claude account or Codex profile");
         return true;
     }
+    // the Just Superhuman account first, then the logins
+    let cards: Vec<Card> = snap.jsh.iter().map(Card::Jsh).chain(profiles.iter().enumerate().map(|(i, p)| Card::Login(i, p))).collect();
 
     // a grid of cards, two or three to a row when there's room
     let cols = (((grid.w + GAP) / (MIN_CARD + GAP)).floor() as usize).clamp(1, 3);
     let cw = (grid.w - GAP * (cols - 1) as f32) / cols as f32;
-    let heights: Vec<f32> = profiles.iter().map(|p| card_height(ui, p, snap.usage.get(&p.id), cw)).collect();
-    let rows = profiles.len().div_ceil(cols);
+    let heights: Vec<f32> = cards
+        .iter()
+        .map(|c| match c {
+            Card::Jsh(j) => jsh::height(ui, j, cw),
+            Card::Login(_, p) => card_height(ui, p, snap.usage.get(&p.id), cw),
+        })
+        .collect();
+    let rows = cards.len().div_ceil(cols);
     let mut tops = Vec::with_capacity(rows);
     let mut row_h = Vec::with_capacity(rows);
     let mut acc = 0.0;
@@ -289,13 +313,16 @@ pub(crate) fn draw(v: &mut super::UsageView, ui: &mut Ui, area: Rect, cx: &mut C
 
     let view = Rect::new(grid.x - 18.0, grid.y - 4.0, grid.w + 36.0, grid.h + 8.0);
     ui.clip(view, 0.0);
-    for (i, p) in profiles.iter().enumerate() {
-        let (r, c) = (i / cols, i % cols);
-        let card = Rect::new(grid.x + c as f32 * (cw + GAP), grid.y + tops[r] - off, cw, row_h[r]);
+    for (k, c) in cards.iter().enumerate() {
+        let (r, col) = (k / cols, k % cols);
+        let card = Rect::new(grid.x + col as f32 * (cw + GAP), grid.y + tops[r] - off, cw, row_h[r]);
         if card.bottom() < view.y || card.y > view.bottom() {
             continue;
         }
-        draw_card(ui, card, i, p, snap.usage.get(&p.id), &snap.picks, cx);
+        match c {
+            Card::Jsh(j) => jsh::draw(ui, card, j, cx.id),
+            Card::Login(i, p) => draw_card(ui, card, *i, p, snap.usage.get(&p.id), &snap.picks, cx),
+        }
     }
     ui.unclip();
     edge_fades(ui, view, content + 8.0, off);
@@ -436,18 +463,7 @@ fn draw_card(ui: &mut Ui, r: Rect, i: usize, p: &Profile, e: Option<&UsageEntry>
     if fetching {
         ui.spinner(Point::new(bx + 7.0, row1.y + 10.0), 4.6, 1.6, t.accent);
     }
-    // "+ session" shows at the top right while the pointer is over the card (above whatever is there)
-    if hot > 0.01 {
-        let st = Style::new(size::SMALL, weight::SEMIBOLD, t.accent);
-        let b = ui.line("+ session", st, None);
-        let chip = Rect::new(right - b.w - 16.0, row1.y, b.w + 16.0, 20.0);
-        let prev = ui.layer();
-        // painted onto the card (glass), so it covers what's there without making the card any less see-through
-        ui.glass(Rect::new(chip.x - 8.0, chip.y - 2.0, right - chip.x + 8.0, chip.h + 4.0), bro_gfx::Corners::ZERO, fill.fade(hot));
-        ui.glass_round(chip, radius::CONTROL, t.accent.with_alpha(0.12).over(fill).fade(hot));
-        ui.draw_faded(&b, Point::new(chip.x + 8.0, chip.y + (chip.h - b.h) / 2.0), hot);
-        ui.set_layer(prev);
-    }
+    session_chip(ui, right, row1.y, fill, hot);
     let plan = e.and_then(|e| e.usage.as_ref()).and_then(|u| u.plan.clone()).or_else(|| p.plan.clone()).unwrap_or_else(|| "—".into());
     let mut sub = vec![(plan, Style::new(size::SMALL, weight::SEMIBOLD, t.shine))];
     if let Some(m) = &p.email {
@@ -507,6 +523,24 @@ fn draw_card(ui: &mut Ui, r: Rect, i: usize, p: &Profile, e: Option<&UsageEntry>
             ui.draw(&b, Point::new(x0 + 24.0, y + 1.0));
         }
     }
+}
+
+/// "+ session" at the top right of a card that starts one (its right edge `right`, top `y`) while the pointer is
+/// over it (`hot`), above whatever is there.
+fn session_chip(ui: &mut Ui, right: f32, y: f32, fill: Color, hot: f32) {
+    if hot <= 0.01 {
+        return;
+    }
+    let t = ui.t;
+    let st = Style::new(size::SMALL, weight::SEMIBOLD, t.accent);
+    let b = ui.line("+ session", st, None);
+    let chip = Rect::new(right - b.w - 16.0, y, b.w + 16.0, 20.0);
+    let prev = ui.layer();
+    // painted onto the card (glass), so it covers what's there without making the card any less see-through
+    ui.glass(Rect::new(chip.x - 8.0, chip.y - 2.0, right - chip.x + 8.0, chip.h + 4.0), bro_gfx::Corners::ZERO, fill.fade(hot));
+    ui.glass_round(chip, radius::CONTROL, t.accent.with_alpha(0.12).over(fill).fade(hot));
+    ui.draw_faded(&b, Point::new(chip.x + 8.0, chip.y + (chip.h - b.h) / 2.0), hot);
+    ui.set_layer(prev);
 }
 
 fn subscription_models(e: Option<&UsageEntry>) -> Vec<bro_core::gemini::ModelQuota> {
@@ -646,6 +680,7 @@ pub(crate) fn click(_v: &mut super::UsageView, n: usize, _p: Point, _mods: KeyMo
             cx.svc.refresh_usage();
             cx.toast(Kind::Usage, "refreshing usage…");
         }
+        jsh::TARGET => cx.act(crate::pane::Action::LaunchUsage(Harness::Claude, Some(bro_core::jsh::PROVIDER_ID.into()))),
         n if n >= CARD => {
             // the same as the terminal UI's click on a signed-in login's block
             let pick = {
@@ -674,6 +709,7 @@ pub(crate) fn wheel(v: &mut super::UsageView, _n: Option<usize>, down: bool, cx:
     } else {
         v.scroll = v.scroll.saturating_sub(1);
     }
-    let n = cx.svc.state().profiles.ready().map(|p| p.len()).unwrap_or(0);
+    let st = cx.svc.state();
+    let n = st.profiles.ready().map(|p| p.len()).unwrap_or(0) + usize::from(st.jsh.signed_in);
     v.scroll = v.scroll.min(n.saturating_sub(1));
 }

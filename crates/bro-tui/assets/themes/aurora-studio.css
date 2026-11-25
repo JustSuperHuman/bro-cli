@@ -1,0 +1,16 @@
+/* Aurora Studio · gradients and glass for T3 Code web/desktop. No external resources. */
+:root.dark [data-workspace-area="conversation"] {
+  background-image: radial-gradient(ellipse at 12% 0%, color-mix(in srgb, var(--app-theme-accent) 16%, transparent), transparent 60%), radial-gradient(ellipse at 100% 100%, color-mix(in srgb, var(--app-theme-message-action) 10%, transparent), transparent 58%);
+}
+:root:not(.dark) [data-workspace-area="conversation"] {
+  background-image: radial-gradient(ellipse at 12% 0%, color-mix(in srgb, var(--app-theme-accent) 8%, transparent), transparent 62%);
+}
+:is([data-chat-header], [data-slot="composer-host"]) {
+  background-color: color-mix(in srgb, var(--app-theme-surface) 84%, transparent);
+  backdrop-filter: saturate(1.15) blur(14px);
+  border-color: var(--app-theme-border);
+}
+:is([data-user-message-bubble], .chat-markdown-codeblock) {
+  border: 1px solid var(--app-theme-border);
+  border-radius: 16px;
+}

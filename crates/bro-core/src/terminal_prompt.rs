@@ -18,6 +18,51 @@ pub struct Opt {
     pub focused: bool,
 }
 
+/// Codex keeps asynchronous questions above its ordinary composer until this shortcut opens them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueuedQuestions {
+    pub count: usize,
+    pub shortcut: QuestionShortcut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuestionShortcut {
+    ShiftLeft,
+    AltUp,
+}
+
+/// A live question queue, including when the normal composer and model footer follow it.
+pub fn queued_questions(rows: &[String]) -> Option<QueuedQuestions> {
+    let lines = lines(rows);
+    let end = dialog_end(&lines);
+    let tail = &lines[end.saturating_sub(32)..end];
+    for (i, line) in tail.iter().enumerate().rev() {
+        let lower = line.trim().to_lowercase();
+        let Some(badge) = lower.strip_prefix("? ") else { continue };
+        let mut words = badge.split_whitespace();
+        let Some(count) = words.next().and_then(|s| s.parse::<usize>().ok()).filter(|n| *n > 0) else { continue };
+        if !matches!(words.next(), Some("question" | "questions")) || words.next().is_some() { continue; }
+        for n in 1..=3.min(tail.len() - i - 1) {
+            let hint = tail[i + 1..=i + n].join(" ").split_whitespace().collect::<String>().to_lowercase();
+            let shortcut = match hint.as_str() {
+                "shift+←toanswer" | "shift+lefttoanswer" | "⇧←toanswer" => QuestionShortcut::ShiftLeft,
+                "alt+uptoanswer" | "alt+↑toanswer" | "⌥↑toanswer" => QuestionShortcut::AltUp,
+                _ => continue,
+            };
+            let trailer: Vec<&str> = tail[i + n + 1..].iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            // New output or an open native editor supersedes an older queue; an ordinary composer does not.
+            if let Some(first) = trailer.first()
+                && (!first.starts_with(['›', '>']) || first.contains("Type your answer") || first.contains("Add notes")
+                    || trailer.iter().any(|s| control_footer(s) || s.starts_with("• ")))
+            {
+                continue;
+            }
+            return Some(QueuedQuestions { count, shortcut });
+        }
+    }
+    None
+}
+
 impl Choice {
     /// Cursor movement does not change the request; a new command, question,
     /// option or description does.
@@ -309,7 +354,7 @@ pub fn choice(rows: &[String]) -> Option<Choice> {
 /// Native editors and menus still need attention even when there is no button
 /// card. Ordinary prose, old menus above an input prompt, and a busy status do not.
 pub fn waiting(rows: &[String]) -> bool {
-    if choice(rows).is_some() {
+    if choice(rows).is_some() || queued_questions(rows).is_some() {
         return true;
     }
     let lines = lines(rows);
@@ -450,6 +495,36 @@ mod tests {
     use super::*;
     fn rows(s: &str) -> Vec<String> {
         s.lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn codex_queued_questions_survive_the_normal_composer_and_footer() {
+        let screen = include_str!("../tests/fixtures/codex-queued-question.txt");
+        for (text, count, shortcut) in [
+            (screen.to_string(), 1, QuestionShortcut::ShiftLeft),
+            (screen.replace("1 question", "3 questions"), 3, QuestionShortcut::ShiftLeft),
+            (screen.replace("shift+← to answer", "shift+← to\nanswer"), 1, QuestionShortcut::ShiftLeft),
+            (screen.replace("shift+← to answer", "alt+up to answer"), 1, QuestionShortcut::AltUp),
+            (screen.replace("› Ask Codex to do anything", "›"), 1, QuestionShortcut::ShiftLeft),
+        ] {
+            assert_eq!(queued_questions(&rows(&text)), Some(QueuedQuestions { count, shortcut }));
+            assert!(waiting(&rows(&text)), "the normal composer must not hide queued questions");
+            assert!(choice(&rows(&text)).is_none(), "opening a queue is not an answer");
+        }
+    }
+
+    #[test]
+    fn stale_or_open_question_queues_are_not_actionable() {
+        for screen in [
+            "? 0 questions\nshift+← to answer\n› Ask Codex to do anything",
+            "? 1 question\nshift+← to answer\nNew output\n› Ask Codex to do anything",
+            "? 1 question\nshift+← to answer\nQuestion 1/2\n› Type your answer\nenter to submit answer | esc to interrupt",
+            "? 1 question\nshift+← to answer\n› Type your answer\nenter to submit answer | esc to interrupt",
+            "? 1 question\nshift+← to answer\n› Ask Codex to do anything\n• Working (2s • esc to interrupt)",
+            "› Ask Codex to do anything\nGPT-6.1-Sol max\n? for shortcuts",
+        ] {
+            assert!(queued_questions(&rows(screen)).is_none(), "{screen}");
+        }
     }
 
     #[test]

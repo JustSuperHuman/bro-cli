@@ -102,6 +102,7 @@ pub fn fill(st: &mut State) {
     st.models = demo_models(st.providers.ready().map(Vec::as_slice).unwrap_or(&[]));
     st.models.insert("gemini:work".into(), vec![bro_core::catalogue::ModelRow { id: "gemini-3.8-flash".into(), name: "Gemini Flash".into(), context: Some(1048576), pricing: None, reasoning: true, created: None }]);
     st.models.insert("gemini-sub:local".into(), vec![bro_core::catalogue::ModelRow { id: "gemini-4-argon-high".into(), name: "Gemini 4 Argon (high)".into(), context: Some(1048576), pricing: None, reasoning: true, created: None }]);
+    st.past_revision += 1;
     st.past = Avail::Ready(vec![
         past(Harness::Claude, Some("claude:work"), "bro-cli-v2", "port the oriel event loop and split tree", 1_800),
         past(Harness::Codex, Some("codex:local"), "bro-cli-v2", "anthropic <-> responses streaming fixtures", 7_200),
@@ -168,6 +169,7 @@ pub fn fill(st: &mut State) {
         token: "demo-9f3a7c21e4b8".into(),
         clients: 3,
         error: None,
+        devices: demo_devices(now),
     });
     st.bridge.qr = Some(fake_qr());
     st.bridge.enabled = true;
@@ -179,8 +181,16 @@ pub fn fill(st: &mut State) {
     let repo = |spec: &str, commit: &str, skills: &[(&str, &str)], secs: u64| super::skills::RepoState {
         skills: Some(bro_core::skill_repos::RepoSkills {
             commit: Some(commit.into()),
-            skills: skills.iter().map(|(n, _)| n.to_string()).collect(),
-            found: skills.iter().map(|(n, d)| bro_core::skill_repos::RepoSkill { name: n.to_string(), description: Some(d.to_string()), dir: bro_core::skill_repos::cache_dir(spec).join("skills").join(n) }).collect(),
+            skills: skills.iter().map(|(n, _)| n.rsplit('/').next().unwrap_or(n).to_string()).collect(),
+            found: skills
+                .iter()
+                .map(|(n, d)| {
+                    // a family's skills sit in its folder ("dcc/blender/scenario-blender-expert")
+                    let (group, name) = n.rsplit_once('/').unwrap_or(("", n));
+                    let dir = bro_core::skill_repos::cache_dir(spec).join("skills").join(n.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    bro_core::skill_repos::RepoSkill { name: name.to_string(), description: Some(d.to_string()), dir, group: group.to_string() }
+                })
+                .collect(),
             taken: vec![],
         }),
         synced: ago(secs),
@@ -188,8 +198,27 @@ pub fn fill(st: &mut State) {
     };
     st.skills.repos.insert(TSTACK.into(), repo(TSTACK, "92e38e2", &TSTACK_SKILLS, 2 * 3600));
     st.skills.repos.insert(REACT_PICK.into(), repo(REACT_PICK, "4f1c9d2", &[("react-best-practices", REACT_ABOUT)], 2 * 3600));
+    // BRO_DEMO_SKILL_FAMILIES: Scenario's skills watched too, kept in families of their own (the Skills view's family
+    // headings, for shots)
+    if std::env::var_os("BRO_DEMO_SKILL_FAMILIES").is_some() {
+        st.settings.skills.repos.push(SCENARIO.into());
+        st.skills.repos.insert(SCENARIO.into(), repo(SCENARIO, "8c41f0a", &SCENARIO_SKILLS, 3600));
+    }
     st.skills.own = ["brand-voice", "humanize-writing", "pdf-forms", "higgsfield-generate"].map(String::from).to_vec();
 }
+
+/// Scenario's skills (`BRO_DEMO_SKILL_FAMILIES`): one of their own, and families of them in category folders, by
+/// their folder in the repo's `skills/`.
+const SCENARIO: &str = "scenario-labs/skills";
+const SCENARIO_SKILLS: [(&str, &str); 7] = [
+    ("scenario", "Use when connecting an AI agent to Scenario through MCP, or when a task involves generating images, video, 3D, audio, sprites, textures or game assets."),
+    ("dcc/blender/scenario-blender-animation", "Use when animating characters or objects in Blender through Python: a walk or run cycle, a jump, lip sync, blocking in stepped keys, splining and polish."),
+    ("dcc/blender/scenario-blender-expert", "Use when doing any 3D work in Blender through Python or an MCP bridge, headless or in a live session."),
+    ("dcc/blender/scenario-blender-rigging", "Use when rigging a character, creature or prop in Blender through Python: Rigify metarigs, automatic weights, weight painting fixes."),
+    ("dcc/maya/scenario-maya-expert", "Use when doing any Autodesk Maya task through Python or a bridge, headless or live: maya.cmds or OpenMaya 2.0 scripts, mayapy batch jobs."),
+    ("game-engines/godot/scenario-godot-expert", "Use when an agent drives Godot 4.7 for any task: headless --script jobs, imports, command-line exports, GUT tests, screenshots."),
+    ("game-engines/unity/scenario-unity-expert", "Use when an agent drives Unity 6.3 for any task: batch mode and -executeMethod jobs, a running editor, the Unity CLI and MCP servers."),
+];
 
 /// The repo the demo watches, and the skill it picked from Skill Issue.
 const TSTACK: &str = "t3dotgg/tstack";
@@ -211,6 +240,79 @@ const TSTACK_SKILLS: [(&str, &str); 9] = [
     ("sol-loop", "Use when the user says \"sol loop\"."),
     ("takeover", "Take over existing work. Use when the user asks to take over a PR, branch, or agent thread, or requests a takeover."),
 ];
+
+/// The demo's Slop Collector: what its report says in each fixture (see the GUI script's `slop:` step).
+pub fn slop_report(fixture: &str) -> Option<bro_core::slop::Report> {
+    use bro_core::slop::{Cleanup, Leftover, Ledger, Others, Reason, Report, TempFiles};
+    const GB: u64 = 1 << 30;
+    const MB: u64 = 1 << 20;
+    let now = bro_core::util::now_ms().max(0) as u64;
+    let min = 60_000;
+    let cleanup = |seq, ago_min: u64, (title, what): (&str, &str), project: Option<&str>, session: &str, processes, memory, reason, waited_secs, by_hand| Cleanup {
+        seq,
+        at_ms: now - ago_min * min,
+        session_label: session.into(),
+        title: title.into(),
+        what: what.into(),
+        project: project.map(Into::into),
+        processes,
+        memory,
+        reason,
+        waited_secs,
+        by_hand,
+        ..Cleanup::default()
+    };
+    let recent = vec![
+        Cleanup { folders: 1, disk: 9 * MB, ..cleanup(38, 12, ("Chrome from Remotion", "Remotion's headless Chrome"), Some("film"), "Night Before Closing", 21, 6_900 * MB, Reason::Unattended, 600, false) },
+        Cleanup { seq: 37, at_ms: now - 47 * min, title: "Temp files".into(), what: "Remotion and Puppeteer".into(), folders: 212, disk: 4_300 * MB, ..Cleanup::default() },
+        cleanup(36, 128, ("Chrome from Puppeteer", "Puppeteer's headless Chrome"), Some("og-images"), "JustGains site", 7, 980 * MB, Reason::Quiet, 600, false),
+        cleanup(35, 310, ("Video helper from Remotion", "Remotion's compositor"), Some("bro-promo"), "bro voice promo", 1, 212 * MB, Reason::Unattended, 600, false),
+        cleanup(34, 1_290, ("Chromium from Playwright", "Playwright's headless Chromium"), None, "mobile web shots", 11, 1_400 * MB, Reason::Unattended, 140, true),
+    ];
+    let ledger = Ledger { since_ms: 1_793_448_000_000, cleanups: 38, processes: 512, memory: 61 * GB + 200 * MB, disk: 18 * GB + 900 * MB, seq: 38, recent };
+    let base = Report { on: true, collect: true, wait_mins: 10, supported: true, looked_ms: now - 12_000, sessions: 9, processes: 214, memory: 11 * GB + 400 * MB, ledger, ..Report::default() };
+    match fixture {
+        "off" => Some(Report { on: false, looked_ms: 0, sessions: 0, processes: 0, memory: 0, ..base }),
+        "old" => None,
+        "fresh" => Some(Report { ledger: Ledger { since_ms: now, ..Ledger::default() }, ..base }),
+        "clear" => Some(base),
+        _ => Some(Report {
+            leftovers: vec![
+                Leftover {
+                    key: "95364:1".into(),
+                    session: "demo-1".into(),
+                    session_label: "Night Before Closing".into(),
+                    title: "Chrome from Remotion".into(),
+                    what: "Remotion's headless Chrome".into(),
+                    project: Some("film".into()),
+                    processes: 21,
+                    memory: 6_700 * MB,
+                    reason: Reason::Unattended,
+                    waited_secs: 260,
+                    due_secs: Some(340),
+                    busy: false,
+                },
+                Leftover {
+                    key: "74856:1".into(),
+                    session: "demo-2".into(),
+                    session_label: "homies editor checks".into(),
+                    title: "Chromium from Playwright".into(),
+                    what: "Playwright's headless Chromium".into(),
+                    project: None,
+                    processes: 9,
+                    memory: 1_200 * MB,
+                    reason: Reason::Quiet,
+                    waited_secs: 380,
+                    due_secs: Some(220),
+                    busy: false,
+                },
+            ],
+            temp: TempFiles { folders: 547, bytes: 14 * GB + 600 * MB, tools: vec!["Remotion".into(), "Puppeteer".into(), "Playwright".into()], clearing: false },
+            others: Others { groups: 2, processes: 3, memory: 410 * MB, names: vec!["vite".into(), "esbuild".into()] },
+            ..base
+        }),
+    }
+}
 
 /// The Skills view's installed skills in the demo: bro's own, some of tstack's, the one from Skill Issue, Codex's, a
 /// few of yours, and two of the demo projects' own; and two disabled ones (one of tstack's, one of yours).
@@ -387,8 +489,8 @@ pub struct DemoSession {
 }
 
 /// More demo projects, one session each, for `BRO_DEMO_PROJECTS=<n>` (a crowded tab strip in captures).
-const MORE_PROJECTS: [&str; 18] = [
-    "orbit-voice",
+pub const MORE_PROJECTS: [&str; 18] = [
+    "voice",
     "justimagine",
     "website-studio",
     "justposts",
@@ -679,7 +781,8 @@ pub fn transcript_fit(h: Option<Harness>, cols: u16, rows: u16) -> String {
             block(&[&format!("{b}codex{x}"), "Added 6 fixtures covering text, tool calls and reasoning deltas.", "All 41 proxy tests pass."]),
             vec![format!("{d}› {x}")],
         ],
-        Some(Harness::Pi) | Some(Harness::Omp) => vec![
+        Some(Harness::Antigravity) => vec![block(&["Antigravity", "", "›  Ask Antigravity…"])],
+        Some(Harness::Pi | Harness::Omp) => vec![
             block(&[&format!("{b}pi{x} {d}· openrouter · kimi-k2{x}")]),
             block(&[&format!("{d}>{x} summarise the bridge protocol")]),
             block(&[&format!("The bridge speaks {b}/ws{x} with hello → snapshot → output events,"), "plus /api/sessions for create / kill / rename."]),
@@ -733,6 +836,44 @@ pub fn blocked_screen_fit(cols: u16, rows: u16) -> String {
         prompt_box,
     ];
     stack(blocks, cols, rows)
+}
+
+/// The showcase's logins belong to JustGains, not to a placeholder domain.
+pub fn justgains(st: &mut State) {
+    let emails = [("claude:local", "james@justgains.app"), ("claude:personal", "james+home@justgains.app"), ("claude:work", "team@justgains.app"), ("codex:local", "james@justgains.app"), ("codex:team", "team@justgains.app"), ("gemini-sub:local", "james@justgains.app")];
+    if let Avail::Ready(profiles) = &mut st.profiles {
+        for p in profiles {
+            if let Some((_, email)) = emails.iter().find(|(id, _)| *id == p.id) {
+                p.email = Some((*email).into());
+            }
+        }
+    }
+    if let Some(account) = &mut st.jsh.account {
+        account.user.name = "Alex Morgan".into();
+        account.user.email = "team@justgains.app".into();
+        account.organization.name = "JustGains".into();
+        account.organization.slug = "justgains".into();
+    }
+}
+
+/// The JustGains showcase's Claude Code session, drawn for a tile `cols` by `rows`.
+pub fn justgains_scene(cols: u16, rows: u16) -> String {
+    let (cols, rows) = (cols as usize, rows as usize);
+    let (o, d, g, r, b, x) = ("\x1b[38;2;217;119;87m", "\x1b[2m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[0m");
+    let mut welcome = boxed(o, &[&format!("{o}✻{x} Welcome to {b}Claude Code{x}!"), &format!("  {d}cwd: ~/code/justgains{x}")], cols.min(49));
+    welcome.push(String::new());
+    let blocks: Blocks = vec![
+        welcome,
+        block(&[&format!("{d}>{x} the rest timer drifts when the app is backgrounded mid-set. fix it and add a test")]),
+        block(&[&format!("{o}●{x} The timer counts ticks instead of reading the clock, so a suspended app loses time. I'll anchor it to a start timestamp.")]),
+        block(&[&format!("{o}●{x} {b}Read{x}(src/features/timer/useRestTimer.ts)"), &format!("  {d}⎿  Read 96 lines{x}")]),
+        block(&[&format!("{o}●{x} {b}Update{x}(src/features/timer/useRestTimer.ts)"), &format!("  {d}⎿  Updated with {g}14 additions{x}{d} and {r}6 removals{x}")]),
+        block(&[&format!("{o}●{x} {b}Write{x}(src/features/timer/useRestTimer.test.ts)"), &format!("  {d}⎿  Wrote 42 lines{x}")]),
+        block(&[&format!("{o}●{x} {b}Bash{x}(npx jest timer)"), &format!("  {d}⎿  {g}Tests: 15 passed, 15 total{x}")]),
+        block(&[&format!("{o}●{x} Fixed. The timer now survives backgrounding, and the new test locks it in.")]),
+        vec![format!("{o}✻ Polishing…{x} {d}(12s · ↓ 640 tokens · esc to interrupt){x}")],
+    ];
+    format!("{}\x1b[?25l", stack(blocks, cols, rows))
 }
 
 /// What a demo session draws in a tile `cols` by `rows`: its transcript, or the prompt it waits on. The ones
@@ -789,21 +930,156 @@ pub fn screenshot() -> Option<PathBuf> {
 
 /// What the demo's agent sessions said and did, as their transcripts would have it (focus mode shows it): `i`
 /// is the session's place in [`sessions`].
-pub fn conversation(i: usize) -> Option<String> {
-    use serde_json::json;
-    // times as of now: the working session's last step started a few seconds ago, the done one finished a while back
+/// When the demo's session `i` starts its conversation: the working session's last step started a few seconds ago,
+/// the done one finished a while back.
+fn conversation_base(i: usize) -> i64 {
     let ago_ms: i64 = match i {
         0 => 160_000,
         1 => 31 * 60_000 + 96_000,
         _ => 85_000,
     };
-    let base = now_ms() - ago_ms;
+    now_ms() - ago_ms
+}
+
+/// The briefs and reports of the demo's subagents.
+const DEMO_MAP_BRIEF: &str = "Find every place in crates/ that registers, renews or removes a proxy route for a launch. For each one give the file and line, what triggers it, and which session owns the route afterwards. Read-only: change nothing.";
+const DEMO_MAP_REPORT: &str = "Routes are registered in three places:\n\n- `services/launch.rs:212`, when a session starts on a proxied provider\n- `launch/route.rs:88`, when a reload asks for one\n- `proxy/state.rs:340`, when the proxy restarts and replays them\n\nOnly `cleanup_route` removes one, from the pane's exit. Nothing hands a route to the session that replaces it.";
+const DEMO_CLEANUP_BRIEF: &str = "You are the fork checking what a session's exit cleans up. Trace `cleanup_route` from the pane's exit to the proxy, list each route it removes, and say whether a reload's successor can lose its route in between. Report what you find; don't change code.";
+const DEMO_CALLERS_BRIEF: &str = "List every caller of `cleanup_route` in crates/, with the file, the line and what triggers the call. Read-only.";
+const DEMO_CODEX_THREAD: &str = "019a5e01-7c2b-7d10-a3f4-5b6c7d8e9f00";
+const DEMO_CODEX_REPORT: &str = "Wrote three reasoning fixtures: summary deltas split mid-word, two summaries in one turn, and an empty summary part. All three fail on main, because the translator joins summary parts without a break.";
+
+/// The subagents the demo's session `i` started, as its worker would follow them: each with its own conversation.
+pub fn subagents(i: usize) -> Vec<bro_core::sessions::subagents::Subagent> {
+    use bro_core::sessions::conversation::Conversation;
+    use bro_core::sessions::subagents::{Subagent, SubagentState};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    let base = conversation_base(i);
+    let at = move |s: u32| base + s as i64 * 1000;
+    let ts = move |s: u32| chrono::DateTime::from_timestamp_millis(at(s)).map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)).unwrap_or_default();
+    let read = |harness: Harness, lines: Vec<Value>| {
+        let mut c = Conversation::subagent(harness);
+        for l in &lines {
+            c.ingest(l);
+        }
+        Some(Arc::new(c))
+    };
+    let you = |s: u32, text: &str| json!({"type":"user","isSidechain":true,"timestamp":ts(s),"message":{"role":"user","content":text}});
+    let said = |s: u32, m: &str, text: &str, stop: &str| json!({"type":"assistant","isSidechain":true,"timestamp":ts(s),"message":{"id":m,"stop_reason":stop,"content":[{"type":"text","text":text}]}});
+    let call = |s: u32, m: &str, id: &str, name: &str, input: Value| json!({"type":"assistant","isSidechain":true,"timestamp":ts(s),"message":{"id":m,"stop_reason":"tool_use","content":[{"type":"tool_use","id":id,"name":name,"input":input}]}});
+    let ok = |s: u32, id: &str, result: Value| json!({"type":"user","isSidechain":true,"timestamp":ts(s),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"ok"}]},"toolUseResult":result});
+    let model = Some("claude-opus-5".to_string());
+    match i {
+        0 => {
+            let map = read(Harness::Claude, vec![
+                you(95, DEMO_MAP_BRIEF),
+                call(97, "s1", "g1", "Grep", json!({"pattern":"register_route|cleanup_route"})),
+                ok(98, "g1", json!({})),
+                call(99, "s1", "r1", "Read", json!({"file_path":"crates/bro-tui/src/services/launch.rs","offset":200})),
+                call(99, "s1", "r2", "Read", json!({"file_path":"crates/bro-core/src/launch/route.rs","offset":80})),
+                call(99, "s1", "r3", "Read", json!({"file_path":"crates/bro-proxy/src/state.rs","offset":330})),
+                ok(101, "r1", json!({})),
+                ok(101, "r2", json!({})),
+                ok(101, "r3", json!({})),
+                said(116, "s2", DEMO_MAP_REPORT, "end_turn"),
+            ]);
+            let cleanup = read(Harness::Claude, vec![
+                you(95, DEMO_CLEANUP_BRIEF),
+                call(97, "f1", "c1", "Grep", json!({"pattern":"fn cleanup_route"})),
+                ok(98, "c1", json!({})),
+                call(99, "f1", "c2", "Read", json!({"file_path":"crates/bro-tui/src/panes/term.rs","offset":2040})),
+                ok(100, "c2", json!({})),
+                said(126, "f2", "`cleanup_route` runs from the pane's `Drop`, so it fires before a reload's successor has registered. A subagent lists every caller while I follow the proxy side.", "tool_use"),
+                call(127, "f2", "n1", "Agent", json!({"description":"Find every caller of cleanup_route","subagent_type":"Explore","prompt":DEMO_CALLERS_BRIEF,"run_in_background":true})),
+                ok(128, "n1", json!({"isAsync":true,"status":"async_launched","agentId":"a5d4c3b2a1f0e9d87"})),
+                call(140, "f3", "c3", "Read", json!({"file_path":"crates/bro-proxy/src/state.rs","offset":360})),
+            ]);
+            let callers = read(Harness::Claude, vec![
+                you(127, DEMO_CALLERS_BRIEF),
+                call(130, "x1", "q1", "Grep", json!({"pattern":"cleanup_route\\("})),
+                ok(131, "q1", json!({})),
+                call(150, "x2", "q2", "Read", json!({"file_path":"crates/bro-tui/src/app/sessions.rs","offset":610})),
+            ]);
+            vec![
+                Subagent {
+                    id: Some("ae1f2c3d4b5a69788".into()),
+                    kind: Some("Explore".into()),
+                    brief: Some(DEMO_MAP_BRIEF.into()),
+                    model: model.clone(),
+                    background: true,
+                    state: SubagentState::Done,
+                    result: Some(DEMO_MAP_REPORT.into()),
+                    ended_ms: Some(at(117)),
+                    conversation: map,
+                    ..Subagent::started("a1", "Map every route registration".into(), Some(at(95)))
+                },
+                Subagent {
+                    id: Some("a9c8b7a6f5e4d3c21".into()),
+                    name: Some("route-cleanup".into()),
+                    kind: Some("fork".into()),
+                    brief: Some(DEMO_CLEANUP_BRIEF.into()),
+                    model: model.clone(),
+                    background: true,
+                    conversation: cleanup,
+                    ..Subagent::started("a2", "Check route cleanup on exit".into(), Some(at(95)))
+                },
+                Subagent {
+                    id: Some("a5d4c3b2a1f0e9d87".into()),
+                    parent: Some("a2".into()),
+                    depth: 2,
+                    kind: Some("Explore".into()),
+                    brief: Some(DEMO_CALLERS_BRIEF.into()),
+                    model,
+                    background: true,
+                    conversation: callers,
+                    ..Subagent::started("n1", "Find every caller of cleanup_route".into(), Some(at(127)))
+                },
+            ]
+        }
+        1 => {
+            let item = |s: u32, v: Value| json!({"type":"event_msg","timestamp":ts(s),"payload":{"type":"item_completed","item":v}});
+            let reply = |s: u32, text: &str| json!({"type":"response_item","timestamp":ts(s),"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}});
+            let fixtures = |name: &str| (format!("crates/bro-proxy/tests/fixtures/{name}.jsonl"), json!({"type":"add","content":"{}\n".repeat(24)}));
+            let changes: serde_json::Map<String, Value> = ["reasoning_split", "reasoning_two_summaries", "reasoning_empty_part"].into_iter().map(fixtures).collect();
+            let worker = read(Harness::Codex, vec![
+                json!({"type":"session_meta","timestamp":ts(4),"payload":{"id":DEMO_CODEX_THREAD,"agent_nickname":"Kepler","agent_role":"worker","agent_path":"/root/reasoning_fixtures"}}),
+                json!({"type":"event_msg","timestamp":ts(4),"payload":{"type":"task_started"}}),
+                item(6, json!({"type":"CommandExecution","id":"k1","command":["pwsh","-Command","Get-Content crates/bro-proxy/src/translate/responses.rs"],"parsed_cmd":[{"type":"read","cmd":"Get-Content crates/bro-proxy/src/translate/responses.rs","name":"responses.rs"}],"status":"completed","exit_code":0})),
+                item(30, json!({"type":"FileChange","id":"k2","changes":changes,"status":"completed"})),
+                item(48, json!({"type":"CommandExecution","id":"k3","command":["pwsh","-Command","cargo test -p bro-proxy reasoning"],"parsed_cmd":[{"type":"unknown","cmd":"cargo test -p bro-proxy reasoning"}],"status":"completed","exit_code":101})),
+                reply(56, DEMO_CODEX_REPORT),
+                json!({"type":"event_msg","timestamp":ts(57),"payload":{"type":"task_complete"}}),
+            ]);
+            vec![Subagent {
+                id: Some(DEMO_CODEX_THREAD.into()),
+                name: Some("Kepler".into()),
+                kind: Some("worker".into()),
+                model: Some("gpt-5.2-codex".into()),
+                effort: Some("high".into()),
+                path: Some("/root/reasoning_fixtures".into()),
+                background: true,
+                state: SubagentState::Done,
+                result: Some(DEMO_CODEX_REPORT.into()),
+                ended_ms: Some(at(57)),
+                conversation: worker,
+                ..Subagent::started("call_k1", "Reasoning fixtures".into(), Some(at(4)))
+            }]
+        }
+        _ => vec![],
+    }
+}
+
+pub fn conversation(i: usize) -> Option<String> {
+    use serde_json::json;
+    let base = conversation_base(i);
     let ts = move |s: u32| chrono::DateTime::from_timestamp_millis(base + s as i64 * 1000).map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)).unwrap_or_default();
     let asked = |model: &str, effort: &str| json!({"type":"api-request","timestamp":ts(0),"params":{"model":model,"thinking":{"type":"adaptive"},"output_config":{"effort":effort}}});
     let you = |s: u32, text: &str| json!({"type":"user","timestamp":ts(s),"sessionId":"0b6e3c1e-0000-4000-8000-00000000demo","message":{"role":"user","content":text}});
     let said = |s: u32, m: &str, text: &str| json!({"type":"assistant","timestamp":ts(s),"message":{"id":m,"content":[{"type":"text","text":text}]}});
     let call = |s: u32, m: &str, id: &str, name: &str, input: serde_json::Value| json!({"type":"assistant","timestamp":ts(s),"message":{"id":m,"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}});
     let ok = |s: u32, id: &str, result: serde_json::Value| json!({"type":"user","timestamp":ts(s),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"ok"}]},"toolUseResult":result});
+    let launched = |s: u32, call: &str, agent: &str| ok(s, call, json!({"isAsync":true,"status":"async_launched","agentId":agent,"resolvedModel":"claude-opus-5"}));
     let patch = |add: usize, del: usize| json!({"structuredPatch":[{"lines": std::iter::repeat_n("+x", add).chain(std::iter::repeat_n("-x", del)).collect::<Vec<_>>()}]});
     let worked = |s: u32, ms: u64| json!({"type":"system","subtype":"turn_duration","durationMs":ms,"timestamp":ts(s)});
     let lines: Vec<serde_json::Value> = match i {
@@ -822,15 +1098,27 @@ pub fn conversation(i: usize) -> Option<String> {
             said(40, "m2", "## What happens on a reload\n\nA reload starts a **new** process from the old launch spec, but the route belongs to the old one. When the old process exits, `cleanup_route` takes the route with it, and the new session is left pointing at nothing.\n\n- The new process starts before the old one is gone\n- Both of them share one route id\n- The cleanup at exit doesn't know a successor exists\n\nThe fix is to keep the route alive while a reload is in flight and hand it to the new pane. Want me to make that change?"),
             worked(41, 134_000),
             you(90, "yes, and wire the launcher to the proxy routes while you're there"),
-            said(94, "m3", "I'll look at how launches register routes first."),
-            call(95, "m3", "t3", "Read", json!({"file_path":"crates/bro-tui/src/launcher/mod.rs"})),
-            call(95, "m3", "t4", "Read", json!({"file_path":"crates/bro-core/src/launch/route.rs"})),
-            ok(97, "t3", json!({})),
-            ok(97, "t4", json!({})),
+            said(94, "m3", "I'll send two subagents ahead while I read the launcher: one maps every place a route is registered, one checks what a session's exit cleans up."),
+            call(95, "m3", "a1", "Agent", json!({"description":"Map every route registration","subagent_type":"Explore","prompt":DEMO_MAP_BRIEF,"run_in_background":true})),
+            call(95, "m3", "a2", "Agent", json!({"description":"Check route cleanup on exit","subagent_type":"fork","name":"route-cleanup","prompt":DEMO_CLEANUP_BRIEF,"run_in_background":true})),
+            launched(96, "a1", "ae1f2c3d4b5a69788"),
+            launched(96, "a2", "a9c8b7a6f5e4d3c21"),
+            // the proxy left running in the background, and a watch on its log
+            call(96, "m3", "b1", "Bash", json!({"command":"cargo run -p bro-proxy -- --port 8080","description":"Start the proxy on :8080","run_in_background":true})),
+            ok(97, "b1", json!({"stdout":"","stderr":"","interrupted":false,"backgroundTaskId":"bq7x2k9fd"})),
+            call(97, "m3", "w1", "Monitor", json!({"description":"route changes in the proxy log","command":"tail -f proxy.log | grep --line-buffered route"})),
+            ok(97, "w1", json!({"taskId":"bw4n8c2xa","timeoutMs":1_800_000,"persistent":false})),
+            call(97, "m4", "t3", "Read", json!({"file_path":"crates/bro-tui/src/launcher/mod.rs"})),
+            call(97, "m4", "t4", "Read", json!({"file_path":"crates/bro-core/src/launch/route.rs"})),
+            ok(98, "t3", json!({})),
+            ok(98, "t4", json!({})),
+            json!({"type":"attachment","timestamp":ts(117),"attachment":{"type":"queued_command","origin":{"kind":"task-notification"},"prompt":format!("<task-notification>\n<task-id>ae1f2c3d4b5a69788</task-id>\n<tool-use-id>a1</tool-use-id>\n<status>completed</status>\n<summary>Agent \"Map every route registration\" finished</summary>\n<result>{DEMO_MAP_REPORT}</result>\n</task-notification>")}}),
+            said(118, "m4", "The map is in: three places register a route and only the exit removes one, which is exactly the reload bug."),
             call(120, "m4", "t5", "Edit", json!({"file_path":"crates/bro-tui/src/services/launch.rs"})),
             ok(121, "t5", patch(12, 3)),
             call(130, "m5", "t6", "Edit", json!({"file_path":"crates/bro-core/src/launch/route.rs"})),
             ok(131, "t6", patch(5, 1)),
+            json!({"type":"attachment","timestamp":ts(140),"attachment":{"type":"queued_command","origin":{"kind":"task-notification"},"prompt":"<task-notification>\n<task-id>bw4n8c2xa</task-id>\n<summary>Monitor event: \"route changes in the proxy log\"</summary>\n<event>route r-7f2 renewed for codex-2</event>\n</task-notification>"}}),
             said(150, "m6", "A reload now keeps its route until the new session takes it, and the launcher asks the proxy for one before it starts. Running the launcher tests next."),
             call(151, "m6", "t7", "Bash", json!({"command":"cargo test -p bro-tui launcher","description":"Run the launcher tests"})),
         ],
@@ -843,9 +1131,13 @@ pub fn conversation(i: usize) -> Option<String> {
                 json!({"type":"turn_context","timestamp":ts(0),"payload":{"model":"gpt-5.2-codex","effort":"high"}}),
                 json!({"type":"event_msg","timestamp":ts(0),"payload":{"type":"task_started"}}),
                 item(0, json!({"type":"UserMessage","id":"u1","content":[{"type":"text","text":"add golden fixtures for responses streaming"}]})),
-                reply(3, "I'll read the existing stream fixtures, then add the cases the translator doesn't cover yet."),
+                reply(3, "I'll read the existing stream fixtures, then add the cases the translator doesn't cover yet. A worker takes the reasoning cases meanwhile."),
+                json!({"type":"response_item","timestamp":ts(4),"payload":{"type":"function_call","name":"spawn_agent","namespace":"collaboration","call_id":"call_k1","arguments":json!({"task_name":"reasoning_fixtures","agent_type":"worker","message":"gAAAAABq6nrqHd8lBGIjTFNg2H8Mz4tzXwjjo5hOG4CiTguzawa3H1Vqtby3Q"}).to_string()}}),
+                item(4, json!({"type":"SubAgentActivity","id":"call_k1","kind":"started","agent_thread_id":DEMO_CODEX_THREAD,"agent_path":"/root/reasoning_fixtures","model":"gpt-5.2-codex","reasoning_effort":"high"})),
                 item(5, json!({"type":"CommandExecution","id":"c1","command":["pwsh","-Command","Get-Content fixtures/responses_stream.jsonl"],"parsed_cmd":[{"type":"read","cmd":"Get-Content fixtures/responses_stream.jsonl","name":"responses_stream.jsonl"}],"status":"completed","exit_code":0})),
                 item(9, json!({"type":"CommandExecution","id":"c2","command":["pwsh","-Command","rg -n 'reasoning' crates/bro-proxy/src/translate"],"parsed_cmd":[{"type":"search","cmd":"rg -n reasoning crates/bro-proxy/src/translate","query":"reasoning"}],"status":"completed","exit_code":0})),
+                item(57, json!({"type":"SubAgentActivity","id":"subagent-completed-k1","kind":"completed","agent_thread_id":DEMO_CODEX_THREAD,"agent_path":"/root/reasoning_fixtures"})),
+                json!({"type":"response_item","timestamp":ts(58),"payload":{"type":"agent_message","author":"/root/reasoning_fixtures","recipient":"/root","content":[{"type":"input_text","text":format!("Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/reasoning_fixtures\nPayload:\n{DEMO_CODEX_REPORT}")}]}}),
                 item(60, json!({"type":"FileChange","id":"f1","changes":{"crates/bro-proxy/tests/golden.rs":{"type":"update","unified_diff":format!("@@ -1 +1,86 @@\n{}", "+x\n".repeat(86))}},"status":"completed"})),
                 item(80, json!({"type":"CommandExecution","id":"c3","command":["pwsh","-Command","cargo test -p bro-proxy"],"parsed_cmd":[{"type":"unknown","cmd":"cargo test -p bro-proxy"}],"status":"completed","exit_code":0})),
                 reply(95, "Added six fixtures covering text, tool calls and reasoning deltas. All 41 proxy tests pass.\n\n| Fixture | What it covers |\n|---|---|\n| `text_deltas` | plain text, split mid-word |\n| `tool_call` | one function call and its arguments |\n| `parallel_tools` | two calls in one turn |\n| `reasoning` | reasoning summary deltas |\n| `refusal` | a refusal part |\n| `usage` | token counts at the end |\n\nThe reasoning case caught a real bug: summary parts were joined without a break, so two thoughts ran together. That's fixed in `translate/responses.rs`."),
@@ -994,6 +1286,33 @@ pub fn shell_showing(h: Option<Harness>, label: &str, cwd: PathBuf, screen: &str
     CommandSpec { program, args, env: vec![], env_remove: vec![], cwd, label: label.into(), route: None, cleanup: vec![], caveman: None, store: None }
 }
 
+/// A team's Just Superhuman account for the demo: signed in, about a quarter of the month's credits spent, some
+/// held for a reply that's still running and a one-time grant on top. In the state, the providers and the models,
+/// as a real sign-in puts it there (nothing on disk; the demo signs in to nothing).
+pub fn fill_jsh(st: &mut State) {
+    use bro_core::jsh::{self, Account, ClaudeInfo, ClaudeModel, Credits, Organization, User};
+    let day = 86_400_000;
+    let account = Account {
+        user: User { id: "demo-user".into(), name: "Sam Rivera".into(), email: "me@work.example".into() },
+        organization: Organization { id: "demo-org".into(), name: "Rivera Studio".into(), slug: "rivera-studio".into() },
+        credits: Credits { available: 2_684, granted: 500, monthly_allowance: 3_000, resets_at: Some(now_ms() + 24 * day + 5 * 3_600_000), used: Some(790), reserved: 26, credits_per_usd: Some(100) },
+        claude: ClaudeInfo {
+            base_url: "https://console.justsuperhuman.com/api/claude".into(),
+            available: true,
+            reason: String::new(),
+            models: [("claude-opus-5-5", "Opus 5.5"), ("claude-sonnet-5-5", "Sonnet 5.5"), ("claude-haiku-5-5", "Haiku 5.5")].into_iter().map(|(id, name)| ClaudeModel { id: id.into(), name: Some(name.into()) }).collect(),
+        },
+        host: None,
+    };
+    let provider = jsh::provider_for(&account, jsh::PRODUCTION_ORIGIN);
+    if let Avail::Ready(ps) = &mut st.providers {
+        ps.retain(|p| p.id != provider.id);
+        ps.push(provider.clone());
+    }
+    st.models.extend(demo_models(std::slice::from_ref(&provider)).into_iter().filter(|(id, _)| id == jsh::PROVIDER_ID));
+    st.jsh = jsh::Snapshot { signed_in: true, account: Some(account), fetched_at: now_ms() - 40_000, ..Default::default() };
+}
+
 /// Launcher model lists for the demo (never reads the real OpenRouter cache).
 pub fn demo_models(providers: &[Provider]) -> std::collections::BTreeMap<String, Vec<bro_core::catalogue::ModelRow>> {
     use bro_core::catalogue::ModelRow;
@@ -1012,8 +1331,8 @@ pub fn demo_models(providers: &[Provider]) -> std::collections::BTreeMap<String,
         ],
     );
     m.insert("codex".into(), vec![row("gpt-5.2-codex", "GPT-5.2 Codex", None, None), row("gpt-5.2", "GPT-5.2", None, None), row("gpt-5-mini", "GPT-5 mini", None, None)]);
-    let claude = m.get("anthropic").cloned().unwrap_or_default();
-    m.insert("claude".into(), claude);
+    // what a real run gets before it has asked Anthropic
+    m.insert("claude".into(), bro_core::catalogue::claude_built_in());
     m
 }
 
@@ -1079,4 +1398,100 @@ mod tests {
         assert!(wide.starts_with("\x1b[38;2;217;119;87m╭───────────────────────────────────────────────╮"));
         assert!(wide.contains("Welcome to \x1b[1mClaude Code\x1b[0m!"));
     }
+}
+
+/// The demo's connected devices (Remote Control): bro's app on an iPhone and an iPad, and the web app in a browser
+/// on this computer.
+fn demo_devices(now: i64) -> Vec<bro_bridge::devices::Device> {
+    use bro_bridge::devices::{Device, Form};
+    let device = |id: u64, form: Form, app: bool, name: &str, system: Option<&str>, address: [u8; 4], mins: i64| Device {
+        id,
+        form,
+        app,
+        name: name.into(),
+        system: system.map(str::to_string),
+        address: Some(std::net::IpAddr::from(address)),
+        since_ms: now - mins * 60_000,
+        via: None,
+    };
+    vec![
+        device(1, Form::Phone, true, "iPhone", Some("iOS 18.1"), [192, 168, 1, 40], 14),
+        device(2, Form::Tablet, true, "iPad", Some("iPadOS 18.1"), [192, 168, 1, 52], 63),
+        device(3, Form::Computer, false, "Chrome on Windows", None, [127, 0, 0, 1], 2),
+    ]
+}
+
+/// The demo's Bro RMM: installed, the iPhone in control.
+pub(super) fn rmm_status() -> bro_bridge::rmm::Status {
+    use bro_bridge::rmm::{Phase, Status, Viewer};
+    Status {
+        enabled: true,
+        supported: true,
+        read_only: false,
+        phase: Phase::Running,
+        version: Some(bro_core::rmm::VERSION.into()),
+        message: None,
+        active_viewers: 1,
+        relay_configured: true,
+        viewers: vec![Viewer { address: Some(std::net::IpAddr::from([192, 168, 1, 40])), read_only: false }],
+        checking: false,
+        update: None,
+        checked_ms: Some(crate::util::now_ms() - 3 * 60_000),
+    }
+}
+
+/// The account's computers for the demo: this one, a laptop with sessions open, a build machine whose Bro is
+/// closed and one with access turned off, so every state the Computers view draws is there to see.
+/// `BRO_DEMO_COMPUTERS=offline` adds a look that couldn't reach the account (the list stays, under the notice);
+/// `=signedout` and `=empty` show the two empty states.
+pub fn fill_computers(st: &mut State) {
+    use super::computers::{ComputersState, RemoteSession, Sessions, computers};
+    use bro_core::justconnect::health;
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+    let mode = std::env::var("BRO_DEMO_COMPUTERS").unwrap_or_default();
+    let now = now_ms();
+    let (here, laptop, build, desk) = ("0f6a3c1e-52b7-4c1d-9a5e-1d2f3a4b5c6d", "7b1d9e42-8c3a-4f6b-b2d1-9e8f7a6b5c4d", "c3e5a7b9-1d2f-4a6c-8e0b-2d4f6a8c0e1b", "e9d7c5b3-a1f0-4e2d-9c8b-7a6f5e4d3c2b");
+    let answer = json!({"computers":[
+        {"id":here,"name":"Studio workstation","platform":"windows","enabled":true,"provisioned":true,"broOnline":true,"broLastSeen":now - 3_000,"broVersion":env!("CARGO_PKG_VERSION")},
+        {"id":laptop,"name":"Sam's MacBook Pro","platform":"darwin","enabled":true,"provisioned":true,"broOnline":true,"broLastSeen":now - 9_000,"broVersion":"2.1.31"},
+        {"id":build,"name":"Build box","platform":"linux","enabled":true,"provisioned":true,"broOnline":false,"broLastSeen":now - 2 * 3_600_000 - 400_000,"broVersion":"2.1.44"},
+        {"id":desk,"name":"Front desk","platform":"windows","enabled":false,"provisioned":true,"broOnline":false,"broLastSeen":now - 5 * 86_400_000},
+    ]});
+    let mut c = ComputersState { checked: true, signed_in: true, looked: Some(Instant::now()), tried: Some(Instant::now()), ..Default::default() };
+    match mode.as_str() {
+        "signedout" => c.signed_in = false,
+        "empty" => {}
+        _ => {
+            c.list = computers(&answer, here, now);
+            c.ctl = None;
+            let session = |id: &str, title: &str, project: &str, agent: &str, activity: &str, summary: &str, last: &str| RemoteSession {
+                id: id.into(),
+                title: title.into(),
+                project: Some(project.into()),
+                agent: Some(agent.into()),
+                activity: Some(activity.into()),
+                summary: summary.into(),
+                last_output: last.into(),
+            };
+            c.sessions.insert(
+                laptop.into(),
+                Sessions::Ready {
+                    list: vec![
+                        session("s1", "Ada", "justgains", "claude", "awaiting", "asks: Run the migration on the staging database?", "waiting 40 s"),
+                        session("s2", "Mal", "bro-cli-v2", "codex", "working", "running the bridge tests after the reconnect change", "active 2 s ago"),
+                        session("s3", "Hugh", "website", "claude", "idle", "finished: the pricing page copy is in", "quiet 12 min"),
+                    ],
+                    took: Duration::from_millis(380),
+                    at: Instant::now(),
+                    refreshing: false,
+                },
+            );
+            if mode == "offline" {
+                c.looked = Some(Instant::now() - Duration::from_secs(190));
+                c.failure = Some(health::of_failure(&anyhow::anyhow!("io: no route to host"), None));
+            }
+        }
+    }
+    st.computers = c;
 }

@@ -206,8 +206,11 @@ impl View {
     pub(crate) fn of(state: AttentionState, term: &Term, snap: Option<&Snapshot>) -> View {
         let facts = snap.and_then(|s| s.facts.as_deref());
         let limit = term.limit_warning();
-        let state = if limit.is_some() { AttentionState::Blocked } else { state };
-        let reason = limit.as_ref().map(|l| l.message.clone()).or_else(|| reason_for(state, facts, term.prompt_title()));
+        let browser = term.browser_waiting();
+        let state = if limit.is_some() || browser.is_some() { AttentionState::Blocked } else { state };
+        let reason = limit.as_ref().map(|l| l.message.clone())
+            .or_else(|| browser.map(|h| if h.reason.trim().is_empty() { "Browser needs your input".to_string() } else { format!("Browser · {}", h.reason.trim()) }))
+            .or_else(|| reason_for(state, facts, term.prompt_title()));
         let recap = facts.and_then(|f| recap::choose(f, snap.and_then(|s| s.generated.as_ref())));
         View { state, reason, recap, limit }
     }
@@ -262,6 +265,16 @@ impl App {
         if !self.svc.settings().insights.attention_indicators { return None; }
         let track = self.tracks.get(&id)?;
         track.notice.as_ref().filter(|_| track.state != AttentionState::Working)
+    }
+
+    /// When pane `id` started waiting on you (unix seconds): blocked, or its turn ended on a question. None while it
+    /// works or has nothing to ask.
+    pub(crate) fn waiting_since(&self, id: PaneId) -> Option<u64> {
+        let track = self.tracks.get(&id)?;
+        if track.state == AttentionState::Working || !self.notes.get(&id).is_some_and(|n| n.starts_with('⏸')) && track.state != AttentionState::Blocked {
+            return None;
+        }
+        track.since_wall.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
     }
 
     pub(crate) fn acknowledge_session(&mut self, id: PaneId, event: &str) {

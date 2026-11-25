@@ -1,9 +1,14 @@
 //! Drawing the launcher. One row holds the New / Continue switch and the project the session starts in; then
 //! the agents as chips (and ★ orchestrator, gold; on its tab a second row of chips picks its harness); then the
-//! "run on" list on the left and, beside it, the launch panel: what will run,
+//! providers list on the left (the main ones, the connected ones, and the rest folded away) and, beside it, the
+//! launch panel: what will run,
 //! the model list when one is needed, permission choices and the Launch button.
 //! Narrow screens stack the switches under the list instead.
+//!
+//! The Create Slop tab ([`super::studio`]) is a list of characters to cast beside the media toolkit, with the
+//! agent it runs on above them and the button that starts it below.
 
+use super::studio::StudioFocus;
 use super::{AccountKind, Focus, Hit, Item, Launcher, SessionTab};
 use crate::theme::{self, Theme};
 use crate::ui::{self, fg, muted};
@@ -34,7 +39,11 @@ const SETTINGS_H: u16 = 4;
 
 fn draw_inner(f: &mut Frame, r: Rect, l: &mut Launcher, t: &Theme, _time: f64, hits: &mut Vec<(Rect, Hit)>) {
     ui::clear(f, r, t);
-    let heading = if l.tab == SessionTab::Continue { "Continue a session" } else { "New session" };
+    let heading = match l.tab {
+        SessionTab::Continue => "Continue a session",
+        SessionTab::Slop => "Create Slop",
+        SessionTab::New => "New session",
+    };
     let title = Line::from(vec![Span::raw(" "), Span::styled(heading, ui::bold_accent(t)), Span::raw(" ")]);
     let inner = ui::frame_ex(f, r, title, None, None, true, t);
     // the corner: profiles, and a close button (esc does the same)
@@ -66,6 +75,10 @@ fn draw_inner(f: &mut Frame, r: Rect, l: &mut Launcher, t: &Theme, _time: f64, h
         for (rect, index) in &l.continue_picker.hits {
             hits.push((*rect, Hit::ContinueRow(*index)));
         }
+        return;
+    }
+    if l.tab == SessionTab::Slop {
+        draw_studio(f, Rect { y, height: inner.bottom().saturating_sub(y), ..inner }, l, t, hits);
         return;
     }
 
@@ -106,6 +119,10 @@ fn draw_inner(f: &mut Frame, r: Rect, l: &mut Launcher, t: &Theme, _time: f64, h
             _ => "launch",
         };
         let enter = if l.orchestrator && l.running_orchestrator().is_some() { "go to it" } else { enter };
+        let enter = match l.current() {
+            Some(Item::Others { open, .. }) if l.focus == Focus::List => if open { "hide" } else { "show" },
+            _ => enter,
+        };
         let mut hints = vec![("⏎", enter), ("↑↓", "move"), ("←→", "agent"), ("type", if l.focus == Focus::List { "project" } else { "filter" })];
         if l.orchestrator {
             hints.insert(3, ("shift+←→", "runs on"));
@@ -137,10 +154,14 @@ fn fill(f: &mut Frame, r: Rect, bg: Color) {
 /// `+ New` and `↻ Continue` as one segmented switch; returns where it ends.
 fn draw_mode_switch(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) -> u16 {
     let mut x = r.x;
-    for (tab, label) in [(SessionTab::New, " + New "), (SessionTab::Continue, " ↻ Continue ")] {
+    for (tab, label) in [(SessionTab::New, " + New "), (SessionTab::Continue, " ↻ Continue "), (SessionTab::Slop, " ✦ Create Slop ")] {
         let on = l.tab == tab;
+        // Create Slop wears its own colour
+        let tone = if tab == SessionTab::Slop { slop_color(t) } else { t.accent };
         let style = if on {
-            Style::default().fg(Color::Black).bg(t.accent).add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Black).bg(tone).add_modifier(Modifier::BOLD)
+        } else if tab == SessionTab::Slop {
+            Style::default().fg(tone).bg(tint(tone, t))
         } else {
             Style::default().fg(t.muted).bg(tint(t.accent, t))
         };
@@ -259,7 +280,7 @@ fn draw_brains(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(
     }
     let note = match l.harness {
         Harness::Claude | Harness::Codex => "  tools built in",
-        Harness::Pi | Harness::Omp => "  tools through bro ctl",
+        Harness::Pi | Harness::Omp | Harness::Antigravity => "  tools through bro ctl",
     };
     if x + ui::width(note) as u16 <= r.right() {
         ui::line(f, Rect { x, width: ui::width(note) as u16, ..r }, vec![Span::styled(note, muted(t))]);
@@ -303,7 +324,7 @@ fn select_row(f: &mut Frame, r: Rect, focused: bool, t: &Theme) -> Span<'static>
 
 fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
     let focused = l.focus == Focus::List;
-    filter_line(f, Rect { height: 1, ..area }, &l.list_filter, "run on… ↑↓ to pick · type a project", focused, t);
+    filter_line(f, Rect { height: 1, ..area }, &l.list_filter, "provider… ↑↓ to pick · type a project", focused, t);
     let items = l.items();
     let top = area.y + 2;
     let rows = area.bottom().saturating_sub(top) as usize;
@@ -322,17 +343,11 @@ fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Ve
         let label_style = if on { ui::bold_accent(t) } else { Style::default().fg(t.fg) };
         match item {
             Item::Header(h) => heading(f, Rect { x: r.x + 1, width: r.width.saturating_sub(1), ..r }, h, t),
-            Item::Recent(i) => {
-                let rc = &l.data.recents[*i];
-                let (kind, who) = l.recent_row(rc);
-                let model = rc.model.as_deref().map(|m| crate::services::launch::short_model(m.rsplit('/').next().unwrap_or(m)));
-                let (g, c) = account_glyph(&kind, l.harness, t);
-                let mut spans = vec![mark, Span::raw(" "), Span::styled(format!("{g} "), fg(c)), Span::styled(who, label_style)];
-                if let Some(m) = model {
-                    spans.push(Span::styled(format!("  {m}"), muted(t)));
-                }
-                let age = crate::util::short_dur((crate::util::now_secs() - rc.at).max(0) as u64);
-                ui::line_lr(f, r, spans, vec![Span::styled(format!("{age} ago "), muted(t))]);
+            // the fold over the providers with no key: ▸ closed, ▾ open, and how many it holds
+            Item::Others { count, open } => {
+                let style = if on { label_style } else { muted(t) };
+                let left = vec![mark, Span::raw(" "), Span::styled(if *open { "▾ " } else { "▸ " }, style), Span::styled("other providers", style)];
+                ui::line_lr(f, r, left, vec![Span::styled(format!("{count} "), muted(t))]);
             }
             Item::Account(a) => {
                 let (g, c) = account_glyph(&a.kind, l.harness, t);
@@ -344,8 +359,8 @@ fn draw_run_on(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Ve
                         right.extend(ui::left_meter(left, meter, t));
                     }
                     right.push(Span::styled(format!(" {left:>3.0}% left "), fg(ui::left_color(left, t))));
-                } else if !a.ready {
-                    right.push(Span::styled("not signed in ", muted(t)));
+                } else if let Some(why) = a.blocked {
+                    right.push(Span::styled(format!("{why} "), muted(t)));
                 }
                 let left = vec![mark, Span::raw(" "), Span::styled(glyph.0, fg(glyph.1)), Span::styled(format!("{}  ", a.label), label_style), Span::styled(a.detail.clone(), muted(t))];
                 ui::line_lr(f, r, left, right);
@@ -430,7 +445,13 @@ fn draw_summary(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
     }
     let brand = ui::harness_color(Some(l.harness), t);
     let Some(spec) = l.spec() else {
-        let msg = if l.installed(l.harness) { "pick where it runs on the left" } else { "install it first" };
+        let msg = if !l.installed(l.harness) {
+            "install it first"
+        } else if l.on_others() {
+            "⏎ shows the providers with no key yet"
+        } else {
+            "pick a provider on the left"
+        };
         ui::line(f, row(2), vec![Span::styled(msg, muted(t))]);
         return;
     };
@@ -451,8 +472,6 @@ fn draw_summary(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme) {
             spans.push(Span::styled(format!(" {left:.0}% left"), fg(ui::left_color(left, t))));
             ui::line(f, row(4), spans);
         }
-    } else if let Some(Item::Recent(_)) = chosen {
-        ui::line(f, row(3), vec![Span::raw("  "), Span::styled("the way you last ran it here", muted(t))]);
     }
 }
 
@@ -527,9 +546,9 @@ fn draw_button(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(
         Some(_) if l.orchestrator && l.running_orchestrator().is_some() => ("⏎  Go to the orchestrator".to_string(), Style::default().fg(Color::Black).bg(brand).add_modifier(Modifier::BOLD)),
         Some(s) if l.orchestrator => (format!("⏎  Start it on {}", crate::services::launch::label_for(&s).trim_start_matches("orchestrator · ")), Style::default().fg(Color::Black).bg(brand).add_modifier(Modifier::BOLD)),
         Some(s) => (format!("⏎  Launch {}", crate::services::launch::label_for(&s)), Style::default().fg(Color::Black).bg(brand).add_modifier(Modifier::BOLD)),
-        None if !l.installed(l.harness) => (format!("⏎  Install {}", l.harness.label()), Style::default().fg(t.bg).bg(t.danger).add_modifier(Modifier::BOLD)),
+        None if !l.installed(l.harness) => (format!("⏎  Install {}", l.harness.label()), Style::default().fg(Color::White).bg(t.danger).add_modifier(Modifier::BOLD)),
         None if l.needs_model() => ("pick a model to launch".to_string(), Style::default().fg(t.muted).bg(tint(t.muted, t))),
-        None => ("pick where it runs".to_string(), Style::default().fg(t.muted).bg(tint(t.muted, t))),
+        None => ("pick a provider".to_string(), Style::default().fg(t.muted).bg(tint(t.muted, t))),
     };
     fill(f, r, style.bg.unwrap_or(t.bg));
     let text = ui::fit(&text, r.width.saturating_sub(2) as usize);
@@ -563,7 +582,7 @@ fn draw_stacked(f: &mut Frame, body: Rect, l: &Launcher, t: &Theme, hits: &mut V
             vec![Span::styled("→ ", muted(t)), Span::styled(crate::services::launch::label_for(&s), Style::default().fg(brand).add_modifier(Modifier::BOLD))]
         }
         None if needs => vec![Span::styled("→ pick a model", fg(t.shine))],
-        None => vec![Span::styled("→ pick where to run", muted(t))],
+        None => vec![Span::styled("→ pick a provider", muted(t))],
     };
     if y < body.bottom() {
         ui::line(f, row(y), summary);
@@ -585,6 +604,256 @@ fn draw_stacked(f: &mut Frame, body: Rect, l: &Launcher, t: &Theme, hits: &mut V
         toggles.push(Span::styled(text, if on { Style::default().fg(t.bg).bg(c).add_modifier(Modifier::BOLD) } else { muted(t) }));
     }
     ui::line(f, r, toggles);
+}
+
+// ------------------------------------------------------------------ Create Slop
+
+/// Create Slop's colour: a hot pink, deeper on light themes so it reads on white.
+pub fn slop_color(t: &Theme) -> Color {
+    if t.is_light() { Color::Rgb(0xD6, 0x24, 0x7A) } else { Color::Rgb(0xFF, 0x5F, 0xA8) }
+}
+
+/// The toolkit beside the cast needs this much room; below it the tools go under the cast as one line.
+const STUDIO_SIDE_MIN: u16 = 96;
+const TOOLKIT_W: u16 = 44;
+
+/// The Create Slop tab: the agent it runs on, the cast and the toolkit, the button and the keys.
+fn draw_studio(f: &mut Frame, area: Rect, l: &mut Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
+    // a list here: ↑/↓ move a row
+    l.studio.cols = 1;
+    let row = |y: u16| Rect { y, height: 1, ..area };
+    let mut y = area.y;
+    draw_studio_runs_on(f, row(y), l, t, hits);
+    y += 2;
+    let hints_y = area.bottom().saturating_sub(1);
+    let button_y = hints_y.saturating_sub(2);
+    let body = Rect { y, height: button_y.saturating_sub(y + 1), ..area };
+    if body.width >= STUDIO_SIDE_MIN && body.height >= 6 {
+        let cast = Rect { width: body.width - TOOLKIT_W - 3, ..body };
+        let gap_x = cast.right() + 1;
+        for gy in body.top()..body.bottom() {
+            ui::line(f, Rect { x: gap_x, y: gy, width: 1, height: 1 }, vec![Span::styled("│", fg(t.frame))]);
+        }
+        draw_studio_cast(f, cast, l, t, hits);
+        draw_studio_tools(f, Rect { x: gap_x + 2, width: TOOLKIT_W, ..body }, l, t, hits);
+    } else {
+        // narrow: the cast, then the tools that are on in a line
+        let cast = Rect { height: body.height.saturating_sub(2), ..body };
+        draw_studio_cast(f, cast, l, t, hits);
+        if body.height >= 3 {
+            let on: Vec<&str> = bro_core::studio::TOOLS.iter().filter(|tool| l.studio_tool_on(tool.id)).map(|tool| tool.name).collect();
+            let text = if !l.studio_ready() { "looking at the toolkit…".to_string() } else if on.is_empty() { "no media tools found on this computer".to_string() } else { on.join(" · ") };
+            ui::line(f, row(body.bottom() - 1), vec![Span::styled("tools  ", muted(t).add_modifier(Modifier::BOLD)), Span::styled(ui::fit(&text, area.width.saturating_sub(8) as usize), fg(t.fg))]);
+        }
+    }
+    if button_y > y {
+        draw_studio_button(f, row(button_y), l, t, hits);
+    }
+    if hints_y > button_y {
+        let tools = l.studio.focus == StudioFocus::Tools;
+        let hints = [
+            ("⏎", "start"),
+            ("space", if tools { "on / off" } else { "cast" }),
+            ("type", "find"),
+            ("tab", if tools { "cast" } else { "toolkit" }),
+            ("shift+←→", "agent"),
+            ("alt+n", "runs on"),
+            ("^r", "refresh"),
+            ("esc", if !l.studio.filter.is_empty() || tools { "back" } else { "close" }),
+        ];
+        ui::line(f, row(hints_y), ui::hints(&hints, t));
+    }
+}
+
+/// The agent the session runs on as chips, then the login it would run as.
+fn draw_studio_runs_on(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
+    let tone = slop_color(t);
+    let lead = "runs on ";
+    ui::line(f, Rect { width: (ui::width(lead) as u16).min(r.width), ..r }, vec![Span::styled(lead, fg(tone).add_modifier(Modifier::BOLD))]);
+    let mut x = r.x + ui::width(lead) as u16;
+    for h in Harness::ALL {
+        let on = h == l.harness;
+        let brand = ui::harness_color(Some(h), t);
+        let text = format!(" {} {} ", ui::harness_glyph(Some(h)), h.label());
+        let style = if on {
+            Style::default().fg(Color::Black).bg(brand).add_modifier(Modifier::BOLD)
+        } else if l.installed(h) {
+            Style::default().fg(brand)
+        } else {
+            muted(t)
+        };
+        let w = ui::width(&text) as u16;
+        if x + w > r.right() {
+            return;
+        }
+        let at = Rect { x, width: w, ..r };
+        ui::line(f, at, vec![Span::styled(text, style)]);
+        hits.push((at, Hit::Harness(h)));
+        x += w + 1;
+    }
+    // who it runs as: what the New tab has selected
+    let (text, style) = match l.spec() {
+        Some(s) => (crate::services::launch::label_for(&s).trim_start_matches("slop · ").to_string(), fg(t.fg).add_modifier(Modifier::BOLD)),
+        None if !l.installed(l.harness) => (format!("{} isn't installed yet", l.harness.label()), fg(t.danger)),
+        None => ("pick where it runs".to_string(), fg(t.shine)),
+    };
+    let change = "  change alt+n";
+    let room = r.right().saturating_sub(x + 2) as usize;
+    if room < 12 {
+        return;
+    }
+    let text = ui::fit(&text, room.saturating_sub(ui::width(change)));
+    let w = (ui::width(&text) + ui::width(change)) as u16;
+    let at = Rect { x: x + 2, width: w.min(room as u16), ..r };
+    ui::line(f, at, vec![Span::styled(text, style), Span::styled("  change ", muted(t)), Span::styled("alt+n", key_style(t))]);
+    hits.push((at, Hit::RunsOn));
+}
+
+/// The cast: a line to find one by, then each character with a box that says whether it is cast.
+fn draw_studio_cast(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
+    let focused = l.studio.focus == StudioFocus::Cast;
+    let tone = slop_color(t);
+    let st = &l.data.studio;
+    // the roster's state on the right of the filter line; a click fetches it again
+    let state = if st.loading && st.cast.len() <= 1 {
+        "fetching the roster…".to_string()
+    } else if let Some(_why) = &st.error {
+        "character.slop.cc didn't answer · ^r tries again".to_string()
+    } else {
+        format!("{} characters · character.slop.cc", st.cast.len())
+    };
+    let sw = (ui::width(&state) as u16 + 1).min(area.width / 2);
+    filter_line(f, Rect { height: 1, width: area.width.saturating_sub(sw + 1), ..area }, &l.studio.filter, "find a character… space casts", focused, t);
+    let at = Rect { x: area.right().saturating_sub(sw), width: sw, height: 1, ..area };
+    ui::line(f, at, vec![Span::styled(ui::fit(&state, sw as usize), if st.error.is_some() { fg(t.danger) } else { muted(t) })]);
+    hits.push((at, Hit::StudioRefresh));
+
+    let cast = l.studio_cast();
+    let top = area.y + 2;
+    let rows = area.bottom().saturating_sub(top) as usize;
+    if cast.is_empty() {
+        let msg = if st.cast.is_empty() { "   the roster is on its way" } else { "   nobody by that name · esc clears" };
+        ui::line(f, Rect { y: top, height: 1, ..area }, vec![Span::styled(msg, muted(t))]);
+        return;
+    }
+    let start = window(l.studio.sel, rows);
+    let name_w = (area.width as usize / 4).clamp(12, 22);
+    for (k, &i) in cast.iter().enumerate().skip(start).take(rows) {
+        let c = &st.cast[i];
+        let r = Rect { y: top + (k - start) as u16, height: 1, ..area };
+        let on = k == l.studio.sel;
+        let picked = l.studio_is_picked(c);
+        hits.push((r, Hit::Cast(k)));
+        let mark = if on { select_row(f, r, focused, t) } else { Span::raw(" ") };
+        let check = if picked { Span::styled(" ✔ ", fg(tone).add_modifier(Modifier::BOLD)) } else { Span::styled(" · ", muted(t)) };
+        let name_style = if picked { fg(tone).add_modifier(Modifier::BOLD) } else if on { ui::bold_accent(t) } else { Style::default().fg(t.fg) };
+        let by = if c.creator.is_empty() { c.home().to_string() } else { format!("{} · {}", c.creator, c.home()) };
+        let left = vec![mark, check, Span::styled(ui::pad(&ui::fit(&c.name, name_w), name_w + 1), name_style), Span::styled(c.tagline.clone(), muted(t))];
+        ui::line_lr(f, r, left, vec![Span::styled(format!(" {by} "), muted(t))]);
+    }
+}
+
+/// The toolkit: each tool with what the machine has for it, what gets it going when it can't be used, and the
+/// selected one's way of working (or its key field, while a key is being typed).
+fn draw_studio_tools(f: &mut Frame, area: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
+    use bro_core::studio::{Fix, Ready, TOOLS};
+    let focused = l.studio.focus == StudioFocus::Tools;
+    let row = |i: u16| Rect { y: area.y + i, height: 1, ..area };
+    heading(f, row(0), "toolkit", t);
+    if !l.studio_ready() {
+        ui::line(f, row(2), vec![Span::styled("looking at what this computer has…", muted(t))]);
+        return;
+    }
+    let mut y = 2u16;
+    for (i, tool) in TOOLS.iter().enumerate() {
+        if y >= area.height {
+            return;
+        }
+        let r = row(y);
+        let status = l.studio_tool(tool.id);
+        let ready = status.map(|s| s.ready).unwrap_or(Ready::No);
+        let on = l.studio_tool_on(tool.id);
+        let sel = focused && i == l.studio.tool_sel;
+        hits.push((r, Hit::Tool(i)));
+        let mark = if sel { select_row(f, r, true, t) } else { Span::raw(" ") };
+        // a mark for where it stands: ready, signs you in, or what it is waiting for
+        let (dot, color) = match (ready, on, l.studio_fix(tool.id)) {
+            (Ready::No, _, Some(Fix::Key)) => ("⚿", t.inline),
+            (Ready::No, _, Some(Fix::Start(_))) => ("▶", t.inline),
+            (Ready::No, _, _) => ("↓", t.inline),
+            (_, false, _) => ("○", t.muted),
+            (Ready::SignIn, true, _) => ("◐", theme::gold(t)),
+            (Ready::Yes, true, _) => ("✓", t.good),
+        };
+        let name = if on { fg(t.fg).add_modifier(Modifier::BOLD) } else { muted(t) };
+        let note = if l.studio.saved == Some(tool.id) && status.is_some_and(|s| s.keyless) { "key saved".to_string() } else { status.map(|s| s.note.clone()).unwrap_or_default() };
+        // on the right: on / off for a tool that can be used, else what enter does for it
+        let (state, style) = match l.studio_fix(tool.id) {
+            Some(Fix::Install(_)) => ("install ".to_string(), fg(t.inline)),
+            Some(Fix::Start(_)) => ("start ".to_string(), fg(t.inline)),
+            Some(Fix::Key) => ("add key ".to_string(), fg(t.inline)),
+            None if on => ("on ".to_string(), fg(t.good)),
+            None => ("off ".to_string(), muted(t)),
+        };
+        let left = vec![mark, Span::styled(format!(" {dot} "), fg(color)), Span::styled(ui::pad(tool.name, 12), name), Span::styled(ui::fit(&note, (area.width as usize).saturating_sub(17 + state.chars().count())), muted(t))];
+        ui::line_lr(f, r, left, vec![Span::styled(state, style)]);
+        y += 1;
+    }
+    let tool = &TOOLS[l.studio.tool_sel.min(TOOLS.len() - 1)];
+    y += 1;
+    // the key field, while a key is being typed
+    if let Some(entry) = &l.studio.key {
+        if y + 1 < area.height
+            && let Some(spec) = bro_core::studio::key_spec(entry.tool)
+        {
+            let n = entry.text.chars().count();
+            let shown = if n == 0 { spec.looks_like.to_string() } else { format!("{}{}", "•".repeat(n.saturating_sub(4).min(24)), entry.text.chars().skip(n.saturating_sub(4)).collect::<String>()) };
+            let name = bro_core::studio::tool(entry.tool).map_or(entry.tool, |t| t.name);
+            ui::line(f, row(y), vec![Span::styled(format!(" {name} {}: ", spec.label.to_lowercase()), fg(t.fg).add_modifier(Modifier::BOLD)), Span::styled(ui::fit(&shown, (area.width as usize).saturating_sub(24)), if n == 0 { muted(t) } else { fg(t.accent) }), Span::styled("▏", fg(t.accent))]);
+            ui::line(f, row(y + 1), vec![Span::styled(ui::fit(&format!(" from {} · enter saves it with your keys · esc cancels", spec.page), area.width as usize), muted(t))]);
+        }
+        return;
+    }
+    // how work with the selected tool goes
+    if y + 1 < area.height {
+        ui::line(f, row(y), vec![Span::styled(ui::fit(&format!("{}: {}", tool.name, tool.does), area.width as usize), fg(t.fg))]);
+        y += 1;
+        for (n, step) in tool.steps.iter().enumerate() {
+            if y >= area.height {
+                break;
+            }
+            ui::line(f, row(y), vec![Span::styled(format!(" {} ", n + 1), fg(slop_color(t))), Span::styled(ui::fit(step, (area.width as usize).saturating_sub(4)), muted(t))]);
+            y += 1;
+        }
+        // what a key would add, for a tool that works without one
+        if y < area.height && focused && l.studio_keyless(tool.id) && l.studio_fix(tool.id).is_none() {
+            ui::line(f, row(y), vec![Span::styled(" ctrl+k ", fg(t.accent)), Span::styled("add its key: it connects without the sign-in", muted(t))]);
+        }
+    }
+}
+
+/// The button that starts it, in Create Slop's colour once there is something to start.
+fn draw_studio_button(f: &mut Frame, r: Rect, l: &Launcher, t: &Theme, hits: &mut Vec<(Rect, Hit)>) {
+    let go = Style::default().fg(Color::White).bg(slop_color(t)).add_modifier(Modifier::BOLD);
+    let wait = Style::default().fg(t.muted).bg(tint(t.muted, t));
+    let (text, style, hit) = if !l.installed(l.harness) {
+        (format!("⏎  Install {}", l.harness.label()), Style::default().fg(Color::White).bg(t.danger).add_modifier(Modifier::BOLD), Hit::Install)
+    } else if !l.studio_ready() {
+        ("looking at the toolkit…".to_string(), wait, Hit::Launch)
+    } else if l.spec().is_none() {
+        ("⏎  Pick where it runs".to_string(), go, Hit::Launch)
+    } else {
+        let text = match l.studio_cast_names() {
+            Some(names) => format!("⏎  Start cooking with {names}"),
+            None => "⏎  Start cooking".to_string(),
+        };
+        (text, go, Hit::Launch)
+    };
+    fill(f, r, style.bg.unwrap_or(t.bg));
+    let text = ui::fit(&text, r.width.saturating_sub(2) as usize);
+    let tw = ui::width(&text) as u16;
+    ui::line(f, Rect { x: r.x + (r.width.saturating_sub(tw)) / 2, width: tw.min(r.width), ..r }, vec![Span::styled(text, style)]);
+    hits.push((r, hit));
 }
 
 /// 262144 → "262k", 1048576 → "1M".

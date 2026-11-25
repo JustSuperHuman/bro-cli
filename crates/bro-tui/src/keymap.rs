@@ -47,12 +47,10 @@ pub enum Act {
     PrevProject,
     NextTab,
     PrevTab,
-    /// Show a project tab: 0 is All (every session tiled), 1–9 the projects in tab order.
+    /// Show a scope: 0 is All (every session tiled), 1–9 the projects with sessions, in order.
     ShowTab(u8),
-    /// Back to the project tab you were on before this one.
+    /// Back to the sessions you were looking at before these.
     LastTab,
-    /// The project tabs over the sessions, on / off.
-    ToggleProjectTabs,
     Attention,
     ToggleSidebar,
     FocusSidebar,
@@ -61,6 +59,8 @@ pub enum Act {
     Profiles,
     Proxy,
     Bridge,
+    /// Computers: the computers on your Just Superhuman account, their sessions, and where `bro ctl` runs.
+    Computers,
     /// Token totals per login (the ⓘ on the sidebar's usage).
     Stats,
     /// Claude Code privacy / update / behaviour presets.
@@ -91,8 +91,11 @@ pub enum Act {
     UsageDetails,
     Continue,
     Reload,
+    ForkConversation,
     /// Go to bro's orchestrator, or start one (the launcher on its tab).
     Orchestrator,
+    /// The launcher on its Create Slop tab: a session cast and tooled up for video and media.
+    CreateSlop,
     /// Durable outcomes, blockers, evidence, and recovery.
     Tasks,
     SwitchLogin,
@@ -143,13 +146,13 @@ impl Act {
     /// Every action, in help order.
     pub fn all() -> Vec<Act> {
         use Act::*;
-        let mut v = vec![NewSession, QuickAgent, NewShell, Reload, Rename, Close, Attention, CloseProject, Continue, Orchestrator, SwitchLogin, OpenClipboardFolder, OpenedFile, AgentFiles, Team, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
+        let mut v = vec![NewSession, QuickAgent, NewShell, Reload, ForkConversation, Rename, Close, Attention, CloseProject, Continue, Orchestrator, CreateSlop, SwitchLogin, OpenClipboardFolder, OpenedFile, AgentFiles, Team, Watchdog, NextSession, PrevSession, NextProject, PrevProject];
         v.extend((1..=9).map(Jump));
         v.extend((0..=9).map(ShowTab));
         v.extend([LastTab, NextTab, PrevTab, FocusSidebar, ToggleSidebar]);
         v.extend([Split, SplitRight, SplitDown, TileAll, Zoom, Grow, Shrink, Flip, FlipAll, Focus, FocusLeft, FocusRight, FocusUp, FocusDown, ResizeLeft, ResizeRight, ResizeUp, ResizeDown]);
-        v.extend([Tasks, Usage, UsageDetails, Stats, Profiles, Proxy, ToggleProxyMode, ToggleTrim, Bridge, Settings, WatchdogPrompt, QuickInstall, Sounds, Quips, Skills, Setup, RefreshUsage, Media]);
-        v.extend([Palette, Help, Themes, ToggleIcons, ToggleProjectTabs, ToggleAutoResume, ToggleCaveman, RestartServer, Quit]);
+        v.extend([Tasks, Usage, UsageDetails, Stats, Profiles, Proxy, ToggleProxyMode, ToggleTrim, Bridge, Computers, Settings, WatchdogPrompt, QuickInstall, Sounds, Quips, Skills, Setup, RefreshUsage, Media]);
+        v.extend([Palette, Help, Themes, ToggleIcons, ToggleAutoResume, ToggleCaveman, RestartServer, Quit]);
         v
     }
 
@@ -161,7 +164,6 @@ impl Act {
             ShowTab(0) => "tab_all".into(),
             ShowTab(n) => format!("tab_{n}"),
             LastTab => "last_tab".into(),
-            ToggleProjectTabs => "toggle_project_tabs".into(),
             NewSession => "new_session".into(),
             QuickAgent => "quick_agent".into(),
             NewShell => "new_shell".into(),
@@ -198,6 +200,7 @@ impl Act {
             Profiles => "profiles".into(),
             Proxy => "proxy".into(),
             Bridge => "bridge".into(),
+            Computers => "computers".into(),
             Stats => "stats".into(),
             Settings => "settings".into(),
             QuickInstall => "quick_install".into(),
@@ -217,7 +220,9 @@ impl Act {
             UsageDetails => "usage_details".into(),
             Continue => "continue".into(),
             Reload => "reload".into(),
+            ForkConversation => "fork_conversation".into(),
             Orchestrator => "orchestrator".into(),
+            CreateSlop => "create_slop".into(),
             Tasks => "tasks".into(),
             SwitchLogin => "switch_login".into(),
             CloseProject => "close_project".into(),
@@ -243,10 +248,9 @@ impl Act {
         use Act::*;
         match self {
             Jump(n) => format!("jump to live session {n}"),
-            ShowTab(0) => "project tabs: All — every session tiled".into(),
-            ShowTab(n) => format!("project tabs: project {n} — its sessions tiled"),
-            LastTab => "project tabs: back to the tab you were on before".into(),
-            ToggleProjectTabs => "project tabs over the sessions on / off".into(),
+            ShowTab(0) => "All sessions — every session tiled".into(),
+            ShowTab(n) => format!("project {n} — its sessions tiled, in the session tabs"),
+            LastTab => "back to the sessions you were looking at before".into(),
             NewSession => "launch an agent session…".into(),
             QuickAgent => "quick agent in your home folder on your last login, for system tasks".into(),
             NewShell => "open a plain shell tab".into(),
@@ -271,8 +275,8 @@ impl Act {
             ResizeDown => "move the divider down".into(),
             NextSession => "next session".into(),
             PrevSession => "previous session".into(),
-            NextProject => "next project (in a grid: the next project tab)".into(),
-            PrevProject => "previous project (in a grid: the previous project tab)".into(),
+            NextProject => "next project (in a grid: the next project's grid)".into(),
+            PrevProject => "previous project (in a grid: the previous project's grid)".into(),
             NextTab => "next layout (a session opened in its own tab, with its splits)".into(),
             PrevTab => "previous layout".into(),
             Attention => "jump to the next session that needs you (again: the one after)".into(),
@@ -283,6 +287,7 @@ impl Act {
             Profiles => "profiles: accounts and logins".into(),
             Proxy => "proxy: routes and live requests".into(),
             Bridge => "bridge: phone / web pairing".into(),
+            Computers => "computers: the computers on your Just Superhuman account · which can run sessions now, what's in the way of the others, their sessions, where bro ctl runs".into(),
             Stats => "stats: tokens per login — lifetime, last 24h / 7d / 30d".into(),
             Settings => "settings: bro options and Claude Code privacy, updates and long-run presets".into(),
             QuickInstall => "quick install: JustTools, Git, Node.js, Bun, Python, .NET and the coding agents".into(),
@@ -302,8 +307,10 @@ impl Act {
             UsageDetails => "sidebar usage: totals / every profile".into(),
             Continue => "continue an earlier session (search, resume in any login)".into(),
             Reload => "reload session with a profile…".into(),
+            ForkConversation => "fork conversation".into(),
             SwitchLogin => "move this session to another login (keeps the conversation)".into(),
             Orchestrator => "go to or start this project's orchestrator".into(),
+            CreateSlop => "create slop: a session cast and tooled up for video and media".into(),
             Tasks => "tasks: outcomes, blockers, verification and recovery".into(),
             CloseProject => "close the current project (and its sessions)".into(),
             OpenClipboardFolder => "open the folder whose path you copied as a project".into(),
@@ -321,11 +328,11 @@ impl Act {
     pub fn group(self) -> Group {
         use Act::*;
         match self {
-            NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Reload | Orchestrator | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Team | Watchdog => Group::Sessions,
+            NewSession | QuickAgent | NewShell | Rename | Close | Attention | Continue | Reload | ForkConversation | Orchestrator | CreateSlop | SwitchLogin | CloseProject | OpenClipboardFolder | OpenedFile | AgentFiles | Team | Watchdog => Group::Sessions,
             NextSession | PrevSession | NextProject | PrevProject | Jump(_) | ShowTab(_) | LastTab | NextTab | PrevTab | FocusSidebar | ToggleSidebar => Group::Navigate,
             Split | SplitRight | SplitDown | TileAll | Zoom | Grow | Shrink | Flip | FlipAll | Focus | FocusLeft | FocusRight | FocusUp | FocusDown | ResizeLeft | ResizeRight | ResizeUp | ResizeDown => Group::Panes,
-            Tasks | Usage | UsageDetails | Stats | Profiles | Proxy | ToggleProxyMode | ToggleTrim | Bridge | Settings | WatchdogPrompt | QuickInstall | Sounds | Quips | Skills | Setup | RefreshUsage | Media => Group::Views,
-            Palette | Help | Themes | ToggleIcons | ToggleProjectTabs | ToggleAutoResume | ToggleCaveman | RestartServer | Quit => Group::App,
+            Tasks | Usage | UsageDetails | Stats | Profiles | Proxy | ToggleProxyMode | ToggleTrim | Bridge | Computers | Settings | WatchdogPrompt | QuickInstall | Sounds | Quips | Skills | Setup | RefreshUsage | Media => Group::Views,
+            Palette | Help | Themes | ToggleIcons | ToggleAutoResume | ToggleCaveman | RestartServer | Quit => Group::App,
         }
     }
 
@@ -370,6 +377,7 @@ impl Act {
             SwitchLogin => vec!["alt+L"],
             Continue => vec!["alt+r"],
             Orchestrator => vec!["alt+O"],
+            CreateSlop => vec!["alt+S"],
             Tasks => vec!["alt+shift+d"],
             OpenClipboardFolder => vec!["ctrl+shift+o"],
             Profiles => vec!["alt+o"],
@@ -426,6 +434,7 @@ impl Act {
             Continue => vec!["C"],
             Reload => vec!["R"],
             Orchestrator => vec!["O"],
+            CreateSlop => vec!["V"],
             Tasks => vec!["v"],
             SwitchLogin => vec!["P"],
             CloseProject => vec!["X"],
@@ -445,7 +454,7 @@ impl Act {
             QuickInstall => vec!["I"],
             Setup => vec!["e"],
             Media => vec!["m"],
-            Split | Focus | ShowTab(_) | ToggleProjectTabs | ToggleProxyMode | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder | Sounds | Quips | Skills | RestartServer => vec![],
+            Split | Focus | ShowTab(_) | ToggleProxyMode | ToggleTrim | ToggleAutoResume | ToggleCaveman | WatchdogPrompt | OpenClipboardFolder | Sounds | Quips | Skills | Computers | RestartServer | ForkConversation => vec![],
         }
     }
 }

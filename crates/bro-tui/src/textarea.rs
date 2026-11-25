@@ -1,9 +1,12 @@
 //! A small text editor for overlays (the watchdog's milestones, its prompt): soft-wraps to its width at
-//! spaces, moves by character, word and visual row, and keeps the cursor in view. No undo.
+//! spaces, moves by character, word and visual row, and keeps the cursor in view. No undo. A `selectable`
+//! one (the desktop app's reply box) also selects: shift with a move, a drag, a double-click's word; typing,
+//! a paste or a delete replace what's selected.
 
 use crate::ui;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Frame, layout::Rect, style::{Modifier, Style}, text::Span};
+use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Debug, Default)]
@@ -18,10 +21,54 @@ pub struct TextArea {
     scroll: usize,
     /// the column up / down aims for
     goal: Option<usize>,
+    /// shift with a move selects (only where the selection is drawn: the desktop app's reply box)
+    pub selectable: bool,
+    /// the selection's fixed end; the cursor is the end that moves
+    anchor: Option<usize>,
 }
 
 fn cw(c: char) -> usize {
     c.width().unwrap_or(0)
+}
+
+/// What a double-click takes around byte `at`: a word (letters, digits, `_`), a run of spaces, or a run of
+/// other marks. Never across a line break.
+pub(crate) fn word_range(text: &str, at: usize) -> Range<usize> {
+    fn class(c: char) -> u8 {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c == '\n' {
+            3
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    }
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    // the character under the press; at a line's end (or the text's), the one before it
+    let under = text[at..].chars().next().filter(|c| *c != '\n');
+    let (start_at, kind) = match under {
+        Some(c) => (at, class(c)),
+        None => match text[..at].chars().next_back().filter(|c| *c != '\n') {
+            Some(c) => (at - c.len_utf8(), class(c)),
+            None => return at..at,
+        },
+    };
+    let start = text[..start_at].char_indices().rev().take_while(|(_, c)| class(*c) == kind).last().map_or(start_at, |(i, _)| i);
+    let end = text[start_at..].char_indices().find(|(_, c)| class(*c) != kind).map_or(text.len(), |(i, _)| start_at + i);
+    start..end
+}
+
+/// The line (between line breaks) holding byte `at`: what a triple-click takes.
+pub(crate) fn line_range(text: &str, at: usize) -> Range<usize> {
+    let at = at.min(text.len());
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    start..end
 }
 
 impl TextArea {
@@ -43,13 +90,69 @@ impl TextArea {
         self.cur = self.text.len();
         self.scroll = 0;
         self.goal = None;
+        self.anchor = None;
     }
 
+    /// Type or paste `s` at the cursor, over the selection when there is one.
     pub fn insert(&mut self, s: &str) {
         let s = clean(s, true);
+        self.delete_selection();
         self.text.insert_str(self.cur, &s);
         self.cur += s.len();
         self.goal = None;
+    }
+
+    /// The selected bytes, when something is selected.
+    pub(crate) fn selection(&self) -> Option<Range<usize>> {
+        let a = self.anchor.filter(|a| *a != self.cur)?;
+        Some(a.min(self.cur)..a.max(self.cur))
+    }
+
+    /// The selected text.
+    pub(crate) fn selected(&self) -> Option<&str> {
+        self.selection().map(|r| &self.text[r])
+    }
+
+    /// The end of a selection that stays put (the cursor when nothing is selected): a shift+click grows from it.
+    pub(crate) fn anchor(&self) -> usize {
+        self.anchor.unwrap_or(self.cur)
+    }
+
+    /// Select from `anchor` to `cursor` (bytes, back to character boundaries); the same byte selects nothing.
+    pub(crate) fn select(&mut self, anchor: usize, cursor: usize) {
+        let anchor = self.boundary(anchor);
+        self.cur = self.boundary(cursor);
+        self.anchor = (anchor != self.cur).then_some(anchor);
+        self.goal = None;
+    }
+
+    pub(crate) fn select_all(&mut self) {
+        self.select(0, self.text.len());
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.anchor = None;
+    }
+
+    /// Take out what's selected (the cursor where it was); false when nothing was.
+    pub(crate) fn delete_selection(&mut self) -> bool {
+        let Some(r) = self.selection() else {
+            self.anchor = None;
+            return false;
+        };
+        self.text.replace_range(r.clone(), "");
+        self.cur = r.start;
+        self.anchor = None;
+        self.goal = None;
+        true
+    }
+
+    fn boundary(&self, at: usize) -> usize {
+        let mut at = at.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
     }
 
     /// Visual rows at `width`: byte ranges into the text, soft-wrapped at spaces.
@@ -151,6 +254,46 @@ impl TextArea {
     pub fn key(&mut self, k: KeyEvent, width: usize) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        let moves = matches!(k.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown);
+        if self.selectable {
+            if moves && shift {
+                // shift with a move: the selection grows from where it started (or from the cursor)
+                let anchor = self.anchor();
+                // the move itself, as without shift (nothing selected while it runs)
+                self.anchor = None;
+                let used = match k.code {
+                    // past the first or last row: to the start or the end
+                    KeyCode::Up if !alt && !ctrl => self.vertical(-1, width) || { self.cur = 0; true },
+                    KeyCode::Down if !alt && !ctrl => self.vertical(1, width) || { self.cur = self.text.len(); true },
+                    _ => self.key(KeyEvent::new(k.code, k.modifiers.difference(KeyModifiers::SHIFT)), width),
+                };
+                self.anchor = (anchor != self.cur).then_some(anchor);
+                return used;
+            }
+            if let Some(r) = self.selection() {
+                match k.code {
+                    // a plain left or right from a selection lands on its edge
+                    KeyCode::Left | KeyCode::Right if !ctrl && !alt => {
+                        self.cur = if k.code == KeyCode::Left { r.start } else { r.end };
+                        self.anchor = None;
+                        self.goal = None;
+                        return true;
+                    }
+                    // a delete takes what's selected, and only that
+                    KeyCode::Backspace | KeyCode::Delete => return self.delete_selection(),
+                    KeyCode::Char('w' | 'h' | 'u' | 'k') if ctrl => return self.delete_selection(),
+                    // a newline goes in its place
+                    KeyCode::Enter if self.newline_on_enter || alt || shift => {
+                        self.delete_selection();
+                    }
+                    _ => {}
+                }
+            }
+            if moves || (ctrl && matches!(k.code, KeyCode::Char('a' | 'e'))) {
+                self.anchor = None;
+            }
+        }
         let keep_goal = matches!(k.code, KeyCode::Up | KeyCode::Down);
         let used = match k.code {
             KeyCode::Char(c) if ctrl => match c {
@@ -270,6 +413,7 @@ impl TextArea {
     pub fn cursor_to(&mut self, start: bool) {
         self.cur = if start { 0 } else { self.text.len() };
         self.goal = None;
+        self.anchor = None;
     }
 
     /// Byte offset of the cursor (the desktop app draws its caret).
@@ -284,14 +428,12 @@ impl TextArea {
         self.set_cursor(at);
     }
 
-    /// Put the cursor at byte `at` (a click in the desktop app), back to a character boundary.
+    /// Put the cursor at byte `at` (a click in the desktop app), back to a character boundary. Nothing stays
+    /// selected.
     pub(crate) fn set_cursor(&mut self, at: usize) {
-        let mut at = at.min(self.text.len());
-        while !self.text.is_char_boundary(at) {
-            at -= 1;
-        }
-        self.cur = at;
+        self.cur = self.boundary(at);
         self.goal = None;
+        self.anchor = None;
     }
 
     /// Draw into `area`; a focused field shows its cursor. Empty text shows `placeholder`.
@@ -384,5 +526,127 @@ mod tests {
         p.newline_on_enter = true;
         assert!(p.key(key(KeyCode::Enter), 40));
         assert_eq!(p.text(), "a\n");
+    }
+
+    fn with(code: KeyCode, m: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, m)
+    }
+
+    fn selectable(text: &str) -> TextArea {
+        let mut t = TextArea::new(text);
+        t.selectable = true;
+        t
+    }
+
+    #[test]
+    fn shift_moves_select_and_plain_moves_land_on_the_selections_edge() {
+        let mut t = selectable("hello brave world");
+        t.key(with(KeyCode::Left, KeyModifiers::SHIFT), 40);
+        t.key(with(KeyCode::Left, KeyModifiers::SHIFT), 40);
+        assert_eq!(t.selected(), Some("ld"));
+        // ctrl+shift+left grows by a word from the same anchor
+        t.key(with(KeyCode::Left, KeyModifiers::SHIFT | KeyModifiers::CONTROL), 40);
+        assert_eq!(t.selected(), Some("world"));
+        // shift back the other way shrinks it, through the anchor and out the other side
+        t.key(with(KeyCode::End, KeyModifiers::SHIFT), 40);
+        assert_eq!(t.selection(), None, "back at the anchor nothing is selected");
+        t.key(with(KeyCode::Home, KeyModifiers::SHIFT), 40);
+        assert_eq!(t.selected(), Some("hello brave world"));
+        assert!(t.key(key(KeyCode::Right), 40));
+        assert_eq!((t.selection(), t.cursor()), (None, t.text().len()), "right lands on the selection's end");
+        t.select(6, 11);
+        assert!(t.key(key(KeyCode::Left), 40));
+        assert_eq!((t.selection(), t.cursor()), (None, 6), "left lands on its start");
+        t.select(6, 11);
+        t.key(key(KeyCode::Home), 40);
+        assert_eq!((t.selection(), t.cursor()), (None, 0), "other moves go from the cursor and deselect");
+    }
+
+    #[test]
+    fn shift_up_and_down_select_by_row_and_past_the_ends() {
+        let mut t = selectable("first line\nsecond line");
+        t.set_cursor(14);
+        t.key(with(KeyCode::Up, KeyModifiers::SHIFT), 40);
+        assert_eq!(t.selected(), Some("st line\nsec"), "up a row at the same column");
+        assert!(t.key(with(KeyCode::Up, KeyModifiers::SHIFT), 40), "shift+up on the first row selects to the start");
+        assert_eq!(t.selected(), Some("first line\nsec"));
+        t.set_cursor(3);
+        assert!(t.key(with(KeyCode::Down, KeyModifiers::SHIFT), 40));
+        assert!(t.key(with(KeyCode::Down, KeyModifiers::SHIFT), 40));
+        assert_eq!(t.selected(), Some("st line\nsecond line"));
+        // without shift, up on the first row still belongs to the owner (the reply box's history)
+        t.set_cursor(0);
+        assert!(!t.key(key(KeyCode::Up), 40));
+    }
+
+    #[test]
+    fn typing_pasting_and_deleting_replace_the_selection() {
+        let mut t = selectable("ship the offline sync");
+        t.select(9, 16);
+        assert_eq!(t.selected(), Some("offline"));
+        t.key(key(KeyCode::Char('o')), 40);
+        t.key(key(KeyCode::Char('n')), 40);
+        assert_eq!((t.text(), t.cursor(), t.selection()), ("ship the on sync", 11, None));
+        t.select(5, 8);
+        t.insert("a\r\nfew");
+        assert_eq!(t.text(), "ship a\nfew on sync");
+        t.select(0, 5);
+        assert!(t.key(key(KeyCode::Backspace), 40));
+        assert_eq!(t.text(), "a\nfew on sync", "backspace takes only the selection");
+        t.select(1, 2);
+        assert!(t.key(key(KeyCode::Delete), 40));
+        assert_eq!(t.text(), "afew on sync");
+        t.select(0, 4);
+        assert!(t.key(with(KeyCode::Char('w'), KeyModifiers::CONTROL), 40));
+        assert_eq!(t.text(), " on sync", "ctrl+w deletes the selection, not a word before it");
+        t.select(0, 3);
+        assert!(t.key(with(KeyCode::Enter, KeyModifiers::SHIFT), 40));
+        assert_eq!(t.text(), "\n sync", "shift+enter's newline replaces it too");
+        t.select_all();
+        assert_eq!(t.selected(), Some("\n sync"));
+        assert!(!t.key(key(KeyCode::Enter), 40), "plain enter is still the owner's");
+        assert_eq!(t.text(), "\n sync", "and doesn't touch the selection");
+        t.set_text("new");
+        assert_eq!(t.selection(), None, "replacing the text ends the selection");
+    }
+
+    #[test]
+    fn a_field_that_doesnt_draw_a_selection_never_makes_one() {
+        let mut t = TextArea::new("hello world");
+        t.key(with(KeyCode::Left, KeyModifiers::SHIFT), 40);
+        assert_eq!(t.selection(), None);
+        assert_eq!(t.cursor(), 10, "shift+left still moves");
+        t.key(key(KeyCode::Char('!')), 40);
+        assert_eq!(t.text(), "hello worl!d");
+    }
+
+    #[test]
+    fn selection_stays_on_character_boundaries() {
+        let mut t = selectable("café 🙂 ok");
+        t.select(4, 1000);
+        assert_eq!(t.selected(), Some("é 🙂 ok"));
+        t.select(5, 8);
+        assert_eq!(t.selection(), Some(5..6), "inside the emoji goes back to its start");
+        t.select(3, 3);
+        assert_eq!(t.selection(), None);
+    }
+
+    #[test]
+    fn double_and_triple_click_ranges() {
+        let s = "let snake_case = foo::bar(1);  next\nline two";
+        let w = |at: usize| &s[word_range(s, at)];
+        assert_eq!(w(6), "snake_case");
+        assert_eq!(w(4), "snake_case", "the first letter");
+        assert_eq!(w(3), " ", "a space alone");
+        assert_eq!(w(20), "::");
+        assert_eq!(w(29), "  ", "a run of spaces");
+        assert_eq!(w(35), "next", "at a line's end: the word before it");
+        assert_eq!(w(s.len()), "two", "at the end: the last word");
+        assert_eq!(w(0), "let");
+        assert_eq!(&"é🙂ab"[word_range("é🙂ab", 1)], "é", "never inside a character");
+        assert_eq!(word_range("", 0), 0..0);
+        assert_eq!(word_range("a\n\nb", 2), 2..2, "an empty line takes nothing");
+        assert_eq!(&s[line_range(s, 6)], "let snake_case = foo::bar(1);  next");
+        assert_eq!(&s[line_range(s, s.len())], "line two");
     }
 }

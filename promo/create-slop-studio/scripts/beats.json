@@ -1,0 +1,162 @@
+{
+  "voice": "FGY2WhTYpPnrIDTdsKH5",
+  "voiceName": "Laura (ElevenLabs premade)",
+  "model": "eleven_v3",
+  "folder": "bro/Create Slop launch/VO",
+  "lead": 0.55,
+  "gap": 0.45,
+  "tail": 0.95,
+  "order": [
+    "cold",
+    "pull",
+    "cast",
+    "tools",
+    "start",
+    "board",
+    "approve",
+    "ask",
+    "keyframes",
+    "film",
+    "montage",
+    "end"
+  ],
+  "scenes": {
+    "cold": {
+      "lead": 7.9,
+      "tail": 0.5,
+      "note": "Meta Muse singing to the lens (the film from 0:21.2); after 'Hi, viewers!' (0:28.3) the picture holds and the music cuts; then her narration"
+    },
+    "pull": {
+      "lead": 0.3,
+      "tail": 0.6,
+      "note": "freeze, pull back into the storyboard, then to the Create Slop page"
+    },
+    "cast": {
+      "lead": 0.4,
+      "tail": 0.7
+    },
+    "tools": {
+      "lead": 0.4,
+      "tail": 0.6
+    },
+    "start": {
+      "lead": 0.4,
+      "tail": 0.7
+    },
+    "board": {
+      "lead": 0.4,
+      "tail": 0.6
+    },
+    "approve": {
+      "lead": 0.4,
+      "tail": 0.7
+    },
+    "ask": {
+      "lead": 0.4,
+      "tail": 2.4
+    },
+    "keyframes": {
+      "lead": 0.4,
+      "tail": 0.8
+    },
+    "film": {
+      "lead": 0.5,
+      "tail": 2.2,
+      "note": "the board, then the alligator take full frame with the song up (lyric captioned)"
+    },
+    "montage": {
+      "lead": 1.6,
+      "tail": 1.0,
+      "min": 13.0,
+      "note": "two choruses of the finished cut (7 s + 6 s), song up under her"
+    },
+    "end": {
+      "min": 5.6,
+      "note": "end card, and the song's own 'You can stop watching now.' lands last (song 1:43.2 to 1:47.5, then it stops)"
+    }
+  },
+  "beats": [
+    {
+      "id": "n01",
+      "scene": "cold",
+      "say": "Hi. I'm Meta Muse. I'm the one in this launch video who knows it's a launch video."
+    },
+    {
+      "id": "n02",
+      "scene": "pull",
+      "say": "This is bro. Its Create Slop mode just became a studio."
+    },
+    {
+      "id": "b04",
+      "scene": "cast",
+      "say": "Pick who's in it. Chinese Bone. Claudia.",
+      "min": 4.2
+    },
+    {
+      "id": "b05a",
+      "scene": "tools",
+      "say": "Your tools show up with their real logos."
+    },
+    {
+      "id": "b05b",
+      "scene": "tools",
+      "say": "Missing one? One click installs it."
+    },
+    {
+      "id": "b05c",
+      "scene": "tools",
+      "say": "No key? Paste it once."
+    },
+    {
+      "id": "b06",
+      "scene": "start",
+      "say": "Start cooking. The agent takes one side. The film takes the other."
+    },
+    {
+      "id": "n06",
+      "scene": "board",
+      "say": "It writes every scene: what you hear, and what you see."
+    },
+    {
+      "id": "n07",
+      "scene": "approve",
+      "say": "Approve what you like.",
+      "min": 3.2
+    },
+    {
+      "id": "n08a",
+      "scene": "ask",
+      "say": "Don't like something? Ask.",
+      "min": 2.4
+    },
+    {
+      "id": "b09b",
+      "scene": "ask",
+      "say": "Send it to the agent.",
+      "pre": 2.0,
+      "typed": "Give the alligator a gold chain to go with the shades. It is the real star: Chinese Bone stops mid-line and bows to it"
+    },
+    {
+      "id": "n09",
+      "scene": "keyframes",
+      "say": "It draws the keyframes. You pick.",
+      "min": 3.4
+    },
+    {
+      "id": "n10a",
+      "scene": "film",
+      "say": "Then it films them."
+    },
+    {
+      "id": "n10b",
+      "scene": "film",
+      "say": "The gold chain was your idea. I only approved it.",
+      "pre": 1.8
+    },
+    {
+      "id": "b11",
+      "scene": "montage",
+      "say": "That's the feature. The film you just saw was made with it, today. I've existed for about two hours."
+    }
+  ]
+}

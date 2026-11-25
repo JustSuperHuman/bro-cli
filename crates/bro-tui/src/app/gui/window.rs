@@ -299,11 +299,12 @@ pub fn set_clipboard_files(paths: &[std::path::PathBuf]) -> Result<(), String> {
 #[cfg(not(windows))]
 const NO_CLIPBOARD: &str = "bro can't reach the clipboard here";
 
-/// Leave the console: whenever this process has one, start `args` as a copy with a hidden console of its own and
-/// return true (this one exits). That covers a shell's console (started from a terminal) and our own (bro.exe
-/// opened from Explorer, Start or Run): on Windows 11 that console is a Windows Terminal tab, and hiding its
-/// window leaves the tab open, so closing the tab would close the app. Child processes keep a console either
-/// way, so none of them flash one of their own.
+/// Leave the console: whenever this process has one, start `args` as a copy with a hidden console of its own,
+/// stay until its window is on screen ([`super::startup::watch`]), and return true (this one exits). That covers
+/// a shell's console (started from a terminal: problems are told there) and our own (bro.exe opened from
+/// Explorer, Start or Run, or by bro-app: problems get a message box). On Windows 11 that console is a Windows
+/// Terminal tab, and hiding its window leaves the tab open, so closing the tab would close the app. Child
+/// processes keep a console either way, so none of them flash one of their own.
 #[cfg(windows)]
 pub fn detach_from_console(args: &[String]) -> bool {
     use std::os::windows::process::CommandExt;
@@ -319,20 +320,24 @@ pub fn detach_from_console(args: &[String]) -> bool {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    let spawn = |flags: u32| {
+    let spawn = |flags: u32, status: &std::path::Path| {
         std::process::Command::new(&exe)
             .args(args)
+            .arg("--window-status")
+            .arg(status)
             .creation_flags(flags)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .is_ok()
+            .ok()
     };
     let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
     // out of the terminal's job too, when it allows that: a terminal that kills its job on close takes no app
     // with it (a job that forbids breaking away fails the spawn, so try again inside it)
-    if spawn(flags | CREATE_BREAKAWAY_FROM_JOB) || spawn(flags) {
+    let start = |status: &std::path::Path| spawn(flags | CREATE_BREAKAWAY_FROM_JOB, status).or_else(|| spawn(flags, status));
+    // more processes on the console than this one: a shell's, which hears what goes wrong
+    if super::startup::watch(start, n > 1) {
         return true;
     }
     if n == 1 {
@@ -349,8 +354,8 @@ pub fn detach_from_console(args: &[String]) -> bool {
 }
 
 /// Started from a terminal (`bro` in a shell): run the window as its own process, in its own process group so
-/// the shell's ctrl+c doesn't reach it, and give the shell its prompt back (as `code .` does). Returns true when
-/// it handed off.
+/// the shell's ctrl+c doesn't reach it, and give the shell its prompt back (as `code .` does) once the window is
+/// on screen ([`super::startup::watch`], which tells the terminal what went wrong). Returns true when it handed off.
 #[cfg(not(windows))]
 pub fn detach_from_console(args: &[String]) -> bool {
     use std::io::IsTerminal;
@@ -359,12 +364,17 @@ pub fn detach_from_console(args: &[String]) -> bool {
         return false;
     }
     let Ok(exe) = std::env::current_exe() else { return false };
-    std::process::Command::new(exe)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .process_group(0)
-        .spawn()
-        .is_ok()
+    let start = |status: &std::path::Path| {
+        std::process::Command::new(&exe)
+            .args(args)
+            .arg("--window-status")
+            .arg(status)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .ok()
+    };
+    super::startup::watch(start, true)
 }

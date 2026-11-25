@@ -229,3 +229,34 @@ fn the_terminal_ui_answers_what_its_own_sessions_ask() {
     p.process(b"\x1b[c\x1b[6n");
     assert!(p.callbacks_mut().answers.take().is_empty());
 }
+
+#[test]
+fn focus_messages_execute_on_local_and_hosted_ptys_without_an_extra_enter() {
+    crate::testkit::isolate();
+    for (hosted, harness) in [(false, Harness::Claude), (true, Harness::Codex)] {
+        let dir = hosted.then(server);
+        let (tx, _rx) = mpsc::channel();
+        let svc = Services::offline(Default::default(), tx.clone());
+        if let Some(dir) = &dir { svc.set_host_for_test(Some(connect(dir.path()))); }
+        let mut term = Term::new(meta(&svc), shell(), svc.clone());
+        term.ensure_started(24, 80, Waker::new(1, tx.clone()));
+        assert!(term.error.is_none(), "{:?}", term.error);
+        // Exercise each agent's paste delay using a harmless shell, without launching an agent or API call.
+        term.meta.harness = Some(harness);
+        let command = if cfg!(windows) { "set /a 6*7" } else { "printf '\\n%s\\n' $((6*7))" };
+        let delivery = term.send_message(&format!("{command}{}", " ".repeat(3000)));
+        let theme = crate::theme::get("graphite");
+        let mut actions = vec![];
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            term.poll(&mut Cx { id: 1, theme: &theme, svc: &svc, tx: &tx, actions: &mut actions, focused: true });
+            if term.screen_rows().iter().any(|row| row.trim() == "42") { break; }
+            assert!(Instant::now() < until, "hosted={hosted}: the prompt never executed: {}", term.screen_rows().join("\n"));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(delivery.state(), DeliveryState::Submitted);
+        assert_eq!(term.sent.iter().filter(|b| **b == b'\r').count(), 1, "exactly one Enter");
+        term.kill();
+        if let Some(client) = svc.host() { client.shutdown(Duration::from_secs(5)); }
+    }
+}

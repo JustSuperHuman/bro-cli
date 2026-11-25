@@ -17,6 +17,10 @@
 //! that stopped without being asked to (a crash, the computer shutting down) leaves its sessions there, and the
 //! next one offers them as [`HostInfo::lost`] so a window can bring them back.
 //!
+//! The server also runs bro's Slop Collector ([`bro_core::slop`]) over its sessions' process trees, which only it
+//! holds: it reads `[slop]` from `v2.toml` in its folder, looks every half minute while that's on, and tells every
+//! client what it found.
+//!
 //! Discovery: the running server records `{pid, port, token, protocol, version}` in `~/.bro/v2-host.json`
 //! (written atomically, readable by you alone) and holds `~/.bro/v2-host.lock` for its lifetime.
 
@@ -132,6 +136,9 @@ pub struct HostInfo {
     /// This connection's role, as granted.
     #[serde(default)]
     pub role: Role,
+    /// The Slop Collector's last report (None: a server from before it).
+    #[serde(default)]
+    pub slop: Option<bro_core::slop::Report>,
 }
 
 pub(crate) fn now_ms() -> u64 {

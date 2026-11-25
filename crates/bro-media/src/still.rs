@@ -283,6 +283,16 @@ fn load_svg(path: &Path, max_side: u32) -> Result<Image, String> {
         return Err("the SVG is too large to preview".into());
     }
     let data = std::fs::read(path).map_err(|e| read_error(path, e))?;
+    render_svg(&data, max_side)
+}
+
+/// An SVG held in memory, rasterised to fit `max_side`: a picture bro composes itself and never writes down (the
+/// demo's project icons).
+pub fn svg_thumbnail(svg: &[u8], max_side: u32) -> Result<Rgba, String> {
+    render_svg(svg, max_side)?.frames.into_iter().next().map(|(frame, _)| frame).ok_or_else(|| "the SVG drew nothing".to_string())
+}
+
+fn render_svg(data: &[u8], max_side: u32) -> Result<Image, String> {
     if data.starts_with(&[0x1f, 0x8b]) && data.len() > MAX_SVGZ_BYTES {
         return Err("the SVG is too large to preview".into());
     }
@@ -294,7 +304,7 @@ fn load_svg(path: &Path, max_side: u32) -> Result<Image, String> {
     if data.starts_with(&[0x1f, 0x8b]) || data.windows(5).any(|w| w == b"<text") {
         opt.fontdb = system_fonts();
     }
-    let tree = parse_svg(&data, &opt, MAX_SVG_NODES)?;
+    let tree = parse_svg(data, &opt, MAX_SVG_NODES)?;
     let size = tree.size();
     let (w, h) = (size.width(), size.height());
     let scale = max_side as f32 / w.max(h);

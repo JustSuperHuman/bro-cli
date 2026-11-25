@@ -293,8 +293,8 @@ pub(crate) fn key_button(ui: &mut Ui, r: Rect, label: &str, chord: &str, kind: w
             t.on_accent
         }
         widgets::Kind::Danger => {
-            ui.round(r, radius::CONTROL, if down { t.danger.fade(0.8) } else { t.danger.fade(1.0 - 0.1 * hot) });
-            t.ink_on(t.danger)
+            ui.round(r, radius::CONTROL, if down { t.bold_fill(t.danger).fade(0.8) } else { t.bold_fill(t.danger).fade(1.0 - 0.1 * hot) });
+            t.on_bold()
         }
         widgets::Kind::Secondary => {
             widgets::control(ui, r, if down { t.control_pressed } else { t.control.mix(t.control_hover, hot) });

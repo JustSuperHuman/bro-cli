@@ -76,6 +76,8 @@ pub(crate) struct AppState {
     pub runtime: Arc<OnceLock<tokio::runtime::Handle>>,
     /// Connected `/ws` clients.
     pub clients: Arc<AtomicUsize>,
+    /// Who the connected `/ws` clients are (see [`crate::devices`]).
+    pub devices: Arc<crate::devices::Devices>,
     /// Remote `/ws` subscriptions per session id (one per client slot). bro uses it to
     /// give watched sessions a minimum size; see [`crate::Bridge::remote_viewers`].
     pub viewers: Arc<Mutex<HashMap<String, usize>>>,
@@ -92,7 +94,13 @@ pub(crate) struct AppState {
     /// Host exit observations survive unregister. Missing registry entries are never exit proof.
     pub coordination_exits: Arc<Mutex<HashMap<String, (Option<u32>, String, i64)>>>,
     pub coordination_wakes: Arc<Mutex<HashMap<String, (u64, u64, String)>>>,
+    pub browser_handoff_changed: Arc<tokio::sync::Notify>,
+    pub browser_handoff_pending: Arc<Mutex<Vec<crate::browser::Handoff>>>,
+    /// Live voice calls and their settings (see [`crate::voice`]).
+    pub voice: Arc<crate::voice::VoiceHub>,
     pub rmm: Arc<crate::rmm::Rmm>,
+    /// The icons bro's window keeps for its projects (see [`crate::project_icons`]).
+    pub icons: Arc<crate::project_icons::ProjectIcons>,
 }
 
 impl AppState {
@@ -107,6 +115,7 @@ impl AppState {
         let rmm_root = if data_root.file_name().is_some_and(|name| name == "bridge") {
             data_root.parent().unwrap_or(&data_root).join("rmm")
         } else { data_root.join("rmm") };
+        let icons = Arc::new(crate::project_icons::ProjectIcons::new(&data_root));
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 sessions: HashMap::new(),
@@ -132,6 +141,7 @@ impl AppState {
             schedule,
             runtime: Arc::new(OnceLock::new()),
             clients: Arc::new(AtomicUsize::new(0)),
+            devices: Arc::new(crate::devices::Devices::default()),
             viewers: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
             last_error: Arc::new(Mutex::new(None)),
@@ -141,7 +151,11 @@ impl AppState {
             mod_jobs: Arc::new(crate::mod_jobs::ModJobs::default()),
             coordination_exits: Arc::new(Mutex::new(HashMap::new())),
             coordination_wakes: Arc::new(Mutex::new(HashMap::new())),
+            browser_handoff_changed: Arc::new(tokio::sync::Notify::new()),
+            browser_handoff_pending: Arc::new(Mutex::new(Vec::new())),
+            voice: Arc::new(crate::voice::VoiceHub::default()),
             rmm: Arc::new(crate::rmm::Rmm::new(rmm_root)),
+            icons,
         }
     }
 

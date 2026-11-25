@@ -145,8 +145,10 @@ pub struct BindSpec {
     pub pid: Option<u32>,
     pub cwd: PathBuf,
     pub started: SystemTime,
-    /// `--resume`/`resume <id>` the pane was launched with
+    /// The pane's own session ID from the launch command, when known.
     pub resume_id: Option<String>,
+    /// The ID read by a native fork, which belongs to a different pane.
+    pub fork_source: Option<String>,
 }
 
 /// Finds and follows the transcript a live pane is writing. Poll it from a worker thread;
@@ -246,15 +248,16 @@ impl Binder {
                 };
                 (found, every)
             }
-            Harness::Pi | Harness::Omp => (None, Duration::from_secs(3600)),
+            Harness::Pi | Harness::Omp | Harness::Antigravity => (None, Duration::from_secs(3600)),
         };
         self.next = Some(now + every);
         let (path, id) = match found {
             None => return false,
-            // A guess made before Claude wrote its session file is another session in the same folder.
+            // A fresh session may have no transcript until its first prompt, including after /clear.
             Some(Found::Unwritten(id)) => {
+                let changed = self.session_id.as_deref() != Some(id.as_str());
                 self.session_id = Some(id);
-                if !self.guessed {
+                if !self.guessed && !changed {
                     return false;
                 }
                 self.guessed = false;
@@ -293,18 +296,26 @@ impl Binder {
             .unwrap_or(self.spec.started)
     }
 
+    fn is_fork_source(&self, id: &str) -> bool {
+        self.spec.fork_source.as_deref() == Some(id)
+    }
+
     fn find_claude(&mut self) -> Option<Found> {
         let dir = self.config_dir();
         // 1. the process's own session file
         let by_pid = self
             .spec
             .pid
-            .and_then(|pid| read_claude_session_file(&dir, pid));
+            .and_then(|pid| read_claude_session_file(&dir, pid))
+            .filter(|f| !self.is_fork_source(&f.session_id));
         // 2. a session file for this cwd started with the pane (bro may have spawned a shim)
         let file = by_pid.or_else(|| {
+            let tree = self.spec.fork_source.as_ref().and(self.spec.pid).and_then(super::holders::tree);
             let since_ms = crate::util::system_time_ms(self.since()) as i64;
             list_claude_session_files(&dir)
                 .into_iter()
+                .filter(|f| !self.is_fork_source(&f.session_id))
+                .filter(|f| tree.as_ref().is_none_or(|pids| pids.contains(&f.pid)))
                 .filter(|f| {
                     f.cwd
                         .as_deref()
@@ -333,6 +344,9 @@ impl Binder {
             self.guessed = false;
             return Some(Found::Transcript(p, Some(id.to_string())));
         }
+        if self.spec.fork_source.is_some() {
+            return None;
+        }
         // 4. the newest transcript for this cwd that no other running Claude has
         let others: Vec<String> = list_claude_session_files(&dir)
             .into_iter()
@@ -351,6 +365,9 @@ impl Binder {
     }
 
     fn find_codex(&mut self) -> Option<(PathBuf, Option<String>)> {
+        if let Some(held) = self.find_codex_held() {
+            return held;
+        }
         // a rollout begun before the pane is another Codex's (a resumed one is found by its id below)
         let since = self.since();
         latest_for_where(
@@ -358,7 +375,7 @@ impl Binder {
             self.spec.profile_id.as_deref(),
             &self.spec.cwd,
             since,
-            |s| begun_since(&s.path, since),
+            |s| !self.is_fork_source(&s.id) && begun_since(&s.path, since),
         )
         .map(|s| (s.path, Some(s.id)))
         .or_else(|| {
@@ -366,6 +383,42 @@ impl Binder {
             let login = self.spec.profile_id.as_deref().unwrap_or("codex:local");
             find_in_profile(Harness::Codex, id, Some(login)).map(|s| (s.path, Some(s.id)))
         })
+    }
+}
+
+impl Binder {
+    /// The rollout the pane's own processes have open: Codex keeps the one it writes open while it runs, so a
+    /// sibling Codex in the same folder (newer, busier, or begun after this pane) is never taken for this one.
+    /// Several can be open (its sub-agents' are left out with the rest that aren't interactive): the newest wins.
+    /// Some(None) when none of them is this pane's yet; None when bro can't tell (no pid, or the system doesn't
+    /// say), and the folder's newest rollout is taken as before.
+    ///
+    /// Every rollout for the folder is a candidate, not only those touched since the pane began: Windows keeps the
+    /// time a file was last written at its creation while Codex holds it open, and a pane that came back after bro
+    /// restarted may be writing one begun long before. Who holds each is cached, so that's asked about once.
+    fn find_codex_held(&self) -> Option<Option<(PathBuf, Option<String>)>> {
+        let pid = self.spec.pid?;
+        let tree = super::holders::tree(pid)?;
+        let mut candidates = super::recent_for(Harness::Codex, self.spec.profile_id.as_deref(), &self.spec.cwd, SystemTime::UNIX_EPOCH);
+        // a resumed rollout among the folder's older ones, or under another folder
+        if let Some(id) = self.spec.resume_id.as_deref()
+            && !candidates.iter().any(|s| s.id == id)
+            && let Some(s) = find_in_profile(Harness::Codex, id, Some(self.spec.profile_id.as_deref().unwrap_or("codex:local")))
+        {
+            candidates.push(s);
+            candidates.sort_by_key(|s| std::cmp::Reverse(s.modified));
+        }
+        candidates.retain(|s| !self.is_fork_source(&s.id));
+        let mut told = candidates.is_empty();
+        for s in candidates {
+            match super::holders::held_within(&s.path, &tree) {
+                Some(true) => return Some(Some((s.path, Some(s.id)))),
+                Some(false) => told = true,
+                // gone since it was listed, or the system wouldn't say for this one
+                None => {}
+            }
+        }
+        told.then_some(None)
     }
 }
 
@@ -2632,6 +2685,7 @@ mod tests {
             cwd: cwd.clone(),
             started: SystemTime::now(),
             resume_id: None,
+            fork_source: None,
         };
         let mut b = Binder::new(spec);
         let t0 = Instant::now();
@@ -2639,6 +2693,12 @@ mod tests {
         assert_eq!(b.session_id(), Some(id1));
         assert_eq!(b.claude_busy(), Some(true), "Claude's own status");
         std::fs::write(proj.join(format!("{id1}.jsonl")), "{}\n").unwrap();
+        let mut branch = Binder::new(BindSpec {
+            fork_source: Some(id1.into()),
+            ..b.spec().clone()
+        });
+        assert!(!branch.poll(t0), "a fork must never follow its source");
+        assert!(branch.session_id().is_none());
         assert!(!b.poll(t0 + Duration::from_secs(1)), "rate limited");
         assert!(b.poll(t0 + CLAUDE_EVERY));
         assert!(b.path().unwrap().ends_with(format!("{id1}.jsonl")));
@@ -2649,8 +2709,14 @@ mod tests {
             json!({"pid": 4242, "sessionId": id2, "cwd": cwd}).to_string(),
         )
         .unwrap();
-        std::fs::write(proj.join(format!("{id2}.jsonl")), "{}\n").unwrap();
         assert!(b.poll(t0 + CLAUDE_EVERY * 3));
+        assert!(b.path().is_none(), "the old transcript is gone before the new session writes anything");
+        assert_eq!(b.session_id(), Some(id2));
+        assert!(!b.poll(t0 + CLAUDE_EVERY * 4), "the empty conversation stays empty");
+        std::fs::write(proj.join(format!("{id2}.jsonl")), "{}\n").unwrap();
+        assert!(b.poll(t0 + CLAUDE_EVERY * 5));
+        assert!(branch.poll(t0 + CLAUDE_EVERY * 5));
+        assert_eq!(branch.session_id(), Some(id2));
         assert!(b.path().unwrap().ends_with(format!("{id2}.jsonl")));
         assert_eq!(b.session_id(), Some(id2));
 
@@ -2716,6 +2782,7 @@ mod tests {
             cwd: cwd.clone(),
             started: SystemTime::now(),
             resume_id: None,
+            fork_source: None,
         });
         let t0 = Instant::now();
         assert!(!b.poll(t0), "the busy session's transcript is that session's");
@@ -2772,6 +2839,7 @@ mod tests {
             cwd: cwd.clone(),
             started,
             resume_id: None,
+            fork_source: None,
         });
         assert!(!b.poll(Instant::now()));
         assert!(b.path().is_none());
@@ -2782,6 +2850,58 @@ mod tests {
         });
         assert!(r.poll(Instant::now()));
         assert_eq!(r.session_id(), Some(busy));
+    }
+
+    #[test]
+    fn a_codex_pane_binds_the_rollout_its_own_process_has_open() {
+        let sb = sandbox();
+        let day = sb.home().join(".codex").join("sessions").join("2026").join("10").join("02");
+        std::fs::create_dir_all(&day).unwrap();
+        let cwd = PathBuf::from(if cfg!(windows) { "F:\\tools" } else { "/tools" });
+        let rollout = |id: &str, text: &str| {
+            let lines = [
+                json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd, "originator": "codex-tui"}}),
+                json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}),
+                json!({"type": "pad", "x": "y".repeat(600)}),
+            ];
+            let path = day.join(format!("rollout-2026-10-02T09-00-00-{id}.jsonl"));
+            std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+            path
+        };
+        let started = SystemTime::now() - Duration::from_secs(60);
+        let (mine, theirs) = ("019a0000-0000-7000-8000-00000000000a", "019a0000-0000-7000-8000-00000000000b");
+        let own = rollout(mine, "this pane's codex");
+        let other = rollout(theirs, "a sibling codex in the same folder");
+        // the sibling's is the newer and busier one; this pane's was begun before it (a pane brought back after bro
+        // restarted), and Windows keeps that time while it's written
+        std::fs::File::options().write(true).open(&own).unwrap().set_modified(started - Duration::from_secs(3600)).unwrap();
+        std::fs::File::options().write(true).open(&other).unwrap().set_modified(started + Duration::from_secs(50)).unwrap();
+        // this process stands in for the pane's Codex: it keeps its rollout open
+        let _writing = std::fs::File::options().append(true).open(&own).unwrap();
+        if crate::sessions::holders::tree(std::process::id()).is_none() || crate::sessions::holders::held_by(&own).is_none() {
+            return; // bro can't tell here
+        }
+        let spec = BindSpec { harness: Harness::Codex, profile_id: None, config_dir: None, pid: Some(std::process::id()), cwd: cwd.clone(), started, resume_id: None, fork_source: None };
+        let mut b = Binder::new(spec.clone());
+        assert!(b.poll(Instant::now()));
+        assert_eq!(b.session_id(), Some(mine), "its own, not the newest in the folder");
+        assert_eq!(b.path(), Some(own.as_path()));
+        let mut fork = Binder::new(BindSpec { fork_source: Some(mine.into()), ..spec.clone() });
+        let t0 = Instant::now();
+        assert!(!fork.poll(t0), "opening the source during a fork does not make it the pane's rollout");
+        let mut branch = std::fs::File::options().append(true).open(&other).unwrap();
+        // Write past any cached negative holder check from the first poll.
+        std::io::Write::write_all(&mut branch, b"{}\n").unwrap();
+        assert!(fork.poll(t0 + CODEX_SEARCH_EVERY));
+        assert_eq!(fork.path(), Some(other.as_path()));
+        // without a pid, the folder's newest is the guess
+        let mut guess = Binder::new(BindSpec { pid: None, ..spec.clone() });
+        assert!(guess.poll(Instant::now()));
+        assert_eq!(guess.session_id(), Some(theirs));
+        // a pane whose processes hold none of them binds nothing yet
+        let mut none = Binder::new(BindSpec { pid: Some(u32::MAX - 1), ..spec });
+        assert!(!none.poll(Instant::now()));
+        assert!(none.path().is_none());
     }
 
     #[test]
@@ -2810,6 +2930,7 @@ mod tests {
             cwd: cwd.clone(),
             started: SystemTime::now(),
             resume_id: None,
+            fork_source: None,
         });
         let t0 = Instant::now();
         assert!(!b.poll(t0));

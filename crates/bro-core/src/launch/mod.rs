@@ -69,6 +69,10 @@ pub struct LaunchSpec {
     /// [`crate::orchestrator`]). Needs [`LaunchCtx::bridge_url`].
     #[serde(default)]
     pub orchestrator: bool,
+    /// Launch in Create Slop mode: the kit's cast and media tools as MCP servers, and its brief (see
+    /// [`crate::studio`]).
+    #[serde(default)]
+    pub studio: Option<crate::studio::Kit>,
 }
 
 /// Where the running bro-proxy lives, so cross-format launches can be routed through it.
@@ -107,12 +111,35 @@ pub struct LaunchCtx {
     /// Proxy mode (`ProxySettings::shared`): launches on a login run on all signed-in logins of its
     /// family, through bro-proxy (see the module docs).
     pub shared_logins: bool,
+    /// In-memory preferences from the launching window; None reads persisted settings.
+    pub automation: Option<crate::automation::Settings>,
+    /// What the machine has for a Create Slop launch ([`crate::studio::Facts`]); None looks now.
+    pub studio_facts: Option<crate::studio::Facts>,
 }
 
 impl LaunchCtx {
     /// The proxy is running and native logins should go through it.
     fn routes_native(&self) -> bool {
         self.route_native && self.proxy_base.as_deref().is_some_and(|b| !b.is_empty())
+    }
+}
+
+/// Launch arguments that set a session's reasoning effort ("none", "low", "medium", "high");
+/// empty for anything else and for harnesses without the knob. Meant for `LaunchSpec::extra_args`.
+/// Claude Code gets `--effort <level>`; `none` also turns extended thinking off (see `claude.rs`).
+/// Codex gets `-c model_reasoning_effort="<level>"`, `none` as `low`, the lowest level every current Codex model accepts.
+pub fn effort_args(harness: Harness, effort: &str) -> Vec<String> {
+    let effort = effort.trim().to_ascii_lowercase();
+    if !matches!(effort.as_str(), "none" | "low" | "medium" | "high") {
+        return vec![];
+    }
+    match harness {
+        Harness::Claude => vec!["--effort".into(), effort],
+        Harness::Codex => {
+            let level = if effort == "none" { "low" } else { effort.as_str() };
+            vec!["-c".into(), format!("model_reasoning_effort=\"{level}\"")]
+        }
+        _ => vec![],
     }
 }
 
@@ -205,7 +232,7 @@ fn family_matches(harness: Harness, profile: &Profile) -> bool {
     match harness {
         Harness::Claude => profile.is_claude(),
         Harness::Codex => profile.is_codex(),
-        Harness::Pi | Harness::Omp => false,
+        Harness::Pi | Harness::Omp | Harness::Antigravity => false,
     }
 }
 
@@ -270,7 +297,7 @@ fn share(harness: Harness, target: Target, profile: Option<&Profile>) -> Target 
             Harness::Claude => Target::Logins(true),
             Harness::Codex => Target::Logins(false),
             // Pi and omp keep the login they're configured with
-            Harness::Pi | Harness::Omp => Target::Login,
+            Harness::Pi | Harness::Omp | Harness::Antigravity => Target::Login,
         },
         Target::Upstream(up) => match family(&up) {
             Some(claude) => Target::Logins(claude),
@@ -280,7 +307,7 @@ fn share(harness: Harness, target: Target, profile: Option<&Profile>) -> Target 
         Target::Provider(p, key) if p.mode == ProviderMode::Native => match harness {
             Harness::Claude | Harness::Codex => Target::Logins(true),
             Harness::Pi | Harness::Omp if profile.is_some_and(|p| p.is_claude()) => Target::Logins(true),
-            Harness::Pi | Harness::Omp => Target::Provider(p, key),
+            Harness::Pi | Harness::Omp | Harness::Antigravity => Target::Provider(p, key),
         },
         other => other,
     }
@@ -365,6 +392,18 @@ pub fn build(spec: &LaunchSpec, ctx: &LaunchCtx) -> anyhow::Result<CommandSpec> 
     if spec.orchestrator && orchestrator_bridge(ctx).is_none() {
         bail!("the orchestrator drives bro through its bridge, which isn't running (turn it on in the bridge view)");
     }
+    // Resuming a session that was launched in Create Slop mode brings its kit back.
+    let recalled;
+    let spec = match (&spec.studio, &spec.resume) {
+        (None, Some(resume)) => match crate::studio::session_kit(&resume.session_id) {
+            Some(kit) => {
+                recalled = LaunchSpec { studio: Some(kit), ..spec.clone() };
+                &recalled
+            }
+            None => spec,
+        },
+        _ => spec,
+    };
     // Only No project uses the dedicated coordinator workspace.
     let moved;
     let spec = if spec.orchestrator && crate::orchestrator::is_global(&spec.cwd) {
@@ -374,20 +413,103 @@ pub fn build(spec: &LaunchSpec, ctx: &LaunchCtx) -> anyhow::Result<CommandSpec> 
     } else {
         spec
     };
-    let r = resolve(spec, ctx.shared_logins)?;
-    let mut out = match r.harness {
-        Harness::Claude => claude::build(spec, ctx, &r),
-        Harness::Codex => codex::build(spec, ctx, &r),
-        Harness::Pi | Harness::Omp => pi::build(spec, ctx, &r),
+    let mut out = if spec.harness == Harness::Antigravity {
+        antigravity(spec, ctx)
+    } else {
+        let r = resolve(spec, ctx.shared_logins)?;
+        match r.harness {
+            Harness::Claude => claude::build(spec, ctx, &r),
+            Harness::Codex => codex::build(spec, ctx, &r),
+            Harness::Pi | Harness::Omp => pi::build(spec, ctx, &r),
+            Harness::Antigravity => unreachable!(),
+        }
     };
     if let Ok(cmd) = &mut out {
         cmd.cwd = spec.cwd.clone();
+        let automation = crate::automation::Active::for_launch(ctx);
+        cmd.set_env("BRO_BROWSER_PROVIDER", if automation.browser { "justbrowse" } else { "off" });
         if spec.orchestrator {
             cmd.set_env(crate::orchestrator::ENV_FLAG, "1");
             cmd.label = format!("orchestrator · {}", cmd.label);
         }
+        if let Some(kit) = &spec.studio {
+            cmd.set_env(crate::studio::ENV_FLAG, "1");
+            for (k, v) in crate::studio::session_env(kit, &studio_facts(ctx)) {
+                // a PATH the launch already built (an agent's own folder) keeps what it added
+                let built = (k == "PATH").then(|| cmd.env.iter().find(|(name, _)| name == "PATH").map(|(_, path)| path.clone())).flatten();
+                match (built, v.rsplit(if cfg!(windows) { ';' } else { ':' }).next()) {
+                    (Some(path), Some(dir)) => cmd.set_env("PATH", format!("{path}{}{dir}", if cfg!(windows) { ';' } else { ':' })),
+                    _ => cmd.set_env(&k, v),
+                }
+            }
+            cmd.label = format!("slop · {}", cmd.label);
+        }
     }
     out.with_context(|| format!("building {} launch", spec.harness.label()))
+}
+
+fn antigravity(spec: &LaunchSpec, ctx: &LaunchCtx) -> anyhow::Result<CommandSpec> {
+    if spec.profile_id.is_some() || spec.provider_id.is_some() {
+        bail!("Antigravity uses the account configured in agy.");
+    }
+    let mut args = Vec::new();
+    args.extend(antigravity_permission_args(spec.permission).iter().map(|arg| (*arg).to_owned()));
+    if let Some(model) = &spec.model {
+        args.extend(["--model".to_owned(), model.clone()]);
+    }
+    if let Some(resume) = &spec.resume {
+        if resume.fork {
+            bail!("Antigravity can resume a conversation by ID.");
+        }
+        args.extend(["--conversation".to_owned(), resume.session_id.clone()]);
+    } else {
+        let mut brief = Vec::new();
+        if spec.orchestrator {
+            brief.push(crate::orchestrator::scoped_prompt(spec.harness, &spec.cwd));
+        }
+        if let Some(kit) = &spec.studio {
+            brief.push(crate::studio::brief(kit, &studio_facts(ctx), spec.harness, &spec.cwd, &[]));
+        }
+        if !brief.is_empty() {
+            args.extend(["-i".to_owned(), brief.join("\n\n")]);
+        }
+    }
+    args.extend(spec.extra_args.iter().cloned());
+    let (program, args) = program_and_args(Harness::Antigravity.program(), args);
+    Ok(CommandSpec { program, args, label: "antigravity".into(), ..CommandSpec::default() })
+}
+
+pub fn antigravity_permission_args(permission: Permission) -> &'static [&'static str] {
+    match permission {
+        Permission::Default => &[],
+        Permission::Auto => &["--mode", "auto"],
+        Permission::Skip => &["--dangerously-skip-permissions"],
+    }
+}
+
+/// What the machine has, for a Create Slop launch: what the window already found, else a look now (once for a
+/// launch: its servers, its brief and its environment are built from the same look), with where bro's bridge
+/// answers.
+fn studio_facts(ctx: &LaunchCtx) -> crate::studio::Facts {
+    thread_local! {
+        static LOOKED: std::cell::RefCell<Option<(std::time::Instant, crate::studio::Facts)>> = const { std::cell::RefCell::new(None) };
+    }
+    let mut facts = match &ctx.studio_facts {
+        Some(facts) => facts.clone(),
+        None => LOOKED.with(|looked| {
+            let mut looked = looked.borrow_mut();
+            match looked.as_ref().filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(3)) {
+                Some((_, facts)) => facts.clone(),
+                None => {
+                    let facts = crate::studio::Facts::gather();
+                    *looked = Some((std::time::Instant::now(), facts.clone()));
+                    facts
+                }
+            }
+        }),
+    };
+    facts.bridge = ctx.bridge_url.clone().filter(|url| !url.trim().is_empty());
+    facts
 }
 
 /// The bridge an orchestrator launch talks to.

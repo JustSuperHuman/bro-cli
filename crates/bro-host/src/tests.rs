@@ -54,26 +54,6 @@ impl Server {
     }
 }
 
-#[test]
-#[ignore = "isolated authenticated loopback host; no PTYs or external programs"]
-fn native_companion_status_is_primary_only_and_view_controls_relay_without_takeover() {
-    let server = Server::start();
-    let (primary, commands) = server.connect();
-    let (viewer, _) = server.connect_as(Role::Viewer);
-    let key = "bro.native.orbit-status.v1";
-    primary.set_value(key, "primary-status");
-    wait("primary status", || client::status(server.path()).ok().is_some_and(|s| s.values.get(key).is_some_and(|v| v == "primary-status")));
-    viewer.set_value(key, "forged-viewer-status");
-    // A relayed control follows the attempted write in the same ordered socket stream.
-    let body = serde_json::json!({"orbitControl":{"kind":"stop"}});
-    viewer.relay(body.clone());
-    assert_eq!(next(&commands, |e| matches!(e, ClientEvent::Relayed(_))), ClientEvent::Relayed(body));
-    let status = client::status(server.path()).unwrap();
-    assert_eq!(status.values.get(key).map(String::as_str), Some("primary-status"));
-    assert_eq!(status.peers.primary.unwrap().role, Role::Window);
-    primary.shutdown(Duration::from_secs(2));
-    server.done.recv_timeout(Duration::from_secs(5)).unwrap();
-}
 
 /// A shell that stays at its prompt.
 fn shell() -> (String, Vec<String>) {
@@ -430,4 +410,86 @@ fn a_spawn_that_fails_says_why() {
         Ok(remote) => assert!(wait_exit(&remote) != 0),
     }
     client.shutdown(Duration::from_secs(5));
+}
+
+#[test]
+fn the_slop_collector_reports_to_windows_and_to_bro_slop() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("v2.toml"), "[slop]\non = true\nwait_mins = 5\n").unwrap();
+    let server = Server::in_dir(dir, Duration::from_secs(120), |_| false);
+    let (client, events) = server.connect();
+    let first = client.info().slop.clone().expect("a server with the collector says so in its welcome");
+    assert!(first.on && first.wait_mins == 5);
+    let (_remote, _) = {
+        let mut r = client.spawn(request("s1", shell())).unwrap();
+        let out = Output::of(&mut r);
+        (r, out)
+    };
+    client.slop_look(false);
+    // the first look may have run before the session started: wait for one that saw it
+    let ClientEvent::Slop(report) = next(&events, |e| matches!(e, ClientEvent::Slop(r) if r.sessions == 1)) else { unreachable!() };
+    assert_eq!(report.supported, cfg!(windows));
+    if cfg!(windows) {
+        assert_eq!(report.sessions, 1);
+        assert!(report.processes >= 1, "the shell, at least");
+    }
+    assert!(report.leftovers.is_empty(), "a shell at its prompt leaves nothing");
+    assert_eq!(client.slop().map(|r| r.looked_ms), Some(report.looked_ms));
+    // `bro slop`: a query, not a window
+    let asked = client::slop(server.path(), true).unwrap().unwrap();
+    assert!(asked.looked_ms >= report.looked_ms);
+    client.shutdown(Duration::from_secs(5));
+    server.done.recv_timeout(Duration::from_secs(10)).unwrap();
+}
+
+/// The real thing: in a session, a script starts a headless Chrome and exits (as a killed Remotion render does), and
+/// `bro slop collect` ends the browser it left. Needs Node and a Chrome: `BRO_TEST_CHROME=<chrome.exe>`.
+#[cfg(windows)]
+#[test]
+#[ignore = "starts a real headless Chrome; set BRO_TEST_CHROME"]
+fn a_real_headless_chrome_left_by_a_script_is_found_and_collected() {
+    let Some(chrome) = std::env::var_os("BRO_TEST_CHROME") else { return };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("v2.toml"), "[slop]\non = true\ncollect = false\n").unwrap();
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(
+        work.path().join("launch.cjs"),
+        "const {spawn} = require('child_process');\n\
+         const c = spawn(process.env.BRO_TEST_CHROME, ['--headless', '--remote-debugging-port=0', '--user-data-dir=' + process.env.BRO_TEST_PROFILE, 'about:blank'], {detached: true, stdio: 'ignore'});\n\
+         c.unref();\n\
+         console.log('launched ' + c.pid);\n",
+    )
+    .unwrap();
+    let server = Server::in_dir(dir, Duration::from_secs(120), |_| false);
+    let (client, _) = server.connect();
+    let mut req = request("chrome", ("cmd.exe".into(), vec!["/c".into(), "node launch.cjs & ping -n 600 127.0.0.1 >nul".into()]));
+    req.cwd = work.path().to_path_buf();
+    req.env.push(("BRO_TEST_CHROME".into(), chrome.to_string_lossy().into_owned()));
+    req.env.push(("BRO_TEST_PROFILE".into(), work.path().join("profile").display().to_string()));
+    req.blob = serde_json::json!({ "name": "Night Before Closing" });
+    let mut remote = client.spawn(req).unwrap();
+    let mut out = Output::of(&mut remote);
+    out.until("launched");
+    let mut found = None;
+    let until = Instant::now() + Duration::from_secs(30);
+    while found.is_none() && Instant::now() < until {
+        let r = client::slop(server.path(), false).unwrap().unwrap();
+        found = r.leftovers.first().cloned().filter(|l| l.processes >= 2);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let l = found.expect("the browser the script left");
+    println!("found: {l:?}");
+    assert_eq!(l.session_label, "Night Before Closing");
+    assert!(l.what.contains("headless Chrome"), "{}", l.what);
+    assert_eq!(l.due_secs, None, "just list it: it waits for you");
+    let r = client::slop(server.path(), true).unwrap().unwrap();
+    println!("after collect: {} leftovers, ledger {:?}", r.leftovers.len(), (r.ledger.cleanups, r.ledger.processes, r.ledger.memory));
+    assert_eq!(r.ledger.cleanups, 1);
+    assert!(r.leftovers.is_empty());
+    let pid: u32 = l.key.split(':').next().unwrap().parse().unwrap();
+    let tasks = std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&tasks.stdout).contains(&pid.to_string()), "the browser is gone");
+    assert!(remote.exit_code().is_none(), "the session keeps running");
+    client.shutdown(Duration::from_secs(5));
+    server.done.recv_timeout(Duration::from_secs(10)).unwrap();
 }

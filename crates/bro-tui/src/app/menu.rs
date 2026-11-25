@@ -12,6 +12,7 @@ pub(crate) struct Menu {
     pub top: usize,
     /// Pointer position in the frontend's coordinates; None anchors near the focused session.
     pub anchor: Option<(f32, f32)>,
+    pane: Option<crate::layout::PaneId>,
     pub hits: Vec<(Rect, Act)>,
 }
 
@@ -20,6 +21,7 @@ pub(crate) fn label(act: Act) -> String {
         Act::NewSession => "New session…".into(),
         Act::QuickAgent => "Quick agent (home folder)".into(),
         Act::Reload => "Reload session with a profile…".into(),
+        Act::ForkConversation => "Fork conversation".into(),
         Act::Continue => "Continue an earlier session…".into(),
         Act::SwitchLogin => "Move session to another login…".into(),
         Act::OpenedFile => "Last opened file".into(),
@@ -48,16 +50,36 @@ impl Menu {
 }
 
 impl App {
+    pub(crate) fn menu_actions(&self) -> Vec<(String, Act)> {
+        let mut items = self.keymap.prefix_actions();
+        if self.menu.pane.is_some_and(|id| self.supports_conversation_fork(id))
+            && !items.iter().any(|(_, act)| *act == Act::ForkConversation)
+        {
+            items.insert(0, (String::new(), Act::ForkConversation));
+        }
+        items
+    }
+
     pub(crate) fn open_menu(&mut self, anchor: Option<(f32, f32)>) {
         self.prefix_armed = true;
-        self.menu = Menu { anchor, ..Menu::default() };
+        self.menu = Menu { anchor, pane: self.focused(), ..Menu::default() };
         self.sel = None;
         self.link_press = None;
         self.clipboard_request = None;
     }
 
+    pub(crate) fn run_menu_act(&mut self, act: Act) {
+        if act == Act::ForkConversation {
+            if let Some(id) = self.menu.pane {
+                self.fork_conversation(id);
+            }
+        } else {
+            self.run_act(act);
+        }
+    }
+
     pub(crate) fn menu_move(&mut self, delta: isize) {
-        let n = self.keymap.prefix_actions().len();
+        let n = self.menu_actions().len();
         self.menu.sel = self.menu.sel.saturating_add_signed(delta).min(n.saturating_sub(1));
     }
 
@@ -72,11 +94,11 @@ impl App {
             KeyCode::PageDown => self.menu_move(10),
             KeyCode::PageUp => self.menu_move(-10),
             KeyCode::Home => self.menu.sel = 0,
-            KeyCode::End => self.menu.sel = self.keymap.prefix_actions().len().saturating_sub(1),
+            KeyCode::End => self.menu.sel = self.menu_actions().len().saturating_sub(1),
             KeyCode::Enter => {
                 self.prefix_armed = false;
-                if let Some((_, act)) = self.keymap.prefix_actions().get(self.menu.sel) {
-                    self.run_act(*act);
+                if let Some((_, act)) = self.menu_actions().get(self.menu.sel) {
+                    self.run_menu_act(*act);
                 }
             }
             _ => return false,
@@ -89,7 +111,7 @@ impl App {
         if area.width < 8 || area.height < 5 {
             return;
         }
-        let items = self.keymap.prefix_actions();
+        let items = self.menu_actions();
         let rows = items.len().min(area.height.saturating_sub(5) as usize).min(20);
         self.menu.keep_visible(rows, items.len());
         let w = area.width.saturating_sub(2).min(82);
