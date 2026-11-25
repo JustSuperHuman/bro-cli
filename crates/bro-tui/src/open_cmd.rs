@@ -223,7 +223,9 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let cfg = bro_bridge::BridgeConfig { port: 0, automatic_port: false, bind: "127.0.0.1".into(), data_root: dir.path().join("bridge"), web_interface: false };
         let bridge = bro_bridge::Bridge::start_with(cfg, bro_bridge::StartOptions { import_legacy_token: false }, Box::new(move |c| {
-            let _ = tx.send(c);
+            if matches!(c, bro_bridge::BridgeCommand::OpenFile { .. } | bro_bridge::BridgeCommand::OpenInEditor { .. }) {
+                let _ = tx.send(c);
+            }
         }))
         .unwrap();
         bridge.register(bro_bridge::SessionMeta { id: "s1".into(), title: "t".into(), shell: "sh".into(), args: vec![], cwd: Some(dir.path().to_path_buf()), project: Some(dir.path().to_path_buf()), pid: None, cols: 80, rows: 24, agent: Some("claude".into()), kind: None });

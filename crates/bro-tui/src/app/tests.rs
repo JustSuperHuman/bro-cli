@@ -3699,8 +3699,11 @@ fn hidden_panes_get_the_remote_minimum_without_being_drawn() {
 #[test]
 fn usage_info_icon_opens_token_stats_in_two_tabs() {
     use bro_core::profiles::{Profile, ProfileKind};
-    let (mut a, rx) = usage_launch_app();
-    // logins in a tempdir: the demo's point at the real ~/.claude and ~/.codex
+    testkit::isolate();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let svc = Services::without_workers_for_test(fallback_settings(), tx.clone());
+    let mut a = App::new(svc, tx, Opts { demo: false, fixed_demo: true, load_recents: false });
+    // Use fixture logs so this exercises the normal stats scan without touching real conversations.
     let home = tempfile::tempdir().unwrap();
     let now = crate::util::now_secs();
     let iso = |s: i64| chrono::DateTime::from_timestamp(s, 0).unwrap().to_rfc3339();
@@ -3756,9 +3759,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert!(screen.contains("Summary screensaver") && !screen.contains("Auto-resume"), "{screen}");
     let recaps = a.svc.settings().insights.generate_recaps;
     // the summary screensaver: off, then steps through its waits
-    for _ in 0..2 {
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-    }
+    select_settings_row(&mut a, "Summary screensaver");
     assert_eq!(a.svc.settings().summary_screensaver_secs, 0);
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     assert_eq!(a.svc.settings().summary_screensaver_secs, 60);
@@ -3822,11 +3823,7 @@ fn settings_view_switches_presets_and_overrides_switches() {
     assert!(!a.svc.settings().voice.enabled);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(a.svc.settings().voice.enabled);
-    for _ in 0..4 { key(&mut a, KeyCode::Down, KeyModifiers::NONE); } // key, mode, speaker, API key
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // live voice
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // call voice (no active calls)
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // announcements
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // caveman mode
+    select_settings_row(&mut a, "Caveman");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // off → caveman
     assert_eq!(a.svc.settings().caveman.active(), Some(bro_core::caveman::Level::Caveman));
     { let s = draw(&mut a); let top = s.lines().next().unwrap_or_default(); assert!(!top.contains("caveman"), "no badge beside the settings gear: {top}"); }
@@ -3993,6 +3990,14 @@ fn settings_view_switches_presets_and_overrides_switches() {
     { let s = draw(&mut a); assert!(s.contains("Summary screensaver"), "{s}"); }
     a.run_palette(crate::palette::Cmd::ClaudePreset("presenter".into()));
     assert_eq!(a.svc.settings().claude_env.preset, "presenter");
+}
+
+fn select_settings_row(app: &mut App, label: &str) {
+    let screen = draw(app);
+    let (row, column) = screen.lines().enumerate().find_map(|(row, line)| {
+        line.find(label).map(|start| (row, unicode_width::UnicodeWidthStr::width(&line[..start])))
+    }).expect("settings row is visible");
+    app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: column as u16, row: row as u16, modifiers: KeyModifiers::NONE });
 }
 
 #[test]
@@ -4176,7 +4181,7 @@ fn font_row_only_where_the_terminal_can_switch_and_steps_through_fonts() {
     crate::fonts::TEST_APP_WINDOW.with(|w| w.set(true));
     let screen = draw(&mut a);
     assert!(screen.contains("Font") && screen.contains("terminal's own"), "{screen}");
-    key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Font
+    select_settings_row(&mut a, "Font");
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     assert_eq!(a.svc.settings().font.as_deref(), Some("jetbrains-mono"));
     key(&mut a, KeyCode::Left, KeyModifiers::NONE);

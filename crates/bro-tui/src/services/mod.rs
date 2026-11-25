@@ -379,6 +379,11 @@ pub fn load_settings() -> (Settings, Option<String>) {
 
 impl Services {
     #[cfg(test)]
+    pub(crate) fn without_workers_for_test(settings: Settings, tx: Sender<Event>) -> Services {
+        Services::with_state(Services::empty_state(settings), tx, false, false)
+    }
+
+    #[cfg(test)]
     pub(crate) fn coordination_test_bridge(bridge: Bridge) -> Services {
         let (tx,_rx)=std::sync::mpsc::channel();
         let svc=Services::with_state(Services::empty_state(fallback_settings()),tx,false,false);

@@ -103,7 +103,6 @@ impl AutoResume {
         let mut out = vec![];
         if !cfg.enabled {
             self.ep = None;
-            return out;
         }
         match seen.activity {
             Some(Activity::Working) => {
@@ -118,6 +117,9 @@ impl AutoResume {
             }
             Some(Activity::Idle) if seen.quiet >= SETTLE => {}
             _ => return out,
+        }
+        if !cfg.enabled {
+            return out;
         }
         // you typed into it: it's yours again
         if self.ep.as_ref().is_some_and(|ep| ep.typed != seen.typed) {
